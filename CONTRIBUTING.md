@@ -24,12 +24,17 @@ Thank you for your interest in contributing to KORTEX OS.
 git clone https://github.com/Kortex-AI/kortex-os.git
 cd kortex-os
 
+# Create isolated Python virtual environment (.venv)
+py -m venv .venv
+
+# Activate virtual environment (Windows PowerShell)
+.\.venv\Scripts\Activate.ps1
+
 # Generate project structure (if not already done)
 python tools/create_project.py
 
-# Install Python dependencies
-cd backend
-pip install -e ".[dev]"
+# Install backend Python dependencies into .venv
+python -m pip install -e "backend/[dev,ai]"
 
 # Install pre-commit hooks
 pre-commit install

@@ -1,0 +1,4 @@
+# KORTEX OS Root Requirements File
+# Redirects to backend package requirements
+
+-r backend/requirements-dev.txt
