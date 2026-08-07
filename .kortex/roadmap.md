@@ -2,26 +2,26 @@
 
 ## Phase 1: Core Microkernel & Runtime Foundation
 
-**Status**: In Progress
+**Status**: Completed
 
 - [x] Project structure and scaffolding tool
 - [x] Configuration files (pyproject.toml, .editorconfig, pre-commit)
 - [x] Documentation skeleton
-- [ ] Kernel core implementation
-- [ ] Boot Engine
-- [ ] Configuration Engine
-- [ ] Registry Engine
-- [ ] Event Engine (in-memory async pub/sub)
+- [x] Kernel core implementation
+- [x] Boot Engine
+- [x] Configuration Engine
+- [x] Registry Engine
+- [x] Event Engine (in-memory async pub/sub)
 
-## Phase 2: Security, Identity & Data Layer
+## Phase 2: Business Foundation Layer
 
-**Status**: Planned
+**Status**: In Progress
 
-- [ ] PostgreSQL + SQLAlchemy 2.0 async engine
-- [ ] Alembic migration infrastructure
-- [ ] Identity Engine (Users, Workspaces, Tenants)
-- [ ] Security Engine (RBAC, encryption, audit)
-- [ ] License Engine
+- [x] Storage Engine (`kortex.engines.storage` — `IDataStore`, `IFileStore`, `IObjectStore`, `ICacheStore`)
+- [x] Workflow Engine (`kortex.engines.workflow` — Sole runtime state machine and execution engine)
+- [x] Recipe Engine (`kortex.engines.recipe` — Declarative parser, validator, pure deterministic compiler, packager, installer, catalog registry)
+- [ ] Document Engine (`kortex.engines.document` — Renderer registry & document lifecycle manager — Pending)
+- [ ] Connector Engine (`kortex.engines.connector` — Driver registry & integration driver host — Pending)
 
 ## Phase 3: Desktop Container & UI System
 
@@ -41,14 +41,14 @@
 - [ ] Knowledge Engine (RAG, vector store, chunking)
 - [ ] Document Intelligence Engine (PDF parsing, OCR)
 
-## Phase 5: Recipe Engine & Human Approval
+## Phase 5: Advanced Business Engines & Approvals
 
 **Status**: Planned
 
-- [ ] Workflow Engine (State machine, persistence)
-- [ ] Recipe schema (JSON/YAML declarative format)
-- [ ] Human-in-the-loop approval queues
-- [ ] Process Intelligence Engine (telemetry)
+- [ ] Human-in-the-loop approval queues & notification schedules
+- [ ] Process Intelligence Engine (telemetry & process mining)
+- [ ] Security Engine (RBAC, encryption, audit)
+- [ ] License Engine
 
 ## Phase 6: Pilot Business Modules
 

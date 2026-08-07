@@ -20,7 +20,7 @@ It is a complete Business Operating System designed to:
 - Organize and leverage **Organizational Knowledge** across all operations.
 - Connect to external systems through managed **Connectors**.
 
-## Architecture
+## Architecture & System Engines Implementation Status
 
 ```
 Kernel → System Engines → Modules → Recipes → Templates → Connectors → AI
@@ -28,12 +28,22 @@ Kernel → System Engines → Modules → Recipes → Templates → Connectors �
 
 Everything communicates through the Kernel. No direct module coupling.
 
+### Phase 2 Business Foundation Engines Status
+
+| Engine | Namespace | Responsibilities | Status | Coverage |
+| :--- | :--- | :--- | :--- | :--- |
+| **Storage Engine** | `kortex.engines.storage` | Multi-store abstraction (`IDataStore`, `IFileStore`, `IObjectStore`, `ICacheStore`) | **Completed** | 100% |
+| **Workflow Engine** | `kortex.engines.workflow` | Sole runtime state machine and recipe execution engine | **Completed** | 100% |
+| **Recipe Engine** | `kortex.engines.recipe` | Declarative parser, validator, pure deterministic compiler, packager, installer, catalog registry | **Completed** | 97% |
+| **Document Engine** | `kortex.engines.document` | Renderer registry & document lifecycle manager | *Pending* | - |
+| **Connector Engine** | `kortex.engines.connector` | Driver registry & integration driver host | *Pending* | - |
+
 ## Technology Stack
 
 | Layer | Technology |
 |-------|------------|
-| Backend | Python 3.12+, FastAPI, SQLAlchemy, Pydantic |
-| Database | PostgreSQL |
+| Backend | Python 3.12+, FastAPI, SQLAlchemy 2.0, Pydantic v2 |
+| Database | SQLite (Default) / PostgreSQL |
 | Desktop | Tauri v2, React, TypeScript, TailwindCSS |
 | AI | Ollama (Local) |
 | Containers | Docker, Docker Compose |
@@ -45,14 +55,12 @@ Everything communicates through the Kernel. No direct module coupling.
 git clone https://github.com/Kortex-AI/kortex-os.git
 cd kortex-os
 
-# Generate project structure
-python tools/create_project.py
-
-# Install backend dependencies
+# Activate virtualenv & install backend
 cd backend
+..\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 
-# Run tests
+# Run full test suite
 pytest
 ```
 
@@ -68,7 +76,9 @@ kortex-os/
 │   └── server/       # Headless enterprise server
 ├── backend/
 │   ├── src/kortex/   # Python backend package
-│   ├── tests/        # Automated test suite
+│   │   ├── core/     # Kernel, base engine, container, event bus
+│   │   └── engines/  # System engines (storage, workflow, recipe, ...)
+│   ├── tests/        # Unit & integration test suite
 │   └── alembic/      # Database migrations
 ├── docker/           # Container configurations
 ├── docs/             # Comprehensive documentation
@@ -80,7 +90,7 @@ kortex-os/
 
 - **Local First** — Cloud enhanced, offline capable.
 - **AI Native** — Every module exposes AI capabilities.
-- **Recipe Driven** — Repetitive tasks become reusable recipes.
+- **Recipe Driven** — Repetitive tasks become reusable declarative recipes.
 - **Human Approval** — AI suggests, humans decide.
 - **Everything Modular** — Independently deployable components.
 - **Everything Event Driven** — Decoupled communication through the Kernel.
