@@ -26,6 +26,7 @@ from kortex.engines.connector.interfaces import (
     IEngineDiagnostics,
     IRateLimiter,
 )
+from kortex.engines.connector.loader import ConnectorDriverLoader
 from kortex.engines.connector.models import (
     ActionRequest,
     ActionResult,
@@ -37,6 +38,7 @@ from kortex.engines.connector.models import (
     DriverMetadata,
     PipelineStage,
 )
+from kortex.engines.connector.registry import ConnectorDriverRegistry
 
 __all__ = [
     "ActionRequest",
@@ -46,6 +48,8 @@ __all__ = [
     "ConnectorCapability",
     "ConnectorConnectionError",
     "ConnectorDriverError",
+    "ConnectorDriverLoader",
+    "ConnectorDriverRegistry",
     "ConnectorEngineError",
     "ConnectorOperationError",
     "ConnectorPipelineDefinition",
