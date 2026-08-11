@@ -3,6 +3,17 @@
 from __future__ import annotations
 
 from kortex.engines.connector.base_driver import BaseConnectorDriver
+from kortex.engines.connector.diagnostics import (
+    CANONICAL_CAPABILITIES,
+    ConnectorDiagnostics,
+)
+from kortex.engines.connector.events import (
+    ConnectorActionCompletedEvent,
+    ConnectorActionFailedEvent,
+    ConnectorActionStartedEvent,
+    ConnectorBaseEvent,
+    ConnectorDriverRegisteredEvent,
+)
 from kortex.engines.connector.exceptions import (
     ConnectorConnectionError,
     ConnectorDriverError,
@@ -48,14 +59,21 @@ from kortex.engines.connector.rate_limiter import (
 from kortex.engines.connector.registry import ConnectorDriverRegistry
 
 __all__ = [
+    "CANONICAL_CAPABILITIES",
     "ActionRequest",
     "ActionResult",
     "BaseConnectorDriver",
+    "ConnectorActionCompletedEvent",
+    "ConnectorActionFailedEvent",
+    "ConnectorActionStartedEvent",
     "ConnectorActionType",
+    "ConnectorBaseEvent",
     "ConnectorCapability",
     "ConnectorConnectionError",
+    "ConnectorDiagnostics",
     "ConnectorDriverError",
     "ConnectorDriverLoader",
+    "ConnectorDriverRegisteredEvent",
     "ConnectorDriverRegistry",
     "ConnectorEngineError",
     "ConnectorOperationError",
