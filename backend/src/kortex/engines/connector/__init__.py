@@ -7,6 +7,7 @@ from kortex.engines.connector.diagnostics import (
     CANONICAL_CAPABILITIES,
     ConnectorDiagnostics,
 )
+from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.events import (
     ConnectorActionCompletedEvent,
     ConnectorActionFailedEvent,
@@ -75,6 +76,7 @@ __all__ = [
     "ConnectorDriverLoader",
     "ConnectorDriverRegisteredEvent",
     "ConnectorDriverRegistry",
+    "ConnectorEngine",
     "ConnectorEngineError",
     "ConnectorOperationError",
     "ConnectorPipeline",
