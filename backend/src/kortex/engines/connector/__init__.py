@@ -38,6 +38,7 @@ from kortex.engines.connector.models import (
     DriverMetadata,
     PipelineStage,
 )
+from kortex.engines.connector.profiles import ConnectorProfileManager
 from kortex.engines.connector.rate_limiter import (
     TokenBucketRateLimiter,
     calculate_backoff_delay,
@@ -59,6 +60,7 @@ __all__ = [
     "ConnectorOperationError",
     "ConnectorPipelineDefinition",
     "ConnectorProfile",
+    "ConnectorProfileManager",
     "ConnectorProfileNotFoundError",
     "ConnectorSecurityError",
     "ConnectorStatus",
