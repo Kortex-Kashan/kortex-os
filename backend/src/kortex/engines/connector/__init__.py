@@ -38,6 +38,7 @@ from kortex.engines.connector.models import (
     DriverMetadata,
     PipelineStage,
 )
+from kortex.engines.connector.pipeline import ConnectorPipeline
 from kortex.engines.connector.profiles import ConnectorProfileManager
 from kortex.engines.connector.rate_limiter import (
     TokenBucketRateLimiter,
@@ -58,6 +59,7 @@ __all__ = [
     "ConnectorDriverRegistry",
     "ConnectorEngineError",
     "ConnectorOperationError",
+    "ConnectorPipeline",
     "ConnectorPipelineDefinition",
     "ConnectorProfile",
     "ConnectorProfileManager",
