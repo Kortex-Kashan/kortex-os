@@ -38,6 +38,11 @@ from kortex.engines.connector.models import (
     DriverMetadata,
     PipelineStage,
 )
+from kortex.engines.connector.rate_limiter import (
+    TokenBucketRateLimiter,
+    calculate_backoff_delay,
+    execute_with_retry,
+)
 from kortex.engines.connector.registry import ConnectorDriverRegistry
 
 __all__ = [
@@ -72,4 +77,7 @@ __all__ = [
     "IRateLimiter",
     "PipelineStage",
     "RateLimitExceededError",
+    "TokenBucketRateLimiter",
+    "calculate_backoff_delay",
+    "execute_with_retry",
 ]
