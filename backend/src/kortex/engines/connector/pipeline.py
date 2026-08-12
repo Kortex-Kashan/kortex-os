@@ -7,8 +7,9 @@ in accordance with the Connector Engine Specification.
 
 from __future__ import annotations
 
+import asyncio
 import time
-from typing import Any, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from kortex.engines.connector.exceptions import (
     ConnectorOperationError,
@@ -27,6 +28,9 @@ from kortex.engines.connector.models import (
 )
 from kortex.engines.connector.rate_limiter import execute_with_retry
 
+if TYPE_CHECKING:
+    from kortex.engines.connector.diagnostics import ConnectorDiagnostics
+
 
 class ConnectorPipeline(IConnectorPipeline):
     """Multi-stage coordinator for executing action requests through Connector Profiles and Drivers."""
@@ -36,6 +40,7 @@ class ConnectorPipeline(IConnectorPipeline):
         registry: IConnectorDriverRegistry,
         rate_limiter: IRateLimiter | None = None,
         secret_resolver: Callable[[str], Coroutine[Any, Any, str | None]] | None = None,
+        diagnostics: ConnectorDiagnostics | None = None,
     ) -> None:
         """Initialize ConnectorPipeline.
 
@@ -43,10 +48,23 @@ class ConnectorPipeline(IConnectorPipeline):
             registry: IConnectorDriverRegistry instance for driver lookup.
             rate_limiter: Optional IRateLimiter instance for rate limiting.
             secret_resolver: Optional async callable for resolving secret handle to token string.
+            diagnostics: Optional ConnectorDiagnostics instance for stage & attempt metric recording.
         """
         self._registry = registry
         self._rate_limiter = rate_limiter
         self._secret_resolver = secret_resolver
+        self._diagnostics = diagnostics
+
+    def _safe_record(self, record_fn_name: str, *args: Any, **kwargs: Any) -> None:
+        """Helper to invoke a diagnostic recording method safely without altering execution flow."""
+        if self._diagnostics is None:
+            return
+        try:
+            fn = getattr(self._diagnostics, record_fn_name, None)
+            if callable(fn):
+                fn(*args, **kwargs)
+        except Exception:
+            pass
 
     async def execute(
         self, request: ActionRequest, profile: ConnectorProfile
@@ -71,6 +89,7 @@ class ConnectorPipeline(IConnectorPipeline):
 
         # Stage 1: Validation & Active Status Check
         if request.profile_id != profile.profile_id:
+            self._safe_record("record_error_category", "unknown_error")
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             return ActionResult(
                 request_id=request.request_id,
@@ -89,6 +108,7 @@ class ConnectorPipeline(IConnectorPipeline):
             )
 
         if not profile.is_active:
+            self._safe_record("record_error_category", "unknown_error")
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             return ActionResult(
                 request_id=request.request_id,
@@ -107,6 +127,8 @@ class ConnectorPipeline(IConnectorPipeline):
         if profile.secret_handle and profile.secret_handle.strip():
             handle = profile.secret_handle.strip()
             if self._secret_resolver is None:
+                self._safe_record("record_authentication_failure")
+                self._safe_record("record_error_category", "authentication")
                 elapsed_ms = (time.perf_counter() - start_time) * 1000.0
                 return ActionResult(
                     request_id=request.request_id,
@@ -123,6 +145,8 @@ class ConnectorPipeline(IConnectorPipeline):
             try:
                 secret_token = await self._secret_resolver(handle)
             except Exception:
+                self._safe_record("record_authentication_failure")
+                self._safe_record("record_error_category", "authentication")
                 elapsed_ms = (time.perf_counter() - start_time) * 1000.0
                 return ActionResult(
                     request_id=request.request_id,
@@ -141,6 +165,8 @@ class ConnectorPipeline(IConnectorPipeline):
             rate_key = f"profile:{profile.profile_id}"
             acquired = await self._rate_limiter.acquire_token(rate_key)
             if not acquired:
+                self._safe_record("record_rate_limit_rejection")
+                self._safe_record("record_error_category", "rate_limit")
                 elapsed_ms = (time.perf_counter() - start_time) * 1000.0
                 return ActionResult(
                     request_id=request.request_id,
@@ -154,10 +180,12 @@ class ConnectorPipeline(IConnectorPipeline):
                     correlation_id=request.correlation_id,
                 )
 
-        # Stage 4: Dispatch Stage with Exponential Backoff Retry
+        # Stage 4: Dispatch Stage with Exponential Backoff Retry & Attempt Instrumentation
         try:
             driver = self._registry.get_driver(profile.driver_id)
         except DriverNotFoundError as err:
+            self._safe_record("record_driver_failure")
+            self._safe_record("record_error_category", "driver_not_found")
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             return ActionResult(
                 request_id=request.request_id,
@@ -172,9 +200,18 @@ class ConnectorPipeline(IConnectorPipeline):
                 correlation_id=request.correlation_id,
             )
 
+        attempts = 0
+
+        async def _tracked_driver_execute(
+            req: ActionRequest, secret_token: str | None = None
+        ) -> ActionResult:
+            nonlocal attempts
+            attempts += 1
+            return await driver.execute_action(req, secret_token=secret_token)
+
         try:
             driver_result = await execute_with_retry(
-                driver.execute_action,
+                _tracked_driver_execute,
                 request,
                 secret_token=secret_token,
                 max_retries=profile.max_retries,
@@ -182,7 +219,11 @@ class ConnectorPipeline(IConnectorPipeline):
                 jitter=False,
                 retryable_exceptions=(DriverExecutionError, ConnectorOperationError),
             )
+        except asyncio.CancelledError:
+            raise
         except Exception:
+            self._safe_record("record_driver_failure")
+            self._safe_record("record_error_category", "driver_execution")
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             return ActionResult(
                 request_id=request.request_id,
@@ -196,8 +237,28 @@ class ConnectorPipeline(IConnectorPipeline):
                 },
                 correlation_id=request.correlation_id,
             )
+        finally:
+            retry_count = max(0, attempts - 1)
+            if retry_count > 0:
+                self._safe_record("record_retry", retry_count)
 
-        # Stage 5 & 6: Verification & Audit Stage
+        # Stage 5 & 6: Verification, HTTP Status Recording & Audit Stage
+        if isinstance(driver_result.response_payload, dict):
+            status_code = driver_result.response_payload.get("status_code")
+            if status_code is not None and not isinstance(status_code, bool):
+                self._safe_record("record_http_status", status_code)
+                code_int: int | None = None
+                if isinstance(status_code, int):
+                    code_int = status_code
+                elif isinstance(status_code, str) and status_code.strip().isdigit():
+                    code_int = int(status_code.strip())
+
+                if code_int is not None:
+                    if 400 <= code_int <= 499:
+                        self._safe_record("record_error_category", "http_4xx")
+                    elif 500 <= code_int <= 599:
+                        self._safe_record("record_error_category", "http_5xx")
+
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
         return driver_result.model_copy(
