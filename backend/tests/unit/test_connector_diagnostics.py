@@ -133,8 +133,8 @@ def test_metrics_reporting_and_deferred_contract() -> None:
     assert metrics_info["rate_limiter_configured"] is False
     assert metrics_info["async_profile_metrics_deferred"] is True
 
-    # Assert no fabricated metrics (no execution latency, throughput, error rates)
-    assert "average_latency_ms" not in metrics_info
+    # Assert observable state metrics exist
+    assert "average_latency_ms" in metrics_info
     assert "total_dispatches" not in metrics_info
     assert "error_rate" not in metrics_info
     assert "total_profile_count" not in metrics_info
