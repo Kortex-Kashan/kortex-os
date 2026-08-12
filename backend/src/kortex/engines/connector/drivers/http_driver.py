@@ -66,6 +66,22 @@ RESTRICTED_IPV6_NETWORKS = [
 MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_RESPONSE_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# Explicit allowlist for HTTP response headers included in ActionResult.
+# All response headers NOT in this set are stripped before ActionResult construction.
+# This prevents credential-bearing headers (Set-Cookie, Authorization, Proxy-Authorization,
+# X-Api-Key, Api-Key, WWW-Authenticate, etc.) from leaking into workflow step_outputs,
+# WorkflowContext persistence, connector events, or logs.
+ALLOWED_RESPONSE_HEADERS: frozenset[str] = frozenset({
+    "content-type",
+    "content-length",
+    "etag",
+    "last-modified",
+    "date",
+    "cache-control",
+    "x-request-id",
+    "x-correlation-id",
+})
+
 
 class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
     """Custom httpcore network backend that forces TCP socket creation directly to a pre-validated IP address."""
@@ -270,7 +286,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
                             status="SUCCESS",
                             response_payload={
                                 "status_code": status_code,
-                                "headers": dict(response.headers),
+                                "headers": self._sanitize_response_headers(response.headers),
                                 "body": res_body,
                             },
                             execution_time_ms=exec_time_ms,
@@ -414,6 +430,21 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
             params.update(payload_params)
 
         return params
+
+    @staticmethod
+    def _sanitize_response_headers(headers: httpx.Headers) -> dict[str, str]:
+        """Filter HTTP response headers to an explicit allowlist.
+
+        Only headers whose lowercased name is in ALLOWED_RESPONSE_HEADERS are
+        included in the returned dictionary.  All credential-bearing, internal,
+        and debug headers are silently excluded so they never propagate into
+        ActionResult, workflow step_outputs, events, persistence, or logs.
+        """
+        return {
+            k: v
+            for k, v in headers.items()
+            if k.lower() in ALLOWED_RESPONSE_HEADERS
+        }
 
     def _build_request_body(self, payload: dict[str, Any]) -> bytes | None:
         """Serialize and validate request payload body size."""
@@ -571,4 +602,4 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
                 self._verify_ip_object(str(ip_obj.ipv4_mapped))
 
 
-__all__ = ["HttpRestConnectorDriver", "SSRFHardenedTransport", "PinnedIPNetworkBackend"]
+__all__ = ["HttpRestConnectorDriver", "SSRFHardenedTransport", "PinnedIPNetworkBackend", "ALLOWED_RESPONSE_HEADERS"]

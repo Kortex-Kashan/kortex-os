@@ -543,3 +543,208 @@ async def test_failure_pathway_missing_profile_and_failed_action(tmp_path) -> No
     assert "error" in res.error_details
 
     await kernel.shutdown()
+
+
+# -- Milestone 9.1 Remediation Integration Tests ------------------------------
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from kortex.engines.connector.exceptions import ConnectorSecurityError
+from kortex.engines.connector.models import (
+    ConnectorActionHistoryModel,
+    ConnectorProfileModel,
+)
+from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
+
+
+@pytest.mark.asyncio
+async def test_idatastore_profile_persistence_and_query(tmp_path) -> None:
+    """13. Test durable ConnectorProfile persistence via Storage Engine IDataStore."""
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "idatastore_prof_storage"))
+    connector_engine = ConnectorEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(connector_engine)
+    await kernel.boot()
+
+    # Create tables in DatabaseEngineManager
+    await kernel._db_manager.create_all_tables()
+
+    profile = ConnectorProfile(
+        profile_id="prof-db-1",
+        name="DB Profile 1",
+        driver_id="connector-dummy",
+        secret_handle="vault:db_token",
+        rate_limit_per_sec=25.0,
+    )
+    await connector_engine.profile_manager.register_profile(profile)
+
+    # Verify profile row persisted in database table via IDataStore
+    async def _query_profile(session: AsyncSession) -> ConnectorProfileModel | None:
+        stmt = select(ConnectorProfileModel).where(ConnectorProfileModel.id == "prof-db-1")
+        res = await session.execute(stmt)
+        return res.scalar_one_or_none()
+
+    data_store = storage_engine.data
+    model = await data_store.execute_in_transaction(_query_profile)
+    assert model is not None
+    assert model.name == "DB Profile 1"
+    assert model.driver_id == "connector-dummy"
+    assert model.secret_handle == "vault:db_token"
+    assert model.rate_limit_per_sec == 25.0
+
+    # Test updating profile via register_profile
+    updated_profile = ConnectorProfile(
+        profile_id="prof-db-1",
+        name="Updated DB Profile 1",
+        driver_id="connector-dummy",
+        secret_handle="vault:db_token_v2",
+        rate_limit_per_sec=50.0,
+    )
+    await connector_engine.profile_manager.register_profile(updated_profile)
+
+    updated_model = await data_store.execute_in_transaction(_query_profile)
+    assert updated_model is not None
+    assert updated_model.name == "Updated DB Profile 1"
+    assert updated_model.secret_handle == "vault:db_token_v2"
+    assert updated_model.rate_limit_per_sec == 50.0
+
+    # Delete profile and verify DB deletion
+    deleted = await connector_engine.profile_manager.delete_profile("prof-db-1")
+    assert deleted is True
+
+    deleted_model = await data_store.execute_in_transaction(_query_profile)
+    assert deleted_model is None
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_action_execution_history_persistence(tmp_path) -> None:
+    """14. Test sanitized action execution history persistence in Storage Engine IDataStore."""
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "hist_storage"))
+    connector_engine = ConnectorEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(connector_engine)
+    await kernel.boot()
+    await kernel._db_manager.create_all_tables()
+
+    driver = DummyConnectorDriver()
+    connector_engine.register_driver(driver)
+
+    profile = ConnectorProfile(
+        profile_id="prof-hist-1",
+        name="History Test Profile",
+        driver_id="connector-dummy",
+    )
+    await connector_engine.profile_manager.register_profile(profile)
+
+    req = ActionRequest(
+        request_id="req-hist-100",
+        profile_id="prof-hist-1",
+        action_type="SEND",
+        payload={"msg": "history test"},
+        correlation_id="corr-hist-100",
+    )
+
+    res = await connector_engine.execute_action(req)
+    assert res.status == "SUCCESS"
+
+    # Query history record from IDataStore
+    async def _query_history(session: AsyncSession) -> ConnectorActionHistoryModel | None:
+        stmt = select(ConnectorActionHistoryModel).where(ConnectorActionHistoryModel.id == "req-hist-100")
+        db_res = await session.execute(stmt)
+        return db_res.scalar_one_or_none()
+
+    data_store = storage_engine.data
+    hist_entry = await data_store.execute_in_transaction(_query_history)
+
+    assert hist_entry is not None
+    assert hist_entry.id == "req-hist-100"
+    assert hist_entry.profile_id == "prof-hist-1"
+    assert hist_entry.action_type == "SEND"
+    assert hist_entry.status == "SUCCESS"
+    assert hist_entry.correlation_id == "corr-hist-100"
+    assert hist_entry.driver_id == "connector-dummy"
+    assert hist_entry.execution_time_ms > 0.0
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_rbac_capability_authorization(tmp_path) -> None:
+    """15. Test RBAC capability permission enforcement on execute_action."""
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "rbac_storage"))
+    connector_engine = ConnectorEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(connector_engine)
+    await kernel.boot()
+
+    driver = DummyConnectorDriver()
+    connector_engine.register_driver(driver)
+
+    profile = ConnectorProfile(
+        profile_id="prof-rbac-1",
+        name="RBAC Profile",
+        driver_id="connector-dummy",
+    )
+    await connector_engine.profile_manager.register_profile(profile)
+
+    # 1. Unauthorized request (missing kortex.connector.action.execute permission)
+    req_unauth = ActionRequest(
+        request_id="req-rbac-unauth",
+        profile_id="prof-rbac-1",
+        action_type="SEND",
+        options={"granted_permissions": ["kortex.workflow.execute"]},
+    )
+    with pytest.raises(ConnectorSecurityError) as exc_info:
+        await connector_engine.execute_action(req_unauth)
+
+    assert "missing required permission" in str(exc_info.value)
+
+    # 2. Authorized request (granted kortex.connector.action.execute permission)
+    req_auth = ActionRequest(
+        request_id="req-rbac-auth",
+        profile_id="prof-rbac-1",
+        action_type="SEND",
+        options={"granted_permissions": ["kortex.connector.action.execute", "kortex.workflow.execute"]},
+    )
+    res = await connector_engine.execute_action(req_auth)
+    assert res.status == "SUCCESS"
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_cache_storage_and_concurrency(tmp_path) -> None:
+    """16. Test TokenBucketRateLimiter with Storage Engine ICacheStore, capacity, refill, and concurrency."""
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "rate_storage"))
+
+    kernel.register_engine(storage_engine)
+    await kernel.boot()
+
+    cache_store = storage_engine.cache
+    limiter = TokenBucketRateLimiter(cache_store=cache_store, default_capacity=2.0, default_refill_rate=1.0)
+
+    # Acquire initial 2 tokens
+    assert await limiter.acquire_token("key-1", tokens=1.0) is True
+    assert await limiter.acquire_token("key-1", tokens=1.0) is True
+
+    # 3rd token request exceeds burst capacity (2.0)
+    assert await limiter.acquire_token("key-1", tokens=1.0) is False
+
+    # Concurrent token acquisition test
+    results = await asyncio.gather(
+        limiter.acquire_token("key-concurrent", tokens=1.0, capacity=5.0),
+        limiter.acquire_token("key-concurrent", tokens=1.0, capacity=5.0),
+        limiter.acquire_token("key-concurrent", tokens=1.0, capacity=5.0),
+    )
+    assert all(results)
+
+    await kernel.shutdown()

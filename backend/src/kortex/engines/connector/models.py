@@ -128,13 +128,51 @@ class ConnectorPipelineDefinition(BaseModel):
     stages: list[PipelineStage] = Field(default_factory=list)
 
 
+# -- SQLAlchemy ORM Models for IDataStore Persistence -------------------------
+
+from sqlalchemy import Boolean, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from kortex.core.db import BaseModel as SQLAlchemyBaseModel
+
+
+class ConnectorProfileModel(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for persisting Connector Profile records via IDataStore."""
+
+    __tablename__ = "connector_profiles"
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    driver_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    secret_handle: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rate_limit_per_sec: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    options_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ConnectorActionHistoryModel(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for persisting sanitized action execution history via IDataStore."""
+
+    __tablename__ = "connector_action_history"
+
+    profile_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_time_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    driver_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 __all__ = [
     "ActionRequest",
     "ActionResult",
+    "ConnectorActionHistoryModel",
     "ConnectorActionType",
     "ConnectorCapability",
     "ConnectorPipelineDefinition",
     "ConnectorProfile",
+    "ConnectorProfileModel",
     "ConnectorStatus",
     "DriverMetadata",
     "PipelineStage",

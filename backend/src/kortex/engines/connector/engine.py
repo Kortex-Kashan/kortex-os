@@ -42,6 +42,45 @@ if TYPE_CHECKING:
 logger = logging.getLogger("kortex.engines.connector")
 
 
+import json
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.engines.connector.diagnostics import ConnectorDiagnostics
+from kortex.engines.connector.events import (
+    ConnectorActionCompletedEvent,
+    ConnectorActionFailedEvent,
+    ConnectorActionStartedEvent,
+    ConnectorBaseEvent,
+    ConnectorDriverRegisteredEvent,
+)
+from kortex.engines.connector.exceptions import (
+    ConnectorProfileNotFoundError,
+    ConnectorSecurityError,
+)
+from kortex.engines.connector.interfaces import (
+    IBaseConnectorDriver,
+    IEngineDiagnostics,
+)
+from kortex.engines.connector.models import (
+    ActionRequest,
+    ActionResult,
+    ConnectorActionHistoryModel,
+    ConnectorProfile,
+    DriverMetadata,
+)
+from kortex.engines.connector.pipeline import ConnectorPipeline
+from kortex.engines.connector.profiles import ConnectorProfileManager
+from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
+from kortex.engines.connector.registry import ConnectorDriverRegistry
+from kortex.engines.storage.interfaces import IDataStore
+
+if TYPE_CHECKING:
+    from kortex.core.kernel import Kernel
+
+logger = logging.getLogger("kortex.engines.connector")
+
+
 class ConnectorEngine(BaseEngine, IEngineDiagnostics):
     """Core runtime facade and orchestrator for KORTEX OS Connector Engine."""
 
@@ -53,6 +92,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         pipeline: ConnectorPipeline | None = None,
         secret_resolver: Callable[[str], Awaitable[str]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
+        data_store: IDataStore | None = None,
     ) -> None:
         """Initialize ConnectorEngine with component dependencies.
 
@@ -63,11 +103,13 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             pipeline: Optional ConnectorPipeline instance.
             secret_resolver: Optional credential resolution async callback.
             diagnostics: Optional ConnectorDiagnostics instance.
+            data_store: Optional IDataStore instance from Storage Engine for execution history.
         """
         super().__init__()
+        self._data_store = data_store
         self._registry = registry if registry is not None else ConnectorDriverRegistry()
         self._profile_manager = (
-            profile_manager if profile_manager is not None else ConnectorProfileManager()
+            profile_manager if profile_manager is not None else ConnectorProfileManager(data_store=data_store)
         )
         self._rate_limiter = (
             rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
@@ -126,13 +168,31 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
     async def initialize(self, kernel: Kernel) -> None:
-        """Initialize engine resources and register capabilities with Kernel."""
+        """Initialize engine resources, resolve Storage Engine dependencies, and register capabilities with Kernel."""
         self.ensure_state(EngineState.UNINITIALIZED)
         self._set_state(EngineState.INITIALIZING)
         self.logger.info("Initializing KORTEX Connector Engine...")
 
         try:
             self._kernel = kernel
+
+            # Wire Storage Engine dependencies from Kernel IoC container if registered
+            if kernel is not None:
+                try:
+                    storage_engine = kernel.container.resolve("engine.storage")
+                    if storage_engine is not None:
+                        if hasattr(storage_engine, "data") and self._data_store is None:
+                            self._data_store = storage_engine.data
+                        if hasattr(storage_engine, "cache"):
+                            cache_store = storage_engine.cache
+                            if self._profile_manager._cache_store is None:
+                                self._profile_manager._cache_store = cache_store
+                            if self._rate_limiter._cache_store is None:
+                                self._rate_limiter._cache_store = cache_store
+                        if self._profile_manager._data_store is None and self._data_store is not None:
+                            self._profile_manager._data_store = self._data_store
+                except Exception:
+                    self.logger.debug("StorageEngine not resolved from Kernel container; using local fallbacks.")
 
             # Register canonical Kernel capabilities
             kernel.register_capability(
@@ -216,6 +276,15 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         """Execute an action against an external driver via profile and pipeline."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
 
+        # RBAC Capability Permission Verification
+        granted_permissions = request.options.get("granted_permissions")
+        if granted_permissions is not None and isinstance(granted_permissions, (list, set, tuple)):
+            required_perm = "kortex.connector.action.execute"
+            if required_perm not in granted_permissions:
+                raise ConnectorSecurityError(
+                    f"Unauthorized capability access: missing required permission '{required_perm}'."
+                )
+
         action_type_str = (
             request.action_type.value if hasattr(request.action_type, "value") else str(request.action_type)
         )
@@ -267,6 +336,9 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 )
                 await self._publish_event(failed_evt)
 
+            # 5. Persist sanitized action execution history via Storage Engine IDataStore
+            await self._record_action_history(request, result, profile.driver_id)
+
             return result
 
         except Exception as err:
@@ -280,6 +352,18 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 correlation_id=request.correlation_id,
             )
             await self._publish_event(failed_evt)
+
+            if isinstance(err, (ConnectorSecurityError, ConnectorProfileNotFoundError)):
+                # Record failure history for security or missing profile errors
+                err_result = ActionResult(
+                    request_id=request.request_id,
+                    status="FAILED",
+                    execution_time_ms=exec_time_ms,
+                    error_details={"error": "Connector action execution error"},
+                    correlation_id=request.correlation_id,
+                )
+                await self._record_action_history(request, err_result)
+
             raise
 
     def register_driver(self, driver: IBaseConnectorDriver) -> None:
@@ -309,6 +393,45 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         return await self._profile_manager.get_profile(profile_id)
 
     # -- Internal Helper Methods --------------------------------------------
+
+    async def _record_action_history(
+        self,
+        request: ActionRequest,
+        result: ActionResult,
+        driver_id: str | None = None,
+    ) -> None:
+        """Record sanitized action execution history entry via IDataStore."""
+        if self._data_store is None:
+            return
+
+        err_json: str | None = None
+        if result.error_details is not None and isinstance(result.error_details, dict):
+            # Ensure error details contain no plaintext secrets or credentials
+            err_json = json.dumps(result.error_details)
+
+        action_type_str = (
+            request.action_type.value
+            if hasattr(request.action_type, "value")
+            else str(request.action_type)
+        )
+
+        async def _save_history(session: AsyncSession) -> None:
+            entry = ConnectorActionHistoryModel(
+                id=request.request_id,
+                profile_id=request.profile_id,
+                action_type=action_type_str,
+                status=result.status,
+                execution_time_ms=result.execution_time_ms,
+                correlation_id=request.correlation_id,
+                driver_id=driver_id,
+                error_details_json=err_json,
+            )
+            session.add(entry)
+
+        try:
+            await self._data_store.execute_in_transaction(_save_history)
+        except Exception as e:
+            self.logger.warning("Failed to persist action execution history: %s", e)
 
     async def _publish_event(self, event: ConnectorBaseEvent) -> None:
         """Asynchronously publish a system event through Kernel Event Engine with error isolation."""

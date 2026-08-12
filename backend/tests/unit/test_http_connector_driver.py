@@ -1220,3 +1220,86 @@ async def test_pinned_ip_network_backend_helpers() -> None:
     with patch.object(backend._default_backend, "sleep", new_callable=AsyncMock) as mock_sleep:
         await backend.sleep(0.01)
         mock_sleep.assert_called_once_with(0.01)
+
+
+@pytest.mark.asyncio
+async def test_response_header_sanitization_at_driver_level(http_driver: HttpRestConnectorDriver) -> None:
+    """L-U3. Verify HTTP response header sanitization via explicit allowlist.
+
+    Verifies:
+    - Allowed headers (content-type, content-length, etag, last-modified, date,
+      cache-control, x-request-id, x-correlation-id) are retained in ActionResult.
+    - Denied headers (set-cookie, cookie, authorization, proxy-authorization,
+      x-api-key, api-key, www-authenticate, x-internal-debug) are stripped.
+    - Secret/credential header VALUES do not appear anywhere in ActionResult.
+    - Case-insensitive matching works for mixed-case header names.
+    """
+    from kortex.engines.connector.drivers.http_driver import ALLOWED_RESPONSE_HEADERS
+
+    # Construct a response with all allowed + all denied headers
+    all_headers = {
+        # ALLOWED
+        "Content-Type": "application/json",
+        "Content-Length": "42",
+        "ETag": '"abc123"',
+        "Last-Modified": "Tue, 12 Aug 2026 00:00:00 GMT",
+        "Date": "Tue, 12 Aug 2026 12:00:00 GMT",
+        "Cache-Control": "no-cache",
+        "X-Request-Id": "rid-999",
+        "X-Correlation-Id": "cid-888",
+        # DENIED
+        "Set-Cookie": "session=supersecret",
+        "Cookie": "tracker=supersecret",
+        "Authorization": "Bearer supersecret",
+        "Proxy-Authorization": "Basic supersecret",
+        "X-Api-Key": "supersecret",
+        "Api-Key": "supersecret",
+        "WWW-Authenticate": "secret",
+        "X-Internal-Debug": "debug-secret",
+        # Unknown header (should also be denied by allowlist)
+        "X-Custom-Internal": "internal-value",
+    }
+
+    req = ActionRequest(
+        request_id="req-hdr-san-1",
+        profile_id="prof-1",
+        action_type=ConnectorActionType.FETCH,
+        payload={"url": "https://api.example.com/test"},
+    )
+
+    resp_bytes = json.dumps({"status": "ok"}).encode("utf-8")
+
+    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
+            mock_stream.return_value = MockStreamResponse(
+                [resp_bytes], status_code=200, headers=all_headers,
+            )
+            result = await http_driver.execute_action(req)
+
+    assert result.status == "SUCCESS"
+    res_headers = result.response_payload["headers"]
+    lower_keys = {k.lower() for k in res_headers}
+
+    # Verify ALL allowed headers are present
+    for allowed in ALLOWED_RESPONSE_HEADERS:
+        assert allowed in lower_keys, f"Allowed header '{allowed}' missing from response"
+
+    # Verify ALL denied headers are absent
+    denied_headers = {
+        "set-cookie", "cookie", "authorization", "proxy-authorization",
+        "x-api-key", "api-key", "www-authenticate", "x-internal-debug",
+        "x-custom-internal",
+    }
+    for denied in denied_headers:
+        assert denied not in lower_keys, f"Denied header '{denied}' found in response"
+
+    # Verify secret/credential VALUES never appear in ActionResult
+    secret_values = ["supersecret", "Bearer supersecret", "Basic supersecret",
+                     "session=supersecret", "tracker=supersecret", "secret",
+                     "debug-secret", "internal-value"]
+    result_str = json.dumps(result.response_payload)
+    for secret in secret_values:
+        assert secret not in result_str, f"Secret value '{secret}' leaked into ActionResult"
+
+    # Verify only allowed count matches
+    assert len(res_headers) == len(ALLOWED_RESPONSE_HEADERS)
