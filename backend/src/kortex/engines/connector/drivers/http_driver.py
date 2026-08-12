@@ -32,6 +32,8 @@ from kortex.engines.connector.models import (
 
 logger = logging.getLogger("kortex.engines.connector.drivers.http")
 
+import httpcore
+
 # Restricted IPv4 and IPv6 Networks for SSRF Validation
 RESTRICTED_IPV4_NETWORKS = [
     ipaddress.ip_network("0.0.0.0/8"),
@@ -65,12 +67,67 @@ MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_RESPONSE_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Custom httpcore network backend that forces TCP socket creation directly to a pre-validated IP address."""
+
+    def __init__(self, pinned_ip: str) -> None:
+        self._pinned_ip = pinned_ip
+        self._default_backend = httpcore._backends.anyio.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ) -> httpcore.AsyncNetworkStream:
+        """Force socket connection directly to self._pinned_ip, preventing time-of-use DNS re-resolution."""
+        return await self._default_backend.connect_tcp(
+            host=self._pinned_ip,
+            port=port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, *args, **kwargs):
+        return await self._default_backend.connect_unix_socket(*args, **kwargs)
+
+    async def sleep(self, seconds: float) -> None:
+        await self._default_backend.sleep(seconds)
+
+
+class SSRFHardenedTransport(httpx.AsyncHTTPTransport):
+    """Custom httpx AsyncHTTPTransport that pins TCP connections to a pre-validated IP address.
+
+    This transport does NOT call super().__init__() to avoid creating an orphaned
+    default connection pool. Instead, it directly constructs a single
+    httpcore.AsyncConnectionPool with PinnedIPNetworkBackend, ensuring:
+    - Exactly one active connection pool per transport instance
+    - No orphaned pool or resource leak
+    - Proper async close behavior via inherited aclose() → self._pool.aclose()
+    - All TCP connections are physically routed to the pinned IP
+    """
+
+    def __init__(self, pinned_ip: str, verify: bool = True) -> None:
+        # Intentionally skip super().__init__() to avoid creating an orphaned pool.
+        # AsyncHTTPTransport.__init__() would create self._pool as a default
+        # httpcore.AsyncConnectionPool without our PinnedIPNetworkBackend,
+        # and we'd then have to overwrite it, leaving the original pool un-closed.
+        ssl_context = httpx.create_ssl_context(verify=verify)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl_context,
+            network_backend=PinnedIPNetworkBackend(pinned_ip),
+        )
+
+
 class HttpRestConnectorDriver(BaseConnectorDriver):
     """Production REST/HTTP Connector Driver Plugin.
 
     Supports asynchronous HTTP requests (GET, POST, PUT, DELETE) over external REST APIs.
-    Enforces pre-connection SSRF IP checks, non-redirect policies, request/response size limits,
-    and secret token isolation.
+    Enforces pre-connection SSRF IP checks, exact IP pinning, non-redirect policies,
+    request/response size limits, and secret token isolation.
     """
 
     @property
@@ -131,6 +188,10 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         payload = request.payload or {}
         options = request.options or {}
 
+        # Reject custom proxy options explicitly
+        if options.get("proxy") or payload.get("proxy"):
+            raise ConnectorSecurityError("Custom proxy configuration is not supported.")
+
         # 1. Determine HTTP method
         method = self._resolve_http_method(request.action_type, payload)
 
@@ -155,8 +216,8 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         else:
             final_url = raw_url
 
-        # 6. Perform pre-connect SSRF security validation
-        await self._validate_ssrf_security(final_url)
+        # 6. Perform pre-connect SSRF security validation & select pinned IP
+        pinned_ip = await self._validate_ssrf_security(final_url)
 
         # 7. Construct headers and inject secret token safely
         headers = self._build_headers(options, payload, secret_token)
@@ -164,10 +225,14 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         # 8. Build query parameters
         params = self._build_query_params(options, payload)
 
-        # 9. Execute HTTP request via httpx (follow_redirects=False) with streaming limit enforcement
+        # 9. Execute HTTP request via SSRFHardenedTransport (follow_redirects=False, trust_env=False)
+        transport = SSRFHardenedTransport(pinned_ip=pinned_ip)
         try:
             async with httpx.AsyncClient(
-                follow_redirects=False, timeout=timeout_config
+                transport=transport,
+                follow_redirects=False,
+                trust_env=False,
+                timeout=timeout_config,
             ) as client:
                 async with client.stream(
                     method=method,
@@ -390,15 +455,13 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
         return httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=30.0)
 
-    async def _validate_ssrf_security(self, url: str) -> None:
-        """Validate URL scheme, parse host/IP, and pre-resolve DNS against restricted IP ranges.
+    async def _validate_ssrf_security(self, url: str) -> str:
+        """Validate URL scheme, parse host/IP, pre-resolve DNS, enforce Reject-All on all resolved IPs,
+        and return the deterministically selected pinned IP address (IPv4 preference over IPv6).
 
-        Security Note (TOCTOU Limitation & Sub-Milestone 10.3 Scope):
-        Pre-connection DNS validation verifies all resolved addresses against restricted IP networks
-        before socket creation at time t0. However, because httpx performs its own socket connection
-        dispatch independently at time t1, a DNS rebinding attack (where host DNS changes between t0
-        and t1) remains a residual risk. Complete transport-level socket binding to the pre-validated IP
-        address is explicitly assigned to Sub-Milestone 10.3.
+        Security Note:
+        After successful t0 validation, the TCP connection is pinned to the exact validated IP
+        and does not perform a second DNS resolution at time t1.
         """
         try:
             parsed = urllib.parse.urlparse(url)
@@ -428,7 +491,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         # Parse and check explicit IP addresses (handles standard, octal, hex, or integer IPs)
         self._check_explicit_ip(normalized_host)
 
-        # Pre-connect DNS Resolution Check
+        # Pre-connect DNS Resolution Check (Reject-All Rule & Deterministic Selection)
         try:
             loop = asyncio.get_running_loop()
             addr_info = await loop.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)
@@ -437,9 +500,22 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
                     f"SSRF validation failed: unable to resolve hostname '{hostname}'."
                 )
 
+            validated_ipv4: list[str] = []
+            validated_ipv6: list[str] = []
+
+            # Reject-All Rule: Validate EVERY resolved address. If ANY address is restricted, fail the request.
             for family, socktype, proto, canonname, sockaddr in addr_info:
                 ip_str = sockaddr[0]
                 self._verify_ip_object(ip_str)
+                ip_obj = ipaddress.ip_address(ip_str)
+                if isinstance(ip_obj, ipaddress.IPv4Address):
+                    validated_ipv4.append(ip_str)
+                elif isinstance(ip_obj, ipaddress.IPv6Address):
+                    validated_ipv6.append(ip_str)
+
+            if validated_ipv4:
+                return validated_ipv4[0]
+            return validated_ipv6[0]
         except ConnectorSecurityError:
             raise
         except Exception as e:
@@ -495,4 +571,4 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
                 self._verify_ip_object(str(ip_obj.ipv4_mapped))
 
 
-__all__ = ["HttpRestConnectorDriver"]
+__all__ = ["HttpRestConnectorDriver", "SSRFHardenedTransport", "PinnedIPNetworkBackend"]

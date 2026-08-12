@@ -1,21 +1,27 @@
-"""Unit tests for Production REST/HTTP Connector Driver (Sub-Milestone 10.2).
+"""Unit tests for Production REST/HTTP Connector Driver (Sub-Milestones 10.2 & 10.3).
 
 Verifies driver contract compliance, HTTP method dispatching, request/response payload mapping,
 pre-connect SSRF security checks, non-redirect policies, body size limits, credential isolation,
+DNS TOCTOU elimination via exact IP pinning, real transport integration, pool lifecycle,
 and 100% statement coverage for HttpRestConnectorDriver.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncio
 import json
 import logging
+import os
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpcore
 import httpx
 import pytest
 
-from kortex.engines.connector.drivers.http_driver import HttpRestConnectorDriver
+from kortex.engines.connector.drivers.http_driver import HttpRestConnectorDriver, PinnedIPNetworkBackend
 from kortex.engines.connector.exceptions import ConnectorSecurityError, DriverExecutionError
 from kortex.engines.connector.models import (
     ActionRequest,
@@ -764,3 +770,453 @@ def test_check_explicit_ip_hex_and_verify_ip_object(http_driver: HttpRestConnect
 
     # IPv6 valid public IP (e.g., 2001:4860:4860::8888)
     http_driver._verify_ip_object("2001:4860:4860::8888")
+
+
+# -- L. Sub-Milestone 10.3 Hardened Security & DNS TOCTOU Integration Tests ----
+#
+# These tests exercise the REAL transport stack:
+#   httpx.AsyncClient → SSRFHardenedTransport → httpcore.AsyncConnectionPool
+#   → PinnedIPNetworkBackend → connect_tcp()
+# They do NOT mock AsyncClient.stream. They use a RecordingNetworkBackend
+# injected into PinnedIPNetworkBackend to intercept and record the actual
+# TCP connection target.
+
+
+from kortex.engines.connector.drivers.http_driver import SSRFHardenedTransport
+
+
+class RecordingStream(httpcore.AsyncNetworkStream):
+    """Minimal httpcore stream that returns a valid HTTP/1.1 response, enabling
+    the full transport stack to complete without a real network connection."""
+
+    def __init__(self) -> None:
+        self._response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 12\r\n"
+            b"\r\n"
+            b'{"ok": true}'
+        )
+        self._offset = 0
+        self.closed = False
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        if self._offset >= len(self._response):
+            return b""
+        chunk = self._response[self._offset : self._offset + max_bytes]
+        self._offset += len(chunk)
+        return chunk
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    async def start_tls(
+        self,
+        ssl_context,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        self._tls_server_hostname = server_hostname
+        return self
+
+    def get_extra_info(self, info: str, default=None):
+        return default
+
+
+class RecordingNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Network backend that records all connect_tcp calls with their exact
+    host, port, and TLS server_hostname for test verification."""
+
+    def __init__(self) -> None:
+        self.tcp_connections: list[dict[str, Any]] = []
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ) -> httpcore.AsyncNetworkStream:
+        stream = RecordingStream()
+        self.tcp_connections.append({
+            "host": host,
+            "port": port,
+            "stream": stream,
+        })
+        return stream
+
+    async def connect_unix_socket(self, *args, **kwargs):
+        return RecordingStream()
+
+    async def sleep(self, seconds: float) -> None:
+        pass
+
+
+# Helper: create SSRFHardenedTransport with recording backend injected
+def _make_recording_transport(pinned_ip: str) -> tuple[httpx.AsyncHTTPTransport, RecordingNetworkBackend]:
+    """Build an SSRFHardenedTransport whose PinnedIPNetworkBackend delegates
+    to a RecordingNetworkBackend instead of real AnyIO sockets."""
+    transport = SSRFHardenedTransport(pinned_ip=pinned_ip, verify=False)
+    recording_backend = RecordingNetworkBackend()
+    # Replace the default AnyIO backend inside PinnedIPNetworkBackend with our recorder
+    transport._pool._network_backend._default_backend = recording_backend
+    return transport, recording_backend
+
+
+@pytest.mark.asyncio
+async def test_real_transport_ipv4_pinning(http_driver: HttpRestConnectorDriver) -> None:
+    """L1. Real transport: IPv4 DNS resolution pins connect_tcp to exact validated IP."""
+    addr_info = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    with patch("socket.getaddrinfo", return_value=addr_info):
+        pinned_ip = await http_driver._validate_ssrf_security("https://api.example.com/data")
+        assert pinned_ip == "93.184.216.34"
+
+        transport, recorder = _make_recording_transport(pinned_ip)
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            timeout=httpx.Timeout(5.0),
+        ) as client:
+            response = await client.get("https://api.example.com/data")
+            assert response.status_code == 200
+
+        assert len(recorder.tcp_connections) == 1
+        conn = recorder.tcp_connections[0]
+        assert conn["host"] == "93.184.216.34", "TCP must connect to pinned IPv4"
+        assert conn["port"] == 443
+        assert conn["host"] != "api.example.com", "Hostname must never reach connect_tcp"
+
+
+@pytest.mark.asyncio
+async def test_real_transport_ipv6_pinning(http_driver: HttpRestConnectorDriver) -> None:
+    """L2. Real transport: IPv6-only DNS resolution pins connect_tcp to exact validated IPv6."""
+    addr_info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:4860:4860::8888", 443))]
+    with patch("socket.getaddrinfo", return_value=addr_info):
+        pinned_ip = await http_driver._validate_ssrf_security("https://v6.example.com/data")
+        assert pinned_ip == "2001:4860:4860::8888"
+
+        transport, recorder = _make_recording_transport(pinned_ip)
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            timeout=httpx.Timeout(5.0),
+        ) as client:
+            response = await client.get("https://v6.example.com/data")
+            assert response.status_code == 200
+
+        assert len(recorder.tcp_connections) == 1
+        conn = recorder.tcp_connections[0]
+        assert conn["host"] == "2001:4860:4860::8888", "TCP must connect to pinned IPv6"
+        assert conn["port"] == 443
+
+
+@pytest.mark.asyncio
+async def test_real_transport_dns_rebinding_prevention(http_driver: HttpRestConnectorDriver) -> None:
+    """L3. Real transport: DNS rebinding simulation. t0 resolves to public IP 93.184.216.34.
+    Even if a hypothetical t1 DNS lookup would resolve to 127.0.0.1, the actual TCP
+    connection is pinned to the t0-validated IP and never contacts 127.0.0.1."""
+    # t0: DNS resolves to safe public IP
+    addr_info_t0 = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    with patch("socket.getaddrinfo", return_value=addr_info_t0):
+        pinned_ip = await http_driver._validate_ssrf_security("https://rebinding.example.com/data")
+        assert pinned_ip == "93.184.216.34"
+
+    # Now simulate t1: even though getaddrinfo would return 127.0.0.1 if called again,
+    # the transport is already pinned to 93.184.216.34
+    transport, recorder = _make_recording_transport(pinned_ip)
+    with patch("socket.getaddrinfo", return_value=[
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+    ]):
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            timeout=httpx.Timeout(5.0),
+        ) as client:
+            response = await client.get("https://rebinding.example.com/data")
+            assert response.status_code == 200
+
+    # Verify: TCP connected to validated t0 IP, NEVER to rebinding target
+    assert len(recorder.tcp_connections) == 1
+    conn = recorder.tcp_connections[0]
+    assert conn["host"] == "93.184.216.34", "Must connect to t0-validated IP"
+    assert conn["host"] != "127.0.0.1", "Must NEVER connect to rebinding target"
+    assert conn["host"] != "rebinding.example.com", "Hostname must never reach connect_tcp"
+
+
+@pytest.mark.asyncio
+async def test_real_transport_reject_all_dns_rule(http_driver: HttpRestConnectorDriver) -> None:
+    """L4. Real transport: Reject-All DNS rule blocks request at t0 when ANY resolved IP is restricted."""
+    mixed_addr_info = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443)),
+    ]
+    with patch("socket.getaddrinfo", return_value=mixed_addr_info):
+        with pytest.raises(ConnectorSecurityError) as exc_info:
+            await http_driver._validate_ssrf_security("https://mixed-dns.example.com/data")
+        assert "10.0.0.1" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_real_transport_ipv4_preferred_over_ipv6(http_driver: HttpRestConnectorDriver) -> None:
+    """L5. Real transport: When both IPv4 and IPv6 are available, IPv4 is deterministically selected."""
+    mixed_v4_v6 = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:4860:4860::8888", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    with patch("socket.getaddrinfo", return_value=mixed_v4_v6):
+        pinned_ip = await http_driver._validate_ssrf_security("https://multi-ip.example.com")
+        assert pinned_ip == "93.184.216.34"
+
+        transport, recorder = _make_recording_transport(pinned_ip)
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            timeout=httpx.Timeout(5.0),
+        ) as client:
+            response = await client.get("https://multi-ip.example.com/data")
+            assert response.status_code == 200
+
+        assert recorder.tcp_connections[0]["host"] == "93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_real_transport_environment_proxy_isolation(
+    http_driver: HttpRestConnectorDriver, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L6. Real transport: Environment proxy variables are ignored (trust_env=False)
+    and the request connects directly to the pinned IP."""
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.1:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://10.0.0.1:8080")
+    monkeypatch.setenv("ALL_PROXY", "http://10.0.0.1:8080")
+
+    addr_info = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    with patch("socket.getaddrinfo", return_value=addr_info):
+        pinned_ip = await http_driver._validate_ssrf_security("https://api.example.com/data")
+
+    transport, recorder = _make_recording_transport(pinned_ip)
+    async with httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=False,
+        trust_env=False,
+        timeout=httpx.Timeout(5.0),
+    ) as client:
+        response = await client.get("https://api.example.com/data")
+        assert response.status_code == 200
+
+    # The connection MUST go to the pinned IP, NOT to any proxy
+    assert len(recorder.tcp_connections) == 1
+    assert recorder.tcp_connections[0]["host"] == "93.184.216.34"
+    assert recorder.tcp_connections[0]["port"] == 443
+
+
+@pytest.mark.asyncio
+async def test_real_transport_redirect_not_followed() -> None:
+    """L7. Real transport: 3xx redirect responses are NOT followed (follow_redirects=False)."""
+
+    class RedirectStream(httpcore.AsyncNetworkStream):
+        """Returns HTTP 301 redirect."""
+
+        def __init__(self):
+            self._response = (
+                b"HTTP/1.1 301 Moved Permanently\r\n"
+                b"Location: http://127.0.0.1/evil\r\n"
+                b"Content-Length: 0\r\n"
+                b"\r\n"
+            )
+            self._offset = 0
+
+        async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            if self._offset >= len(self._response):
+                return b""
+            chunk = self._response[self._offset : self._offset + max_bytes]
+            self._offset += len(chunk)
+            return chunk
+
+        async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            return self
+
+        def get_extra_info(self, info: str, default=None):
+            return default
+
+    class RedirectBackend(httpcore.AsyncNetworkBackend):
+        def __init__(self):
+            self.tcp_connections = []
+
+        async def connect_tcp(self, host, port, **kwargs):
+            stream = RedirectStream()
+            self.tcp_connections.append({"host": host, "port": port})
+            return stream
+
+        async def connect_unix_socket(self, *args, **kwargs):
+            return RedirectStream()
+
+        async def sleep(self, seconds):
+            pass
+
+    transport = SSRFHardenedTransport(pinned_ip="93.184.216.34", verify=False)
+    redirect_backend = RedirectBackend()
+    transport._pool._network_backend._default_backend = redirect_backend
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=False,
+        trust_env=False,
+        timeout=httpx.Timeout(5.0),
+    ) as client:
+        response = await client.get("http://safe.example.com/data")
+
+    # Only one connection, redirect NOT followed
+    assert response.status_code == 301
+    assert len(redirect_backend.tcp_connections) == 1
+    assert redirect_backend.tcp_connections[0]["host"] == "93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_real_transport_tls_sni_hostname_preservation() -> None:
+    """L8. Real transport: TLS SNI server_hostname preserves the original domain, not pinned IP."""
+
+    class SNIRecordingStream(RecordingStream):
+        """Records server_hostname from start_tls."""
+        tls_server_hostname: str | None = None
+
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            self.tls_server_hostname = server_hostname
+            return self
+
+    class SNIRecordingBackend(httpcore.AsyncNetworkBackend):
+        def __init__(self):
+            self.streams: list[SNIRecordingStream] = []
+
+        async def connect_tcp(self, host, port, **kwargs):
+            stream = SNIRecordingStream()
+            self.streams.append(stream)
+            return stream
+
+        async def connect_unix_socket(self, *args, **kwargs):
+            return SNIRecordingStream()
+
+        async def sleep(self, seconds):
+            pass
+
+    transport = SSRFHardenedTransport(pinned_ip="93.184.216.34", verify=False)
+    sni_backend = SNIRecordingBackend()
+    transport._pool._network_backend._default_backend = sni_backend
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=False,
+        trust_env=False,
+        timeout=httpx.Timeout(5.0),
+    ) as client:
+        response = await client.get("https://api.example.com/data")
+        assert response.status_code == 200
+
+    assert len(sni_backend.streams) == 1
+    stream = sni_backend.streams[0]
+    # TLS SNI server_hostname must be original domain, NOT the pinned IP
+    assert stream.tls_server_hostname == "api.example.com"
+
+
+@pytest.mark.asyncio
+async def test_real_transport_pool_and_transport_isolation(http_driver: HttpRestConnectorDriver) -> None:
+    """L9. Real transport: Separate execute_action calls create distinct transport and pool instances.
+    Verifies transport_1 is not transport_2 and transport_1._pool is not transport_2._pool."""
+    addr_info = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    captured_transports: list[SSRFHardenedTransport] = []
+
+    original_init = httpx.AsyncClient.__init__
+
+    def capturing_init(self_client, *args, **kwargs):
+        original_init(self_client, *args, **kwargs)
+        transport = kwargs.get("transport")
+        if transport is not None:
+            captured_transports.append(transport)
+
+    with patch("socket.getaddrinfo", return_value=addr_info):
+        with patch.object(httpx.AsyncClient, "__init__", capturing_init):
+            with patch.object(httpx.AsyncClient, "stream") as mock_stream:
+                mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
+
+                req = ActionRequest(
+                    request_id="req-iso",
+                    profile_id="prof-1",
+                    action_type=ConnectorActionType.FETCH,
+                    payload={"url": "https://api.example.com/data"},
+                )
+                await http_driver.execute_action(req)
+                await http_driver.execute_action(req)
+
+    assert len(captured_transports) == 2
+    t1, t2 = captured_transports
+    assert t1 is not t2, "Each request must use a distinct transport instance"
+    assert t1._pool is not t2._pool, "Each transport must have its own connection pool"
+
+
+@pytest.mark.asyncio
+async def test_pool_lifecycle_single_pool_no_orphan() -> None:
+    """L10. SSRFHardenedTransport creates exactly one pool, no orphaned resources."""
+    transport = SSRFHardenedTransport(pinned_ip="93.184.216.34", verify=False)
+
+    # Verify the pool is a proper httpcore.AsyncConnectionPool
+    assert isinstance(transport._pool, httpcore.AsyncConnectionPool)
+
+    # Verify the network backend is PinnedIPNetworkBackend
+    assert isinstance(transport._pool._network_backend, PinnedIPNetworkBackend)
+    assert transport._pool._network_backend._pinned_ip == "93.184.216.34"
+
+    # Verify aclose works without error (no orphaned pool to leak)
+    await transport.aclose()
+
+
+# -- L-Unit. Kept Unit-Level Tests (proxy rejection, helpers) ------------------
+
+@pytest.mark.asyncio
+async def test_proxy_rejection_options_and_payload(http_driver: HttpRestConnectorDriver) -> None:
+    """L-U1. Unit test: explicit proxy in options or payload raises ConnectorSecurityError."""
+    req_proxy_opt = ActionRequest(
+        request_id="req-proxy-opt",
+        profile_id="prof-1",
+        action_type=ConnectorActionType.FETCH,
+        payload={"url": "https://api.example.com"},
+        options={"proxy": "http://10.0.0.1:8080"},
+    )
+    with pytest.raises(ConnectorSecurityError) as exc1:
+        await http_driver.execute_action(req_proxy_opt)
+    assert "Custom proxy configuration is not supported" in str(exc1.value)
+
+    req_proxy_pay = ActionRequest(
+        request_id="req-proxy-pay",
+        profile_id="prof-1",
+        action_type=ConnectorActionType.FETCH,
+        payload={"url": "https://api.example.com", "proxy": "http://10.0.0.1:8080"},
+    )
+    with pytest.raises(ConnectorSecurityError) as exc2:
+        await http_driver.execute_action(req_proxy_pay)
+    assert "Custom proxy configuration is not supported" in str(exc2.value)
+
+
+@pytest.mark.asyncio
+async def test_pinned_ip_network_backend_helpers() -> None:
+    """L-U2. Direct unit test for PinnedIPNetworkBackend connect_unix_socket and sleep delegators."""
+    backend = PinnedIPNetworkBackend("93.184.216.34")
+    with patch.object(backend._default_backend, "connect_unix_socket", new_callable=AsyncMock) as mock_unix:
+        await backend.connect_unix_socket("/tmp/socket.sock")
+        mock_unix.assert_called_once_with("/tmp/socket.sock")
+
+    with patch.object(backend._default_backend, "sleep", new_callable=AsyncMock) as mock_sleep:
+        await backend.sleep(0.01)
+        mock_sleep.assert_called_once_with(0.01)
