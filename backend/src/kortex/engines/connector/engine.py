@@ -115,15 +115,6 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
         )
         self._secret_resolver = secret_resolver
-        self._pipeline = (
-            pipeline
-            if pipeline is not None
-            else ConnectorPipeline(
-                registry=self._registry,
-                rate_limiter=self._rate_limiter,
-                secret_resolver=self._secret_resolver,
-            )
-        )
         self._diagnostics = (
             diagnostics
             if diagnostics is not None
@@ -131,6 +122,16 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 registry=self._registry,
                 profile_manager=self._profile_manager,
                 rate_limiter=self._rate_limiter,
+            )
+        )
+        self._pipeline = (
+            pipeline
+            if pipeline is not None
+            else ConnectorPipeline(
+                registry=self._registry,
+                rate_limiter=self._rate_limiter,
+                secret_resolver=self._secret_resolver,
+                diagnostics=self._diagnostics,
             )
         )
         self._kernel: Kernel | None = None
@@ -272,47 +273,96 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
 
     # -- Engine Facade Capability Handlers ----------------------------------
 
+    def _safe_record_execution(
+        self,
+        is_success: bool,
+        latency_ms: float,
+        driver_id: str | None = None,
+        action_type: str = "FETCH",
+    ) -> None:
+        """Record top-level execution outcome metrics safely without throwing exception."""
+        if self._diagnostics is None:
+            return
+        try:
+            self._diagnostics.record_execution(
+                is_success=is_success,
+                latency_ms=latency_ms,
+                driver_id=driver_id,
+                action_type=action_type,
+            )
+        except Exception:
+            self.logger.warning("Failed to record connector execution metrics.")
+
+    def _safe_record_cancellation(self) -> None:
+        """Record task cancellation metric safely without throwing exception."""
+        if self._diagnostics is None:
+            return
+        try:
+            self._diagnostics.record_cancellation()
+        except Exception:
+            self.logger.warning("Failed to record connector cancellation metric.")
+
     async def execute_action(self, request: ActionRequest) -> ActionResult:
         """Execute an action against an external driver via profile and pipeline."""
-        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        start_time = time.perf_counter()
+        is_success = False
+        resolved_driver_id: str | None = None
+        action_type_str = (
+            request.action_type.value
+            if hasattr(request.action_type, "value")
+            else str(request.action_type)
+        )
+        executed_recorded = False
 
-        # RBAC Capability Permission Verification
-        granted_permissions = request.options.get("granted_permissions")
-        if granted_permissions is not None and isinstance(granted_permissions, (list, set, tuple)):
-            required_perm = "kortex.connector.action.execute"
-            if required_perm not in granted_permissions:
-                raise ConnectorSecurityError(
-                    f"Unauthorized capability access: missing required permission '{required_perm}'."
+        def _finalize_metrics() -> None:
+            nonlocal executed_recorded
+            if not executed_recorded:
+                executed_recorded = True
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                self._safe_record_execution(
+                    is_success=is_success,
+                    latency_ms=latency_ms,
+                    driver_id=resolved_driver_id,
+                    action_type=action_type_str,
                 )
 
-        action_type_str = (
-            request.action_type.value if hasattr(request.action_type, "value") else str(request.action_type)
-        )
-
-        # 1. Emit action started event
-        started_evt = ConnectorActionStartedEvent(
-            request_id=request.request_id,
-            profile_id=request.profile_id,
-            action_type=action_type_str,
-            correlation_id=request.correlation_id,
-        )
-        await self._publish_event(started_evt)
-
-        start_time = time.perf_counter()
-
         try:
+            self.ensure_state(EngineState.READY, EngineState.RUNNING)
+
+            # RBAC Capability Permission Verification
+            granted_permissions = request.options.get("granted_permissions")
+            if granted_permissions is not None and isinstance(
+                granted_permissions, (list, set, tuple)
+            ):
+                required_perm = "kortex.connector.action.execute"
+                if required_perm not in granted_permissions:
+                    raise ConnectorSecurityError(
+                        f"Unauthorized capability access: missing required permission '{required_perm}'."
+                    )
+
+            # 1. Emit action started event
+            started_evt = ConnectorActionStartedEvent(
+                request_id=request.request_id,
+                profile_id=request.profile_id,
+                action_type=action_type_str,
+                correlation_id=request.correlation_id,
+            )
+            await self._publish_event(started_evt)
+
             # 2. Resolve profile
             profile = await self._profile_manager.get_profile(request.profile_id)
+            resolved_driver_id = profile.driver_id
 
             # 3. Execute action through pipeline
             result = await self._pipeline.execute(
                 request=request,
                 profile=profile,
             )
+            is_success = result.status == "SUCCESS"
 
             # 4. Emit completed or failed event based on pipeline result status
             exec_time_ms = (time.perf_counter() - start_time) * 1000.0
-            if result.status == "SUCCESS":
+            if is_success:
                 completed_evt = ConnectorActionCompletedEvent(
                     request_id=request.request_id,
                     profile_id=request.profile_id,
@@ -341,7 +391,12 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
 
             return result
 
+        except asyncio.CancelledError:
+            is_success = False
+            self._safe_record_cancellation()
+            raise
         except Exception as err:
+            is_success = False
             exec_time_ms = (time.perf_counter() - start_time) * 1000.0
             failed_evt = ConnectorActionFailedEvent(
                 request_id=request.request_id,
@@ -365,6 +420,8 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 await self._record_action_history(request, err_result)
 
             raise
+        finally:
+            _finalize_metrics()
 
     def register_driver(self, driver: IBaseConnectorDriver) -> None:
         """Register a connector driver in the engine registry."""
