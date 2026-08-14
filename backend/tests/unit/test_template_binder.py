@@ -537,3 +537,488 @@ async def test_invalid_input_error_handling() -> None:
 
     with pytest.raises(DocumentTemplateError, match="BindingContext input cannot be None"):
         await binder.bind_schema(schema, None)  # type: ignore[arg-type]
+
+
+# -- Strong type validation (Milestone 3) --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_strong_type_validation_passes_for_matching_type() -> None:
+    """A resolved value matching its declared field_types entry produces no type mismatch."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="typed.tmpl",
+        name="Typed Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Type validation test",
+        placeholders=["total_amount"],
+        schema_definition={"field_types": {"total_amount": "NUMBER"}},
+    )
+    context = BindingContext(context_id="ctx-type-ok", data={"total_amount": 42})
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is True
+    assert result.validation_report.type_mismatches == []
+
+
+@pytest.mark.asyncio
+async def test_strong_type_validation_detects_mismatch() -> None:
+    """A resolved value that doesn't match its declared field_types entry is reported."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="typed.mismatch.tmpl",
+        name="Typed Mismatch Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Type validation mismatch test",
+        placeholders=["total_amount"],
+        schema_definition={"field_types": {"total_amount": "NUMBER"}},
+    )
+    context = BindingContext(context_id="ctx-type-bad", data={"total_amount": "not-a-number"})
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is False
+    assert any("total_amount" in m for m in result.validation_report.type_mismatches)
+
+
+# -- Computed-field resolution (Milestone 3) -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_computed_field_sum_equals_rule() -> None:
+    """A declarative SUM_EQUALS computed_fields rule derives its target deterministically."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.sum.tmpl",
+        name="Computed Sum Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field sum test",
+        placeholders=["grand_total"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "grand_total_rule",
+                    "operator": "SUM_EQUALS",
+                    "target_field": "grand_total",
+                    "operand_fields": ["subtotal", "tax_amount"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(
+        context_id="ctx-computed-sum", data={"subtotal": 100, "tax_amount": 15}
+    )
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is True
+    assert result.resolved_values["grand_total"] == 115.0
+    assert "grand_total" in result.validation_report.computed_fields_resolved
+
+
+@pytest.mark.asyncio
+async def test_computed_field_difference_equals_rule() -> None:
+    """A declarative DIFFERENCE_EQUALS computed_fields rule derives net salary from gross/deductions."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.diff.tmpl",
+        name="Computed Difference Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field difference test",
+        placeholders=["net_salary"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "net_salary_rule",
+                    "operator": "DIFFERENCE_EQUALS",
+                    "target_field": "net_salary",
+                    "operand_fields": ["gross_salary", "total_deductions"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(
+        context_id="ctx-computed-diff",
+        data={"gross_salary": 1000, "total_deductions": 200},
+    )
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is True
+    assert result.resolved_values["net_salary"] == 800.0
+
+
+@pytest.mark.asyncio
+async def test_computed_field_skipped_when_operand_missing() -> None:
+    """A computed_fields rule with an unresolved operand is silently skipped, not an error."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.missing.tmpl",
+        name="Computed Missing Operand Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field missing operand test",
+        placeholders=["grand_total"],
+        required_fields=["grand_total"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "grand_total_rule",
+                    "operator": "SUM_EQUALS",
+                    "target_field": "grand_total",
+                    "operand_fields": ["subtotal", "tax_amount"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(context_id="ctx-computed-missing", data={"subtotal": 100})
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is False
+    assert "grand_total" in result.validation_report.missing_placeholders
+
+
+@pytest.mark.asyncio
+async def test_computed_field_unsupported_operator_reports_error() -> None:
+    """An unrecognized operator string in a computed_fields rule produces a descriptive error."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.bad_op.tmpl",
+        name="Computed Bad Operator Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field unsupported operator test",
+        placeholders=["grand_total"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "bad_rule",
+                    "operator": "MULTIPLY_EQUALS",
+                    "target_field": "grand_total",
+                    "operand_fields": ["subtotal"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(context_id="ctx-computed-badop", data={"subtotal": 100})
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is False
+    assert any("Unsupported computed field operator" in e for e in result.validation_report.errors)
+
+
+@pytest.mark.asyncio
+async def test_computed_field_difference_equals_requires_operand_reports_error() -> None:
+    """DIFFERENCE_EQUALS with an empty operand_fields list reports a descriptive error."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.empty_operands.tmpl",
+        name="Computed Empty Operands Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field empty operands test",
+        placeholders=["net_salary"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "net_salary_rule",
+                    "operator": "DIFFERENCE_EQUALS",
+                    "target_field": "net_salary",
+                    "operand_fields": [],
+                }
+            ]
+        },
+    )
+    context = BindingContext(context_id="ctx-computed-empty", data={})
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is False
+    assert any(
+        "net_salary_rule" in e and "failed" in e for e in result.validation_report.errors
+    )
+
+
+@pytest.mark.asyncio
+async def test_computed_field_malformed_spec_entries_are_ignored() -> None:
+    """Non-dict or incomplete computed_fields spec entries are ignored, not fatal."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.malformed.tmpl",
+        name="Computed Malformed Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field malformed spec test",
+        placeholders=["amount"],
+        schema_definition={"computed_fields": ["not-a-dict", {"name": "incomplete"}]},
+    )
+    context = BindingContext(context_id="ctx-computed-malformed", data={"amount": 5})
+
+    result = await binder.bind_schema(schema, context)
+    assert result.validation_report.is_valid is True
+    assert result.resolved_values["amount"] == 5
+
+
+def _chained_rules_schema(rules_in_order: list[dict]) -> TemplateSchema:
+    """Build a two-rule computed_fields schema where rule_b's operand is rule_a's target."""
+    return TemplateSchema(
+        template_id="computed.chained.tmpl",
+        name="Computed Chained Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field chaining stress test",
+        placeholders=["subtotal", "grand_total"],
+        schema_definition={"computed_fields": rules_in_order},
+    )
+
+
+_RULE_A = {
+    "name": "rule_a",
+    "operator": "SUM_EQUALS",
+    "target_field": "subtotal",
+    "operand_fields": ["a", "b"],
+}
+_RULE_B = {
+    "name": "rule_b",
+    "operator": "SUM_EQUALS",
+    "target_field": "grand_total",
+    "operand_fields": ["subtotal", "tax"],
+}
+
+
+@pytest.mark.asyncio
+async def test_computed_field_rules_do_not_chain() -> None:
+    """A rule cannot consume another rule's derived output within the same binding pass."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = _chained_rules_schema([_RULE_A, _RULE_B])
+    context = BindingContext(
+        context_id="ctx-chain-1", data={"a": 10, "b": 20, "tax": 5}
+    )
+
+    result = await binder.bind_schema(schema, context)
+
+    # rule_a resolves directly from context.data.
+    assert result.resolved_values["subtotal"] == 30
+    assert "subtotal" in result.validation_report.computed_fields_resolved
+
+    # rule_b's operand 'subtotal' does not exist in the original snapshot (only as rule_a's
+    # derived output), so rule_b must NOT chain off it — grand_total stays unresolved.
+    assert "grand_total" not in result.resolved_values
+    assert "grand_total" not in result.validation_report.computed_fields_resolved
+    assert "grand_total" in result.validation_report.missing_placeholders
+
+
+@pytest.mark.asyncio
+async def test_computed_field_rule_order_does_not_change_result() -> None:
+    """Reversing the declared rule order produces an identical binding result."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    context = BindingContext(
+        context_id="ctx-chain-order", data={"a": 10, "b": 20, "tax": 5}
+    )
+
+    forward = await binder.bind_schema(_chained_rules_schema([_RULE_A, _RULE_B]), context)
+    reversed_order = await binder.bind_schema(
+        _chained_rules_schema([_RULE_B, _RULE_A]), context
+    )
+
+    assert forward.resolved_values == reversed_order.resolved_values
+    assert (
+        forward.validation_report.missing_placeholders
+        == reversed_order.validation_report.missing_placeholders
+    )
+    assert (
+        forward.validation_report.computed_fields_resolved
+        == reversed_order.validation_report.computed_fields_resolved
+    )
+
+
+@pytest.mark.asyncio
+async def test_computed_field_circular_dependency_does_not_silently_resolve() -> None:
+    """Two rules whose operands reference each other's target never resolve, either order."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    rule_x = {
+        "name": "rule_x",
+        "operator": "SUM_EQUALS",
+        "target_field": "field_x",
+        "operand_fields": ["field_y"],
+    }
+    rule_y = {
+        "name": "rule_y",
+        "operator": "SUM_EQUALS",
+        "target_field": "field_y",
+        "operand_fields": ["field_x"],
+    }
+    schema = TemplateSchema(
+        template_id="computed.circular.tmpl",
+        name="Computed Circular Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field circular dependency stress test",
+        placeholders=["field_x", "field_y"],
+        schema_definition={"computed_fields": [rule_x, rule_y]},
+    )
+    context = BindingContext(context_id="ctx-circular")
+
+    result = await binder.bind_schema(schema, context)
+
+    assert "field_x" not in result.resolved_values
+    assert "field_y" not in result.resolved_values
+    assert "field_x" in result.validation_report.missing_placeholders
+    assert "field_y" in result.validation_report.missing_placeholders
+
+
+@pytest.mark.asyncio
+async def test_computed_field_invalid_operand_type_reports_explicit_error() -> None:
+    """An operand that is present but non-numeric produces an explicit error, not a silent skip."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.invalid_type.tmpl",
+        name="Computed Invalid Type Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field invalid operand type test",
+        placeholders=["total"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "total_rule",
+                    "operator": "SUM_EQUALS",
+                    "target_field": "total",
+                    "operand_fields": ["a", "b"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(context_id="ctx-invalid-type", data={"a": 10, "b": "not-a-number"})
+
+    result = await binder.bind_schema(schema, context)
+
+    assert result.validation_report.is_valid is False
+    assert any(
+        "invalid type" in err and "total_rule" in err
+        for err in result.validation_report.errors
+    )
+    assert "total" not in result.resolved_values
+
+
+@pytest.mark.asyncio
+async def test_computed_field_mixed_valid_and_invalid_operands_reports_error() -> None:
+    """A rule with one valid and one invalid-type operand still reports the type error."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.mixed_operands.tmpl",
+        name="Computed Mixed Operands Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field mixed valid/invalid operand test",
+        placeholders=["net"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "net_rule",
+                    "operator": "DIFFERENCE_EQUALS",
+                    "target_field": "net",
+                    "operand_fields": ["gross", "deduction"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(
+        context_id="ctx-mixed-operands", data={"gross": 1000, "deduction": [1, 2, 3]}
+    )
+
+    result = await binder.bind_schema(schema, context)
+
+    assert result.validation_report.is_valid is False
+    assert any("invalid type" in err for err in result.validation_report.errors)
+    assert "net" not in result.resolved_values
+
+
+@pytest.mark.asyncio
+async def test_computed_field_missing_operand_still_silently_skips() -> None:
+    """A genuinely absent operand remains a silent skip, not an error (unchanged behavior)."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.still_missing.tmpl",
+        name="Computed Still Missing Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Confirms missing operands remain a silent skip after the P1 fix",
+        placeholders=["total"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "total_rule",
+                    "operator": "SUM_EQUALS",
+                    "target_field": "total",
+                    "operand_fields": ["a", "b"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(context_id="ctx-still-missing", data={"a": 10})
+
+    result = await binder.bind_schema(schema, context)
+
+    assert result.validation_report.is_valid is True
+    assert not any("total_rule" in err for err in result.validation_report.errors)
+    assert "total" not in result.resolved_values
+
+
+@pytest.mark.asyncio
+async def test_computed_field_rule_takes_precedence_over_supplied_computed_field() -> None:
+    """A schema-declared rule's derived value wins over an ambient identically-named
+    BindingContext.computed_fields entry (documented, deterministic precedence)."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.precedence.tmpl",
+        name="Computed Precedence Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Computed field supplied-vs-rule-derived precedence test",
+        placeholders=["total"],
+        schema_definition={
+            "computed_fields": [
+                {
+                    "name": "total_rule",
+                    "operator": "SUM_EQUALS",
+                    "target_field": "total",
+                    "operand_fields": ["a", "b"],
+                }
+            ]
+        },
+    )
+    context = BindingContext(
+        context_id="ctx-precedence",
+        data={"a": 10, "b": 20},
+        computed_fields={"total": 999},
+    )
+
+    result = await binder.bind_schema(schema, context)
+
+    # The rule computes 30 (10 + 20); it must win over the ambient supplied value of 999.
+    assert result.resolved_values["total"] == 30
+    assert "total" in result.validation_report.computed_fields_resolved
+
+
+@pytest.mark.asyncio
+async def test_computed_field_direct_context_supplied_value_unchanged_when_no_rule_targets_it() -> None:
+    """A directly-supplied computed_fields value with no matching schema rule resolves exactly
+    as before the P1 rule-independence fix (regression guard for existing behavior)."""
+    binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
+    schema = TemplateSchema(
+        template_id="computed.direct_unchanged.tmpl",
+        name="Computed Direct Unchanged Template",
+        namespace="kortex.test",
+        version="1.0.0",
+        description="Confirms direct computed_fields values are untouched by rule evaluation",
+        placeholders=["tax_amount"],
+    )
+    context = BindingContext(
+        context_id="ctx-direct-unchanged", computed_fields={"tax_amount": 12000}
+    )
+
+    result = await binder.bind_schema(schema, context)
+
+    assert result.resolved_values["tax_amount"] == 12000
+    assert "tax_amount" in result.validation_report.computed_fields_resolved

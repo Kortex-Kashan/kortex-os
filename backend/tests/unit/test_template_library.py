@@ -7,9 +7,35 @@ from __future__ import annotations
 
 import pytest
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.engines.document.exceptions import DocumentTemplateError
 from kortex.engines.document.models import AdapterCapability, TemplateSchema
+from kortex.engines.document.persistence import TemplateRepository
 from kortex.engines.document.template_library import TemplateLibrary, parse_semver
+from kortex.engines.storage.stores.data_store import RelationalDataStore
+
+
+@pytest.fixture
+async def test_db(tmp_path):
+    """Create an isolated file-backed SQLite database manager and initialize all tables."""
+    db_file = tmp_path / "test_template_library.db"
+    db_manager = DatabaseEngineManager(f"sqlite+aiosqlite:///{db_file}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+    yield db_manager
+    await db_manager.disconnect()
+
+
+@pytest.fixture
+def data_store(test_db: DatabaseEngineManager) -> RelationalDataStore:
+    """Create a RelationalDataStore backed by the test database."""
+    return RelationalDataStore(test_db)
+
+
+@pytest.fixture
+def repository(data_store: RelationalDataStore) -> TemplateRepository:
+    """Create a TemplateRepository backed by the test data store."""
+    return TemplateRepository(data_store=data_store)
 
 
 def test_parse_semver_valid() -> None:
@@ -411,4 +437,382 @@ async def test_list_templates_capability_mismatch() -> None:
     lib = TemplateLibrary(load_defaults=True)
     ocr_templates = await lib.list_templates(capability=AdapterCapability.OCR)
     assert len(ocr_templates) == 0
+
+
+# -- Persisted mode (Milestone 3: storage/data abstraction integration) -------
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_register_and_get_survives_fresh_instance(
+    data_store: RelationalDataStore,
+) -> None:
+    """A template registered through a repository-backed library is readable by a fresh instance."""
+    repository = TemplateRepository(data_store=data_store)
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    assert lib.repository is repository
+
+    schema = TemplateSchema(
+        template_id="persisted.custom.v1",
+        name="Persisted Custom Template",
+        namespace="kortex.custom.persisted",
+        version="1.0.0",
+        description="A persisted test template",
+        placeholders=["field_a"],
+    )
+    await lib.register_template(schema)
+
+    fresh_lib = TemplateLibrary(
+        load_defaults=False, repository=TemplateRepository(data_store=data_store)
+    )
+    fetched = await fresh_lib.get_template("persisted.custom.v1")
+    assert fetched.template_id == "persisted.custom.v1"
+    assert fetched.namespace == "kortex.custom.persisted"
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_duplicate_registration_raises(
+    repository: TemplateRepository,
+) -> None:
+    """Registering the same template_id + version twice through a repository-backed library raises."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    schema = TemplateSchema(
+        template_id="persisted.dup.v1",
+        name="Persisted Dup Template",
+        namespace="kortex.custom.persisted",
+        version="1.0.0",
+        description="Duplicate test",
+    )
+    await lib.register_template(schema)
+
+    with pytest.raises(DocumentTemplateError, match="Duplicate template registration"):
+        await lib.register_template(schema)
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_cannot_shadow_standard_template(
+    repository: TemplateRepository,
+) -> None:
+    """A repository-backed library still refuses to re-register a built-in standard template ID."""
+    lib = TemplateLibrary(load_defaults=True, repository=repository)
+    shadow_schema = TemplateSchema(
+        template_id="invoice.declarative.v1",
+        name="Malicious Shadow Invoice",
+        namespace="kortex.finance.invoice",
+        version="1.0.0",
+        description="Attempted shadow of the standard invoice template",
+    )
+    with pytest.raises(DocumentTemplateError, match="Duplicate template registration"):
+        await lib.register_template(shadow_schema)
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_falls_back_to_standard_templates(
+    repository: TemplateRepository,
+) -> None:
+    """A repository-backed library still resolves built-in standard templates not persisted."""
+    lib = TemplateLibrary(load_defaults=True, repository=repository)
+    invoice = await lib.get_template("invoice.declarative.v1")
+    assert invoice.name == "Standard Invoice Template"
+
+    templates = await lib.list_templates()
+    assert len(templates) >= 11
+
+    found = await lib.search_templates("payslip")
+    assert any(t.template_id == "payslip.declarative.v1" for t in found)
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_get_not_found_raises(repository: TemplateRepository) -> None:
+    """Requesting an unregistered, non-standard template_id in repository mode raises."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    with pytest.raises(DocumentTemplateError, match="not found in library"):
+        await lib.get_template("nonexistent.template.v1")
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_update_rejects_existing_version(
+    repository: TemplateRepository,
+) -> None:
+    """update_template in repository mode rejects an already-persisted version."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    schema = TemplateSchema(
+        template_id="persisted.update.v1",
+        name="Persisted Update Template",
+        namespace="kortex.custom.persisted",
+        version="1.0.0",
+        description="Update test",
+    )
+    await lib.register_template(schema)
+
+    with pytest.raises(DocumentTemplateError, match="Cannot update immutable"):
+        await lib.update_template(schema)
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_delete_specific_version(repository: TemplateRepository) -> None:
+    """delete_template in repository mode removes a specific persisted version."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    schema = TemplateSchema(
+        template_id="persisted.delete.v1",
+        name="Persisted Delete Template",
+        namespace="kortex.custom.persisted",
+        version="1.0.0",
+        description="Delete test",
+    )
+    await lib.register_template(schema)
+
+    deleted = await lib.delete_template("persisted.delete.v1", version="1.0.0")
+    assert deleted is True
+
+    with pytest.raises(DocumentTemplateError, match="not found in library"):
+        await lib.get_template("persisted.delete.v1")
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_delete_missing_raises(repository: TemplateRepository) -> None:
+    """delete_template in repository mode raises when the template_id doesn't exist."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    with pytest.raises(DocumentTemplateError, match="Cannot delete"):
+        await lib.delete_template("nonexistent.delete.v1")
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_delete_missing_version_raises(
+    repository: TemplateRepository,
+) -> None:
+    """delete_template in repository mode raises when the specific version doesn't exist."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    schema = TemplateSchema(
+        template_id="persisted.delete_ver.v1",
+        name="Persisted Delete Version Template",
+        namespace="kortex.custom.persisted",
+        version="1.0.0",
+        description="Delete version test",
+    )
+    await lib.register_template(schema)
+
+    with pytest.raises(DocumentTemplateError, match="version '2.0.0' not found"):
+        await lib.delete_template("persisted.delete_ver.v1", version="2.0.0")
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_delete_all_versions(repository: TemplateRepository) -> None:
+    """delete_template with no version in repository mode removes every persisted version."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    await lib.register_template(
+        TemplateSchema(
+            template_id="persisted.delete_all.v1",
+            name="Persisted Delete All Template",
+            namespace="kortex.custom.persisted",
+            version="1.0.0",
+            description="Delete all v1",
+        )
+    )
+    await lib.register_template(
+        TemplateSchema(
+            template_id="persisted.delete_all.v1",
+            name="Persisted Delete All Template",
+            namespace="kortex.custom.persisted",
+            version="2.0.0",
+            description="Delete all v2",
+        )
+    )
+
+    deleted = await lib.delete_template("persisted.delete_all.v1")
+    assert deleted is True
+
+    with pytest.raises(DocumentTemplateError, match="not found in library"):
+        await lib.get_template("persisted.delete_all.v1")
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_semver_resolution_latest_version(
+    repository: TemplateRepository,
+) -> None:
+    """Repository-mode latest-version resolution uses SemVer comparison, matching in-memory mode."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    await lib.register_template(
+        TemplateSchema(
+            template_id="persisted.multi.v1",
+            name="Persisted Multi Version",
+            namespace="kortex.custom.persisted",
+            version="1.0.0",
+            description="v1",
+        )
+    )
+    await lib.register_template(
+        TemplateSchema(
+            template_id="persisted.multi.v1",
+            name="Persisted Multi Version",
+            namespace="kortex.custom.persisted",
+            version="1.10.0",
+            description="v1.10",
+        )
+    )
+    await lib.register_template(
+        TemplateSchema(
+            template_id="persisted.multi.v1",
+            name="Persisted Multi Version",
+            namespace="kortex.custom.persisted",
+            version="1.2.0",
+            description="v1.2",
+        )
+    )
+
+    latest = await lib.get_latest_version("persisted.multi.v1")
+    assert latest.version == "1.10.0"
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_register_and_get_per_call(
+    repository: TemplateRepository,
+) -> None:
+    """A single TemplateLibrary instance keeps per-call tenant_id partitions fully isolated."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    schema = TemplateSchema(
+        template_id="tenant.scoped.tmpl",
+        name="Tenant A Template",
+        namespace="kortex.tenant.scoped",
+        version="1.0.0",
+        description="Registered under tenant-a",
+    )
+
+    await lib.register_template(schema, tenant_id="tenant-a")
+
+    # Tenant A can read its own registration.
+    fetched_a = await lib.get_template("tenant.scoped.tmpl", tenant_id="tenant-a")
+    assert fetched_a.name == "Tenant A Template"
+
+    # Tenant B cannot see tenant A's template through the same TemplateLibrary instance.
+    with pytest.raises(DocumentTemplateError, match="not found"):
+        await lib.get_template("tenant.scoped.tmpl", tenant_id="tenant-b")
+
+    # Tenant B may register its own version of the same template_id+version independently.
+    other_schema = TemplateSchema(
+        template_id="tenant.scoped.tmpl",
+        name="Tenant B Template",
+        namespace="kortex.tenant.scoped",
+        version="1.0.0",
+        description="Registered under tenant-b",
+    )
+    await lib.register_template(other_schema, tenant_id="tenant-b")
+    fetched_b = await lib.get_template("tenant.scoped.tmpl", tenant_id="tenant-b")
+    assert fetched_b.name == "Tenant B Template"
+
+    # Confirming isolation held: tenant A's read is unaffected by tenant B's registration.
+    fetched_a_again = await lib.get_template("tenant.scoped.tmpl", tenant_id="tenant-a")
+    assert fetched_a_again.name == "Tenant A Template"
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_list_and_search_scoped_per_call(
+    repository: TemplateRepository,
+) -> None:
+    """list_templates/search_templates only surface the calling tenant's persisted templates."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    await lib.register_template(
+        TemplateSchema(
+            template_id="tenant.a.only",
+            name="Only In Tenant A",
+            namespace="kortex.tenant.a",
+            version="1.0.0",
+            description="Belongs to tenant-a",
+        ),
+        tenant_id="tenant-a",
+    )
+    await lib.register_template(
+        TemplateSchema(
+            template_id="tenant.b.only",
+            name="Only In Tenant B",
+            namespace="kortex.tenant.b",
+            version="1.0.0",
+            description="Belongs to tenant-b",
+        ),
+        tenant_id="tenant-b",
+    )
+
+    tenant_a_list = await lib.list_templates(tenant_id="tenant-a")
+    tenant_a_ids = {t.template_id for t in tenant_a_list}
+    assert "tenant.a.only" in tenant_a_ids
+    assert "tenant.b.only" not in tenant_a_ids
+
+    tenant_b_search = await lib.search_templates("Only In", tenant_id="tenant-b")
+    tenant_b_ids = {t.template_id for t in tenant_b_search}
+    assert "tenant.b.only" in tenant_b_ids
+    assert "tenant.a.only" not in tenant_b_ids
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_delete_scoped_per_call(
+    repository: TemplateRepository,
+) -> None:
+    """Deleting a template under one tenant_id must not affect another tenant's copy."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository)
+    schema_a = TemplateSchema(
+        template_id="tenant.delete.tmpl",
+        name="Tenant A Delete Target",
+        namespace="kortex.tenant.delete",
+        version="1.0.0",
+        description="Tenant A copy",
+    )
+    schema_b = TemplateSchema(
+        template_id="tenant.delete.tmpl",
+        name="Tenant B Delete Target",
+        namespace="kortex.tenant.delete",
+        version="1.0.0",
+        description="Tenant B copy",
+    )
+    await lib.register_template(schema_a, tenant_id="tenant-a")
+    await lib.register_template(schema_b, tenant_id="tenant-b")
+
+    await lib.delete_template("tenant.delete.tmpl", tenant_id="tenant-a")
+
+    with pytest.raises(DocumentTemplateError, match="not found"):
+        await lib.get_template("tenant.delete.tmpl", tenant_id="tenant-a")
+
+    # Tenant B's copy survives tenant A's deletion untouched.
+    still_there = await lib.get_template("tenant.delete.tmpl", tenant_id="tenant-b")
+    assert still_there.name == "Tenant B Delete Target"
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_standard_templates_available_to_every_tenant(
+    repository: TemplateRepository,
+) -> None:
+    """Built-in standard templates remain available regardless of the calling tenant_id."""
+    lib = TemplateLibrary(load_defaults=True, repository=repository)
+
+    invoice_for_a = await lib.get_template("invoice.declarative.v1", tenant_id="tenant-a")
+    invoice_for_b = await lib.get_template("invoice.declarative.v1", tenant_id="tenant-b")
+    assert invoice_for_a.name == "Standard Invoice Template"
+    assert invoice_for_b.name == "Standard Invoice Template"
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_falls_back_to_constructor_default(
+    repository: TemplateRepository,
+) -> None:
+    """Omitting tenant_id on a per-call operation falls back to the constructor's tenant_id."""
+    lib = TemplateLibrary(load_defaults=False, repository=repository, tenant_id="tenant-default-fallback")
+    schema = TemplateSchema(
+        template_id="fallback.tmpl",
+        name="Fallback Template",
+        namespace="kortex.fallback",
+        version="1.0.0",
+        description="Registered with no explicit tenant_id override",
+    )
+
+    await lib.register_template(schema)
+
+    # Explicit lookup under the constructor's own default tenant_id finds it.
+    fetched = await lib.get_template("fallback.tmpl", tenant_id="tenant-default-fallback")
+    assert fetched.name == "Fallback Template"
+
+    # Omitting tenant_id on the call also finds it (falls back to the same constructor default).
+    fetched_via_default = await lib.get_template("fallback.tmpl")
+    assert fetched_via_default.name == "Fallback Template"
+
+    # A different tenant_id does not see it.
+    with pytest.raises(DocumentTemplateError, match="not found"):
+        await lib.get_template("fallback.tmpl", tenant_id="some-other-tenant")
 

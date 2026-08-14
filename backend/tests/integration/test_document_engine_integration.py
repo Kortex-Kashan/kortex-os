@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from uuid import uuid4
+
 import pytest
 
 from kortex.core.base_engine import EngineState
@@ -24,6 +26,8 @@ from kortex.engines.document.exceptions import (
     DocumentOperationError,
     DocumentProfileNotFoundError,
 )
+from kortex.engines.document.lifecycle import DocumentLifecycleManager
+from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -39,6 +43,7 @@ from kortex.engines.document.models import (
     TemplateSchema,
 )
 from kortex.engines.document.security import DocumentStorageBinder
+from kortex.engines.document.template_library import TemplateLibrary
 from kortex.engines.storage.engine import StorageEngine
 
 
@@ -419,6 +424,107 @@ async def test_storage_engine_persistence_integration(tmp_path) -> None:
     assert cached_data == {"state": "PUBLISHED"}
 
     await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_document_lifecycle_persistence_survives_fresh_session(tmp_path) -> None:
+    """7b. Default DocumentEngine construction must auto-wire repository-backed persistence.
+
+    A version published through the booted engine must be readable by a completely
+    independent DocumentLifecycleManager/DocumentRepository pairing that shares only the
+    underlying Storage Engine data store, proving durability beyond the original engine
+    instance's in-memory state rather than merely asserting an attribute was set.
+    """
+    kernel = Kernel()
+
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_persist"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    # DocumentEngine.initialize() must have auto-wired a repository from the Kernel
+    # container; the default construction path must no longer be silently in-memory-only.
+    assert document_engine.lifecycle_manager.repository is not None
+
+    version = await document_engine.lifecycle_manager.create_version(
+        title="Persisted Payslip",
+        author_id="user-1",
+        version_number="1.0.0",
+    )
+    published_meta = await document_engine.lifecycle_manager.transition_state(
+        document_id=version.document_id,
+        version_id=version.version_id,
+        target_state=DocumentLifecycleState.PUBLISHED,
+    )
+    assert published_meta.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert published_meta.is_immutable is True
+
+    # Capture the underlying data store reference before shutdown; StorageEngine.data
+    # guards access once the engine leaves READY/RUNNING, but the underlying store itself
+    # is not torn down by stop() (only the cache store is cleared).
+    data_store = storage_engine.data
+    await kernel.shutdown()
+
+    # Simulate a fresh session: a brand-new manager/repository pairing, sharing no Python
+    # object state with the original engine, reading through the same underlying store.
+    fresh_manager = DocumentLifecycleManager(
+        repository=DocumentRepository(data_store=data_store)
+    )
+    reread_meta = await fresh_manager.get_version(version.document_id, version.version_id)
+    assert reread_meta.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert reread_meta.is_immutable is True
+
+
+@pytest.mark.asyncio
+async def test_template_library_persistence_survives_fresh_session(tmp_path) -> None:
+    """7c. Default DocumentEngine construction must also auto-wire TemplateLibrary persistence.
+
+    A custom template registered through the booted engine must be readable by a completely
+    independent TemplateLibrary/TemplateRepository pairing sharing only the underlying
+    Storage Engine data store, and the built-in standard templates must remain available
+    throughout.
+    """
+    kernel = Kernel()
+
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_template_persist"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    assert document_engine.template_library.repository is not None
+
+    # Unique per test run: DatabaseEngineManager() defaults to a shared on-disk file
+    # (kortex_local.db) when the Kernel isn't given an explicit connection, so a fixed
+    # template_id could collide with a leftover row from a prior run.
+    unique_id = f"integration.custom.{uuid4()}"
+    custom_schema = TemplateSchema(
+        template_id=unique_id,
+        name="Integration Custom Template",
+        namespace="kortex.integration.custom",
+        version="1.0.0",
+        description="Persisted through the booted DocumentEngine",
+        placeholders=["field_a"],
+    )
+    await document_engine.template_library.register_template(custom_schema)
+
+    # Built-in standard templates remain resolvable alongside the persisted custom one.
+    invoice = await document_engine.template_library.get_template("invoice.declarative.v1")
+    assert invoice.name == "Standard Invoice Template"
+
+    data_store = storage_engine.data
+    await kernel.shutdown()
+
+    fresh_library = TemplateLibrary(
+        load_defaults=False, repository=TemplateRepository(data_store=data_store)
+    )
+    reread = await fresh_library.get_template(unique_id)
+    assert reread.namespace == "kortex.integration.custom"
 
 
 @pytest.mark.asyncio

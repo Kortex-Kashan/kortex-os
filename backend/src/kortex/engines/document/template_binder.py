@@ -18,10 +18,24 @@ from kortex.engines.document.models import (
     TemplateSchema,
     ValidationReport,
 )
+from kortex.engines.document.ontology import (
+    InvariantOperator,
+    OntologyFieldType,
+    compute_invariant_target,
+)
 from kortex.engines.document.template_library import TemplateLibrary
 
 # Regular expression for safe placeholder identifier validation
 PLACEHOLDER_REGEX = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
+
+# Python type checks for declarative field_types entries in TemplateSchema.schema_definition.
+_FIELD_TYPE_PYTHON_TYPES: dict[str, tuple[type, ...]] = {
+    OntologyFieldType.STRING.value: (str,),
+    OntologyFieldType.NUMBER.value: (int, float),
+    OntologyFieldType.BOOLEAN.value: (bool,),
+    OntologyFieldType.ARRAY.value: (list, tuple),
+    OntologyFieldType.OBJECT.value: (dict,),
+}
 
 
 class BindingResult(BaseModel):
@@ -111,7 +125,8 @@ class TemplateBinder:
 
         Args:
             template_id: Template schema identifier string.
-            context: BindingContext data.
+            context: BindingContext data. `context.tenant_id` scopes the template lookup
+                     to that tenant's persisted templates when TemplateLibrary is repository-backed.
             version: Optional SemVer string. Resolves latest version if omitted.
 
         Returns:
@@ -120,7 +135,9 @@ class TemplateBinder:
         Raises:
             DocumentTemplateError: If template_id or version is not found in library.
         """
-        schema = await self._library.get_template(template_id, version=version)
+        schema = await self._library.get_template(
+            template_id, version=version, tenant_id=context.tenant_id
+        )
         return await self.bind_schema(schema, context)
 
     async def bind_schema(
@@ -151,6 +168,80 @@ class TemplateBinder:
         warnings: list[str] = []
         computed_fields_resolved: list[str] = []
 
+        # Declarative computed-field derivation: evaluate schema-declared arithmetic rules
+        # (sum/difference over already-supplied fields) deterministically, without eval/exec.
+        # Every rule's operands are resolved ONLY against the original BindingContext snapshot
+        # (context.computed_fields / context.data) — never against another rule's output. This
+        # makes evaluation order-independent (reversing the rule list cannot change the result)
+        # and makes chained or circular rule dependencies fail to resolve deterministically on
+        # both sides, rather than silently succeeding for whichever rule happens to run first.
+        original_computed_fields: dict[str, Any] = dict(context.computed_fields or {})
+        newly_derived_computed_fields: dict[str, Any] = {}
+        rule_derived_targets: set[str] = set()
+        computed_field_specs = schema.schema_definition.get("computed_fields", [])
+        if isinstance(computed_field_specs, list):
+            for spec in computed_field_specs:
+                if not isinstance(spec, dict):
+                    continue
+                target_field = spec.get("target_field")
+                operator_str = spec.get("operator")
+                operand_fields = spec.get("operand_fields", [])
+                rule_name = spec.get("name", target_field)
+                if not target_field or not operator_str or not isinstance(operand_fields, list):
+                    continue
+
+                try:
+                    operator = InvariantOperator(operator_str)
+                except ValueError:
+                    errors.append(
+                        f"Unsupported computed field operator '{operator_str}' for rule '{rule_name}'."
+                    )
+                    continue
+
+                operand_values: list[float] = []
+                operands_resolved = True
+                for operand_name in operand_fields:
+                    op_found, op_val = resolve_dotted_path(original_computed_fields, operand_name)
+                    if not op_found and context.data:
+                        op_found, op_val = resolve_dotted_path(context.data, operand_name)
+                    if not op_found:
+                        operands_resolved = False
+                        break
+                    if not isinstance(op_val, (int, float)):
+                        errors.append(
+                            f"Computed field rule '{rule_name}' operand '{operand_name}' has an "
+                            f"invalid type: expected a numeric value, got '{type(op_val).__name__}'."
+                        )
+                        operands_resolved = False
+                        break
+                    operand_values.append(float(op_val))
+
+                if not operands_resolved:
+                    continue
+
+                try:
+                    computed_value = compute_invariant_target(operator, operand_values)
+                except DocumentTemplateError as exc:
+                    errors.append(f"Computed field rule '{rule_name}' failed: {exc}")
+                    continue
+
+                newly_derived_computed_fields[target_field] = computed_value
+                rule_derived_targets.add(target_field)
+
+        # Merge for placeholder resolution below: a rule-derived value takes precedence over an
+        # ambient BindingContext.computed_fields entry sharing the same target_field, since the
+        # rule is schema-authored and treated as more authoritative than incidental context data.
+        derived_computed_fields: dict[str, Any] = {
+            **original_computed_fields,
+            **newly_derived_computed_fields,
+        }
+
+        # Declarative strong type validation: schema.schema_definition['field_types'] maps
+        # placeholder name -> OntologyFieldType value (e.g. 'NUMBER', 'STRING').
+        field_types = schema.schema_definition.get("field_types", {})
+        if not isinstance(field_types, dict):
+            field_types = {}
+
         # Combine all target placeholders (schema.placeholders + schema.required_fields)
         all_target_placeholders: set[str] = set()
         if schema.placeholders:
@@ -172,9 +263,9 @@ class TemplateBinder:
             found = False
             val: Any = None
 
-            # Priority 1: Check BindingContext.computed_fields
-            if context.computed_fields:
-                found_computed, comp_val = resolve_dotted_path(context.computed_fields, ph_clean)
+            # Priority 1: Check BindingContext.computed_fields (including derived computed fields)
+            if derived_computed_fields:
+                found_computed, comp_val = resolve_dotted_path(derived_computed_fields, ph_clean)
                 if found_computed:
                     found = True
                     val = comp_val
@@ -189,6 +280,20 @@ class TemplateBinder:
 
             if found and val is not None:
                 resolved_values[ph_clean] = val
+
+                declared_type = field_types.get(ph_clean)
+                if declared_type is not None:
+                    expected_python_types = _FIELD_TYPE_PYTHON_TYPES.get(declared_type)
+                    if expected_python_types is not None and not isinstance(
+                        val, expected_python_types
+                    ):
+                        type_mismatches.append(
+                            f"Field '{ph_clean}' expected type {declared_type}, "
+                            f"got '{type(val).__name__}'."
+                        )
+                        errors.append(
+                            f"Type mismatch for field '{ph_clean}': expected {declared_type}."
+                        )
             else:
                 unresolved_placeholders.append(ph_clean)
                 missing_placeholders.append(ph_clean)
@@ -199,6 +304,10 @@ class TemplateBinder:
                 else:
                     warn_msg = f"Missing optional placeholder: '{ph_clean}'."
                     warnings.append(warn_msg)
+
+        # Include rule-derived computed fields even when their target is not itself a
+        # declared placeholder, so computed_fields_resolved reflects every rule that fired.
+        computed_fields_resolved.extend(rule_derived_targets)
 
         is_valid = len(errors) == 0
 

@@ -143,17 +143,24 @@ class IDocumentLifecycleManager(Protocol):
 class ITemplateLibrary(Protocol):
     """Interface for indexing, searching, loading, and managing declarative templates."""
 
-    async def get_template(self, template_id: str) -> TemplateSchema:
+    async def get_template(
+        self, template_id: str, tenant_id: str | None = None
+    ) -> TemplateSchema:
         """Retrieve declarative TemplateSchema by template ID."""
         ...
 
     async def search_templates(
-        self, query: str, tags: list[str] | None = None
+        self,
+        query: str,
+        tags: list[str] | None = None,
+        tenant_id: str | None = None,
     ) -> list[TemplateSchema]:
         """Search template library by keyword query and filtering tags."""
         ...
 
-    async def install_template(self, schema: TemplateSchema) -> bool:
+    async def install_template(
+        self, schema: TemplateSchema, tenant_id: str | None = None
+    ) -> bool:
         """Install a new declarative template into the local Template Library."""
         ...
 
@@ -444,6 +451,35 @@ class IDocumentRepository(Protocol):
         ...
 
 
+@runtime_checkable
+class ITemplateRepository(Protocol):
+    """Protocol defining relational persistence operations for Template Schemas via IDataStore."""
+
+    async def save_template(
+        self, schema: TemplateSchema, tenant_id: str = "default"
+    ) -> TemplateSchema:
+        """Persist a new declarative TemplateSchema version."""
+        ...
+
+    async def get_template(
+        self, template_id: str, version: str | None = None, tenant_id: str = "default"
+    ) -> TemplateSchema | None:
+        """Retrieve a TemplateSchema by template_id and optional version (latest if omitted)."""
+        ...
+
+    async def list_templates(
+        self, tenant_id: str = "default", namespace: str | None = None
+    ) -> list[TemplateSchema]:
+        """List persisted template versions matching tenant and optional namespace filter."""
+        ...
+
+    async def delete_template(
+        self, template_id: str, version: str, tenant_id: str = "default"
+    ) -> bool:
+        """Delete a specific persisted template version."""
+        ...
+
+
 __all__ = [
     "IAdapterPipelineExecutor",
     "IAdapterSandbox",
@@ -458,4 +494,5 @@ __all__ = [
     "IDocumentRepository",
     "ITemplateBinder",
     "ITemplateLibrary",
+    "ITemplateRepository",
 ]

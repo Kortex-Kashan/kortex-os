@@ -22,7 +22,7 @@ from kortex.engines.document.exceptions import (
     DocumentLifecycleError,
     DocumentValidationError,
 )
-from kortex.engines.document.interfaces import IDocumentRepository
+from kortex.engines.document.interfaces import IDocumentRepository, ITemplateRepository
 from kortex.engines.document.models import (
     AdapterPipelineDefinition,
     Document,
@@ -37,8 +37,11 @@ from kortex.engines.document.models import (
     DocumentVersionRecord,
     SecurityClassification,
     SecurityMetadata,
+    TemplateSchema,
+    TemplateSchemaRecord,
     ValidationReport,
 )
+from kortex.engines.document.template_library import parse_semver
 from kortex.engines.storage.interfaces import IDataStore
 
 logger = logging.getLogger("kortex.engines.document.persistence")
@@ -1172,6 +1175,182 @@ class DocumentRepository(IDocumentRepository):
         return await self._data_store.execute_in_transaction(_action)
 
 
+class TemplateRepository(ITemplateRepository):
+    """Repository handling relational database persistence for declarative Template Schemas."""
+
+    def __init__(self, data_store: IDataStore) -> None:
+        """Initialize TemplateRepository with Storage Engine IDataStore.
+
+        Args:
+            data_store: Storage Engine relational persistence provider.
+        """
+        self._data_store = data_store
+
+    @staticmethod
+    def _record_to_domain(record: TemplateSchemaRecord) -> TemplateSchema:
+        """Convert a TemplateSchemaRecord ORM entity to a TemplateSchema domain model."""
+        placeholders = json.loads(record.placeholders_json) if record.placeholders_json else []
+        required_fields = (
+            json.loads(record.required_fields_json) if record.required_fields_json else []
+        )
+        schema_definition = (
+            json.loads(record.schema_definition_json) if record.schema_definition_json else {}
+        )
+
+        return TemplateSchema(
+            template_id=record.template_id,
+            name=record.name,
+            namespace=record.namespace,
+            version=record.version,
+            description=record.description,
+            placeholders=placeholders,
+            required_fields=required_fields,
+            schema_definition=schema_definition,
+        )
+
+    async def save_template(
+        self, schema: TemplateSchema, tenant_id: str = "default"
+    ) -> TemplateSchema:
+        """Persist a new declarative TemplateSchema version.
+
+        Args:
+            schema: TemplateSchema domain model instance.
+            tenant_id: Tenant partition identifier.
+
+        Returns:
+            The persisted TemplateSchema instance.
+
+        Raises:
+            DocumentEngineError: If the template_id + version pair already exists.
+        """
+        async def _action(session: AsyncSession) -> TemplateSchema:
+            stmt = select(TemplateSchemaRecord).where(
+                TemplateSchemaRecord.tenant_id == tenant_id,
+                TemplateSchemaRecord.template_id == schema.template_id,
+                TemplateSchemaRecord.version == schema.version,
+            )
+            res = await session.execute(stmt)
+            if res.scalar_one_or_none() is not None:
+                raise DocumentEngineError(
+                    f"Duplicate template registration: '{schema.template_id}' version "
+                    f"'{schema.version}' is already registered."
+                )
+
+            record = TemplateSchemaRecord(
+                id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                template_id=schema.template_id,
+                version=schema.version,
+                name=schema.name,
+                namespace=schema.namespace,
+                description=schema.description,
+                placeholders_json=json.dumps(schema.placeholders) if schema.placeholders else None,
+                required_fields_json=(
+                    json.dumps(schema.required_fields) if schema.required_fields else None
+                ),
+                schema_definition_json=(
+                    json.dumps(schema.schema_definition) if schema.schema_definition else None
+                ),
+            )
+            session.add(record)
+            await session.flush()
+            return self._record_to_domain(record)
+
+        return await self._data_store.execute_in_transaction(_action)
+
+    async def get_template(
+        self, template_id: str, version: str | None = None, tenant_id: str = "default"
+    ) -> TemplateSchema | None:
+        """Retrieve a TemplateSchema by template_id and optional version.
+
+        If version is omitted, returns the latest version based on SemVer comparison,
+        consistent with TemplateLibrary's own in-memory latest-version resolution.
+
+        Args:
+            template_id: Template identifier string.
+            version: Optional SemVer string.
+            tenant_id: Tenant partition identifier.
+
+        Returns:
+            TemplateSchema domain model, or None if not found.
+        """
+        async def _action(session: AsyncSession) -> TemplateSchema | None:
+            query = select(TemplateSchemaRecord).where(
+                TemplateSchemaRecord.tenant_id == tenant_id,
+                TemplateSchemaRecord.template_id == template_id,
+            )
+            if version is not None:
+                query = query.where(TemplateSchemaRecord.version == version)
+
+            res = await session.execute(query)
+            records = res.scalars().all()
+            if not records:
+                return None
+
+            if version is not None:
+                return self._record_to_domain(records[0])
+
+            latest = max(records, key=lambda r: parse_semver(r.version))
+            return self._record_to_domain(latest)
+
+        return await self._data_store.execute_in_transaction(_action)
+
+    async def list_templates(
+        self, tenant_id: str = "default", namespace: str | None = None
+    ) -> list[TemplateSchema]:
+        """List persisted template versions matching tenant and optional namespace filter.
+
+        Args:
+            tenant_id: Tenant partition identifier.
+            namespace: Optional namespace filter.
+
+        Returns:
+            List of TemplateSchema domain models (all persisted versions, not deduplicated).
+        """
+        async def _action(session: AsyncSession) -> list[TemplateSchema]:
+            query = select(TemplateSchemaRecord).where(TemplateSchemaRecord.tenant_id == tenant_id)
+            if namespace is not None:
+                query = query.where(TemplateSchemaRecord.namespace == namespace)
+
+            query = query.order_by(TemplateSchemaRecord.template_id.asc())
+            res = await session.execute(query)
+            records = res.scalars().all()
+            return [self._record_to_domain(r) for r in records]
+
+        return await self._data_store.execute_in_transaction(_action)
+
+    async def delete_template(
+        self, template_id: str, version: str, tenant_id: str = "default"
+    ) -> bool:
+        """Delete a specific persisted template version.
+
+        Args:
+            template_id: Template identifier string.
+            version: SemVer version string.
+            tenant_id: Tenant partition identifier.
+
+        Returns:
+            True if deleted; False if not found.
+        """
+        async def _action(session: AsyncSession) -> bool:
+            stmt = select(TemplateSchemaRecord).where(
+                TemplateSchemaRecord.tenant_id == tenant_id,
+                TemplateSchemaRecord.template_id == template_id,
+                TemplateSchemaRecord.version == version,
+            )
+            res = await session.execute(stmt)
+            record = res.scalar_one_or_none()
+            if record is None:
+                return False
+
+            await session.delete(record)
+            await session.flush()
+            return True
+
+        return await self._data_store.execute_in_transaction(_action)
+
+
 __all__ = [
     "DocumentRepository",
+    "TemplateRepository",
 ]

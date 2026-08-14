@@ -422,6 +422,25 @@ class DocumentOperationHistoryRecord(SQLAlchemyBaseModel):
     errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class TemplateSchemaRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for persisting declarative document Template Schemas."""
+
+    __tablename__ = "document_template_schemas"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "template_id", "version", name="uq_tenant_template_version"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
+    template_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    placeholders_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    required_fields_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_definition_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class DocumentOperationProfileRecord(SQLAlchemyBaseModel):
     """SQLAlchemy ORM model for persisting declarative document operation profiles."""
 
@@ -471,5 +490,6 @@ __all__ = [
     "SecurityClassification",
     "SecurityMetadata",
     "TemplateSchema",
+    "TemplateSchemaRecord",
     "ValidationReport",
 ]

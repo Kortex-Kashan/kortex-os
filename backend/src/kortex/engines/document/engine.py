@@ -47,11 +47,12 @@ from kortex.engines.document.models import (
     ValidationReport,
 )
 from kortex.engines.document.operation_profile import DocumentOperationProfileManager
+from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
 from kortex.engines.document.recovery import DocumentRecoveryManager
 from kortex.engines.document.security import DocumentSecurityVerifier, DocumentStorageBinder
 from kortex.engines.document.template_binder import TemplateBinder
 from kortex.engines.document.template_library import TemplateLibrary
-from kortex.engines.storage.interfaces import IEngineDiagnostics
+from kortex.engines.storage.interfaces import IDataStore, IEngineDiagnostics
 
 
 class DocumentEngine(BaseEngine, IEngineDiagnostics):
@@ -95,6 +96,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         self._lifecycle_manager = (
             lifecycle_manager if lifecycle_manager is not None else DocumentLifecycleManager()
         )
+        self._data_store: IDataStore | None = None
         self._profile_manager = (
             profile_manager
             if profile_manager is not None
@@ -194,6 +196,29 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         """Initialize engine resources and register capabilities with Kernel."""
         self._set_state(EngineState.INITIALIZING)
 
+        # Wire Storage Engine relational persistence from Kernel IoC container if registered.
+        # Explicit constructor injection (lifecycle_manager with its own repository) always
+        # takes priority; this only fills in persistence when none was already configured.
+        if kernel is not None and hasattr(kernel, "container"):
+            try:
+                storage_engine = kernel.container.resolve("engine.storage")
+                if storage_engine is not None and hasattr(storage_engine, "data"):
+                    if self._data_store is None:
+                        self._data_store = storage_engine.data
+                    if self._lifecycle_manager.repository is None and self._data_store is not None:
+                        self._lifecycle_manager._repository = DocumentRepository(
+                            data_store=self._data_store
+                        )
+                    if self._template_library.repository is None and self._data_store is not None:
+                        self._template_library._repository = TemplateRepository(
+                            data_store=self._data_store
+                        )
+            except Exception:
+                self.logger.debug(
+                    "StorageEngine not resolved from Kernel container; DocumentLifecycleManager "
+                    "remains in standalone in-memory mode."
+                )
+
         if kernel is not None and hasattr(kernel, "register_capability"):
             for cap in self.capabilities():
                 handler = None
@@ -284,7 +309,9 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
 
         # 2. Template Resolution & Binding
         if profile.required_template_id:
-            schema = await self._template_library.get_template(profile.required_template_id)
+            schema = await self._template_library.get_template(
+                profile.required_template_id, tenant_id=binding_context.tenant_id
+            )
             report = await self._template_binder.bind(schema, binding_context)
             if not report.is_valid:
                 exec_ms = (time.perf_counter() - start_time) * 1000.0
@@ -395,7 +422,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         self, template_id: str, context: BindingContext
     ) -> ValidationReport:
         """Validate and bind context data against a declarative Template Schema (IDocumentEngine protocol)."""
-        schema = await self._template_library.get_template(template_id)
+        schema = await self._template_library.get_template(template_id, tenant_id=context.tenant_id)
         return await self._template_binder.bind(schema, context)
 
     async def generate_preview(
