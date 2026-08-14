@@ -34,6 +34,7 @@ from kortex.engines.document.intelligence import (
     DefaultDocumentRecommendationProvider,
 )
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
+from kortex.engines.document.loader import DocumentAdapterLoader
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -218,6 +219,18 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     "StorageEngine not resolved from Kernel container; DocumentLifecycleManager "
                     "remains in standalone in-memory mode."
                 )
+
+        # Populate the adapter registry with any discovered in-package reference adapters
+        # (e.g. DummyDocumentAdapter). Safe to call even if adapters were already registered
+        # via explicit constructor injection or a prior initialize() call — the loader skips
+        # duplicates rather than raising, so this never fails engine initialization.
+        try:
+            DocumentAdapterLoader(registry=self._adapter_registry).load_and_register_all()
+        except Exception:
+            self.logger.debug(
+                "DocumentAdapterLoader failed to discover/register adapters; continuing with "
+                "whatever adapters were already registered (if any)."
+            )
 
         if kernel is not None and hasattr(kernel, "register_capability"):
             for cap in self.capabilities():

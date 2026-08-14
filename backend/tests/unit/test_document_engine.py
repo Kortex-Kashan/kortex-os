@@ -365,3 +365,48 @@ def test_security_rules_no_direct_adapter_execution() -> None:
     engine = DocumentEngine()
     assert engine.sandbox is not None
     assert engine.pipeline_executor.sandbox is engine.sandbox
+
+
+@pytest.mark.asyncio
+async def test_initialize_registers_dummy_adapter_on_fresh_engine() -> None:
+    """A freshly initialized engine (no kernel) has the Dummy Adapter registered and usable."""
+    engine = DocumentEngine()
+
+    await engine.initialize(kernel=None)
+
+    adapters = engine.list_adapters()
+    assert any(a.adapter_id == "kortex.document.dummy.v1" for a in adapters)
+
+    # generate_preview() no longer raises AdapterNotFoundError on a freshly booted engine.
+    result = await engine.generate_preview("req-dummy-preview", PreviewOptions(page_number=1))
+    assert result.image_bytes is not None
+
+
+@pytest.mark.asyncio
+async def test_initialize_does_not_duplicate_manually_registered_adapter() -> None:
+    """A manually pre-registered adapter is not clobbered or duplicated by initialize()."""
+    engine = DocumentEngine()
+    manual_adapter = DummyFacadeAdapter()
+    engine.adapter_registry.register_adapter(manual_adapter)
+
+    await engine.initialize(kernel=None)
+
+    adapters = engine.list_adapters()
+    adapter_ids = {a.adapter_id for a in adapters}
+    assert manual_adapter.adapter_id in adapter_ids
+    assert "kortex.document.dummy.v1" in adapter_ids
+    fetched = engine.adapter_registry.get_adapter_by_id(manual_adapter.adapter_id)
+    assert fetched is manual_adapter
+
+
+@pytest.mark.asyncio
+async def test_initialize_is_idempotent_when_called_twice() -> None:
+    """Calling initialize() a second time does not raise or duplicate the Dummy Adapter."""
+    engine = DocumentEngine()
+
+    await engine.initialize(kernel=None)
+    await engine.initialize(kernel=None)
+
+    adapters = engine.list_adapters()
+    dummy_matches = [a for a in adapters if a.adapter_id == "kortex.document.dummy.v1"]
+    assert len(dummy_matches) == 1

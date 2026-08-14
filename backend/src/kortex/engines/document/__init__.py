@@ -6,8 +6,10 @@ and abstract base classes for the Document Engine (Milestone 1).
 
 from __future__ import annotations
 
+from kortex.engines.document.adapters.dummy_adapter import DummyDocumentAdapter
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.engine import DocumentEngine
+from kortex.engines.document.loader import DocumentAdapterLoader
 from kortex.engines.document.intelligence import (
     DefaultDocumentIntelligenceProvider,
     DefaultDocumentRecommendationProvider,
@@ -100,6 +102,7 @@ __all__ = [
     "DefaultDocumentRecommendationProvider",
     "DefaultVerificationService",
     "DocumentAdapterError",
+    "DocumentAdapterLoader",
     "DocumentAdapterRegisteredEvent",
     "DocumentArchivedEvent",
     "DocumentBaseEvent",
@@ -129,6 +132,7 @@ __all__ = [
     "DocumentSupersededEvent",
     "DocumentTemplateError",
     "DocumentVersion",
+    "DummyDocumentAdapter",
     "FailureMetadata",
     "IAdapterPipelineExecutor",
     "IAdapterSandbox",

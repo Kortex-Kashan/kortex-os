@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -180,20 +181,24 @@ class ITemplateBinder(Protocol):
 class IDocumentAdapterRegistry(Protocol):
     """Thread-safe registry protocol for registering and looking up document adapters."""
 
-    def register_adapter(self, adapter_metadata: AdapterMetadata) -> None:
-        """Register adapter metadata in the registry."""
+    def register_adapter(
+        self, adapter: BaseDocumentAdapter | AdapterMetadata
+    ) -> BaseDocumentAdapter:
+        """Register a document adapter instance, or bare adapter metadata, in the registry."""
         ...
 
-    def unregister_adapter(self, adapter_id: str) -> bool:
-        """Unregister document adapter by adapter ID."""
+    def unregister_adapter(self, adapter_id: str, version: str | None = None) -> bool:
+        """Unregister a document adapter by adapter ID and optional specific version."""
         ...
 
-    def get_adapter(self, capability: AdapterCapability) -> AdapterMetadata:
-        """Retrieve registered adapter advertising the specified capability."""
+    def get_adapter(
+        self, identifier_or_capability: str | AdapterCapability, version: str | None = None
+    ) -> BaseDocumentAdapter:
+        """Retrieve a registered document adapter by adapter ID or by advertised capability."""
         ...
 
     def list_adapters(self) -> list[AdapterMetadata]:
-        """Return metadata for all registered document adapters."""
+        """Return metadata for all registered document adapters (latest version of each)."""
         ...
 
 

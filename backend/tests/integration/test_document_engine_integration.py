@@ -38,6 +38,7 @@ from kortex.engines.document.models import (
     DocumentOperationType,
     OperationRequest,
     PipelineStage,
+    PreviewOptions,
     SecurityClassification,
     SecurityMetadata,
     TemplateSchema,
@@ -349,6 +350,29 @@ async def test_adapter_registry_and_pipeline_sandbox_integration(tmp_path) -> No
     assert res.is_success is True
     assert len(res.stage_results) == 2
     assert b"[INTEGRATION_PDF_OUTPUT]" in res.final_output_bytes
+
+
+@pytest.mark.asyncio
+async def test_adapter_loader_registers_dummy_adapter_on_kernel_boot(tmp_path) -> None:
+    """A DocumentEngine booted through a real Kernel has the Dummy Adapter available."""
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_adapter_loader"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    adapters = document_engine.list_adapters()
+    assert any(a.adapter_id == "kortex.document.dummy.v1" for a in adapters)
+
+    preview_result = await document_engine.generate_preview(
+        "req-boot-preview", PreviewOptions(page_number=1)
+    )
+    assert preview_result.image_bytes is not None
+
+    await kernel.shutdown()
 
 
 @pytest.mark.asyncio
