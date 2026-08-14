@@ -112,6 +112,18 @@ class DocumentMetadata(BaseModel):
     published_at: str | None = None
 
 
+class DocumentContent(BaseModel):
+    """Value object encapsulating storage coordinates and checksum of document binary content."""
+
+    model_config = ConfigDict(frozen=True)
+
+    storage_key: str
+    bucket_name: str = "documents"
+    mime_type: str = "application/octet-stream"
+    file_size_bytes: int = 0
+    sha256_hash: str | None = None
+
+
 class DocumentVersion(BaseModel):
     """Immutable document version snapshot in a version chain."""
 
@@ -125,6 +137,42 @@ class DocumentVersion(BaseModel):
     created_by: str
     is_immutable: bool = False
     metadata: DocumentMetadata
+    content: DocumentContent | None = None
+
+
+class Document(BaseModel):
+    """Canonical root aggregate domain model representing a logical document entity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    tenant_id: str = "default"
+    current_version_id: str | None = None
+    title: str = "Untitled Document"
+    document_type: str = "GENERIC"
+    created_at: str | None = None
+    updated_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentExtractionResult(BaseModel):
+    """Structured extraction result representing text, tables, and domain concepts."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    version_id: str | None = None
+    raw_text: str = ""
+    structured_tables: list[dict[str, Any]] = Field(default_factory=list)
+    metadata_fields: dict[str, Any] = Field(default_factory=dict)
+    extracted_concepts: dict[str, Any] = Field(default_factory=dict)
+    confidence_scores: dict[str, float] = Field(default_factory=dict)
+    mime_type: str = "text/plain"
+    page_count: int = 1
+    language: str | None = None
+
+
+ExtractionResult = DocumentExtractionResult
 
 
 class AdapterMetadata(BaseModel):
@@ -304,11 +352,15 @@ __all__ = [
     "AdapterPipelineDefinition",
     "AdapterSandboxConfig",
     "BindingContext",
+    "Document",
+    "DocumentContent",
+    "DocumentExtractionResult",
     "DocumentLifecycleState",
     "DocumentMetadata",
     "DocumentOperationProfile",
     "DocumentOperationType",
     "DocumentVersion",
+    "ExtractionResult",
     "OperationRequest",
     "OperationResult",
     "PipelineExecutionMode",

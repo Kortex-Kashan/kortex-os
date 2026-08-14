@@ -52,15 +52,30 @@ class DocumentRecoveryError(DocumentEngineError):
     """Raised when execution checkpointing, retry, or rollback stack operation fails."""
 
 
+class DocumentValidationError(DocumentEngineError):
+    """Raised when document content, format, or metadata validation fails."""
+
+
+class DocumentExtractionError(DocumentEngineError):
+    """Raised when parsing or text/table/concept extraction from a document fails."""
+
+
+class DocumentIngestionError(DocumentEngineError):
+    """Raised when document ingestion or raw payload storage fails."""
+
+
 __all__ = [
     "AdapterExecutionError",
     "AdapterNotFoundError",
     "DocumentAdapterError",
     "DocumentEngineError",
+    "DocumentExtractionError",
+    "DocumentIngestionError",
     "DocumentLifecycleError",
     "DocumentOperationError",
     "DocumentProfileNotFoundError",
     "DocumentRecoveryError",
     "DocumentSecurityError",
     "DocumentTemplateError",
+    "DocumentValidationError",
 ]

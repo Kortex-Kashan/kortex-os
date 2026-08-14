@@ -12,6 +12,9 @@ from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
     BindingContext,
+    Document,
+    DocumentContent,
+    DocumentExtractionResult,
     DocumentLifecycleState,
     DocumentMetadata,
     DocumentOperationProfile,
@@ -219,6 +222,24 @@ class IDocumentRecoveryProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class IDocumentParser(Protocol):
+    """Protocol for extracting clean text, tables, and structured metadata from document payloads."""
+
+    def supports_mime_type(self, mime_type: str) -> bool:
+        """Check if parser supports the given MIME type."""
+        ...
+
+    async def parse(
+        self,
+        content: bytes,
+        mime_type: str,
+        options: dict[str, Any] | None = None,
+    ) -> DocumentExtractionResult:
+        """Parse raw content bytes into a structured extraction result."""
+        ...
+
+
 __all__ = [
     "IAdapterPipelineExecutor",
     "IAdapterSandbox",
@@ -227,6 +248,7 @@ __all__ = [
     "IDocumentIntelligenceProvider",
     "IDocumentLifecycleManager",
     "IDocumentOperationProfileManager",
+    "IDocumentParser",
     "IDocumentRecommendationProvider",
     "IDocumentRecoveryProvider",
     "ITemplateBinder",

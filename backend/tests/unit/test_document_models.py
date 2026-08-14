@@ -16,12 +16,15 @@ from kortex.engines.document.exceptions import (
     AdapterNotFoundError,
     DocumentAdapterError,
     DocumentEngineError,
+    DocumentExtractionError,
+    DocumentIngestionError,
     DocumentLifecycleError,
     DocumentOperationError,
     DocumentProfileNotFoundError,
     DocumentRecoveryError,
     DocumentSecurityError,
     DocumentTemplateError,
+    DocumentValidationError,
 )
 from kortex.engines.document.interfaces import (
     IAdapterPipelineExecutor,
@@ -31,6 +34,7 @@ from kortex.engines.document.interfaces import (
     IDocumentIntelligenceProvider,
     IDocumentLifecycleManager,
     IDocumentOperationProfileManager,
+    IDocumentParser,
     IDocumentRecommendationProvider,
     IDocumentRecoveryProvider,
     ITemplateBinder,
@@ -42,11 +46,15 @@ from kortex.engines.document.models import (
     AdapterPipelineDefinition,
     AdapterSandboxConfig,
     BindingContext,
+    Document,
+    DocumentContent,
+    DocumentExtractionResult,
     DocumentLifecycleState,
     DocumentMetadata,
     DocumentOperationProfile,
     DocumentOperationType,
     DocumentVersion,
+    ExtractionResult,
     OperationRequest,
     OperationResult,
     PipelineExecutionMode,
@@ -389,6 +397,169 @@ def test_interface_protocols_defined() -> None:
         IDocumentIntelligenceProvider,
         IDocumentRecommendationProvider,
         IDocumentRecoveryProvider,
+        IDocumentParser,
     ]
     for proto in protocols:
         assert hasattr(proto, "__protocol_attrs__") or hasattr(proto, "_is_protocol")
+
+
+def test_document_root_model() -> None:
+    """Test Document root entity model creation, defaults, immutability, and serialization."""
+    doc = Document(
+        document_id="doc-root-001",
+        tenant_id="tenant-acme",
+        title="Acme Corporation Master Agreement",
+        document_type="CONTRACT",
+        metadata={"category": "legal", "department": "compliance"},
+    )
+    assert doc.document_id == "doc-root-001"
+    assert doc.tenant_id == "tenant-acme"
+    assert doc.title == "Acme Corporation Master Agreement"
+    assert doc.document_type == "CONTRACT"
+    assert doc.current_version_id is None
+    assert doc.metadata["category"] == "legal"
+
+    # Immutability verification
+    with pytest.raises(ValidationError):
+        doc.title = "Modified Title"  # type: ignore[misc]
+
+    # Serialization roundtrip
+    dumped = doc.model_dump()
+    assert dumped["document_id"] == "doc-root-001"
+    assert dumped["tenant_id"] == "tenant-acme"
+    restored = Document.model_validate(dumped)
+    assert restored == doc
+
+
+def test_document_content_model() -> None:
+    """Test DocumentContent value object creation, defaults, immutability, and checksum verification."""
+    content = DocumentContent(
+        storage_key="tenant-acme/doc-001/v1.pdf",
+        bucket_name="contracts",
+        mime_type="application/pdf",
+        file_size_bytes=1048576,
+        sha256_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    )
+    assert content.storage_key == "tenant-acme/doc-001/v1.pdf"
+    assert content.bucket_name == "contracts"
+    assert content.mime_type == "application/pdf"
+    assert content.file_size_bytes == 1048576
+    assert content.sha256_hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    with pytest.raises(ValidationError):
+        content.file_size_bytes = 2000  # type: ignore[misc]
+
+
+def test_document_version_with_content() -> None:
+    """Test DocumentVersion model integrating DocumentContent value object."""
+    doc_meta = DocumentMetadata(
+        document_id="doc-500",
+        version_id="ver-500-1",
+        title="Q3 Financial Report",
+        author_id="finance_lead",
+        created_at="2026-08-14T00:00:00Z",
+    )
+    content = DocumentContent(
+        storage_key="default/doc-500/ver-500-1.pdf",
+        bucket_name="documents",
+        mime_type="application/pdf",
+        file_size_bytes=45200,
+        sha256_hash="a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e",
+    )
+    ver = DocumentVersion(
+        version_id="ver-500-1",
+        document_id="doc-500",
+        version_number="1.0.0",
+        created_at="2026-08-14T00:00:00Z",
+        created_by="finance_lead",
+        metadata=doc_meta,
+        content=content,
+    )
+    assert ver.version_id == "ver-500-1"
+    assert ver.content is not None
+    assert ver.content.file_size_bytes == 45200
+    assert ver.content.mime_type == "application/pdf"
+
+    # Serialization roundtrip
+    data = ver.model_dump()
+    restored = DocumentVersion.model_validate(data)
+    assert restored == ver
+    assert restored.content == content
+
+
+def test_document_extraction_result_and_alias() -> None:
+    """Test DocumentExtractionResult model and ExtractionResult alias."""
+    extraction = DocumentExtractionResult(
+        document_id="doc-700",
+        version_id="ver-700-1",
+        raw_text="Employee Name: John Doe\nNet Pay: $5,000.00",
+        structured_tables=[{"headers": ["Item", "Amount"], "rows": [["Base Salary", "$5,000.00"]]}],
+        metadata_fields={"page_count": 1, "author": "HR"},
+        extracted_concepts={"entity": "Payslip", "employee_name": "John Doe"},
+        confidence_scores={"employee_name": 0.99, "net_pay": 0.98},
+        mime_type="application/pdf",
+        page_count=1,
+        language="en",
+    )
+    assert extraction.document_id == "doc-700"
+    assert extraction.version_id == "ver-700-1"
+    assert "John Doe" in extraction.raw_text
+    assert len(extraction.structured_tables) == 1
+    assert extraction.confidence_scores["employee_name"] == 0.99
+    assert extraction.page_count == 1
+
+    # Verify alias
+    assert ExtractionResult is DocumentExtractionResult
+
+    # Immutability
+    with pytest.raises(ValidationError):
+        extraction.page_count = 2  # type: ignore[misc]
+
+
+def test_additional_exception_subclasses() -> None:
+    """Test DocumentValidationError, DocumentExtractionError, and DocumentIngestionError inheritance and safety."""
+    val_err = DocumentValidationError("Invalid document MIME signature.", details={"code": "ERR_MIME_MISMATCH"})
+    assert isinstance(val_err, DocumentEngineError)
+    assert str(val_err) == "Invalid document MIME signature."
+    assert val_err.details["code"] == "ERR_MIME_MISMATCH"
+
+    extract_err = DocumentExtractionError("Failed to extract text from corrupted PDF payload.")
+    assert isinstance(extract_err, DocumentEngineError)
+    assert str(extract_err) == "Failed to extract text from corrupted PDF payload."
+
+    ingest_err = DocumentIngestionError("Document size exceeds tenant quota limit.", details={"quota_mb": 100})
+    assert isinstance(ingest_err, DocumentEngineError)
+    assert ingest_err.details["quota_mb"] == 100
+
+
+class DummyMockParser:
+    """Mock implementation of IDocumentParser for runtime check verification."""
+
+    def supports_mime_type(self, mime_type: str) -> bool:
+        return mime_type == "text/plain"
+
+    async def parse(
+        self,
+        content: bytes,
+        mime_type: str,
+        options: dict[str, Any] | None = None,
+    ) -> DocumentExtractionResult:
+        text = content.decode("utf-8")
+        return DocumentExtractionResult(
+            document_id="doc-mock",
+            raw_text=text,
+            mime_type=mime_type,
+        )
+
+
+@pytest.mark.asyncio
+async def test_document_parser_protocol_runtime_check() -> None:
+    """Verify IDocumentParser runtime protocol checks and async parsing."""
+    parser = DummyMockParser()
+    assert isinstance(parser, IDocumentParser)
+    assert parser.supports_mime_type("text/plain") is True
+    assert parser.supports_mime_type("application/pdf") is False
+
+    res = await parser.parse(b"Hello World", "text/plain")
+    assert isinstance(res, DocumentExtractionResult)
+    assert res.raw_text == "Hello World"
