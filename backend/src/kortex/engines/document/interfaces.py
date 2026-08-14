@@ -18,6 +18,7 @@ from kortex.engines.document.models import (
     DocumentLifecycleState,
     DocumentMetadata,
     DocumentOperationProfile,
+    DocumentVersion,
     OperationRequest,
     OperationResult,
     PreviewOptions,
@@ -240,6 +241,141 @@ class IDocumentParser(Protocol):
         ...
 
 
+@runtime_checkable
+class IDocumentRepository(Protocol):
+    """Protocol defining relational persistence operations for Document Engine entities via IDataStore."""
+
+    async def create_document(self, document: Document) -> Document:
+        """Persist a new root Document entity."""
+        ...
+
+    async def get_document(
+        self, document_id: str, tenant_id: str = "default", include_deleted: bool = False
+    ) -> Document | None:
+        """Retrieve root Document entity by ID and tenant."""
+        ...
+
+    async def update_document(self, document: Document) -> Document:
+        """Update existing root Document entity attributes."""
+        ...
+
+    async def soft_delete_document(self, document_id: str, tenant_id: str = "default") -> bool:
+        """Logically soft-delete a document (is_deleted = True)."""
+        ...
+
+    async def hard_delete_document(self, document_id: str, tenant_id: str = "default") -> bool:
+        """Physically delete document record and cascade delete all child versions."""
+        ...
+
+    async def list_documents(
+        self,
+        tenant_id: str = "default",
+        document_type: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Document]:
+        """List root documents matching tenant and optional type filter."""
+        ...
+
+    async def create_version(
+        self, version: DocumentVersion, tenant_id: str = "default"
+    ) -> DocumentVersion:
+        """Persist an immutable DocumentVersion snapshot."""
+        ...
+
+    async def get_version(
+        self, document_id: str, version_id: str, tenant_id: str = "default"
+    ) -> DocumentVersion | None:
+        """Retrieve specific DocumentVersion snapshot."""
+        ...
+
+    async def get_latest_version(
+        self, document_id: str, tenant_id: str = "default"
+    ) -> DocumentVersion | None:
+        """Retrieve most recently created version snapshot for a document."""
+        ...
+
+    async def list_versions(
+        self, document_id: str, tenant_id: str = "default"
+    ) -> list[DocumentVersion]:
+        """List all version snapshots for a document in creation order."""
+        ...
+
+    async def update_version_state(
+        self,
+        document_id: str,
+        version_id: str,
+        target_state: DocumentLifecycleState,
+        is_immutable: bool,
+        published_at: str | None = None,
+        tenant_id: str = "default",
+    ) -> DocumentVersion:
+        """Update lifecycle state and immutability lock for a version snapshot."""
+        ...
+
+    async def record_operation_history(
+        self,
+        request_id: str,
+        profile_id: str,
+        status: str,
+        tenant_id: str = "default",
+        document_id: str | None = None,
+        version_id: str | None = None,
+        user_id: str | None = None,
+        execution_time_ms: float = 0.0,
+        output_storage_key: str | None = None,
+        validation_report: ValidationReport | None = None,
+        errors: list[str] | None = None,
+    ) -> None:
+        """Record sanitized document operation execution history."""
+        ...
+
+    async def get_operation_history(
+        self, request_id: str, tenant_id: str = "default"
+    ) -> dict[str, Any] | None:
+        """Retrieve operation execution history entry by request ID."""
+        ...
+
+    async def list_operation_history(
+        self,
+        tenant_id: str = "default",
+        profile_id: str | None = None,
+        document_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List operation history entries matching criteria."""
+        ...
+
+    async def save_operation_profile(
+        self, profile: DocumentOperationProfile, tenant_id: str = "default"
+    ) -> DocumentOperationProfile:
+        """Persist or update a DocumentOperationProfile definition."""
+        ...
+
+    async def get_operation_profile(
+        self, profile_id: str, version: str | None = None, tenant_id: str = "default"
+    ) -> DocumentOperationProfile | None:
+        """Retrieve DocumentOperationProfile by profile ID and optional version."""
+        ...
+
+    async def list_operation_profiles(
+        self,
+        tenant_id: str = "default",
+        business_operation: str | None = None,
+        namespace: str | None = None,
+    ) -> list[DocumentOperationProfile]:
+        """List registered operation profiles matching criteria."""
+        ...
+
+    async def delete_operation_profile(
+        self, profile_id: str, version: str, tenant_id: str = "default"
+    ) -> bool:
+        """Delete an operation profile version record."""
+        ...
+
+
 __all__ = [
     "IAdapterPipelineExecutor",
     "IAdapterSandbox",
@@ -251,6 +387,7 @@ __all__ = [
     "IDocumentParser",
     "IDocumentRecommendationProvider",
     "IDocumentRecoveryProvider",
+    "IDocumentRepository",
     "ITemplateBinder",
     "ITemplateLibrary",
 ]

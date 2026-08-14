@@ -346,6 +346,103 @@ class TemplateSchema(BaseModel):
     schema_definition: dict[str, Any] = Field(default_factory=dict)
 
 
+# -- SQLAlchemy ORM Models for IDataStore Persistence -------------------------
+
+import datetime
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from kortex.core.db import BaseModel as SQLAlchemyBaseModel
+
+
+class DocumentRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model representing the logical root document aggregate."""
+
+    __tablename__ = "documents"
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    document_type: Mapped[str] = mapped_column(String(64), nullable=False, default="GENERIC")
+    current_version_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DocumentVersionRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model representing an immutable document revision snapshot."""
+
+    __tablename__ = "document_versions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "document_id", "version_number", name="uq_tenant_doc_ver_num"),
+    )
+
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
+    parent_version_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    version_number: Mapped[str] = mapped_column(String(32), nullable=False, default="1.0.0")
+    lifecycle_state: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT", index=True)
+    is_immutable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    author_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # IObjectStore Content Coordinates (Zero binary payload in database)
+    storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    bucket_name: Mapped[str | None] = mapped_column(String(128), nullable=True, default="documents")
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="application/octet-stream")
+    file_size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sha256_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
+    # Security Metadata
+    security_classification: Mapped[str] = mapped_column(String(32), nullable=False, default="INTERNAL")
+    security_labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    security_owner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Lineage & Timestamp Metadata
+    lineage_path_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentOperationHistoryRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for auditing document pipeline executions."""
+
+    __tablename__ = "document_operation_history"
+
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
+    profile_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    document_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    version_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_time_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    output_storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    validation_report_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DocumentOperationProfileRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for persisting declarative document operation profiles."""
+
+    __tablename__ = "document_operation_profiles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "profile_id", "version", name="uq_tenant_profile_version"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
+    profile_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    business_operation: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    required_template_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    output_bucket: Mapped[str] = mapped_column(String(128), default="documents", nullable=False)
+    pipeline_definition_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    permissions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 __all__ = [
     "AdapterCapability",
     "AdapterMetadata",
@@ -357,9 +454,13 @@ __all__ = [
     "DocumentExtractionResult",
     "DocumentLifecycleState",
     "DocumentMetadata",
+    "DocumentOperationHistoryRecord",
     "DocumentOperationProfile",
+    "DocumentOperationProfileRecord",
     "DocumentOperationType",
+    "DocumentRecord",
     "DocumentVersion",
+    "DocumentVersionRecord",
     "ExtractionResult",
     "OperationRequest",
     "OperationResult",
