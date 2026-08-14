@@ -6,9 +6,11 @@ tenant isolation, version chain management, and domain/ORM entity mapping via St
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -41,6 +43,14 @@ from kortex.engines.storage.interfaces import IDataStore
 
 logger = logging.getLogger("kortex.engines.document.persistence")
 
+# Regular expression for SemVer 2.0.0 validation (consistent with TemplateLibrary and ConnectorRegistry)
+SEMVER_REGEX = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+(?P<buildmetadata>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
+)
+
 
 class DocumentRepository(IDocumentRepository):
     """Repository handling all relational database persistence for the Document Engine."""
@@ -52,6 +62,7 @@ class DocumentRepository(IDocumentRepository):
             data_store: Storage Engine relational persistence provider.
         """
         self._data_store = data_store
+        self._publish_lock = asyncio.Lock()
 
     # -- Domain <-> ORM Entity Mapping Helpers --------------------------------
 
@@ -236,7 +247,7 @@ class DocumentRepository(IDocumentRepository):
                 tenant_id=document.tenant_id,
                 title=document.title,
                 document_type=document.document_type,
-                current_version_id=document.current_version_id,
+                current_version_id=None,
                 is_deleted=False,
                 metadata_json=metadata_str,
             )
@@ -278,6 +289,9 @@ class DocumentRepository(IDocumentRepository):
     async def update_document(self, document: Document) -> Document:
         """Update existing root Document entity attributes.
 
+        Note: DocumentRecord.current_version_id is publication-owned state and cannot
+        be modified through update_document. It is updated exclusively via publish_version().
+
         Args:
             document: Updated Document domain model.
 
@@ -302,7 +316,6 @@ class DocumentRepository(IDocumentRepository):
 
             record.title = document.title
             record.document_type = document.document_type
-            record.current_version_id = document.current_version_id
             if document.metadata is not None:
                 record.metadata_json = json.dumps(document.metadata)
 
@@ -450,7 +463,14 @@ class DocumentRepository(IDocumentRepository):
                     f"Cannot create version for non-existent document '{version.document_id}' under tenant '{tenant_id}'."
                 )
 
-            # 2. Check for duplicate version_id or duplicate version_number under same document
+            # 2. Validate SemVer 2.0.0 format
+            if not SEMVER_REGEX.match(version.version_number.strip()):
+                raise DocumentLifecycleError(
+                    f"Invalid semantic version format: '{version.version_number}'. "
+                    f"Must follow SemVer 2.0.0 (MAJOR.MINOR.PATCH)."
+                )
+
+            # 3. Check for duplicate version_id or duplicate version_number under same document
             ver_check_stmt = select(DocumentVersionRecord).where(
                 DocumentVersionRecord.document_id == version.document_id,
                 DocumentVersionRecord.tenant_id == tenant_id,
@@ -490,9 +510,6 @@ class DocumentRepository(IDocumentRepository):
                 published_at=None,
             )
             session.add(ver_record)
-
-            # 4. Update parent document's current_version_id pointer
-            doc_record.current_version_id = version.version_id
             await session.flush()
 
             return self._version_to_domain(ver_record)
@@ -531,12 +548,15 @@ class DocumentRepository(IDocumentRepository):
     ) -> DocumentVersion | None:
         """Retrieve most recently created version snapshot for a document.
 
+        Note: Returns newest created version (which may be in DRAFT or REVIEW state).
+        To retrieve the active published version, inspect `Document.current_version_id`.
+
         Args:
             document_id: Unique document identifier.
             tenant_id: Tenant partition identifier.
 
         Returns:
-            Latest DocumentVersion domain model or None if no versions exist.
+            Latest created DocumentVersion domain model or None if no versions exist.
         """
         async def _action(session: AsyncSession) -> DocumentVersion | None:
             stmt = (
@@ -641,6 +661,13 @@ class DocumentRepository(IDocumentRepository):
         Raises:
             DocumentLifecycleError: If version is not found.
         """
+        if target_state == DocumentLifecycleState.PUBLISHED:
+            raise DocumentLifecycleError(
+                f"Direct transition to 'PUBLISHED' state via update_version_state is forbidden for "
+                f"version '{version_id}' of document '{document_id}'. Use publish_version() for atomic "
+                f"publication and aggregate pointer synchronization."
+            )
+
         async def _action(session: AsyncSession) -> DocumentVersion:
             stmt = select(DocumentVersionRecord).where(
                 DocumentVersionRecord.id == version_id,
@@ -666,6 +693,143 @@ class DocumentRepository(IDocumentRepository):
             return self._version_to_domain(record)
 
         return await self._data_store.execute_in_transaction(_action)
+
+    async def publish_version(
+        self,
+        document_id: str,
+        version_id: str,
+        parent_version_id: str | None = None,
+        published_at: str | None = None,
+        tenant_id: str = "default",
+    ) -> tuple[DocumentVersion, DocumentVersion | None]:
+        """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document pointer.
+
+        Uses an atomic compare-and-swap (CAS) update on DocumentRecord.current_version_id to guarantee that exactly
+        one transaction succeeds in concurrent publication races.
+
+        Args:
+            document_id: Unique document identifier.
+            version_id: Unique version identifier to publish.
+            parent_version_id: Optional expected active predecessor version identifier.
+            published_at: Optional ISO timestamp of publication.
+            tenant_id: Tenant partition identifier.
+
+        Returns:
+            A tuple of (published_child_version, superseded_parent_version_or_none).
+
+        Raises:
+            DocumentLifecycleError: If child is missing/invalid state, parent is missing/non-published,
+                                    lineage validation fails, or CAS publication gate fails.
+        """
+        async def _action(session: AsyncSession) -> tuple[DocumentVersion, DocumentVersion | None]:
+            # 1. Fetch and validate child version
+            child_stmt = select(DocumentVersionRecord).where(
+                DocumentVersionRecord.id == version_id,
+                DocumentVersionRecord.document_id == document_id,
+                DocumentVersionRecord.tenant_id == tenant_id,
+            )
+            child_res = await session.execute(child_stmt)
+            child_record = child_res.scalar_one_or_none()
+            if child_record is None:
+                raise DocumentLifecycleError(
+                    f"Cannot publish non-existent version '{version_id}' of document '{document_id}'."
+                )
+
+            # Child must be in DRAFT or REVIEW
+            if child_record.lifecycle_state not in (
+                DocumentLifecycleState.DRAFT.value,
+                DocumentLifecycleState.REVIEW.value,
+            ):
+                raise DocumentLifecycleError(
+                    f"Cannot publish version '{version_id}' in lifecycle state '{child_record.lifecycle_state}'. "
+                    f"Version must be in DRAFT or REVIEW state."
+                )
+
+            # Validate child-parent lineage relationship:
+            # - If child has a parent: caller must supply matching parent_version_id
+            # - If child has no parent (genesis): caller must supply parent_version_id=None
+            if child_record.parent_version_id != parent_version_id:
+                raise DocumentLifecycleError(
+                    f"Lineage mismatch for publication of version '{version_id}': version record has "
+                    f"parent_version_id='{child_record.parent_version_id}', but publication requested with "
+                    f"parent_version_id='{parent_version_id}'."
+                )
+
+            parent_domain: DocumentVersion | None = None
+            parent_record: DocumentVersionRecord | None = None
+
+            # 2. Fetch and validate parent version if supplied
+            if parent_version_id is not None:
+                parent_stmt = select(DocumentVersionRecord).where(
+                    DocumentVersionRecord.id == parent_version_id,
+                    DocumentVersionRecord.document_id == document_id,
+                    DocumentVersionRecord.tenant_id == tenant_id,
+                )
+                parent_res = await session.execute(parent_stmt)
+                parent_record = parent_res.scalar_one_or_none()
+                if parent_record is None:
+                    raise DocumentLifecycleError(
+                        f"Cannot supersede non-existent parent version '{parent_version_id}' for document '{document_id}'."
+                    )
+                if parent_record.lifecycle_state != DocumentLifecycleState.PUBLISHED.value:
+                    raise DocumentLifecycleError(
+                        f"Cannot supersede parent version '{parent_version_id}': parent is in '{parent_record.lifecycle_state}' state, "
+                        f"expected 'PUBLISHED'."
+                    )
+
+            # 3. Execute authoritative aggregate-level CAS publication gate on documents table
+            if parent_version_id is not None:
+                doc_cas_stmt = (
+                    update(DocumentRecord)
+                    .where(
+                        DocumentRecord.id == document_id,
+                        DocumentRecord.tenant_id == tenant_id,
+                        DocumentRecord.current_version_id == parent_version_id,
+                    )
+                    .values(current_version_id=version_id)
+                )
+            else:
+                doc_cas_stmt = (
+                    update(DocumentRecord)
+                    .where(
+                        DocumentRecord.id == document_id,
+                        DocumentRecord.tenant_id == tenant_id,
+                        DocumentRecord.current_version_id.is_(None),
+                    )
+                    .values(current_version_id=version_id)
+                )
+
+            doc_cas_res = await session.execute(doc_cas_stmt)
+            if doc_cas_res.rowcount != 1:
+                raise DocumentLifecycleError(
+                    f"Concurrent publication collision or invalid predecessor: document '{document_id}' "
+                    f"current_version_id does not match expected predecessor '{parent_version_id}'."
+                )
+
+            # 4. Mutate parent version to SUPERSEDED (if applicable)
+            if parent_record is not None:
+                parent_record.lifecycle_state = DocumentLifecycleState.SUPERSEDED.value
+                parent_record.is_immutable = True
+                parent_domain = self._version_to_domain(parent_record)
+
+            # 5. Mutate child version to PUBLISHED
+            child_record.lifecycle_state = DocumentLifecycleState.PUBLISHED.value
+            child_record.is_immutable = True
+            if published_at:
+                try:
+                    child_record.published_at = datetime.datetime.fromisoformat(published_at)
+                except Exception:
+                    child_record.published_at = datetime.datetime.now(datetime.timezone.utc)
+            else:
+                child_record.published_at = datetime.datetime.now(datetime.timezone.utc)
+
+            await session.flush()
+
+            child_domain = self._version_to_domain(child_record)
+            return (child_domain, parent_domain)
+
+        async with self._publish_lock:
+            return await self._data_store.execute_in_transaction(_action)
 
     # -- Operation History Persistence ----------------------------------------
 

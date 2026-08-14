@@ -66,23 +66,76 @@ class IDocumentEngine(Protocol):
 
 @runtime_checkable
 class IDocumentLifecycleManager(Protocol):
-    """Interface for managing document lifecycle state machine and version lineage."""
+    """Interface for managing document lifecycle state machine, version lineage, and immutability."""
+
+    def validate_transition(
+        self, current_state: DocumentLifecycleState, target_state: DocumentLifecycleState
+    ) -> bool:
+        """Validate whether a lifecycle transition from current_state to target_state is permitted."""
+        ...
 
     async def transition_state(
         self,
         document_id: str,
         version_id: str,
         target_state: DocumentLifecycleState,
+        published_at: str | None = None,
+        tenant_id: str = "default",
     ) -> DocumentMetadata:
         """Transition document state adhering to state machine transition rules."""
         ...
 
-    async def get_lineage(self, document_id: str) -> list[DocumentMetadata]:
+    async def get_version(
+        self, document_id: str, version_id: str, tenant_id: str = "default"
+    ) -> DocumentMetadata:
+        """Retrieve metadata for a specific document version."""
+        ...
+
+    async def get_latest_version(
+        self, document_id: str, tenant_id: str = "default"
+    ) -> DocumentMetadata:
+        """Retrieve newest active version metadata for a document entity."""
+        ...
+
+    async def get_lineage(
+        self, document_id: str, tenant_id: str = "default"
+    ) -> list[DocumentMetadata]:
         """Retrieve complete version lineage chain for a document entity."""
         ...
 
-    async def is_immutable(self, document_id: str, version_id: str) -> bool:
+    async def is_immutable(
+        self, document_id: str, version_id: str, tenant_id: str = "default"
+    ) -> bool:
         """Check whether a document version is locked against edits."""
+        ...
+
+    async def create_version(
+        self,
+        document_id: str | None = None,
+        title: str = "Untitled Document",
+        author_id: str = "system",
+        parent_version_id: str | None = None,
+        version_number: str | None = None,
+        version_id: str | None = None,
+        security_metadata: SecurityMetadata | None = None,
+        created_at: str | None = None,
+        tenant_id: str = "default",
+    ) -> DocumentVersion:
+        """Create a new document version snapshot."""
+        ...
+
+    async def create_child_version(
+        self,
+        parent_version_id: str,
+        document_id: str | None = None,
+        title: str | None = None,
+        author_id: str = "system",
+        version_number: str | None = None,
+        version_id: str | None = None,
+        security_metadata: SecurityMetadata | None = None,
+        tenant_id: str = "default",
+    ) -> DocumentVersion:
+        """Create a new child version derived from a parent version."""
         ...
 
 
@@ -312,6 +365,21 @@ class IDocumentRepository(Protocol):
         tenant_id: str = "default",
     ) -> DocumentVersion:
         """Update lifecycle state and immutability lock for a version snapshot."""
+        ...
+
+    async def publish_version(
+        self,
+        document_id: str,
+        version_id: str,
+        parent_version_id: str | None = None,
+        published_at: str | None = None,
+        tenant_id: str = "default",
+    ) -> tuple[DocumentVersion, DocumentVersion | None]:
+        """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document pointer.
+
+        Uses an atomic compare-and-swap (CAS) update on DocumentRecord.current_version_id to guarantee that exactly
+        one transaction succeeds in concurrent publication races.
+        """
         ...
 
     async def record_operation_history(

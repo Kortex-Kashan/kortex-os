@@ -5,6 +5,7 @@ Target: 100% pass rate, >=95% code coverage across persistence models and reposi
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import pytest
 from sqlalchemy import select
@@ -41,9 +42,10 @@ from kortex.engines.storage.stores.data_store import RelationalDataStore
 
 
 @pytest.fixture
-async def test_db():
-    """Create an isolated in-memory SQLite database manager and initialize all tables."""
-    db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
+async def test_db(tmp_path):
+    """Create an isolated file-backed SQLite database manager and initialize all tables."""
+    db_file = tmp_path / "test_document_persistence.db"
+    db_manager = DatabaseEngineManager(f"sqlite+aiosqlite:///{db_file}")
     await db_manager.connect()
     await db_manager.create_all_tables()
     yield db_manager
@@ -54,6 +56,18 @@ async def test_db():
 def data_store(test_db: DatabaseEngineManager) -> RelationalDataStore:
     """Create a RelationalDataStore backed by the test database."""
     return RelationalDataStore(test_db)
+
+
+@pytest.fixture
+async def concurrent_data_store(tmp_path) -> RelationalDataStore:
+    """Create a file-backed RelationalDataStore supporting true independent concurrent transactions."""
+    db_file = tmp_path / "concurrent_test.db"
+    db_manager = DatabaseEngineManager(f"sqlite+aiosqlite:///{db_file}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+    store = RelationalDataStore(db_manager)
+    yield store
+    await db_manager.disconnect()
 
 
 @pytest.fixture
@@ -136,12 +150,105 @@ async def test_document_update(repository: DocumentRepository) -> None:
     result = await repository.update_document(updated_doc)
     assert result.title == "Updated Title"
     assert result.document_type == "INVOICE_AMENDED"
-    assert result.current_version_id == "ver-updated-1"
+    # current_version_id must remain None (cannot be set via update_document)
+    assert result.current_version_id is None
     assert result.metadata["amended_by"] == "finance_lead"
 
     fetched = await repository.get_document("doc-update", tenant_id="tenant-alpha")
     assert fetched is not None
     assert fetched.title == "Updated Title"
+    assert fetched.current_version_id is None
+
+
+@pytest.mark.asyncio
+async def test_update_document_pointer_bypass_rejection(repository: DocumentRepository) -> None:
+    """Verify that ordinary document updates cannot move current_version_id to DRAFT, REVIEW, or arbitrary versions."""
+    # 1. Create document
+    doc = Document(
+        document_id="doc-bypass-test",
+        tenant_id="tenant-alpha",
+        title="Bypass Test Doc",
+        current_version_id="fabricated-v1",  # Fabricated pointer in constructor
+    )
+    created = await repository.create_document(doc)
+    # create_document must initialize current_version_id to None
+    assert created.current_version_id is None
+
+    # 2. Create a DRAFT version
+    m_draft = DocumentMetadata(
+        document_id="doc-bypass-test",
+        version_id="ver-draft-1",
+        title="Draft V1",
+        author_id="author",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v_draft = DocumentVersion(
+        version_id="ver-draft-1",
+        document_id="doc-bypass-test",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="author",
+        metadata=m_draft,
+    )
+    await repository.create_version(v_draft, tenant_id="tenant-alpha")
+
+    # Attempt to update document with DRAFT version_id
+    doc_attempt_draft = Document(
+        document_id="doc-bypass-test",
+        tenant_id="tenant-alpha",
+        title="Attempt Draft Pointer",
+        current_version_id="ver-draft-1",
+    )
+    res_draft = await repository.update_document(doc_attempt_draft)
+    assert res_draft.current_version_id is None
+
+    reloaded_1 = await repository.get_document("doc-bypass-test", tenant_id="tenant-alpha")
+    assert reloaded_1 is not None
+    assert reloaded_1.current_version_id is None
+
+    # 3. Create a REVIEW version
+    m_rev = DocumentMetadata(
+        document_id="doc-bypass-test",
+        version_id="ver-review-1",
+        title="Review V1",
+        author_id="author",
+        lifecycle_state=DocumentLifecycleState.REVIEW,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v_rev = DocumentVersion(
+        version_id="ver-review-1",
+        document_id="doc-bypass-test",
+        version_number="1.0.1",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="author",
+        metadata=m_rev,
+    )
+    await repository.create_version(v_rev, tenant_id="tenant-alpha")
+
+    # Attempt to update document with REVIEW version_id
+    doc_attempt_rev = Document(
+        document_id="doc-bypass-test",
+        tenant_id="tenant-alpha",
+        title="Attempt Review Pointer",
+        current_version_id="ver-review-1",
+    )
+    res_rev = await repository.update_document(doc_attempt_rev)
+    assert res_rev.current_version_id is None
+
+    # 4. Attempt to update document with arbitrary nonexistent version_id
+    doc_attempt_arbitrary = Document(
+        document_id="doc-bypass-test",
+        tenant_id="tenant-alpha",
+        title="Attempt Arbitrary Pointer",
+        current_version_id="ver-nonexistent-999",
+    )
+    res_arb = await repository.update_document(doc_attempt_arbitrary)
+    assert res_arb.current_version_id is None
+
+    reloaded_2 = await repository.get_document("doc-bypass-test", tenant_id="tenant-alpha")
+    assert reloaded_2 is not None
+    assert reloaded_2.current_version_id is None
 
 
 @pytest.mark.asyncio
@@ -265,10 +372,10 @@ async def test_version_creation_and_retrieval(repository: DocumentRepository) ->
     assert created_ver.content is not None
     assert created_ver.content.storage_key == "tenant-alpha/doc-ver-1/ver-1-0.pdf"
 
-    # Parent document current_version_id pointer should be updated
+    # Parent document current_version_id pointer should remain None for DRAFT
     parent_doc = await repository.get_document("doc-ver-1", tenant_id="tenant-alpha")
     assert parent_doc is not None
-    assert parent_doc.current_version_id == "ver-1-0"
+    assert parent_doc.current_version_id is None
 
     # Retrieve version directly
     fetched_ver = await repository.get_version("doc-ver-1", "ver-1-0", tenant_id="tenant-alpha")
@@ -344,6 +451,33 @@ async def test_version_number_uniqueness_rejection(repository: DocumentRepositor
 
 
 @pytest.mark.asyncio
+async def test_version_creation_invalid_semver_rejection(repository: DocumentRepository) -> None:
+    """Test that creating a version with invalid SemVer format raises DocumentLifecycleError."""
+    doc = Document(document_id="doc-ver-semver-test", tenant_id="tenant-alpha", title="SemVer Validation Test")
+    await repository.create_document(doc)
+
+    invalid_semvers = ["1", "1.2", "1.a.3", "foo", "custom-v1", "01.2.3", "1.0.0.0", "v1.0.0"]
+    for idx, inv_semver in enumerate(invalid_semvers):
+        meta = DocumentMetadata(
+            document_id="doc-ver-semver-test",
+            version_id=f"ver-inv-{idx}",
+            title="Invalid Version Test",
+            author_id="author",
+            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        )
+        ver = DocumentVersion(
+            version_id=f"ver-inv-{idx}",
+            document_id="doc-ver-semver-test",
+            version_number=inv_semver,
+            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_by="author",
+            metadata=meta,
+        )
+        with pytest.raises(DocumentLifecycleError, match="Invalid semantic version format"):
+            await repository.create_version(ver, tenant_id="tenant-alpha")
+
+
+@pytest.mark.asyncio
 async def test_version_lineage_and_latest_lookup(repository: DocumentRepository) -> None:
     """Test multiple version creation, listing in order, and latest version lookup."""
     doc = Document(document_id="doc-lineage", tenant_id="tenant-alpha", title="Lineage Test")
@@ -413,19 +547,27 @@ async def test_update_version_state(repository: DocumentRepository) -> None:
     )
     await repository.create_version(ver, tenant_id="tenant-alpha")
 
-    # Update to PUBLISHED
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    updated = await repository.update_version_state(
+    # Update to REVIEW
+    updated_rev = await repository.update_version_state(
         document_id="doc-state",
         version_id="ver-state-1",
-        target_state=DocumentLifecycleState.PUBLISHED,
-        is_immutable=True,
-        published_at=now_iso,
+        target_state=DocumentLifecycleState.REVIEW,
+        is_immutable=False,
         tenant_id="tenant-alpha",
     )
-    assert updated.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
-    assert updated.is_immutable is True
-    assert updated.metadata.published_at is not None
+    assert updated_rev.metadata.lifecycle_state == DocumentLifecycleState.REVIEW
+    assert updated_rev.is_immutable is False
+
+    # Update to ARCHIVED
+    updated_arch = await repository.update_version_state(
+        document_id="doc-state",
+        version_id="ver-state-1",
+        target_state=DocumentLifecycleState.ARCHIVED,
+        is_immutable=True,
+        tenant_id="tenant-alpha",
+    )
+    assert updated_arch.metadata.lifecycle_state == DocumentLifecycleState.ARCHIVED
+    assert updated_arch.is_immutable is True
 
     # Updating non-existent version raises error
     with pytest.raises(DocumentLifecycleError, match="Cannot update state"):
@@ -436,6 +578,51 @@ async def test_update_version_state(repository: DocumentRepository) -> None:
             is_immutable=True,
             tenant_id="tenant-alpha",
         )
+
+
+@pytest.mark.asyncio
+async def test_update_version_state_published_bypass_rejected(repository: DocumentRepository) -> None:
+    """Verify that update_version_state rejects target_state=PUBLISHED with DocumentLifecycleError."""
+    doc = Document(document_id="doc-bypass-pub", tenant_id="tenant-alpha", title="Bypass Pub Doc")
+    await repository.create_document(doc)
+
+    doc_meta = DocumentMetadata(
+        document_id="doc-bypass-pub",
+        version_id="ver-bypass-pub-1",
+        title="Draft",
+        author_id="author",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    ver = DocumentVersion(
+        version_id="ver-bypass-pub-1",
+        document_id="doc-bypass-pub",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="author",
+        metadata=doc_meta,
+    )
+    await repository.create_version(ver, tenant_id="tenant-alpha")
+
+    # Direct transition to PUBLISHED via update_version_state MUST be rejected
+    with pytest.raises(DocumentLifecycleError, match="Direct transition to 'PUBLISHED' state via update_version_state is forbidden"):
+        await repository.update_version_state(
+            document_id="doc-bypass-pub",
+            version_id="ver-bypass-pub-1",
+            target_state=DocumentLifecycleState.PUBLISHED,
+            is_immutable=True,
+            tenant_id="tenant-alpha",
+        )
+
+    # Prove version remains DRAFT and document.current_version_id remains None
+    ver_check = await repository.get_version("doc-bypass-pub", "ver-bypass-pub-1", tenant_id="tenant-alpha")
+    assert ver_check is not None
+    assert ver_check.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+    assert ver_check.is_immutable is False
+
+    doc_check = await repository.get_document("doc-bypass-pub", tenant_id="tenant-alpha")
+    assert doc_check is not None
+    assert doc_check.current_version_id is None
 
 
 # --- Test Multi-Tenant Isolation ---
@@ -789,12 +976,39 @@ async def test_additional_persistence_edge_cases(
     updated = await repository.update_version_state(
         document_id="doc-zero-ver",
         version_id="ver-pub-test",
-        target_state=DocumentLifecycleState.PUBLISHED,
+        target_state=DocumentLifecycleState.ARCHIVED,
         is_immutable=True,
         published_at="INVALID_TIMESTAMP_STRING",
         tenant_id="tenant-alpha",
     )
     assert updated.metadata.published_at is not None
+
+    # Verify invalid published_at timestamp in publish_version falls back safely
+    doc_meta_pub = DocumentMetadata(
+        document_id="doc-zero-ver",
+        version_id="ver-pub-test-2",
+        title="V2",
+        author_id="author",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    ver_pub = DocumentVersion(
+        version_id="ver-pub-test-2",
+        document_id="doc-zero-ver",
+        version_number="1.0.1",
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_by="author",
+        metadata=doc_meta_pub,
+    )
+    await repository.create_version(ver_pub, tenant_id="tenant-alpha")
+    pub_child, _ = await repository.publish_version(
+        document_id="doc-zero-ver",
+        version_id="ver-pub-test-2",
+        parent_version_id=None,
+        published_at="INVALID_TIMESTAMP_STRING",
+        tenant_id="tenant-alpha",
+    )
+    assert pub_child.metadata.published_at is not None
 
     # 3. get_operation_profile non-existent
     assert await repository.get_operation_profile("prof-ghost", tenant_id="tenant-alpha") is None
@@ -944,3 +1158,903 @@ async def test_operation_profile_in_place_update(
     # 7. Verify original version identity remains unchanged
     assert retrieved.id == "profile.inplace.test"
     assert retrieved.version == "1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_publish_version_genesis_success(
+    repository: DocumentRepository,
+) -> None:
+    """Verify successful atomic publication of a root genesis document version."""
+    doc = Document(document_id="doc-genesis-test", tenant_id="tenant-alpha", title="Genesis Test")
+    await repository.create_document(doc)
+
+    # Create root draft version
+    meta = DocumentMetadata(
+        document_id="doc-genesis-test",
+        version_id="ver-genesis-1",
+        title="Genesis Title",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-genesis-1",
+        document_id="doc-genesis-test",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=meta,
+    )
+    await repository.create_version(v1, tenant_id="tenant-alpha")
+
+    # Publish genesis version
+    child, parent = await repository.publish_version(
+        document_id="doc-genesis-test",
+        version_id="ver-genesis-1",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    assert parent is None
+    assert child.version_id == "ver-genesis-1"
+    assert child.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert child.is_immutable is True
+    assert child.metadata.published_at is not None
+
+    # Verify DocumentRecord.current_version_id updated
+    reloaded_doc = await repository.get_document("doc-genesis-test", tenant_id="tenant-alpha")
+    assert reloaded_doc is not None
+    assert reloaded_doc.current_version_id == "ver-genesis-1"
+
+
+@pytest.mark.asyncio
+async def test_publish_version_with_parent_superseding(
+    repository: DocumentRepository,
+) -> None:
+    """Verify child publication atomically supersedes active parent and updates document pointer."""
+    doc = Document(document_id="doc-parent-test", tenant_id="tenant-alpha", title="Parent Test")
+    await repository.create_document(doc)
+
+    # 1. Create and publish parent V1
+    m1 = DocumentMetadata(
+        document_id="doc-parent-test",
+        version_id="ver-parent-1",
+        title="Parent V1",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-parent-1",
+        document_id="doc-parent-test",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m1,
+    )
+    await repository.create_version(v1, tenant_id="tenant-alpha")
+    await repository.publish_version(
+        document_id="doc-parent-test",
+        version_id="ver-parent-1",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    # 2. Create child draft V2
+    m2 = DocumentMetadata(
+        document_id="doc-parent-test",
+        version_id="ver-child-2",
+        parent_version_id="ver-parent-1",
+        title="Child V2",
+        author_id="user-2",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-02T00:00:00Z",
+    )
+    v2 = DocumentVersion(
+        version_id="ver-child-2",
+        document_id="doc-parent-test",
+        parent_version_id="ver-parent-1",
+        version_number="1.0.1",
+        created_at="2026-01-02T00:00:00Z",
+        created_by="user-2",
+        metadata=m2,
+    )
+    await repository.create_version(v2, tenant_id="tenant-alpha")
+
+    # 3. Publish child V2 with expected predecessor V1
+    child, parent = await repository.publish_version(
+        document_id="doc-parent-test",
+        version_id="ver-child-2",
+        parent_version_id="ver-parent-1",
+        tenant_id="tenant-alpha",
+    )
+
+    assert child.version_id == "ver-child-2"
+    assert child.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert child.is_immutable is True
+
+    assert parent is not None
+    assert parent.version_id == "ver-parent-1"
+    assert parent.metadata.lifecycle_state == DocumentLifecycleState.SUPERSEDED
+    assert parent.is_immutable is True
+
+    # 4. Check DocumentRecord pointer
+    reloaded_doc = await repository.get_document("doc-parent-test", tenant_id="tenant-alpha")
+    assert reloaded_doc is not None
+    assert reloaded_doc.current_version_id == "ver-child-2"
+
+
+@pytest.mark.asyncio
+async def test_publish_version_rejections(
+    repository: DocumentRepository,
+) -> None:
+    """Verify rejections on missing child, invalid child state, missing parent, non-published parent, and CAS collision."""
+    doc = Document(document_id="doc-rej-test", tenant_id="tenant-alpha", title="Rejection Test")
+    await repository.create_document(doc)
+
+    # 1. Non-existent child
+    with pytest.raises(DocumentLifecycleError, match="Cannot publish non-existent version"):
+        await repository.publish_version(
+            document_id="doc-rej-test",
+            version_id="ghost-version",
+            tenant_id="tenant-alpha",
+        )
+
+    # 2. Child in invalid state (e.g. SUPERSEDED)
+    m1 = DocumentMetadata(
+        document_id="doc-rej-test",
+        version_id="ver-invalid-state",
+        title="Invalid State Version",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-invalid-state",
+        document_id="doc-rej-test",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m1,
+    )
+    await repository.create_version(v1, tenant_id="tenant-alpha")
+    await repository.update_version_state(
+        document_id="doc-rej-test",
+        version_id="ver-invalid-state",
+        target_state=DocumentLifecycleState.ARCHIVED,
+        is_immutable=True,
+        tenant_id="tenant-alpha",
+    )
+
+    with pytest.raises(DocumentLifecycleError, match="must be in DRAFT or REVIEW"):
+        await repository.publish_version(
+            document_id="doc-rej-test",
+            version_id="ver-invalid-state",
+            tenant_id="tenant-alpha",
+        )
+
+    # 3. Non-existent parent supplied
+    m2 = DocumentMetadata(
+        document_id="doc-rej-test",
+        version_id="ver-child-draft",
+        parent_version_id="ghost-parent",
+        title="Child Draft",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v2 = DocumentVersion(
+        version_id="ver-child-draft",
+        document_id="doc-rej-test",
+        parent_version_id="ghost-parent",
+        version_number="1.0.1",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m2,
+    )
+    await repository.create_version(v2, tenant_id="tenant-alpha")
+
+    with pytest.raises(DocumentLifecycleError, match="non-existent parent version"):
+        await repository.publish_version(
+            document_id="doc-rej-test",
+            version_id="ver-child-draft",
+            parent_version_id="ghost-parent",
+            tenant_id="tenant-alpha",
+        )
+
+    # 4. Parent not in PUBLISHED state (e.g. parent is DRAFT)
+    m_parent_draft = DocumentMetadata(
+        document_id="doc-rej-test",
+        version_id="ver-parent-draft",
+        title="Parent Draft",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v_parent_draft = DocumentVersion(
+        version_id="ver-parent-draft",
+        document_id="doc-rej-test",
+        version_number="1.0.2",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m_parent_draft,
+    )
+    await repository.create_version(v_parent_draft, tenant_id="tenant-alpha")
+
+    # Create child of v_parent_draft
+    m_child_of_draft = DocumentMetadata(
+        document_id="doc-rej-test",
+        version_id="ver-child-of-draft",
+        parent_version_id="ver-parent-draft",
+        title="Child of Draft",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v_child_of_draft = DocumentVersion(
+        version_id="ver-child-of-draft",
+        document_id="doc-rej-test",
+        parent_version_id="ver-parent-draft",
+        version_number="1.0.3",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m_child_of_draft,
+    )
+    await repository.create_version(v_child_of_draft, tenant_id="tenant-alpha")
+
+    with pytest.raises(DocumentLifecycleError, match="expected 'PUBLISHED'"):
+        await repository.publish_version(
+            document_id="doc-rej-test",
+            version_id="ver-child-of-draft",
+            parent_version_id="ver-parent-draft",
+            tenant_id="tenant-alpha",
+        )
+
+    # 5. Genesis publication when a version is already PUBLISHED
+    # Publish v_parent_draft
+    await repository.publish_version(
+        document_id="doc-rej-test",
+        version_id="ver-parent-draft",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    # Create another genesis draft
+    m_another_gen = DocumentMetadata(
+        document_id="doc-rej-test",
+        version_id="ver-another-genesis",
+        title="Another Genesis",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v_another_gen = DocumentVersion(
+        version_id="ver-another-genesis",
+        document_id="doc-rej-test",
+        version_number="1.0.4",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m_another_gen,
+    )
+    await repository.create_version(v_another_gen, tenant_id="tenant-alpha")
+
+    # Publishing ver-another-genesis with parent_version_id=None must fail because current_version_id is no longer NULL
+    with pytest.raises(DocumentLifecycleError, match="Concurrent publication collision"):
+        await repository.publish_version(
+            document_id="doc-rej-test",
+            version_id="ver-another-genesis",
+            parent_version_id=None,
+            tenant_id="tenant-alpha",
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_version_lineage_and_parent_identity_validation(
+    repository: DocumentRepository,
+) -> None:
+    """Verify strict validation of parent-child lineage, cross-document, and cross-tenant boundaries."""
+    doc_a = Document(document_id="doc-lineage-a", tenant_id="tenant-alpha", title="Lineage Doc A")
+    doc_b = Document(document_id="doc-lineage-b", tenant_id="tenant-alpha", title="Lineage Doc B")
+    doc_beta = Document(document_id="doc-lineage-beta", tenant_id="tenant-beta", title="Lineage Doc Beta")
+
+    await repository.create_document(doc_a)
+    await repository.create_document(doc_b)
+    await repository.create_document(doc_beta)
+
+    # 1. Publish genesis version on Doc A
+    vA1 = DocumentVersion(
+        version_id="ver-A-1",
+        document_id="doc-lineage-a",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-a",
+            version_id="ver-A-1",
+            title="A1",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-01T00:00:00Z",
+        ),
+    )
+    await repository.create_version(vA1, tenant_id="tenant-alpha")
+    await repository.publish_version(
+        document_id="doc-lineage-a",
+        version_id="ver-A-1",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    # 2. Publish genesis version on Doc B
+    vB1 = DocumentVersion(
+        version_id="ver-B-1",
+        document_id="doc-lineage-b",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-b",
+            version_id="ver-B-1",
+            title="B1",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-01T00:00:00Z",
+        ),
+    )
+    await repository.create_version(vB1, tenant_id="tenant-alpha")
+    await repository.publish_version(
+        document_id="doc-lineage-b",
+        version_id="ver-B-1",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    # 3. Create child version A2 derived from A1
+    vA2 = DocumentVersion(
+        version_id="ver-A-2",
+        document_id="doc-lineage-a",
+        parent_version_id="ver-A-1",
+        version_number="1.0.1",
+        created_at="2026-01-02T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-a",
+            version_id="ver-A-2",
+            parent_version_id="ver-A-1",
+            title="A2",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-02T00:00:00Z",
+        ),
+    )
+    await repository.create_version(vA2, tenant_id="tenant-alpha")
+
+    # A. Wrong parent ID rejection: caller passes parent_version_id="ver-wrong"
+    with pytest.raises(DocumentLifecycleError, match="Lineage mismatch"):
+        await repository.publish_version(
+            document_id="doc-lineage-a",
+            version_id="ver-A-2",
+            parent_version_id="ver-wrong",
+            tenant_id="tenant-alpha",
+        )
+
+    # B. Child with parent published as genesis (caller passes parent_version_id=None)
+    with pytest.raises(DocumentLifecycleError, match="Lineage mismatch"):
+        await repository.publish_version(
+            document_id="doc-lineage-a",
+            version_id="ver-A-2",
+            parent_version_id=None,
+            tenant_id="tenant-alpha",
+        )
+
+    # C. Genesis child published with parent ID
+    vA_gen_draft = DocumentVersion(
+        version_id="ver-A-gen-draft",
+        document_id="doc-lineage-a",
+        parent_version_id=None,
+        version_number="1.0.2",
+        created_at="2026-01-03T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-a",
+            version_id="ver-A-gen-draft",
+            parent_version_id=None,
+            title="A Gen Draft",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-03T00:00:00Z",
+        ),
+    )
+    await repository.create_version(vA_gen_draft, tenant_id="tenant-alpha")
+    with pytest.raises(DocumentLifecycleError, match="Lineage mismatch"):
+        await repository.publish_version(
+            document_id="doc-lineage-a",
+            version_id="ver-A-gen-draft",
+            parent_version_id="ver-A-1",
+            tenant_id="tenant-alpha",
+        )
+
+    # D. Cross-document parent: child on Doc A with parent_version_id="ver-B-1" (on Doc B)
+    vA_cross_doc = DocumentVersion(
+        version_id="ver-A-cross-doc",
+        document_id="doc-lineage-a",
+        parent_version_id="ver-B-1",
+        version_number="1.0.3",
+        created_at="2026-01-04T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-a",
+            version_id="ver-A-cross-doc",
+            parent_version_id="ver-B-1",
+            title="A Cross Doc",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-04T00:00:00Z",
+        ),
+    )
+    await repository.create_version(vA_cross_doc, tenant_id="tenant-alpha")
+    with pytest.raises(DocumentLifecycleError, match="non-existent parent version"):
+        await repository.publish_version(
+            document_id="doc-lineage-a",
+            version_id="ver-A-cross-doc",
+            parent_version_id="ver-B-1",
+            tenant_id="tenant-alpha",
+        )
+
+    # E. Cross-tenant parent: child on Tenant Alpha attempting to use parent on Tenant Beta
+    vBeta1 = DocumentVersion(
+        version_id="ver-Beta-1",
+        document_id="doc-lineage-beta",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-beta",
+            version_id="ver-Beta-1",
+            title="Beta 1",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-01T00:00:00Z",
+            security_metadata=SecurityMetadata(tenant_id="tenant-beta"),
+        ),
+    )
+    await repository.create_version(vBeta1, tenant_id="tenant-beta")
+    await repository.publish_version(
+        document_id="doc-lineage-beta",
+        version_id="ver-Beta-1",
+        parent_version_id=None,
+        tenant_id="tenant-beta",
+    )
+
+    vA_cross_tenant = DocumentVersion(
+        version_id="ver-A-cross-tenant",
+        document_id="doc-lineage-a",
+        parent_version_id="ver-Beta-1",
+        version_number="1.0.4",
+        created_at="2026-01-05T00:00:00Z",
+        created_by="author",
+        metadata=DocumentMetadata(
+            document_id="doc-lineage-a",
+            version_id="ver-A-cross-tenant",
+            parent_version_id="ver-Beta-1",
+            title="A Cross Tenant",
+            author_id="author",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-05T00:00:00Z",
+        ),
+    )
+    await repository.create_version(vA_cross_tenant, tenant_id="tenant-alpha")
+    with pytest.raises(DocumentLifecycleError, match="non-existent parent version"):
+        await repository.publish_version(
+            document_id="doc-lineage-a",
+            version_id="ver-A-cross-tenant",
+            parent_version_id="ver-Beta-1",
+            tenant_id="tenant-alpha",
+        )
+
+
+@pytest.mark.asyncio
+async def test_pointer_invariant_lifecycle_stages(
+    repository: DocumentRepository,
+) -> None:
+    """Verify that current_version_id represents the active published version exclusively at all lifecycle stages."""
+    # 1. Initial document creation
+    doc = Document(document_id="doc-ptr-stage", tenant_id="tenant-alpha", title="Pointer Invariant Doc")
+    await repository.create_document(doc)
+
+    reloaded_0 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_0 is not None
+    assert reloaded_0.current_version_id is None
+
+    # 2. Create DRAFT genesis version (V1)
+    m1 = DocumentMetadata(
+        document_id="doc-ptr-stage",
+        version_id="ver-ptr-1",
+        title="V1 Draft",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-ptr-1",
+        document_id="doc-ptr-stage",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=m1,
+    )
+    await repository.create_version(v1, tenant_id="tenant-alpha")
+
+    # Pointer MUST remain None after DRAFT creation
+    reloaded_1 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_1 is not None
+    assert reloaded_1.current_version_id is None
+
+    # 3. Transition V1 to REVIEW
+    await repository.update_version_state(
+        document_id="doc-ptr-stage",
+        version_id="ver-ptr-1",
+        target_state=DocumentLifecycleState.REVIEW,
+        is_immutable=False,
+        tenant_id="tenant-alpha",
+    )
+
+    # Pointer MUST remain None during REVIEW
+    reloaded_2 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_2 is not None
+    assert reloaded_2.current_version_id is None
+
+    # 4. Publish V1
+    child_1, _ = await repository.publish_version(
+        document_id="doc-ptr-stage",
+        version_id="ver-ptr-1",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+    assert child_1.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+
+    # Pointer MUST now point to V1
+    reloaded_3 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_3 is not None
+    assert reloaded_3.current_version_id == "ver-ptr-1"
+
+    # 5. Create child DRAFT V2 derived from V1
+    m2 = DocumentMetadata(
+        document_id="doc-ptr-stage",
+        version_id="ver-ptr-2",
+        parent_version_id="ver-ptr-1",
+        title="V2 Draft",
+        author_id="user-2",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-02T00:00:00Z",
+    )
+    v2 = DocumentVersion(
+        version_id="ver-ptr-2",
+        document_id="doc-ptr-stage",
+        parent_version_id="ver-ptr-1",
+        version_number="1.0.1",
+        created_at="2026-01-02T00:00:00Z",
+        created_by="user-2",
+        metadata=m2,
+    )
+    await repository.create_version(v2, tenant_id="tenant-alpha")
+
+    # Pointer MUST still point to V1; V1 remains PUBLISHED, V2 is DRAFT
+    reloaded_4 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_4 is not None
+    assert reloaded_4.current_version_id == "ver-ptr-1"
+
+    v1_check = await repository.get_version("doc-ptr-stage", "ver-ptr-1", tenant_id="tenant-alpha")
+    v2_check = await repository.get_version("doc-ptr-stage", "ver-ptr-2", tenant_id="tenant-alpha")
+    assert v1_check is not None and v1_check.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert v2_check is not None and v2_check.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+
+    # 6. Transition V2 to REVIEW
+    await repository.update_version_state(
+        document_id="doc-ptr-stage",
+        version_id="ver-ptr-2",
+        target_state=DocumentLifecycleState.REVIEW,
+        is_immutable=False,
+        tenant_id="tenant-alpha",
+    )
+    reloaded_5 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_5 is not None
+    assert reloaded_5.current_version_id == "ver-ptr-1"
+
+    # 7. Publish V2 -> Pointer updates to V2, V1 becomes SUPERSEDED
+    await repository.publish_version(
+        document_id="doc-ptr-stage",
+        version_id="ver-ptr-2",
+        parent_version_id="ver-ptr-1",
+        tenant_id="tenant-alpha",
+    )
+
+    reloaded_6 = await repository.get_document("doc-ptr-stage", tenant_id="tenant-alpha")
+    assert reloaded_6 is not None
+    assert reloaded_6.current_version_id == "ver-ptr-2"
+
+    v1_final = await repository.get_version("doc-ptr-stage", "ver-ptr-1", tenant_id="tenant-alpha")
+    v2_final = await repository.get_version("doc-ptr-stage", "ver-ptr-2", tenant_id="tenant-alpha")
+    assert v1_final is not None and v1_final.metadata.lifecycle_state == DocumentLifecycleState.SUPERSEDED
+    assert v2_final is not None and v2_final.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_concurrent_genesis_publication_race(
+    concurrent_data_store: RelationalDataStore,
+) -> None:
+    """Verify that concurrent genesis publication attempts across independent repositories result in exactly one winner."""
+    repo_a = DocumentRepository(concurrent_data_store)
+    repo_b = DocumentRepository(concurrent_data_store)
+
+    doc = Document(document_id="doc-conc-gen", tenant_id="tenant-alpha", title="Concurrent Genesis Doc")
+    await repo_a.create_document(doc)
+
+    # Create competing genesis draft versions A and B
+    vA = DocumentVersion(
+        version_id="ver-gen-A",
+        document_id="doc-conc-gen",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-A",
+        metadata=DocumentMetadata(
+            document_id="doc-conc-gen",
+            version_id="ver-gen-A",
+            title="Gen A",
+            author_id="user-A",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-01T00:00:00Z",
+        ),
+    )
+    vB = DocumentVersion(
+        version_id="ver-gen-B",
+        document_id="doc-conc-gen",
+        version_number="1.0.1",
+        created_at="2026-01-01T00:00:01Z",
+        created_by="user-B",
+        metadata=DocumentMetadata(
+            document_id="doc-conc-gen",
+            version_id="ver-gen-B",
+            title="Gen B",
+            author_id="user-B",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-01T00:00:01Z",
+        ),
+    )
+    await repo_a.create_version(vA, tenant_id="tenant-alpha")
+    await repo_a.create_version(vB, tenant_id="tenant-alpha")
+
+    # Run competing publications concurrently using independent repository instances
+    results = await asyncio.gather(
+        repo_a.publish_version(
+            document_id="doc-conc-gen",
+            version_id="ver-gen-A",
+            parent_version_id=None,
+            tenant_id="tenant-alpha",
+        ),
+        repo_b.publish_version(
+            document_id="doc-conc-gen",
+            version_id="ver-gen-B",
+            parent_version_id=None,
+            tenant_id="tenant-alpha",
+        ),
+        return_exceptions=True,
+    )
+
+    # Exactly one winner, one DocumentLifecycleError loser
+    successes = [r for r in results if not isinstance(r, Exception)]
+    failures = [r for r in results if isinstance(r, Exception)]
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], DocumentLifecycleError)
+
+    winning_ver, _ = successes[0]
+    losing_ver_id = "ver-gen-B" if winning_ver.version_id == "ver-gen-A" else "ver-gen-A"
+
+    # Reload document and verify current pointer
+    reloaded_doc = await repo_a.get_document("doc-conc-gen", tenant_id="tenant-alpha")
+    assert reloaded_doc is not None
+    assert reloaded_doc.current_version_id == winning_ver.version_id
+
+    # Verify winning version is PUBLISHED, losing version rolled back completely (remains DRAFT)
+    w_ver = await repo_a.get_version("doc-conc-gen", winning_ver.version_id, tenant_id="tenant-alpha")
+    l_ver = await repo_a.get_version("doc-conc-gen", losing_ver_id, tenant_id="tenant-alpha")
+
+    assert w_ver is not None and w_ver.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert w_ver.is_immutable is True
+
+    assert l_ver is not None and l_ver.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+    assert l_ver.is_immutable is False
+
+    # Check total published versions for document
+    all_versions = await repo_a.list_versions("doc-conc-gen", tenant_id="tenant-alpha")
+    published_versions = [v for v in all_versions if v.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED]
+    assert len(published_versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sibling_publication_race(
+    concurrent_data_store: RelationalDataStore,
+) -> None:
+    """Verify that concurrent sibling child publications across independent repositories result in exactly one winner."""
+    repo_a = DocumentRepository(concurrent_data_store)
+    repo_b = DocumentRepository(concurrent_data_store)
+
+    doc = Document(document_id="doc-conc-sib", tenant_id="tenant-alpha", title="Concurrent Sibling Doc")
+    await repo_a.create_document(doc)
+
+    # 1. Publish parent V1
+    v1 = DocumentVersion(
+        version_id="ver-parent-root",
+        document_id="doc-conc-sib",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="lead",
+        metadata=DocumentMetadata(
+            document_id="doc-conc-sib",
+            version_id="ver-parent-root",
+            title="Root V1",
+            author_id="lead",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-01T00:00:00Z",
+        ),
+    )
+    await repo_a.create_version(v1, tenant_id="tenant-alpha")
+    await repo_a.publish_version(
+        document_id="doc-conc-sib",
+        version_id="ver-parent-root",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    # 2. Create sibling child drafts derived from V1
+    v2A = DocumentVersion(
+        version_id="ver-child-A",
+        document_id="doc-conc-sib",
+        parent_version_id="ver-parent-root",
+        version_number="1.0.1",
+        created_at="2026-01-02T00:00:00Z",
+        created_by="user-A",
+        metadata=DocumentMetadata(
+            document_id="doc-conc-sib",
+            version_id="ver-child-A",
+            parent_version_id="ver-parent-root",
+            title="Child A",
+            author_id="user-A",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-02T00:00:00Z",
+        ),
+    )
+    v2B = DocumentVersion(
+        version_id="ver-child-B",
+        document_id="doc-conc-sib",
+        parent_version_id="ver-parent-root",
+        version_number="1.0.2",
+        created_at="2026-01-02T00:00:01Z",
+        created_by="user-B",
+        metadata=DocumentMetadata(
+            document_id="doc-conc-sib",
+            version_id="ver-child-B",
+            parent_version_id="ver-parent-root",
+            title="Child B",
+            author_id="user-B",
+            lifecycle_state=DocumentLifecycleState.DRAFT,
+            created_at="2026-01-02T00:00:01Z",
+        ),
+    )
+    await repo_a.create_version(v2A, tenant_id="tenant-alpha")
+    await repo_a.create_version(v2B, tenant_id="tenant-alpha")
+
+    # 3. Competing concurrent sibling publication across independent repository instances
+    results = await asyncio.gather(
+        repo_a.publish_version(
+            document_id="doc-conc-sib",
+            version_id="ver-child-A",
+            parent_version_id="ver-parent-root",
+            tenant_id="tenant-alpha",
+        ),
+        repo_b.publish_version(
+            document_id="doc-conc-sib",
+            version_id="ver-child-B",
+            parent_version_id="ver-parent-root",
+            tenant_id="tenant-alpha",
+        ),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if not isinstance(r, Exception)]
+    failures = [r for r in results if isinstance(r, Exception)]
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], DocumentLifecycleError)
+
+    winning_child, superseded_parent = successes[0]
+    losing_child_id = "ver-child-B" if winning_child.version_id == "ver-child-A" else "ver-child-A"
+
+    # 4. Verify Document pointer
+    reloaded_doc = await repo_a.get_document("doc-conc-sib", tenant_id="tenant-alpha")
+    assert reloaded_doc is not None
+    assert reloaded_doc.current_version_id == winning_child.version_id
+
+    # 5. Verify states: parent = SUPERSEDED, winner = PUBLISHED, loser = DRAFT
+    p_ver = await repo_a.get_version("doc-conc-sib", "ver-parent-root", tenant_id="tenant-alpha")
+    w_ver = await repo_a.get_version("doc-conc-sib", winning_child.version_id, tenant_id="tenant-alpha")
+    l_ver = await repo_a.get_version("doc-conc-sib", losing_child_id, tenant_id="tenant-alpha")
+
+    assert p_ver is not None and p_ver.metadata.lifecycle_state == DocumentLifecycleState.SUPERSEDED
+    assert p_ver.is_immutable is True
+
+    assert w_ver is not None and w_ver.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED
+    assert w_ver.is_immutable is True
+
+    assert l_ver is not None and l_ver.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+    assert l_ver.is_immutable is False
+
+    # Check that exactly one version is PUBLISHED
+    all_versions = await repo_a.list_versions("doc-conc-sib", tenant_id="tenant-alpha")
+    published_versions = [v for v in all_versions if v.metadata.lifecycle_state == DocumentLifecycleState.PUBLISHED]
+    assert len(published_versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_version_forced_failure_rollback(
+    data_store: RelationalDataStore,
+) -> None:
+    """Verify that a forced exception after CAS step completely rolls back all publication mutations."""
+    repo = DocumentRepository(data_store)
+    doc = Document(document_id="doc-fail-rollback", tenant_id="tenant-alpha", title="Fail Rollback Doc")
+    await repo.create_document(doc)
+
+    meta = DocumentMetadata(
+        document_id="doc-fail-rollback",
+        version_id="ver-fail-1",
+        title="V1",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-fail-1",
+        document_id="doc-fail-rollback",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=meta,
+    )
+    await repo.create_version(v1, tenant_id="tenant-alpha")
+
+    # Hook repository to raise an exception after the CAS execution inside transaction
+    class FailingDocumentRepository(DocumentRepository):
+        async def publish_version(self, *args, **kwargs):
+            orig_converter = self._version_to_domain
+
+            def _failing_converter(record):
+                raise RuntimeError("Simulated transient failure post-CAS")
+
+            self._version_to_domain = _failing_converter
+            try:
+                return await super().publish_version(*args, **kwargs)
+            finally:
+                self._version_to_domain = orig_converter
+
+    failing_repo = FailingDocumentRepository(data_store)
+    with pytest.raises(RuntimeError, match="Simulated transient failure post-CAS"):
+        await failing_repo.publish_version(
+            document_id="doc-fail-rollback",
+            version_id="ver-fail-1",
+            parent_version_id=None,
+            tenant_id="tenant-alpha",
+        )
+
+    # Prove database state returned 100% to pre-publication state
+    reloaded_doc = await repo.get_document("doc-fail-rollback", tenant_id="tenant-alpha")
+    assert reloaded_doc is not None
+    assert reloaded_doc.current_version_id is None
+
+    reloaded_ver = await repo.get_version("doc-fail-rollback", "ver-fail-1", tenant_id="tenant-alpha")
+    assert reloaded_ver is not None
+    assert reloaded_ver.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+    assert reloaded_ver.is_immutable is False
+    assert reloaded_ver.metadata.published_at is None
