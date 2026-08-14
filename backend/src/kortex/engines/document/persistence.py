@@ -1099,14 +1099,17 @@ class DocumentRepository(IDocumentRepository):
             )
             if version is not None:
                 query = query.where(DocumentOperationProfileRecord.version == version)
-            else:
-                query = query.order_by(DocumentOperationProfileRecord.created_at.desc())
 
             res = await session.execute(query)
-            record = res.scalars().first()
-            if record is None:
+            records = res.scalars().all()
+            if not records:
                 return None
-            return self._profile_to_domain(record)
+
+            if version is not None:
+                return self._profile_to_domain(records[0])
+
+            latest = max(records, key=lambda r: parse_semver(r.version))
+            return self._profile_to_domain(latest)
 
         return await self._data_store.execute_in_transaction(_action)
 

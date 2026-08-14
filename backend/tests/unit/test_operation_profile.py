@@ -28,7 +28,33 @@ from kortex.engines.document.models import (
     TemplateSchema,
 )
 from kortex.engines.document.operation_profile import DocumentOperationProfileManager
+from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
 from kortex.engines.document.template_library import TemplateLibrary
+from kortex.core.db import DatabaseEngineManager
+from kortex.engines.storage.stores.data_store import RelationalDataStore
+
+
+@pytest.fixture
+async def test_db(tmp_path):
+    """Create an isolated file-backed SQLite database manager and initialize all tables."""
+    db_file = tmp_path / "test_operation_profile.db"
+    db_manager = DatabaseEngineManager(f"sqlite+aiosqlite:///{db_file}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+    yield db_manager
+    await db_manager.disconnect()
+
+
+@pytest.fixture
+def data_store(test_db: DatabaseEngineManager) -> RelationalDataStore:
+    """Create a RelationalDataStore backed by the test database."""
+    return RelationalDataStore(test_db)
+
+
+@pytest.fixture
+def repository(data_store: RelationalDataStore) -> DocumentRepository:
+    """Create a DocumentRepository backed by the test data store."""
+    return DocumentRepository(data_store)
 
 
 class DummyProfileAdapter(BaseDocumentAdapter):
@@ -480,3 +506,209 @@ async def test_regression_compatibility_across_milestones() -> None:
     )
     assert res.is_success is True
     assert res.final_output_bytes == b"[PDF_OUTPUT]"
+
+
+@pytest.mark.asyncio
+async def test_required_template_validation_with_repository_backed_library(
+    data_store: RelationalDataStore,
+) -> None:
+    """Reproduces and fixes the actual defect: a template that exists ONLY via a
+    repository-backed TemplateLibrary (invisible to the old `_templates` dict check) is now
+    correctly found by the async, repository-aware _validate_required_template check."""
+    tmpl_repository = TemplateRepository(data_store=data_store)
+    tmpl_lib = TemplateLibrary(load_defaults=False, repository=tmpl_repository)
+    await tmpl_lib.register_template(
+        TemplateSchema(
+            template_id="repo.only.tmpl",
+            name="Repository-Only Template",
+            namespace="kortex.repo.only",
+            version="1.0.0",
+            description="Exists only in the repository, never in the in-memory _templates dict",
+        )
+    )
+
+    mgr = DocumentOperationProfileManager(template_library=tmpl_lib)
+    profile = create_sample_profile(
+        profile_id="p.repo.tmpl", required_template_id="repo.only.tmpl"
+    )
+
+    # This is the exact regression the old `req_tmpl_id not in self._template_library._templates`
+    # check would have failed: the template is real and registered, but only via the repository.
+    await mgr.register_profile(profile)
+
+    fetched = await mgr.get_profile("p.repo.tmpl")
+    assert fetched.required_template_id == "repo.only.tmpl"
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_register_and_get_survives_fresh_instance(
+    repository: DocumentRepository,
+) -> None:
+    """A profile registered through a repository-backed manager survives a fresh instance."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+    profile = create_sample_profile(profile_id="p.persisted.v1")
+
+    await mgr.register_profile(profile)
+
+    fresh_mgr = DocumentOperationProfileManager(repository=repository)
+    fetched = await fresh_mgr.get_profile("p.persisted.v1")
+    assert fetched.id == "p.persisted.v1"
+    assert fetched.version == "1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_duplicate_registration_raises(
+    repository: DocumentRepository,
+) -> None:
+    """Duplicate profile_id+version registration is rejected in repository mode."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+    profile = create_sample_profile(profile_id="p.dup.v1")
+
+    await mgr.register_profile(profile)
+
+    with pytest.raises(DocumentOperationError, match="Duplicate profile registration"):
+        await mgr.register_profile(profile)
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_semver_resolution_latest_version(
+    repository: DocumentRepository,
+) -> None:
+    """Repository-mode latest-version resolution uses SemVer comparison, matching in-memory mode."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+
+    await mgr.register_profile(create_sample_profile(profile_id="p.semver.v1", version="1.0.0"))
+    await mgr.register_profile(create_sample_profile(profile_id="p.semver.v1", version="1.10.0"))
+    await mgr.register_profile(create_sample_profile(profile_id="p.semver.v1", version="1.2.0"))
+
+    latest = await mgr.get_latest_version("p.semver.v1")
+    assert latest.version == "1.10.0"
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_delete_specific_and_all_versions(
+    repository: DocumentRepository,
+) -> None:
+    """Repository-mode delete supports both specific-version and delete-all semantics."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+    await mgr.register_profile(create_sample_profile(profile_id="p.delete.v1", version="1.0.0"))
+    await mgr.register_profile(create_sample_profile(profile_id="p.delete.v1", version="2.0.0"))
+
+    assert await mgr.unregister_profile("p.delete.v1", version="1.0.0") is True
+    remaining = await mgr.get_latest_version("p.delete.v1")
+    assert remaining.version == "2.0.0"
+
+    assert await mgr.unregister_profile("p.delete.v1") is True
+    with pytest.raises(DocumentProfileNotFoundError):
+        await mgr.get_profile("p.delete.v1")
+
+    assert await mgr.unregister_profile("p.delete.missing") is False
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_register_and_get_per_call(
+    repository: DocumentRepository,
+) -> None:
+    """A single DocumentOperationProfileManager keeps per-call tenant_id partitions isolated."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+    profile_a = create_sample_profile(profile_id="p.tenant.scoped")
+
+    await mgr.register_profile(profile_a, tenant_id="tenant-a")
+
+    fetched_a = await mgr.get_profile("p.tenant.scoped", tenant_id="tenant-a")
+    assert fetched_a.id == "p.tenant.scoped"
+
+    with pytest.raises(DocumentProfileNotFoundError):
+        await mgr.get_profile("p.tenant.scoped", tenant_id="tenant-b")
+
+    # Tenant B may independently register the same profile_id+version.
+    profile_b = create_sample_profile(profile_id="p.tenant.scoped")
+    await mgr.register_profile(profile_b, tenant_id="tenant-b")
+    fetched_b = await mgr.get_profile("p.tenant.scoped", tenant_id="tenant-b")
+    assert fetched_b.id == "p.tenant.scoped"
+
+    # Isolation held: tenant A's read is unaffected by tenant B's registration.
+    fetched_a_again = await mgr.get_profile("p.tenant.scoped", tenant_id="tenant-a")
+    assert fetched_a_again.id == "p.tenant.scoped"
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_list_and_delete_scoped_per_call(
+    repository: DocumentRepository,
+) -> None:
+    """list_profiles/unregister_profile only affect the calling tenant's persisted profiles."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+    await mgr.register_profile(
+        create_sample_profile(profile_id="p.tenant.a.only"), tenant_id="tenant-a"
+    )
+    await mgr.register_profile(
+        create_sample_profile(profile_id="p.tenant.b.only"), tenant_id="tenant-b"
+    )
+
+    tenant_a_list = await mgr.list_profiles(tenant_id="tenant-a")
+    tenant_a_ids = {p.id for p in tenant_a_list}
+    assert "p.tenant.a.only" in tenant_a_ids
+    assert "p.tenant.b.only" not in tenant_a_ids
+
+    await mgr.unregister_profile("p.tenant.a.only", tenant_id="tenant-a")
+    with pytest.raises(DocumentProfileNotFoundError):
+        await mgr.get_profile("p.tenant.a.only", tenant_id="tenant-a")
+
+    # Tenant B's copy survives tenant A's deletion untouched.
+    still_there = await mgr.get_profile("p.tenant.b.only", tenant_id="tenant-b")
+    assert still_there.id == "p.tenant.b.only"
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_falls_back_to_constructor_default(
+    repository: DocumentRepository,
+) -> None:
+    """Omitting tenant_id on a per-call operation falls back to the constructor's tenant_id."""
+    mgr = DocumentOperationProfileManager(
+        repository=repository, tenant_id="tenant-default-fallback"
+    )
+    profile = create_sample_profile(profile_id="p.fallback")
+
+    await mgr.register_profile(profile)
+
+    fetched = await mgr.get_profile("p.fallback", tenant_id="tenant-default-fallback")
+    assert fetched.id == "p.fallback"
+
+    fetched_via_default = await mgr.get_profile("p.fallback")
+    assert fetched_via_default.id == "p.fallback"
+
+    with pytest.raises(DocumentProfileNotFoundError):
+        await mgr.get_profile("p.fallback", tenant_id="some-other-tenant")
+
+
+@pytest.mark.asyncio
+async def test_repository_mode_not_found_and_listing_branches(
+    repository: DocumentRepository,
+) -> None:
+    """Exercise repository-mode not-found and listing/search branches not covered elsewhere."""
+    mgr = DocumentOperationProfileManager(repository=repository)
+
+    # get_profile with an explicit version that doesn't exist.
+    await mgr.register_profile(create_sample_profile(profile_id="p.notfound.v1"))
+    with pytest.raises(DocumentProfileNotFoundError, match="version '9.9.9' not found"):
+        await mgr.get_profile("p.notfound.v1", version="9.9.9")
+
+    # get_latest_version for a profile_id that was never registered.
+    with pytest.raises(DocumentProfileNotFoundError):
+        await mgr.get_latest_version("p.never.registered")
+
+    # unregister_profile: specific version not found among an existing profile_id's matches.
+    assert await mgr.unregister_profile("p.notfound.v1", version="9.9.9") is False
+
+    # list_all_profile_versions, find_by_business_operation, find_by_namespace in repository mode.
+    await mgr.register_profile(
+        create_sample_profile(profile_id="p.notfound.v1", version="2.0.0")
+    )
+    all_versions = await mgr.list_all_profile_versions()
+    assert len([p for p in all_versions if p.id == "p.notfound.v1"]) == 2
+
+    by_business_op = await mgr.find_by_business_operation("GENERATE_PAYROLL_SLIP")
+    assert any(p.id == "p.notfound.v1" for p in by_business_op)
+
+    by_namespace = await mgr.find_by_namespace("kortex.hr.payroll")
+    assert any(p.id == "p.notfound.v1" for p in by_namespace)

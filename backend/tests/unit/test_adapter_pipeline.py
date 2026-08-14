@@ -22,17 +22,20 @@ from kortex.engines.document.exceptions import (
     AdapterNotFoundError,
     DocumentOperationError,
 )
+from kortex.engines.document.adapters.macro_adapter import MacroAdapter
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
     AdapterPipelineDefinition,
     BindingContext,
+    DocumentOperationProfile,
     DocumentOperationType,
     OperationRequest,
     PipelineExecutionMode,
     PipelineStage,
     TemplateSchema,
 )
+from kortex.engines.document.operation_profile import DocumentOperationProfileManager
 
 
 class MockNormalizerAdapter(BaseDocumentAdapter):
@@ -683,4 +686,110 @@ def test_edge_case_condition_and_context_metadata() -> None:
 
     assert evaluate_declarative_condition("missing_key != expected", ctx) is True
     assert evaluate_declarative_condition("meta_key == meta_val", ctx) is True
+
+
+@pytest.mark.asyncio
+async def test_execute_pipeline_resolves_real_profile_via_profile_manager() -> None:
+    """When a profile_manager is configured, execute_pipeline() resolves the REAL registered
+    profile's adapter_pipeline instead of treating profile_id as an adapter_id (the fixed
+    Milestone 5 defect)."""
+    registry = DocumentAdapterRegistry()
+    pdf = MockPdfAdapter(adapter_id="kortex.adapter.real_pdf")
+    registry.register_adapter(pdf)
+
+    profile_manager = DocumentOperationProfileManager(adapter_registry=registry)
+    real_pipeline = AdapterPipelineDefinition(
+        pipeline_id="pipe-real",
+        profile_id="profile.real.v1",
+        stages=[
+            PipelineStage(
+                stage_id="s1",
+                adapter_id="kortex.adapter.real_pdf",
+                required_capability=AdapterCapability.GENERATE,
+            )
+        ],
+    )
+    await profile_manager.register_profile(
+        DocumentOperationProfile(
+            id="profile.real.v1",
+            name="Real Profile",
+            namespace="kortex.test.real",
+            version="1.0.0",
+            description="A real, registered operation profile",
+            business_operation="TEST_REAL_OP",
+            adapter_pipeline=real_pipeline,
+        )
+    )
+
+    executor = AdapterPipelineExecutor(registry=registry, profile_manager=profile_manager)
+    assert executor.profile_manager is profile_manager
+    req = OperationRequest(
+        request_id="req-real-profile",
+        profile_id="profile.real.v1",
+        binding_context=BindingContext(context_id="c-real"),
+    )
+
+    # Note: "profile.real.v1" is NOT itself a registered adapter_id — if the legacy shim
+    # were still active, this would fail with "contains no execution stages". Success here
+    # proves the real profile->pipeline resolution path executed instead.
+    res = await executor.execute_pipeline("profile.real.v1", req)
+
+    assert res.status == "COMPLETED"
+    assert res.output_bytes == b"[PDF_BYTES]"
+
+
+@pytest.mark.asyncio
+async def test_execute_pipeline_falls_back_to_legacy_shim_when_profile_unresolvable() -> None:
+    """With a profile_manager configured but no matching profile registered, execute_pipeline()
+    falls back to the legacy adapter_id-as-profile_id shim rather than failing outright."""
+    registry = DocumentAdapterRegistry()
+    pdf = MockPdfAdapter(adapter_id="profile-pdf-fallback")
+    registry.register_adapter(pdf)
+
+    profile_manager = DocumentOperationProfileManager(adapter_registry=registry)
+    executor = AdapterPipelineExecutor(registry=registry, profile_manager=profile_manager)
+    req = OperationRequest(
+        request_id="req-fallback",
+        profile_id="profile-pdf-fallback",
+        binding_context=BindingContext(context_id="c-fallback"),
+    )
+
+    res = await executor.execute_pipeline("profile-pdf-fallback", req)
+
+    assert res.status == "COMPLETED"
+    assert res.output_bytes == b"[PDF_BYTES]"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_stage_with_macro_capability_executes_end_to_end() -> None:
+    """A MACROS-capability pipeline stage flows correctly through the unmodified
+    AdapterPipelineExecutor, proving the reference Macro Adapter integrates with the
+    existing pipeline/registry machinery exactly like DummyDocumentAdapter does for
+    GENERATE/PREVIEW."""
+    registry = DocumentAdapterRegistry()
+    macro = MacroAdapter()
+    registry.register_adapter(macro)
+
+    pipeline_def = AdapterPipelineDefinition(
+        pipeline_id="pipe-macro",
+        profile_id="profile.macro.v1",
+        stages=[
+            PipelineStage(
+                stage_id="s1",
+                adapter_id=macro.adapter_id,
+                required_capability=AdapterCapability.MACROS,
+            )
+        ],
+    )
+
+    executor = AdapterPipelineExecutor(registry=registry)
+    res = await executor.execute_pipeline_definition(
+        pipeline_def, BindingContext(context_id="ctx-macro-pipeline", data={"rows": 3})
+    )
+
+    assert res.is_success is True
+    assert len(res.stage_results) == 1
+    assert res.stage_results[0].capability == AdapterCapability.MACROS
+    assert res.final_output_bytes is not None
+    assert b"kortex.document.macro.v1" in res.final_output_bytes
 

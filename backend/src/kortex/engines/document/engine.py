@@ -214,6 +214,10 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                         self._template_library._repository = TemplateRepository(
                             data_store=self._data_store
                         )
+                    if self._profile_manager.repository is None and self._data_store is not None:
+                        self._profile_manager._repository = DocumentRepository(
+                            data_store=self._data_store
+                        )
             except Exception:
                 self.logger.debug(
                     "StorageEngine not resolved from Kernel container; DocumentLifecycleManager "
@@ -313,11 +317,13 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             DocumentOperationStartedEvent(request_id=request.request_id, profile_id=profile_id)
         )
 
-        # 1. Resolve profile
-        profile = await self._profile_manager.get_profile(profile_id)
-
         binding_context = request.binding_context or BindingContext(
             context_id=f"ctx-{request.request_id}"
+        )
+
+        # 1. Resolve profile
+        profile = await self._profile_manager.get_profile(
+            profile_id, tenant_id=binding_context.tenant_id
         )
 
         # 2. Template Resolution & Binding

@@ -7,6 +7,8 @@ declarative Document Operation Profiles, in accordance with the Document Engine 
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
 from kortex.engines.document.exceptions import (
     AdapterNotFoundError,
@@ -23,6 +25,9 @@ from kortex.engines.document.template_library import (
     TemplateLibrary,
     parse_semver,
 )
+
+if TYPE_CHECKING:
+    from kortex.engines.document.interfaces import IDocumentRepository
 
 
 class DocumentOperationProfileManager:
@@ -42,17 +47,27 @@ class DocumentOperationProfileManager:
         self,
         template_library: TemplateLibrary | None = None,
         adapter_registry: DocumentAdapterRegistry | None = None,
+        repository: "IDocumentRepository | None" = None,
+        tenant_id: str = "default",
     ) -> None:
         """Initialize DocumentOperationProfileManager with optional dependencies.
 
         Args:
             template_library: Optional TemplateLibrary for validating required_template_id.
             adapter_registry: Optional DocumentAdapterRegistry for validating pipeline stage adapters.
+            repository: Optional IDocumentRepository for relational persistence via Storage
+                        Engine. If None, operates in standalone in-memory mode.
+            tenant_id: Default tenant partition identifier used when a per-call tenant_id
+                       is not supplied. Every method also accepts an optional per-call
+                       tenant_id override.
         """
-        # Map: profile_id -> dict of (version_str -> DocumentOperationProfile)
+        # Map: profile_id -> dict of (version_str -> DocumentOperationProfile). Used only in
+        # standalone in-memory mode; ignored once a repository is configured.
         self._profiles: dict[str, dict[str, DocumentOperationProfile]] = {}
         self._template_library = template_library
         self._adapter_registry = adapter_registry
+        self._repository = repository
+        self._tenant_id = tenant_id
 
     @property
     def template_library(self) -> TemplateLibrary | None:
@@ -63,6 +78,11 @@ class DocumentOperationProfileManager:
     def adapter_registry(self) -> DocumentAdapterRegistry | None:
         """Return configured DocumentAdapterRegistry instance."""
         return self._adapter_registry
+
+    @property
+    def repository(self) -> "IDocumentRepository | None":
+        """Return the configured IDocumentRepository, or None if in-memory mode."""
+        return self._repository
 
     def validate_profile(self, profile: DocumentOperationProfile) -> None:
         """Validate a DocumentOperationProfile prior to registration.
@@ -107,27 +127,42 @@ class DocumentOperationProfileManager:
             if not isinstance(perm, str) or not perm.strip():
                 raise DocumentOperationError(f"Invalid permission entry: '{perm}'. Must be a non-empty string.")
 
-        # Validate required template reference if TemplateLibrary is configured
+        # Validate required_template_id format only. Actual existence against TemplateLibrary
+        # is checked separately in _validate_required_template(), an async step, because
+        # TemplateLibrary.get_template() is async (it must await a repository-backed lookup
+        # when TemplateLibrary is persisted) and cannot be called from this sync method.
         if profile.required_template_id:
             req_tmpl_id = profile.required_template_id.strip()
             if not req_tmpl_id:
                 raise DocumentOperationError("Invalid required_template_id: cannot be empty string.")
 
-            if self._template_library is not None:
-                try:
-                    # Sync lookup test or check presence
-                    if req_tmpl_id not in self._template_library._templates:
-                        raise DocumentTemplateError(
-                            f"Required template '{req_tmpl_id}' specified in profile '{profile.id}' is not installed in TemplateLibrary."
-                        )
-                except Exception as err:
-                    raise DocumentOperationError(
-                        f"Template validation failed for profile '{profile.id}': {err}"
-                    ) from err
-
         # Validate adapter pipeline definition if specified
         if profile.adapter_pipeline is not None:
             self._validate_pipeline_definition(profile.id, profile.adapter_pipeline)
+
+    async def _validate_required_template(
+        self, profile: DocumentOperationProfile, tenant_id: str | None = None
+    ) -> None:
+        """Validate that profile.required_template_id actually resolves in TemplateLibrary.
+
+        Args:
+            profile: DocumentOperationProfile being registered.
+            tenant_id: Tenant partition identifier used for the TemplateLibrary lookup.
+
+        Raises:
+            DocumentOperationError: If a required_template_id is set but does not resolve.
+        """
+        if not profile.required_template_id or self._template_library is None:
+            return
+
+        req_tmpl_id = profile.required_template_id.strip()
+        try:
+            await self._template_library.get_template(req_tmpl_id, tenant_id=tenant_id)
+        except DocumentTemplateError as err:
+            raise DocumentOperationError(
+                f"Required template '{req_tmpl_id}' specified in profile '{profile.id}' "
+                f"is not installed in TemplateLibrary."
+            ) from err
 
     def _validate_pipeline_definition(
         self, profile_id: str, pipeline: AdapterPipelineDefinition
@@ -168,15 +203,40 @@ class DocumentOperationProfileManager:
                         f"Adapter '{stage.adapter_id}' referenced in stage '{stage_id}' of profile '{profile_id}' is not registered."
                     ) from err
 
-    async def register_profile(self, profile: DocumentOperationProfile) -> None:
+    async def register_profile(
+        self, profile: DocumentOperationProfile, tenant_id: str | None = None
+    ) -> None:
         """Register a DocumentOperationProfile (IDocumentOperationProfileManager protocol).
+
+        When a repository is configured, registration persists through it; otherwise it is
+        registered into the standalone in-memory catalog.
 
         Args:
             profile: DocumentOperationProfile to register.
+            tenant_id: Optional per-call tenant partition identifier. Defaults to the
+                       tenant_id configured at construction when omitted.
 
         Raises:
             DocumentOperationError: If validation fails or duplicate profile version exists.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
+        self.validate_profile(profile)
+        await self._validate_required_template(profile, tenant_id=resolved_tenant_id)
+
+        if self._repository is not None:
+            profile_id = profile.id.strip()
+            version = profile.version.strip()
+            existing = await self._repository.get_operation_profile(
+                profile_id, version=version, tenant_id=resolved_tenant_id
+            )
+            if existing is not None:
+                raise DocumentOperationError(
+                    f"Duplicate profile registration: '{profile_id}' version '{version}' "
+                    f"is already registered."
+                )
+            await self._repository.save_operation_profile(profile, tenant_id=resolved_tenant_id)
+            return
+
         self.register_profile_sync(profile)
 
     def register_profile_sync(self, profile: DocumentOperationProfile) -> DocumentOperationProfile:
@@ -208,18 +268,44 @@ class DocumentOperationProfileManager:
         return profile
 
     async def unregister_profile(
-        self, profile_id: str, version: str | None = None
+        self,
+        profile_id: str,
+        version: str | None = None,
+        tenant_id: str | None = None,
     ) -> bool:
         """Unregister a profile or a specific profile version from the manager catalog.
 
         Args:
             profile_id: Profile identifier string.
             version: Optional SemVer string. If None, unregisters all versions.
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             True if unregistration succeeded; False if profile_id or version was not found.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
         profile_id = profile_id.strip()
+
+        if self._repository is not None:
+            persisted = await self._repository.list_operation_profiles(tenant_id=resolved_tenant_id)
+            matches = [p for p in persisted if p.id == profile_id]
+            if not matches:
+                return False
+
+            if version is not None:
+                version = version.strip()
+                if not any(p.version == version for p in matches):
+                    return False
+                return await self._repository.delete_operation_profile(
+                    profile_id, version, tenant_id=resolved_tenant_id
+                )
+
+            for match in matches:
+                await self._repository.delete_operation_profile(
+                    profile_id, match.version, tenant_id=resolved_tenant_id
+                )
+            return True
+
         if profile_id not in self._profiles or not self._profiles[profile_id]:
             return False
 
@@ -236,13 +322,18 @@ class DocumentOperationProfileManager:
         return True
 
     async def get_profile(
-        self, profile_id: str, version: str | None = None
+        self,
+        profile_id: str,
+        version: str | None = None,
+        tenant_id: str | None = None,
     ) -> DocumentOperationProfile:
         """Retrieve a DocumentOperationProfile by ID and optional version (IDocumentOperationProfileManager protocol).
 
         Args:
             profile_id: Profile identifier string.
             version: Optional SemVer string. Resolves latest version if None.
+            tenant_id: Optional per-call tenant partition identifier. Defaults to the
+                       tenant_id configured at construction when omitted.
 
         Returns:
             DocumentOperationProfile object.
@@ -250,7 +341,21 @@ class DocumentOperationProfileManager:
         Raises:
             DocumentProfileNotFoundError: If profile_id or version is not found.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
         profile_id = profile_id.strip()
+
+        if self._repository is not None:
+            result = await self._repository.get_operation_profile(
+                profile_id, version=version, tenant_id=resolved_tenant_id
+            )
+            if result is None:
+                if version is not None:
+                    raise DocumentProfileNotFoundError(
+                        f"Document Operation Profile '{profile_id}' version '{version}' not found."
+                    )
+                raise DocumentProfileNotFoundError(f"Document Operation Profile '{profile_id}' not found.")
+            return result
+
         if profile_id not in self._profiles or not self._profiles[profile_id]:
             raise DocumentProfileNotFoundError(f"Document Operation Profile '{profile_id}' not found.")
 
@@ -262,29 +367,33 @@ class DocumentOperationProfileManager:
                 )
             return self._profiles[profile_id][version]
 
-        return await self.get_latest_version(profile_id)
+        return await self.get_latest_version(profile_id, tenant_id=resolved_tenant_id)
 
     async def get_specific_version(
-        self, profile_id: str, version: str
+        self, profile_id: str, version: str, tenant_id: str | None = None
     ) -> DocumentOperationProfile:
         """Retrieve a specific version of a DocumentOperationProfile.
 
         Args:
             profile_id: Profile identifier string.
             version: Specific SemVer string.
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             DocumentOperationProfile object.
         """
-        return await self.get_profile(profile_id, version=version)
+        return await self.get_profile(profile_id, version=version, tenant_id=tenant_id)
 
-    async def get_latest_version(self, profile_id: str) -> DocumentOperationProfile:
+    async def get_latest_version(
+        self, profile_id: str, tenant_id: str | None = None
+    ) -> DocumentOperationProfile:
         """Retrieve the latest registered version of a profile using SemVer resolution.
 
         Prioritizes stable versions over pre-release versions.
 
         Args:
             profile_id: Profile identifier string.
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             Latest DocumentOperationProfile object.
@@ -292,7 +401,17 @@ class DocumentOperationProfileManager:
         Raises:
             DocumentProfileNotFoundError: If profile_id is not found.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
         profile_id = profile_id.strip()
+
+        if self._repository is not None:
+            result = await self._repository.get_operation_profile(
+                profile_id, version=None, tenant_id=resolved_tenant_id
+            )
+            if result is None:
+                raise DocumentProfileNotFoundError(f"Document Operation Profile '{profile_id}' not found.")
+            return result
+
         if profile_id not in self._profiles or not self._profiles[profile_id]:
             raise DocumentProfileNotFoundError(f"Document Operation Profile '{profile_id}' not found.")
 
@@ -301,24 +420,68 @@ class DocumentOperationProfileManager:
         latest_ver = sorted_versions[-1]
         return self._profiles[profile_id][latest_ver]
 
-    async def list_profiles(self) -> list[DocumentOperationProfile]:
+    async def _get_latest_candidates(
+        self, tenant_id: str | None = None
+    ) -> list[DocumentOperationProfile]:
+        """Return the latest version of every persisted profile_id for tenant_id.
+
+        Repository-mode only helper; standalone in-memory mode iterates self._profiles
+        directly in each caller instead.
+
+        Args:
+            tenant_id: Optional per-call tenant partition identifier.
+
+        Returns:
+            List of latest DocumentOperationProfile instances, one per known profile_id.
+        """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
+        if self._repository is None:
+            return []
+
+        persisted = await self._repository.list_operation_profiles(tenant_id=resolved_tenant_id)
+        by_id: dict[str, list[DocumentOperationProfile]] = {}
+        for p in persisted:
+            by_id.setdefault(p.id, []).append(p)
+        return [
+            max(versions, key=lambda p: parse_semver(p.version)) for versions in by_id.values()
+        ]
+
+    async def list_profiles(self, tenant_id: str | None = None) -> list[DocumentOperationProfile]:
         """List latest versions of all registered DocumentOperationProfiles.
+
+        Args:
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             List of latest DocumentOperationProfile objects.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
+
+        if self._repository is not None:
+            return await self._get_latest_candidates(tenant_id=resolved_tenant_id)
+
         result: list[DocumentOperationProfile] = []
         for profile_id in self._profiles:
-            latest = await self.get_latest_version(profile_id)
+            latest = await self.get_latest_version(profile_id, tenant_id=resolved_tenant_id)
             result.append(latest)
         return result
 
-    async def list_all_profile_versions(self) -> list[DocumentOperationProfile]:
+    async def list_all_profile_versions(
+        self, tenant_id: str | None = None
+    ) -> list[DocumentOperationProfile]:
         """List all versions of all registered DocumentOperationProfiles.
+
+        Args:
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             List of DocumentOperationProfile objects.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
+
+        if self._repository is not None:
+            return await self._repository.list_operation_profiles(tenant_id=resolved_tenant_id)
+
         result: list[DocumentOperationProfile] = []
         for profile_id, versions_map in self._profiles.items():
             for ver_str, profile in versions_map.items():
@@ -326,40 +489,54 @@ class DocumentOperationProfileManager:
         return result
 
     async def find_by_business_operation(
-        self, business_operation: str
+        self, business_operation: str, tenant_id: str | None = None
     ) -> list[DocumentOperationProfile]:
         """Find all registered profiles matching a specific business operation code.
 
         Args:
             business_operation: Business operation string (e.g. 'GENERATE_PAYROLL_SLIP').
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             List of matching latest DocumentOperationProfile objects.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
         bo_clean = business_operation.strip().lower()
         result: list[DocumentOperationProfile] = []
 
+        if self._repository is not None:
+            candidates = await self._get_latest_candidates(tenant_id=resolved_tenant_id)
+            return [p for p in candidates if p.business_operation.strip().lower() == bo_clean]
+
         for profile_id in self._profiles:
-            latest = await self.get_latest_version(profile_id)
+            latest = await self.get_latest_version(profile_id, tenant_id=resolved_tenant_id)
             if latest.business_operation.strip().lower() == bo_clean:
                 result.append(latest)
 
         return result
 
-    async def find_by_namespace(self, namespace: str) -> list[DocumentOperationProfile]:
+    async def find_by_namespace(
+        self, namespace: str, tenant_id: str | None = None
+    ) -> list[DocumentOperationProfile]:
         """Find all registered profiles belonging to a specific namespace.
 
         Args:
             namespace: Namespace string.
+            tenant_id: Optional per-call tenant partition identifier.
 
         Returns:
             List of matching latest DocumentOperationProfile objects.
         """
+        resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
         ns_clean = namespace.strip()
         result: list[DocumentOperationProfile] = []
 
+        if self._repository is not None:
+            candidates = await self._get_latest_candidates(tenant_id=resolved_tenant_id)
+            return [p for p in candidates if p.namespace.strip() == ns_clean]
+
         for profile_id in self._profiles:
-            latest = await self.get_latest_version(profile_id)
+            latest = await self.get_latest_version(profile_id, tenant_id=resolved_tenant_id)
             if latest.namespace.strip() == ns_clean:
                 result.append(latest)
 

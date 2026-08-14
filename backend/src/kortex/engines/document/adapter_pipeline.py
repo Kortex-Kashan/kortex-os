@@ -8,7 +8,7 @@ in accordance with Section 10 and Section 14 of the Document Engine Implementati
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,6 +27,9 @@ from kortex.engines.document.models import (
     PipelineExecutionMode,
     PipelineStage,
 )
+
+if TYPE_CHECKING:
+    from kortex.engines.document.operation_profile import DocumentOperationProfileManager
 
 
 class StageExecutionResult(BaseModel):
@@ -137,15 +140,21 @@ class AdapterPipelineExecutor:
         self,
         registry: DocumentAdapterRegistry | None = None,
         sandbox: Any | None = None,
+        profile_manager: "DocumentOperationProfileManager | None" = None,
     ) -> None:
         """Initialize AdapterPipelineExecutor with an optional DocumentAdapterRegistry and sandbox.
 
         Args:
             registry: DocumentAdapterRegistry instance. Defaults to new registry if None.
             sandbox: Optional IAdapterSandbox or AdapterSandbox instance.
+            profile_manager: Optional DocumentOperationProfileManager used by execute_pipeline()
+                              to resolve a profile_id to its real, registered adapter_pipeline.
+                              When None, execute_pipeline() preserves its legacy single-stage
+                              shim behavior (treating profile_id as an adapter_id).
         """
         self._registry = registry if registry is not None else DocumentAdapterRegistry()
         self._sandbox = sandbox
+        self._profile_manager = profile_manager
 
     @property
     def registry(self) -> DocumentAdapterRegistry:
@@ -156,6 +165,11 @@ class AdapterPipelineExecutor:
     def sandbox(self) -> Any | None:
         """Return the underlying sandbox if configured."""
         return self._sandbox
+
+    @property
+    def profile_manager(self) -> "DocumentOperationProfileManager | None":
+        """Return the configured DocumentOperationProfileManager, or None if unset."""
+        return self._profile_manager
 
     def validate_pipeline_definition(self, definition: AdapterPipelineDefinition) -> None:
         """Validate an AdapterPipelineDefinition before execution.
@@ -333,6 +347,12 @@ class AdapterPipelineExecutor:
     ) -> OperationResult:
         """Facade method executing pipeline for a request (IAdapterPipelineExecutor protocol).
 
+        When a DocumentOperationProfileManager is configured, resolves the real registered
+        profile for profile_id and executes its actual adapter_pipeline. When no profile
+        manager is configured (or the profile cannot be resolved, or has no adapter_pipeline),
+        falls back to the legacy single-stage behavior of treating profile_id as an adapter_id
+        directly — preserved for backward compatibility with existing callers.
+
         Args:
             profile_id: Document Operation Profile identifier.
             request: OperationRequest payload.
@@ -345,33 +365,44 @@ class AdapterPipelineExecutor:
         if request is None or not request.request_id:
             raise DocumentOperationError("Invalid OperationRequest: request_id missing.")
 
-        # Create a single-stage fallback pipeline definition if profile_id matches registered adapter
-        try:
-            adapter = self._registry.get_adapter_by_id(profile_id)
-            cap = (
-                adapter.supported_capabilities[0]
-                if adapter.supported_capabilities
-                else AdapterCapability.GENERATE
-            )
-            pipeline_def = AdapterPipelineDefinition(
-                pipeline_id=f"pipeline-{profile_id}",
-                profile_id=profile_id,
-                stages=[
-                    PipelineStage(
-                        stage_id=f"stage-1-{profile_id}",
-                        adapter_id=adapter.adapter_id,
-                        required_capability=cap,
-                    )
-                ],
-            )
-        except AdapterNotFoundError:
-            pipeline_def = AdapterPipelineDefinition(
-                pipeline_id=f"pipeline-{profile_id}",
-                profile_id=profile_id,
-                stages=[],
-            )
-
         context = request.binding_context or BindingContext(context_id=f"ctx-{request.request_id}")
+
+        pipeline_def: AdapterPipelineDefinition | None = None
+        if self._profile_manager is not None:
+            try:
+                profile = await self._profile_manager.get_profile(
+                    profile_id, tenant_id=context.tenant_id
+                )
+                pipeline_def = profile.adapter_pipeline
+            except Exception:
+                pipeline_def = None
+
+        if pipeline_def is None:
+            # Legacy single-stage fallback: treat profile_id as an adapter_id directly.
+            try:
+                adapter = self._registry.get_adapter_by_id(profile_id)
+                cap = (
+                    adapter.supported_capabilities[0]
+                    if adapter.supported_capabilities
+                    else AdapterCapability.GENERATE
+                )
+                pipeline_def = AdapterPipelineDefinition(
+                    pipeline_id=f"pipeline-{profile_id}",
+                    profile_id=profile_id,
+                    stages=[
+                        PipelineStage(
+                            stage_id=f"stage-1-{profile_id}",
+                            adapter_id=adapter.adapter_id,
+                            required_capability=cap,
+                        )
+                    ],
+                )
+            except AdapterNotFoundError:
+                pipeline_def = AdapterPipelineDefinition(
+                    pipeline_id=f"pipeline-{profile_id}",
+                    profile_id=profile_id,
+                    stages=[],
+                )
 
         try:
             res = await self.execute_pipeline_definition(pipeline_def, context)

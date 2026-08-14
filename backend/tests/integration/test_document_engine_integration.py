@@ -26,7 +26,9 @@ from kortex.engines.document.exceptions import (
     DocumentOperationError,
     DocumentProfileNotFoundError,
 )
+from kortex.engines.document.adapters.macro_adapter import MacroAdapter
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
+from kortex.engines.document.operation_profile import DocumentOperationProfileManager
 from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
 from kortex.engines.document.models import (
     AdapterCapability,
@@ -191,10 +193,16 @@ async def test_complete_end_to_end_document_flow(tmp_path) -> None:
     adapter = IntegrationDummyAdapter()
     document_engine.adapter_registry.register_adapter(adapter)
 
+    # Unique per test run: DatabaseEngineManager() defaults to a shared on-disk file
+    # (kortex_local.db) when the Kernel isn't given an explicit connection, so a fixed
+    # profile_id could collide with a leftover row from a prior run now that
+    # DocumentOperationProfileManager persists through it.
+    e2e_profile_id = f"profile.e2e.payslip.{uuid4()}"
+
     # 2. Define pipeline
     pipeline_def = AdapterPipelineDefinition(
         pipeline_id="pipe-e2e",
-        profile_id="profile.e2e.payslip",
+        profile_id=e2e_profile_id,
         stages=[
             PipelineStage(
                 stage_id="stage-gen",
@@ -206,7 +214,7 @@ async def test_complete_end_to_end_document_flow(tmp_path) -> None:
 
     # 3. Register operation profile
     profile = DocumentOperationProfile(
-        id="profile.e2e.payslip",
+        id=e2e_profile_id,
         name="End-To-End Payslip Profile",
         namespace="kortex.e2e",
         version="1.0.0",
@@ -240,11 +248,11 @@ async def test_complete_end_to_end_document_flow(tmp_path) -> None:
 
     request = OperationRequest(
         request_id="req-e2e-100",
-        profile_id="profile.e2e.payslip",
+        profile_id=e2e_profile_id,
         binding_context=context,
     )
 
-    result = await document_engine.execute_profile("profile.e2e.payslip", request)
+    result = await document_engine.execute_profile(e2e_profile_id, request)
 
     assert result.status == "COMPLETED"
     assert result.output_bytes is not None
@@ -552,6 +560,125 @@ async def test_template_library_persistence_survives_fresh_session(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_operation_profile_persistence_survives_fresh_session(tmp_path) -> None:
+    """7d. Default DocumentEngine construction must also auto-wire profile_manager persistence.
+
+    A profile registered through the booted engine must be readable by a completely
+    independent DocumentOperationProfileManager/DocumentRepository pairing sharing only the
+    underlying Storage Engine data store (mirrors the established TemplateLibrary/
+    DocumentLifecycleManager fresh-session persistence pattern).
+    """
+    kernel = Kernel()
+
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_profile_persist"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    assert document_engine.profile_manager.repository is not None
+
+    unique_id = f"integration.profile.{uuid4()}"
+    pipeline_def = AdapterPipelineDefinition(
+        pipeline_id=f"pipe-{unique_id}",
+        profile_id=unique_id,
+        stages=[
+            PipelineStage(
+                stage_id="s1",
+                adapter_id="kortex.document.dummy.v1",
+                required_capability=AdapterCapability.GENERATE,
+            )
+        ],
+    )
+    profile = DocumentOperationProfile(
+        id=unique_id,
+        name="Integration Custom Profile",
+        namespace="kortex.integration.profile",
+        version="1.0.0",
+        description="Persisted through the booted DocumentEngine",
+        business_operation="INTEGRATION_TEST_OP",
+        adapter_pipeline=pipeline_def,
+    )
+    await document_engine.profile_manager.register_profile(profile)
+
+    data_store = storage_engine.data
+    await kernel.shutdown()
+
+    fresh_manager = DocumentOperationProfileManager(
+        repository=DocumentRepository(data_store=data_store)
+    )
+    reread = await fresh_manager.get_profile(unique_id)
+    assert reread.namespace == "kortex.integration.profile"
+    assert reread.adapter_pipeline is not None
+    assert reread.adapter_pipeline.stages[0].adapter_id == "kortex.document.dummy.v1"
+
+
+@pytest.mark.asyncio
+async def test_full_business_operation_flow_with_macro_and_dummy_adapters(tmp_path) -> None:
+    """Full hierarchy exercised end-to-end: Business Operation -> Operation Profile ->
+    Adapter Pipeline -> Document Adapters (Macro + Dummy), executed via
+    DocumentEngine.execute_profile() through a fully booted Kernel.
+    """
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_full_flow"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    # Both reference adapters are auto-registered at boot by DocumentAdapterLoader.
+    adapter_ids = {a.adapter_id for a in document_engine.list_adapters()}
+    assert "kortex.document.macro.v1" in adapter_ids
+    assert "kortex.document.dummy.v1" in adapter_ids
+
+    profile_id = f"integration.full.flow.{uuid4()}"
+    pipeline_def = AdapterPipelineDefinition(
+        pipeline_id=f"pipe-{profile_id}",
+        profile_id=profile_id,
+        stages=[
+            PipelineStage(
+                stage_id="stage-macro",
+                adapter_id="kortex.document.macro.v1",
+                required_capability=AdapterCapability.MACROS,
+            ),
+            PipelineStage(
+                stage_id="stage-dummy",
+                adapter_id="kortex.document.dummy.v1",
+                required_capability=AdapterCapability.GENERATE,
+            ),
+        ],
+    )
+    profile = DocumentOperationProfile(
+        id=profile_id,
+        name="Full Flow Profile",
+        namespace="kortex.integration.fullflow",
+        version="1.0.0",
+        description="Business Operation -> Profile -> Pipeline -> Adapters, end to end",
+        business_operation="INTEGRATION_FULL_FLOW",
+        adapter_pipeline=pipeline_def,
+    )
+    await document_engine.profile_manager.register_profile(profile)
+
+    request = OperationRequest(
+        request_id=f"req-{profile_id}",
+        profile_id=profile_id,
+        binding_context=BindingContext(context_id=f"ctx-{profile_id}", data={"rows": 5}),
+    )
+    result = await document_engine.execute_profile(profile_id, request)
+
+    assert result.status == "COMPLETED"
+    assert result.output_bytes is not None
+    # Final output came from the last stage (dummy adapter), which echoes its own adapter_id.
+    assert b"kortex.document.dummy.v1" in result.output_bytes
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_event_engine_pubsub_integration(tmp_path) -> None:
     """8. Event Engine Integration test."""
     kernel = Kernel()
@@ -572,8 +699,13 @@ async def test_event_engine_pubsub_integration(tmp_path) -> None:
     kernel.subscribe_event("system.started", handle_event)
 
     # Trigger operation on document engine
+    # Unique per test run: DatabaseEngineManager() defaults to a shared on-disk file
+    # (kortex_local.db) when the Kernel isn't given an explicit connection, so a fixed
+    # profile_id could collide with a leftover row from a prior run now that
+    # DocumentOperationProfileManager persists through it.
+    evt_profile_id = f"profile.evt.test.{uuid4()}"
     profile = DocumentOperationProfile(
-        id="profile.evt.test",
+        id=evt_profile_id,
         name="Event Test Profile",
         namespace="kortex.evt",
         version="1.0.0",
@@ -584,11 +716,11 @@ async def test_event_engine_pubsub_integration(tmp_path) -> None:
 
     req = OperationRequest(
         request_id="req-evt-test-1",
-        profile_id="profile.evt.test",
+        profile_id=evt_profile_id,
         business_operation="EVT_OP",
         binding_context=BindingContext(context_id="ctx-evt"),
     )
-    await document_engine.execute_profile("profile.evt.test", req)
+    await document_engine.execute_profile(evt_profile_id, req)
 
     # Verify event logged in engine emitted_events
     assert len(document_engine.emitted_events) >= 2
