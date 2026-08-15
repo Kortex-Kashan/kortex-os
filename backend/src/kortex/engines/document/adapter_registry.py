@@ -7,7 +7,7 @@ in accordance with Section 14 of the Document Engine Implementation Specificatio
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.exceptions import AdapterNotFoundError, DocumentAdapterError
@@ -19,6 +19,7 @@ from kortex.engines.document.models import (
     TemplateSchema,
 )
 from kortex.engines.document.template_library import parse_semver
+from kortex.engines.storage.interfaces import ICacheStore
 
 
 class MetadataAdapterWrapper(BaseDocumentAdapter):
@@ -55,10 +56,52 @@ class DocumentAdapterRegistry:
     6. Thread-safe, deterministic, offline-first adapter resolution.
     """
 
-    def __init__(self) -> None:
-        """Initialize empty in-memory adapter catalog."""
+    # Adapter Discovery Cache: single-key cache of list_adapters_cached()'s result.
+    # Correctness does not depend on this TTL at all (see _mark_discovery_cache_dirty) — it
+    # is kept only as a general hygiene backstop, since adapter registration is a rare,
+    # boot-time event rather than a high-frequency mutation.
+    DISCOVERY_CACHE_KEY = "doc_engine:adapters:discovery:all"
+    ADAPTER_CACHE_TTL_SECONDS = 60
+
+    def __init__(self, cache_store: ICacheStore | None = None) -> None:
+        """Initialize empty in-memory adapter catalog.
+
+        Args:
+            cache_store: Optional ICacheStore backing the additive Adapter Discovery Cache
+                         (see list_adapters_cached()). Adapters are process-global, not
+                         tenant-scoped data (established since Milestone 4), so no tenant_id
+                         is threaded into the cache key.
+        """
         # Map: adapter_id -> dict of (version_str -> BaseDocumentAdapter)
         self._adapters: dict[str, dict[str, BaseDocumentAdapter]] = {}
+        self._cache_store = cache_store
+        # Pending-invalidation flag (see _mark_discovery_cache_dirty / list_adapters_cached).
+        self._discovery_cache_dirty = False
+
+    @property
+    def cache_store(self) -> ICacheStore | None:
+        """Return the configured ICacheStore backing the Adapter Discovery Cache, or None if uncached."""
+        return self._cache_store
+
+    def _mark_discovery_cache_dirty(self) -> None:
+        """Mark the Adapter Discovery Cache as stale after a registration change.
+
+        register_adapter/unregister_adapter are synchronous — an established, tested contract
+        relied on by DocumentAdapterLoader.load_and_register_all() and other sync call sites —
+        while ICacheStore is async-only, so the actual cache entry cannot be deleted from
+        within these methods without making them async. Rather than scheduling a background
+        task (which left a real stale-read window between registration and the task actually
+        running — the cache entry was not guaranteed to be gone by the time the very next
+        read happened), this sets a plain synchronous flag with no event-loop dependency at
+        all. list_adapters_cached() — the sole reader of this cache key — checks this flag
+        FIRST, before ever consulting the cache, and applies the pending deletion synchronously
+        with respect to that read. This guarantees no caller can ever observe a stale entry:
+        correctness comes from ordering at the read site, not from timing of when the flag was
+        set. This single code path covers both automatic discovery (DocumentAdapterLoader
+        calls register_adapter for each discovered adapter) and explicit registration.
+        """
+        if self._cache_store is not None:
+            self._discovery_cache_dirty = True
 
     def validate_adapter_metadata(self, metadata: AdapterMetadata) -> None:
         """Validate AdapterMetadata completeness and SemVer format.
@@ -138,6 +181,7 @@ class DocumentAdapterRegistry:
             self._adapters[adapter_id] = {}
 
         self._adapters[adapter_id][version] = adapter_obj
+        self._mark_discovery_cache_dirty()
         return adapter_obj
 
     def unregister_adapter(
@@ -163,9 +207,11 @@ class DocumentAdapterRegistry:
             del self._adapters[adapter_id][version]
             if not self._adapters[adapter_id]:
                 del self._adapters[adapter_id]
+            self._mark_discovery_cache_dirty()
             return True
 
         del self._adapters[adapter_id]
+        self._mark_discovery_cache_dirty()
         return True
 
     def remove_adapter(self, adapter_id: str, version: str | None = None) -> bool:
@@ -391,6 +437,38 @@ class DocumentAdapterRegistry:
         for adapter_id in self._adapters:
             latest = self.get_latest_version(adapter_id)
             result.append(latest.metadata)
+        return result
+
+    async def list_adapters_cached(self) -> list[AdapterMetadata]:
+        """Read-through cached variant of list_adapters(), backed by the Adapter Discovery Cache.
+
+        Purely additive — does not replace or alter list_adapters(), which remains synchronous
+        and uncached for existing callers. When cache_store is None, this simply delegates to
+        list_adapters() with no caching behavior at all.
+
+        Any pending invalidation from a prior register_adapter/unregister_adapter call (see
+        _mark_discovery_cache_dirty) is applied here, before the cache is consulted — this is
+        what actually guarantees a stale result can never be returned, regardless of how much
+        time has passed since the registration change that triggered it.
+
+        Returns:
+            List of AdapterMetadata objects (same contents as list_adapters()).
+        """
+        if self._cache_store is None:
+            return self.list_adapters()
+
+        if self._discovery_cache_dirty:
+            await self._cache_store.delete(self.DISCOVERY_CACHE_KEY)
+            self._discovery_cache_dirty = False
+
+        cached = await self._cache_store.get(self.DISCOVERY_CACHE_KEY)
+        if cached is not None:
+            return cast(list[AdapterMetadata], cached)
+
+        result = self.list_adapters()
+        await self._cache_store.set(
+            self.DISCOVERY_CACHE_KEY, result, ttl_seconds=self.ADAPTER_CACHE_TTL_SECONDS
+        )
         return result
 
     def list_all_adapter_versions(self) -> list[AdapterMetadata]:

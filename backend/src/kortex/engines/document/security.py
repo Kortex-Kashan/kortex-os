@@ -234,20 +234,25 @@ class DocumentStorageBinder:
         return await self._object_store.get_object(bucket_name, object_key)
 
     # Multi-level caching (ICacheStore)
-    async def cache_get(self, cache_category: str, key: str) -> Any | None:
-        """Retrieve value from multi-level cache store."""
+    async def cache_get(self, cache_category: str, key: str, tenant_id: str = "default") -> Any | None:
+        """Retrieve value from multi-level cache store, scoped to tenant_id."""
         if self._cache_store is None:
             return None
-        composite_key = f"doc_engine:{cache_category}:{key}"
+        composite_key = f"doc_engine:{tenant_id}:{cache_category}:{key}"
         return await self._cache_store.get(composite_key)
 
     async def cache_set(
-        self, cache_category: str, key: str, value: Any, ttl_seconds: int | None = 300
+        self,
+        cache_category: str,
+        key: str,
+        value: Any,
+        ttl_seconds: int | None = 300,
+        tenant_id: str = "default",
     ) -> bool:
-        """Store value in multi-level cache store with optional TTL."""
+        """Store value in multi-level cache store with optional TTL, scoped to tenant_id."""
         if self._cache_store is None:
             return False
-        composite_key = f"doc_engine:{cache_category}:{key}"
+        composite_key = f"doc_engine:{tenant_id}:{cache_category}:{key}"
         return await self._cache_store.set(composite_key, value, ttl_seconds=ttl_seconds)
 
     # Relational persistence (IDataStore)

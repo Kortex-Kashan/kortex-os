@@ -704,6 +704,7 @@ class DocumentRepository(IDocumentRepository):
         parent_version_id: str | None = None,
         published_at: str | None = None,
         tenant_id: str = "default",
+        sha256_hash: str | None = None,
     ) -> tuple[DocumentVersion, DocumentVersion | None]:
         """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document pointer.
 
@@ -716,6 +717,7 @@ class DocumentRepository(IDocumentRepository):
             parent_version_id: Optional expected active predecessor version identifier.
             published_at: Optional ISO timestamp of publication.
             tenant_id: Tenant partition identifier.
+            sha256_hash: Optional SHA256 integrity hash to record on the published version.
 
         Returns:
             A tuple of (published_child_version, superseded_parent_version_or_none).
@@ -818,6 +820,8 @@ class DocumentRepository(IDocumentRepository):
             # 5. Mutate child version to PUBLISHED
             child_record.lifecycle_state = DocumentLifecycleState.PUBLISHED.value
             child_record.is_immutable = True
+            if sha256_hash is not None:
+                child_record.sha256_hash = sha256_hash
             if published_at:
                 try:
                     child_record.published_at = datetime.datetime.fromisoformat(published_at)

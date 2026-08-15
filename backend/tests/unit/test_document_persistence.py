@@ -1208,6 +1208,87 @@ async def test_publish_version_genesis_success(
 
 
 @pytest.mark.asyncio
+async def test_publish_version_records_sha256_hash_when_provided(
+    repository: DocumentRepository,
+) -> None:
+    """Verify publish_version's optional sha256_hash param (Milestone 7) is recorded and
+    round-trips on subsequent reads; omitting it leaves the field None (backward compatible)."""
+    doc = Document(document_id="doc-hash-persist", tenant_id="tenant-alpha", title="Hash Test")
+    await repository.create_document(doc)
+
+    meta = DocumentMetadata(
+        document_id="doc-hash-persist",
+        version_id="ver-hash-persist",
+        title="Hash Title",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-hash-persist",
+        document_id="doc-hash-persist",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=meta,
+    )
+    await repository.create_version(v1, tenant_id="tenant-alpha")
+
+    expected_hash = "a" * 64
+    child, _ = await repository.publish_version(
+        document_id="doc-hash-persist",
+        version_id="ver-hash-persist",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+        sha256_hash=expected_hash,
+    )
+
+    assert child.metadata.sha256_hash == expected_hash
+
+    reread = await repository.get_version(
+        "doc-hash-persist", "ver-hash-persist", tenant_id="tenant-alpha"
+    )
+    assert reread is not None
+    assert reread.metadata.sha256_hash == expected_hash
+
+
+@pytest.mark.asyncio
+async def test_publish_version_without_sha256_hash_leaves_field_none(
+    repository: DocumentRepository,
+) -> None:
+    """Verify omitting sha256_hash on publish_version leaves the field unset (default None)."""
+    doc = Document(document_id="doc-hash-omit", tenant_id="tenant-alpha", title="Hash Omit Test")
+    await repository.create_document(doc)
+
+    meta = DocumentMetadata(
+        document_id="doc-hash-omit",
+        version_id="ver-hash-omit",
+        title="Hash Omit Title",
+        author_id="user-1",
+        lifecycle_state=DocumentLifecycleState.DRAFT,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    v1 = DocumentVersion(
+        version_id="ver-hash-omit",
+        document_id="doc-hash-omit",
+        version_number="1.0.0",
+        created_at="2026-01-01T00:00:00Z",
+        created_by="user-1",
+        metadata=meta,
+    )
+    await repository.create_version(v1, tenant_id="tenant-alpha")
+
+    child, _ = await repository.publish_version(
+        document_id="doc-hash-omit",
+        version_id="ver-hash-omit",
+        parent_version_id=None,
+        tenant_id="tenant-alpha",
+    )
+
+    assert child.metadata.sha256_hash is None
+
+
+@pytest.mark.asyncio
 async def test_publish_version_with_parent_superseding(
     repository: DocumentRepository,
 ) -> None:

@@ -269,6 +269,35 @@ async def test_document_storage_binder_with_stores() -> None:
 
 
 @pytest.mark.asyncio
+async def test_document_storage_binder_cache_tenant_isolation() -> None:
+    """Test that DocumentStorageBinder cache keys are tenant-scoped (Milestone 7 fix).
+
+    Two tenants writing under the identical (cache_category, key) pair must not collide;
+    each tenant must only ever observe its own cached value.
+    """
+    cache_store = MockCacheStore()
+    binder = DocumentStorageBinder(cache_store=cache_store)
+
+    await binder.cache_set("schemas", "payslip", {"tenant": "alpha"}, tenant_id="tenant-alpha")
+    await binder.cache_set("schemas", "payslip", {"tenant": "beta"}, tenant_id="tenant-beta")
+
+    alpha_val = await binder.cache_get("schemas", "payslip", tenant_id="tenant-alpha")
+    beta_val = await binder.cache_get("schemas", "payslip", tenant_id="tenant-beta")
+    assert alpha_val == {"tenant": "alpha"}
+    assert beta_val == {"tenant": "beta"}
+    assert alpha_val != beta_val
+
+    # Default tenant_id ("default") must not observe either tenant's value.
+    assert await binder.cache_get("schemas", "payslip") is None
+
+    # Composite key must actually embed the tenant_id segment, not just coincidentally
+    # produce distinct values (guards against a no-op "fix" that still collides).
+    assert "doc_engine:tenant-alpha:schemas:payslip" in cache_store.cache
+    assert "doc_engine:tenant-beta:schemas:payslip" in cache_store.cache
+    assert "doc_engine:default:schemas:payslip" not in cache_store.cache
+
+
+@pytest.mark.asyncio
 async def test_document_storage_binder_without_stores() -> None:
     """Test DocumentStorageBinder graceful behavior when stores are None."""
     binder = DocumentStorageBinder()

@@ -8,10 +8,11 @@ and validation in accordance with Section 7 of the Document Engine Implementatio
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from kortex.engines.document.exceptions import DocumentTemplateError
 from kortex.engines.document.models import AdapterCapability, TemplateSchema
+from kortex.engines.storage.interfaces import ICacheStore
 
 if TYPE_CHECKING:
     from kortex.engines.document.interfaces import ITemplateRepository
@@ -68,11 +69,17 @@ class TemplateLibrary:
     5. Removal and deletion of template schemas.
     """
 
+    # Template Schema Cache TTL. Templates change rarely once registered, so a longer TTL
+    # than the Metadata Cache is used; correctness is guaranteed by explicit invalidation
+    # on every mutating call (register_template/update_template/delete_template), not TTL alone.
+    TEMPLATE_CACHE_TTL_SECONDS = 600
+
     def __init__(
         self,
         load_defaults: bool = True,
         repository: ITemplateRepository | None = None,
         tenant_id: str = "default",
+        cache_store: ICacheStore | None = None,
     ) -> None:
         """Initialize the template catalog and load standard templates if enabled.
 
@@ -81,12 +88,19 @@ class TemplateLibrary:
             repository: Optional ITemplateRepository for relational persistence via Storage
                         Engine. If None, operates in standalone in-memory mode.
             tenant_id: Tenant partition identifier used when repository is configured.
+            cache_store: Optional ICacheStore backing the tenant-scoped Template Schema Cache.
+                         Only the "latest version" resolution (get_template with version=None)
+                         is cached; specific pinned-version lookups always read live, since
+                         those reference already-immutable, already-registered content and gain
+                         no correctness benefit from caching. When cache_store is None, template
+                         resolution behaves exactly as before this cache was introduced.
         """
         # Map: template_id -> dict of (version_str -> TemplateSchema). Used only in
         # standalone in-memory mode; ignored once a repository is configured.
         self._templates: dict[str, dict[str, TemplateSchema]] = {}
         self._repository = repository
         self._tenant_id = tenant_id
+        self._cache_store = cache_store
 
         if load_defaults:
             self._load_standard_templates()
@@ -95,6 +109,21 @@ class TemplateLibrary:
     def repository(self) -> ITemplateRepository | None:
         """Return the configured ITemplateRepository, or None if in-memory mode."""
         return self._repository
+
+    @property
+    def cache_store(self) -> ICacheStore | None:
+        """Return the configured ICacheStore backing the Template Schema Cache, or None if uncached."""
+        return self._cache_store
+
+    @staticmethod
+    def _template_cache_key(template_id: str, tenant_id: str) -> str:
+        """Build the Template Schema Cache key for a template_id's latest-version resolution."""
+        return f"doc_engine:{tenant_id}:template_schema:{template_id}:latest"
+
+    async def _invalidate_template_cache(self, template_id: str, tenant_id: str) -> None:
+        """Invalidate the cached latest-version resolution for template_id, if caching is enabled."""
+        if self._cache_store is not None:
+            await self._cache_store.delete(self._template_cache_key(template_id, tenant_id))
 
     def validate_template_schema(self, schema: TemplateSchema) -> None:
         """Validate a TemplateSchema instance prior to registration.
@@ -208,7 +237,9 @@ class TemplateLibrary:
                     f"Duplicate template registration: '{template_id}' version '{version}' "
                     f"is already registered."
                 )
-            return await self._repository.save_template(schema, tenant_id=resolved_tenant_id)
+            saved = await self._repository.save_template(schema, tenant_id=resolved_tenant_id)
+            await self._invalidate_template_cache(template_id, resolved_tenant_id)
+            return saved
 
         if is_duplicate_in_memory:
             raise DocumentTemplateError(
@@ -219,6 +250,7 @@ class TemplateLibrary:
             self._templates[template_id] = {}
 
         self._templates[template_id][version] = schema
+        await self._invalidate_template_cache(template_id, resolved_tenant_id)
         return schema
 
     async def install_template(
@@ -248,6 +280,13 @@ class TemplateLibrary:
         When a repository is configured, checks persisted templates first, then falls
         back to the built-in standard templates.
 
+        Read order when a Template Schema Cache is configured (cache_store is not None):
+        the cache is consulted first, but only for latest-version lookups (version=None).
+        On a cache miss, resolution proceeds through the existing repository-first /
+        in-memory-fallback chain unchanged, and the result is written into the cache
+        before being returned. Specific pinned-version lookups (version supplied) are
+        never cached and always resolve through the live chain.
+
         Args:
             template_id: Template identifier string.
             version: Optional SemVer string.
@@ -263,9 +302,32 @@ class TemplateLibrary:
         template_id = template_id.strip()
         resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
 
+        cache_store = self._cache_store
+        cache_key: str | None = None
+        if cache_store is not None and version is None:
+            cache_key = self._template_cache_key(template_id, resolved_tenant_id)
+            cached = await cache_store.get(cache_key)
+            if cached is not None:
+                return cast(TemplateSchema, cached)
+
+        resolved = await self._resolve_template(template_id, version, resolved_tenant_id)
+
+        if cache_key is not None and cache_store is not None:
+            await cache_store.set(cache_key, resolved, ttl_seconds=self.TEMPLATE_CACHE_TTL_SECONDS)
+
+        return resolved
+
+    async def _resolve_template(
+        self, template_id: str, version: str | None, tenant_id: str
+    ) -> TemplateSchema:
+        """Resolve a TemplateSchema through the repository-first / in-memory-fallback chain.
+
+        Extracted from get_template so the Template Schema Cache can wrap this unchanged
+        resolution logic without altering its behavior.
+        """
         if self._repository is not None:
             result = await self._repository.get_template(
-                template_id, version=version, tenant_id=resolved_tenant_id
+                template_id, version=version, tenant_id=tenant_id
             )
             if result is not None:
                 return result
@@ -383,12 +445,14 @@ class TemplateLibrary:
                 await self._repository.delete_template(
                     template_id, version, tenant_id=resolved_tenant_id
                 )
+                await self._invalidate_template_cache(template_id, resolved_tenant_id)
                 return True
 
             for match in matches:
                 await self._repository.delete_template(
                     template_id, match.version, tenant_id=resolved_tenant_id
                 )
+            await self._invalidate_template_cache(template_id, resolved_tenant_id)
             return True
 
         if template_id not in self._templates or not self._templates[template_id]:
@@ -403,9 +467,11 @@ class TemplateLibrary:
             del self._templates[template_id][version]
             if not self._templates[template_id]:
                 del self._templates[template_id]
+            await self._invalidate_template_cache(template_id, resolved_tenant_id)
             return True
 
         del self._templates[template_id]
+        await self._invalidate_template_cache(template_id, resolved_tenant_id)
         return True
 
     async def remove_template(

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from kortex.engines.document.exceptions import DocumentRecoveryError
 from kortex.engines.document.interfaces import IDocumentRecoveryProvider
+from kortex.engines.storage.interfaces import ICacheStore
 
 
 class CheckpointState(BaseModel):
@@ -51,14 +52,32 @@ class DocumentRecoveryManager(IDocumentRecoveryProvider):
     Coordinated with Workflow Engine to guarantee transactional document operations.
     """
 
-    def __init__(self) -> None:
-        """Initialize in-memory checkpoint, failure, and rollback state stores."""
+    def __init__(self, cache_store: ICacheStore | None = None) -> None:
+        """Initialize in-memory checkpoint, failure, and rollback state stores.
+
+        Args:
+            cache_store: Optional ICacheStore used to additionally persist checkpoint
+                state so it survives across DocumentRecoveryManager instances sharing
+                the same cache store. When absent, behavior is identical to pure
+                in-memory operation.
+        """
         # Maps request_id -> list of CheckpointState
         self._checkpoints: dict[str, list[CheckpointState]] = {}
         # Maps request_id -> list of FailureMetadata
         self._failures: dict[str, list[FailureMetadata]] = {}
         # Maps request_id -> list of rollback compensation payload bytes
         self._rollback_stacks: dict[str, list[bytes]] = {}
+        self._cache_store = cache_store
+
+    @property
+    def cache_store(self) -> ICacheStore | None:
+        """Return the configured ICacheStore backing checkpoint persistence, or None if in-memory only."""
+        return self._cache_store
+
+    @staticmethod
+    def _checkpoint_cache_key(request_id: str) -> str:
+        """Build the ICacheStore key under which a request's checkpoints are persisted."""
+        return f"doc_engine:recovery:checkpoints:{request_id}"
 
     async def checkpoint(self, request_id: str, stage_id: str, state_data: bytes) -> str:
         """Save operational checkpoint state for recovery (IDocumentRecoveryProvider protocol).
@@ -101,6 +120,13 @@ class DocumentRecoveryManager(IDocumentRecoveryProvider):
             self._rollback_stacks[req_id] = []
         self._rollback_stacks[req_id].append(state_data)
 
+        if self._cache_store is not None:
+            await self._cache_store.set(
+                self._checkpoint_cache_key(req_id),
+                list(self._checkpoints[req_id]),
+                ttl_seconds=None,
+            )
+
         return chk_id
 
     async def rollback(self, request_id: str) -> bool:
@@ -123,6 +149,9 @@ class DocumentRecoveryManager(IDocumentRecoveryProvider):
 
         if req_id in self._rollback_stacks:
             del self._rollback_stacks[req_id]
+
+        if self._cache_store is not None:
+            await self._cache_store.delete(self._checkpoint_cache_key(req_id))
 
         return existed
 
@@ -186,7 +215,7 @@ class DocumentRecoveryManager(IDocumentRecoveryProvider):
             return None
 
         req_id = request_id.strip()
-        checkpoints = self._checkpoints.get(req_id, [])
+        checkpoints = await self.get_checkpoints(req_id)
         if not checkpoints:
             return None
 
@@ -230,8 +259,22 @@ class DocumentRecoveryManager(IDocumentRecoveryProvider):
         return failure
 
     async def get_checkpoints(self, request_id: str) -> list[CheckpointState]:
-        """Return all checkpoints for a request ID."""
-        return list(self._checkpoints.get(request_id.strip(), []))
+        """Return all checkpoints for a request ID.
+
+        Falls back to the configured ICacheStore when this instance has no in-memory
+        record of request_id, so a fresh DocumentRecoveryManager sharing the same
+        cache_store can still observe checkpoints written by a prior instance.
+        """
+        req_id = request_id.strip()
+        if req_id in self._checkpoints:
+            return list(self._checkpoints[req_id])
+
+        if self._cache_store is not None:
+            cached = await self._cache_store.get(self._checkpoint_cache_key(req_id))
+            if cached:
+                return list(cached)
+
+        return []
 
     async def get_failures(self, request_id: str) -> list[FailureMetadata]:
         """Return all failure metadata records for a request ID."""

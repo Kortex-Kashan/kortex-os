@@ -5,6 +5,7 @@ Target: 100% pass rate, 100% line coverage for adapter_registry.py.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from kortex.engines.document.models import (
     DocumentOperationType,
     TemplateSchema,
 )
+from kortex.engines.storage.stores.cache_store import MemoryCacheStore
 
 
 class DummyPdfAdapter(BaseDocumentAdapter):
@@ -612,4 +614,120 @@ def test_bad_metadata_type_rejection() -> None:
 
     with pytest.raises(DocumentAdapterError, match="Adapter metadata property must return an AdapterMetadata instance"):
         registry.register_adapter(bad_type_adapter)
+
+
+# =============================================================================
+# Milestone 7: Adapter Discovery Cache
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_adapter_discovery_cache_absent_delegates_to_list_adapters() -> None:
+    """Test that omitting cache_store makes list_adapters_cached() a pure passthrough."""
+    registry = DocumentAdapterRegistry()
+    assert registry.cache_store is None
+
+    registry.register_adapter(DummyPdfAdapter())
+
+    cached_result = await registry.list_adapters_cached()
+    direct_result = registry.list_adapters()
+    assert [m.adapter_id for m in cached_result] == [m.adapter_id for m in direct_result]
+
+
+@pytest.mark.asyncio
+async def test_adapter_discovery_cache_read_through() -> None:
+    """Test that list_adapters_cached() populates the Adapter Discovery Cache on a miss."""
+    cache_store = MemoryCacheStore()
+    registry = DocumentAdapterRegistry(cache_store=cache_store)
+    assert registry.cache_store is cache_store
+
+    registry.register_adapter(DummyPdfAdapter())
+
+    first = await registry.list_adapters_cached()
+    assert len(first) == 1
+    assert await cache_store.get(DocumentAdapterRegistry.DISCOVERY_CACHE_KEY) is not None
+
+    second = await registry.list_adapters_cached()
+    assert [m.adapter_id for m in second] == [m.adapter_id for m in first]
+
+
+@pytest.mark.asyncio
+async def test_adapter_discovery_cache_invalidated_on_register() -> None:
+    """Test that register_adapter guarantees the very next read reflects the new
+    registration, never a stale cached result.
+
+    This covers the "explicit registration" half of dual-path invalidation coverage. No
+    event-loop yield (e.g. asyncio.sleep(0)) is needed between register_adapter() and the
+    next list_adapters_cached() call: the pending-invalidation flag is consumed synchronously
+    with respect to that very read, so there is no timing window in which a stale result can
+    be observed.
+    """
+    cache_store = MemoryCacheStore()
+    registry = DocumentAdapterRegistry(cache_store=cache_store)
+
+    registry.register_adapter(DummyPdfAdapter())
+    first = await registry.list_adapters_cached()
+    assert len(first) == 1
+
+    registry.register_adapter(DummyOcrAdapter())
+    second = await registry.list_adapters_cached()
+    assert len(second) == 2
+
+
+@pytest.mark.asyncio
+async def test_adapter_discovery_cache_invalidated_on_unregister() -> None:
+    """Test that unregister_adapter guarantees the very next read reflects the removal."""
+    cache_store = MemoryCacheStore()
+    registry = DocumentAdapterRegistry(cache_store=cache_store)
+
+    registry.register_adapter(DummyPdfAdapter())
+    registry.register_adapter(DummyOcrAdapter())
+    first = await registry.list_adapters_cached()
+    assert len(first) == 2
+
+    registry.unregister_adapter("kortex.adapter.pdf")
+    second = await registry.list_adapters_cached()
+    assert len(second) == 1
+    assert second[0].adapter_id == "kortex.adapter.ocr"
+
+
+@pytest.mark.asyncio
+async def test_adapter_discovery_cache_repeated_register_unregister_never_stale() -> None:
+    """Test that several rapid register/unregister calls in a row, with no intervening
+    cache read, still resolve correctly on the next read (guards against any regression
+    back toward a scheduling-order-dependent invalidation strategy)."""
+    cache_store = MemoryCacheStore()
+    registry = DocumentAdapterRegistry(cache_store=cache_store)
+
+    registry.register_adapter(DummyPdfAdapter())
+    registry.register_adapter(DummyOcrAdapter())
+    registry.unregister_adapter("kortex.adapter.pdf")
+    registry.register_adapter(DummyPdfAdapter(version="2.0.0"))
+
+    result = await registry.list_adapters_cached()
+    adapter_ids = {m.adapter_id for m in result}
+    assert adapter_ids == {"kortex.adapter.pdf", "kortex.adapter.ocr"}
+    pdf_meta = next(m for m in result if m.adapter_id == "kortex.adapter.pdf")
+    assert pdf_meta.version == "2.0.0"
+
+
+def test_adapter_registration_outside_event_loop_marks_cache_dirty_for_next_read() -> None:
+    """Test that register_adapter/unregister_adapter work correctly with no asyncio event
+    loop running at all (e.g. called synchronously from DocumentAdapterLoader before any
+    async context exists), and that the resulting pending-invalidation is still correctly
+    honored the next time the cache is read from an async context.
+    """
+    cache_store = MemoryCacheStore()
+    registry = DocumentAdapterRegistry(cache_store=cache_store)
+
+    # No event loop running here at all — must not raise, and must still mark the cache dirty.
+    registry.register_adapter(DummyPdfAdapter())
+    assert registry.unregister_adapter("kortex.adapter.pdf") is True
+    assert registry._discovery_cache_dirty is True
+
+    async def _read() -> list[AdapterMetadata]:
+        return await registry.list_adapters_cached()
+
+    result = asyncio.run(_read())
+    assert result == []
+    assert registry._discovery_cache_dirty is False
 

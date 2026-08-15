@@ -12,6 +12,7 @@ from kortex.engines.document.exceptions import DocumentTemplateError
 from kortex.engines.document.models import AdapterCapability, TemplateSchema
 from kortex.engines.document.persistence import TemplateRepository
 from kortex.engines.document.template_library import TemplateLibrary, parse_semver
+from kortex.engines.storage.stores.cache_store import MemoryCacheStore
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 
 
@@ -815,4 +816,132 @@ async def test_tenant_isolation_falls_back_to_constructor_default(
     # A different tenant_id does not see it.
     with pytest.raises(DocumentTemplateError, match="not found"):
         await lib.get_template("fallback.tmpl", tenant_id="some-other-tenant")
+
+
+# =============================================================================
+# Milestone 7: Template Schema Cache
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_template_schema_cache_read_through_on_latest_lookup() -> None:
+    """Test that a latest-version get_template() populates the Template Schema Cache
+    and that a subsequent call is served from cache."""
+    cache_store = MemoryCacheStore()
+    lib = TemplateLibrary(load_defaults=False, cache_store=cache_store, tenant_id="tenant-cache")
+    assert lib.cache_store is cache_store
+
+    schema = TemplateSchema(
+        template_id="cache.tmpl",
+        name="Cache Template",
+        namespace="kortex.cache.test",
+        version="1.0.0",
+        description="Template used to exercise the Template Schema Cache",
+    )
+    await lib.register_template(schema, tenant_id="tenant-cache")
+
+    cache_key = TemplateLibrary._template_cache_key("cache.tmpl", "tenant-cache")
+
+    # register_template's own invalidation should leave no stale entry beforehand.
+    assert await cache_store.get(cache_key) is None
+
+    first = await lib.get_template("cache.tmpl", tenant_id="tenant-cache")
+    assert first.name == "Cache Template"
+    assert await cache_store.get(cache_key) is not None
+
+    second = await lib.get_template("cache.tmpl", tenant_id="tenant-cache")
+    assert second.name == "Cache Template"
+
+
+@pytest.mark.asyncio
+async def test_template_schema_cache_specific_version_lookup_is_never_cached() -> None:
+    """Test that pinned-version lookups (version supplied) bypass the cache entirely."""
+    cache_store = MemoryCacheStore()
+    lib = TemplateLibrary(load_defaults=False, cache_store=cache_store, tenant_id="tenant-cache-pin")
+
+    schema = TemplateSchema(
+        template_id="pinned.tmpl",
+        name="Pinned Template",
+        namespace="kortex.cache.pinned",
+        version="1.0.0",
+        description="Template used to verify pinned-version lookups are never cached",
+    )
+    await lib.register_template(schema, tenant_id="tenant-cache-pin")
+
+    await lib.get_template("pinned.tmpl", version="1.0.0", tenant_id="tenant-cache-pin")
+
+    latest_key = TemplateLibrary._template_cache_key("pinned.tmpl", "tenant-cache-pin")
+    assert await cache_store.get(latest_key) is None
+
+
+@pytest.mark.asyncio
+async def test_template_schema_cache_invalidated_on_register_new_version() -> None:
+    """Test that registering a new version invalidates the cached latest-version resolution."""
+    cache_store = MemoryCacheStore()
+    lib = TemplateLibrary(load_defaults=False, cache_store=cache_store, tenant_id="tenant-cache-inv")
+
+    v1 = TemplateSchema(
+        template_id="invalidate.tmpl",
+        name="Invalidate V1",
+        namespace="kortex.cache.invalidate",
+        version="1.0.0",
+        description="Version 1",
+    )
+    await lib.register_template(v1, tenant_id="tenant-cache-inv")
+
+    cached_v1 = await lib.get_template("invalidate.tmpl", tenant_id="tenant-cache-inv")
+    assert cached_v1.name == "Invalidate V1"
+
+    v2 = TemplateSchema(
+        template_id="invalidate.tmpl",
+        name="Invalidate V2",
+        namespace="kortex.cache.invalidate",
+        version="1.1.0",
+        description="Version 2",
+    )
+    await lib.register_template(v2, tenant_id="tenant-cache-inv")
+
+    # Cache must have been invalidated by the new registration, not served the stale V1 result.
+    resolved = await lib.get_template("invalidate.tmpl", tenant_id="tenant-cache-inv")
+    assert resolved.name == "Invalidate V2"
+    assert resolved.version == "1.1.0"
+
+
+@pytest.mark.asyncio
+async def test_template_schema_cache_invalidated_on_delete(
+    repository: TemplateRepository,
+) -> None:
+    """Test that delete_template invalidates the cached latest-version resolution."""
+    cache_store = MemoryCacheStore()
+    lib = TemplateLibrary(
+        load_defaults=False, repository=repository, cache_store=cache_store, tenant_id="tenant-cache-del"
+    )
+
+    schema = TemplateSchema(
+        template_id="delete.cache.tmpl",
+        name="Delete Cache Template",
+        namespace="kortex.cache.delete",
+        version="1.0.0",
+        description="Template used to verify delete invalidates the cache",
+    )
+    await lib.register_template(schema, tenant_id="tenant-cache-del")
+    await lib.get_template("delete.cache.tmpl", tenant_id="tenant-cache-del")
+
+    cache_key = TemplateLibrary._template_cache_key("delete.cache.tmpl", "tenant-cache-del")
+    assert await cache_store.get(cache_key) is not None
+
+    await lib.delete_template("delete.cache.tmpl", tenant_id="tenant-cache-del")
+    assert await cache_store.get(cache_key) is None
+
+    with pytest.raises(DocumentTemplateError, match="not found"):
+        await lib.get_template("delete.cache.tmpl", tenant_id="tenant-cache-del")
+
+
+@pytest.mark.asyncio
+async def test_template_schema_cache_absent_preserves_uncached_behavior() -> None:
+    """Test that omitting cache_store preserves exactly today's uncached resolution behavior."""
+    lib = TemplateLibrary(load_defaults=True)
+    assert lib.cache_store is None
+
+    tmpl = await lib.get_template("invoice.declarative.v1")
+    assert tmpl.name == "Standard Invoice Template"
 

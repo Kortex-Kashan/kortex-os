@@ -30,6 +30,7 @@ from kortex.engines.document.adapters.macro_adapter import MacroAdapter
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
 from kortex.engines.document.operation_profile import DocumentOperationProfileManager
 from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
+from kortex.engines.document.recovery import DocumentRecoveryManager
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -954,5 +955,189 @@ async def test_document_engine_recovery_execution_path_integration(tmp_path) -> 
     # Checkpoints were rolled back and cleared
     checkpoints_term = await document_engine.recovery_manager.get_checkpoints("req-integ-rec-fail")
     assert len(checkpoints_term) == 0
+
+    await kernel.shutdown()
+
+
+# =============================================================================
+# Milestone 7: Storage Integration
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_storage_binder_and_cache_stores_auto_wired_on_kernel_boot(tmp_path) -> None:
+    """Milestone 7: Storage Binder Integration.
+
+    A real Kernel boot must populate DocumentStorageBinder's four stores and every
+    subsystem's optional cache_store dependency (recovery_manager, template_library,
+    lifecycle_manager, adapter_registry) without any manual post-boot wiring, sharing the
+    same underlying ICacheStore instance resolved from the Storage Engine.
+    """
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_m7_wiring"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    binder = document_engine.storage_binder
+    assert binder.data_store is not None
+    assert binder.file_store is not None
+    assert binder.object_store is not None
+    assert binder.cache_store is not None
+
+    assert document_engine.recovery_manager.cache_store is binder.cache_store
+    assert document_engine.template_library.cache_store is binder.cache_store
+    assert document_engine.lifecycle_manager.cache_store is binder.cache_store
+    assert document_engine.adapter_registry.cache_store is binder.cache_store
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_execute_profile_persists_output_to_object_store_tenant_scoped(tmp_path) -> None:
+    """Milestone 7: Object Storage Output Persistence.
+
+    execute_profile must additively persist the generated output through the auto-wired
+    storage_binder when profile.output_bucket is set, keyed with a tenant-scoped object key,
+    while OperationResult.output_bytes remains exactly the same raw bytes as before this
+    milestone's change (never replaced by a storage reference).
+    """
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_m7_object"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    adapter = IntegrationDummyAdapter(adapter_id="kortex.adapter.m7_object_test")
+    document_engine.adapter_registry.register_adapter(adapter)
+
+    profile_id = f"profile.m7.object.{uuid4()}"
+    pipeline_def = AdapterPipelineDefinition(
+        pipeline_id=f"pipe-{profile_id}",
+        profile_id=profile_id,
+        stages=[
+            PipelineStage(
+                stage_id="stage-gen",
+                adapter_id="kortex.adapter.m7_object_test",
+                required_capability=AdapterCapability.GENERATE,
+            )
+        ],
+    )
+    profile = DocumentOperationProfile(
+        id=profile_id,
+        name="M7 Object Persistence Profile",
+        namespace="kortex.m7",
+        version="1.0.0",
+        description="Profile exercising Object Storage Output Persistence",
+        business_operation="M7_OBJECT_TEST",
+        adapter_pipeline=pipeline_def,
+        output_bucket="m7-outputs",
+    )
+    tenant_id = "tenant-m7-object"
+    await document_engine.profile_manager.register_profile(profile, tenant_id=tenant_id)
+
+    context = BindingContext(context_id="ctx-m7-object", tenant_id=tenant_id)
+    request = OperationRequest(
+        request_id="req-m7-object-1",
+        profile_id=profile_id,
+        binding_context=context,
+    )
+
+    result = await document_engine.execute_profile(profile_id, request)
+
+    assert result.status == "COMPLETED"
+    assert result.output_bytes is not None
+    assert b"[INTEGRATION_PDF_OUTPUT]" in result.output_bytes
+
+    expected_key = f"{tenant_id}/{profile_id}/req-m7-object-1"
+    assert await storage_engine.object.object_exists("m7-outputs", expected_key) is True
+    stored_bytes = await storage_engine.object.get_object("m7-outputs", expected_key)
+    assert stored_bytes == result.output_bytes
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_publish_then_verify_sha256_integrity_flow(tmp_path) -> None:
+    """Milestone 7: Security Verification Integration.
+
+    Publishing with a payload through the real, repository-backed
+    DocumentEngine.transition_lifecycle() must populate DocumentMetadata.sha256_hash via the
+    real IVerificationService, and that hash must verify correctly (and reject tampering)
+    through the real DocumentSecurityVerifier.
+    """
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_m7_hash"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    payload = b"[PUBLISHED_DOCUMENT_BYTES_FOR_HASH_VERIFICATION]"
+
+    version = await document_engine.lifecycle_manager.create_version(
+        title="Hash Verification Document", author_id="user-hash"
+    )
+    published_meta = await document_engine.transition_lifecycle(
+        version.document_id,
+        version.version_id,
+        DocumentLifecycleState.PUBLISHED,
+        payload=payload,
+    )
+
+    assert published_meta.sha256_hash is not None
+    assert len(published_meta.sha256_hash) == 64
+
+    is_valid = await document_engine.security_verifier.verify_document_integrity(
+        payload, published_meta.sha256_hash
+    )
+    assert is_valid is True
+
+    tampered_payload = payload + b"TAMPERED"
+    is_invalid = await document_engine.security_verifier.verify_document_integrity(
+        tampered_payload, published_meta.sha256_hash
+    )
+    assert is_invalid is False
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_persists_via_cache_store_across_fresh_manager(tmp_path) -> None:
+    """Milestone 7: Recovery Checkpoint Persistence.
+
+    A checkpoint written through the booted engine's recovery_manager must be observable by a
+    completely independent DocumentRecoveryManager instance sharing only the same underlying
+    ICacheStore resolved from the real Storage Engine, mirroring the established
+    TemplateLibrary/DocumentLifecycleManager fresh-session persistence pattern. Note: the
+    concrete ICacheStore is in-process (MemoryCacheStore), so this proves cross-instance
+    resumability within the running process — not crash-durability across a process restart,
+    which is explicitly out of scope for this milestone's ICacheStore-based design.
+    """
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_m7_recovery"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    assert document_engine.recovery_manager.cache_store is not None
+    await document_engine.recovery_manager.checkpoint("req-m7-recovery", "stage-1", b"[STATE]")
+
+    shared_cache_store = document_engine.recovery_manager.cache_store
+    fresh_recovery = DocumentRecoveryManager(cache_store=shared_cache_store)
+
+    checkpoints = await fresh_recovery.get_checkpoints("req-m7-recovery")
+    assert len(checkpoints) == 1
+    assert checkpoints[0].stage_id == "stage-1"
 
     await kernel.shutdown()

@@ -27,6 +27,8 @@ from kortex.engines.document.models import (
     SecurityMetadata,
 )
 from kortex.engines.document.persistence import DocumentRepository
+from kortex.engines.document.security import DefaultVerificationService
+from kortex.engines.storage.stores.cache_store import MemoryCacheStore
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 
 
@@ -963,3 +965,200 @@ async def test_concurrent_sibling_publication_via_manager(
 
     assert l_meta.lifecycle_state == DocumentLifecycleState.DRAFT
     assert l_meta.is_immutable is False
+
+
+# =============================================================================
+# 5. Milestone 7: SHA256 Integrity Hashing on Publish
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_in_memory_publish_computes_sha256_hash_from_payload(
+    memory_lifecycle_manager: DocumentLifecycleManager,
+) -> None:
+    """Test that publishing with a payload computes and records a real SHA256 hash (in-memory mode)."""
+    mgr = memory_lifecycle_manager
+    payload = b"[INVOICE_PDF_BYTES]"
+
+    await mgr.create_version(document_id="doc-hash-mem", version_id="ver-hash-mem")
+    meta = await mgr.transition_state(
+        "doc-hash-mem",
+        "ver-hash-mem",
+        DocumentLifecycleState.PUBLISHED,
+        payload=payload,
+    )
+
+    expected_hash = await DefaultVerificationService().compute_hash(payload)
+    assert meta.sha256_hash is not None
+    assert meta.sha256_hash == expected_hash
+    assert len(meta.sha256_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_in_memory_publish_without_payload_leaves_hash_none(
+    memory_lifecycle_manager: DocumentLifecycleManager,
+) -> None:
+    """Test that publishing without a payload leaves sha256_hash unset (backward compatible)."""
+    mgr = memory_lifecycle_manager
+
+    await mgr.create_version(document_id="doc-hash-none", version_id="ver-hash-none")
+    meta = await mgr.transition_state(
+        "doc-hash-none", "ver-hash-none", DocumentLifecycleState.PUBLISHED
+    )
+
+    assert meta.sha256_hash is None
+
+
+@pytest.mark.asyncio
+async def test_repository_backed_publish_computes_and_persists_sha256_hash(
+    repo_lifecycle_manager: DocumentLifecycleManager,
+    repository: DocumentRepository,
+) -> None:
+    """Test that repository-backed publish threads sha256_hash through to persistence.py and
+    that it round-trips correctly on a subsequent read."""
+    mgr = repo_lifecycle_manager
+    payload = b"[PAYSLIP_PDF_BYTES]"
+
+    await mgr.create_version(
+        document_id="doc-hash-repo", version_id="ver-hash-repo", tenant_id="tenant-hash"
+    )
+    meta = await mgr.transition_state(
+        "doc-hash-repo",
+        "ver-hash-repo",
+        DocumentLifecycleState.PUBLISHED,
+        tenant_id="tenant-hash",
+        payload=payload,
+    )
+
+    expected_hash = await DefaultVerificationService().compute_hash(payload)
+    assert meta.sha256_hash == expected_hash
+
+    # Round-trip: a fresh read via the repository must reflect the persisted hash.
+    reread = await mgr.get_version("doc-hash-repo", "ver-hash-repo", tenant_id="tenant-hash")
+    assert reread.sha256_hash == expected_hash
+
+    version_record = await repository.get_version(
+        "doc-hash-repo", "ver-hash-repo", tenant_id="tenant-hash"
+    )
+    assert version_record is not None
+    assert version_record.metadata.sha256_hash == expected_hash
+
+
+# =============================================================================
+# 6. Milestone 7: Metadata Cache (read-through + invalidation)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_metadata_cache_read_through_and_invalidation_on_transition(
+    repository: DocumentRepository,
+) -> None:
+    """Test Metadata Cache read-through behavior and invalidation on transition_state.
+
+    Read order: the cache is consulted first; on a miss, resolution proceeds through the
+    existing repository read path unchanged, and the result is cached. A subsequent
+    transition_state() call must invalidate the cached entry so the next read reflects the
+    new state rather than a stale cached one.
+    """
+    cache_store = MemoryCacheStore()
+    mgr = DocumentLifecycleManager(repository=repository, cache_store=cache_store)
+    assert mgr.cache_store is cache_store
+
+    await mgr.create_version(
+        document_id="doc-cache", version_id="ver-cache", tenant_id="tenant-cache"
+    )
+
+    # First read: cache miss, populates cache.
+    first = await mgr.get_version_object(
+        "ver-cache", document_id="doc-cache", tenant_id="tenant-cache"
+    )
+    assert first.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+
+    cache_key = DocumentLifecycleManager._metadata_cache_key(
+        "doc-cache", "ver-cache", "tenant-cache"
+    )
+    assert await cache_store.get(cache_key) is not None
+
+    # Second read: served from cache (same object identity as what was cached).
+    second = await mgr.get_version_object(
+        "ver-cache", document_id="doc-cache", tenant_id="tenant-cache"
+    )
+    assert second.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
+
+    # Transition invalidates the cache entry.
+    await mgr.transition_state(
+        "doc-cache", "ver-cache", DocumentLifecycleState.REVIEW, tenant_id="tenant-cache"
+    )
+    assert await cache_store.get(cache_key) is None
+
+    # Next read reflects the new state, not a stale cached DRAFT.
+    third = await mgr.get_version_object(
+        "ver-cache", document_id="doc-cache", tenant_id="tenant-cache"
+    )
+    assert third.metadata.lifecycle_state == DocumentLifecycleState.REVIEW
+
+
+@pytest.mark.asyncio
+async def test_metadata_cache_publish_invalidates_both_child_and_parent(
+    repository: DocumentRepository,
+) -> None:
+    """Test that publishing a child version invalidates the Metadata Cache for both the
+    newly-published child and its superseded parent."""
+    cache_store = MemoryCacheStore()
+    mgr = DocumentLifecycleManager(repository=repository, cache_store=cache_store)
+
+    await mgr.create_version(
+        document_id="doc-cache-pub", version_id="ver-cache-parent", tenant_id="tenant-cache-pub"
+    )
+    await mgr.transition_state(
+        "doc-cache-pub",
+        "ver-cache-parent",
+        DocumentLifecycleState.PUBLISHED,
+        tenant_id="tenant-cache-pub",
+    )
+
+    await mgr.create_child_version(
+        parent_version_id="ver-cache-parent",
+        document_id="doc-cache-pub",
+        version_id="ver-cache-child",
+        tenant_id="tenant-cache-pub",
+    )
+
+    # Warm the cache for both parent and child before publishing the child.
+    await mgr.get_version_object("ver-cache-parent", document_id="doc-cache-pub", tenant_id="tenant-cache-pub")
+    await mgr.get_version_object("ver-cache-child", document_id="doc-cache-pub", tenant_id="tenant-cache-pub")
+
+    parent_key = DocumentLifecycleManager._metadata_cache_key(
+        "doc-cache-pub", "ver-cache-parent", "tenant-cache-pub"
+    )
+    child_key = DocumentLifecycleManager._metadata_cache_key(
+        "doc-cache-pub", "ver-cache-child", "tenant-cache-pub"
+    )
+    assert await cache_store.get(parent_key) is not None
+    assert await cache_store.get(child_key) is not None
+
+    await mgr.transition_state(
+        "doc-cache-pub",
+        "ver-cache-child",
+        DocumentLifecycleState.PUBLISHED,
+        tenant_id="tenant-cache-pub",
+    )
+
+    assert await cache_store.get(parent_key) is None
+    assert await cache_store.get(child_key) is None
+
+    parent_meta = await mgr.get_version("doc-cache-pub", "ver-cache-parent", tenant_id="tenant-cache-pub")
+    child_meta = await mgr.get_version("doc-cache-pub", "ver-cache-child", tenant_id="tenant-cache-pub")
+    assert parent_meta.lifecycle_state == DocumentLifecycleState.SUPERSEDED
+    assert child_meta.lifecycle_state == DocumentLifecycleState.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_metadata_cache_absent_preserves_uncached_behavior(
+    memory_lifecycle_manager: DocumentLifecycleManager,
+) -> None:
+    """Test that omitting cache_store preserves exactly today's uncached behavior."""
+    mgr = memory_lifecycle_manager
+    assert mgr.cache_store is None
+
+    await mgr.create_version(document_id="doc-no-cache", version_id="ver-no-cache")
+    meta = await mgr.get_version("doc-no-cache", "ver-no-cache")
+    assert meta.lifecycle_state == DocumentLifecycleState.DRAFT

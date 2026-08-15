@@ -13,7 +13,7 @@ import datetime
 import logging
 import re
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from kortex.engines.document.exceptions import DocumentLifecycleError
 from kortex.engines.document.interfaces import (
@@ -27,6 +27,8 @@ from kortex.engines.document.models import (
     DocumentVersion,
     SecurityMetadata,
 )
+from kortex.engines.document.security import DefaultVerificationService, IVerificationService
+from kortex.engines.storage.interfaces import ICacheStore
 
 logger = logging.getLogger("kortex.engines.document.lifecycle")
 
@@ -84,23 +86,54 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         DocumentLifecycleState.LOGICAL_DELETE,
     }
 
-    def __init__(self, repository: IDocumentRepository | None = None) -> None:
+    METADATA_CACHE_TTL_SECONDS = 300
+
+    def __init__(
+        self,
+        repository: IDocumentRepository | None = None,
+        verification_service: IVerificationService | None = None,
+        cache_store: ICacheStore | None = None,
+    ) -> None:
         """Initialize the DocumentLifecycleManager.
 
         Args:
             repository: Optional IDocumentRepository for relational persistence.
                         If None, operates in standalone in-memory mode.
+            verification_service: Optional IVerificationService used to compute SHA256
+                                   integrity hashes when publishing a version with a payload.
+                                   Defaults to DefaultVerificationService when not supplied.
+            cache_store: Optional ICacheStore backing the tenant-scoped Metadata Cache.
+                         When None, metadata is always read from repository/in-memory state.
         """
         self._repository = repository
         self._versions: dict[str, DocumentVersion] = {}
         self._document_chains: dict[str, list[str]] = {}
         self._current_versions: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._verification_service = verification_service or DefaultVerificationService()
+        self._cache_store = cache_store
 
     @property
     def repository(self) -> IDocumentRepository | None:
         """Return the configured IDocumentRepository, or None if in-memory mode."""
         return self._repository
+
+    @property
+    def cache_store(self) -> ICacheStore | None:
+        """Return the configured ICacheStore backing the Metadata Cache, or None if uncached."""
+        return self._cache_store
+
+    @staticmethod
+    def _metadata_cache_key(document_id: str, version_id: str, tenant_id: str) -> str:
+        """Build the Metadata Cache key for a specific document version."""
+        return f"doc_engine:{tenant_id}:metadata:{document_id}:{version_id}"
+
+    async def _invalidate_metadata_cache(
+        self, document_id: str, version_id: str, tenant_id: str
+    ) -> None:
+        """Invalidate the Metadata Cache entry for a specific document version, if caching is enabled."""
+        if self._cache_store is not None:
+            await self._cache_store.delete(self._metadata_cache_key(document_id, version_id, tenant_id))
 
     def validate_transition(
         self, current_state: DocumentLifecycleState, target_state: DocumentLifecycleState
@@ -351,12 +384,14 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         target_state: DocumentLifecycleState,
         published_at: str | None = None,
         tenant_id: str = "default",
+        payload: bytes | None = None,
     ) -> DocumentMetadata:
         """Transition a document version to a target lifecycle state.
 
         When target_state == PUBLISHED, atomically acquires the publication gate via compare-and-swap (CAS)
         on DocumentRecord.current_version_id, transitions child to PUBLISHED, supersedes the active predecessor,
-        and sets is_immutable = True.
+        and sets is_immutable = True. When PUBLISHED and a payload is supplied, a SHA256 integrity hash is
+        computed via IVerificationService and recorded on DocumentMetadata.sha256_hash.
 
         Args:
             document_id: Root document UUID.
@@ -364,6 +399,8 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
             target_state: Proposed target state.
             published_at: Optional ISO timestamp override when publishing.
             tenant_id: Tenant partition identifier.
+            payload: Optional binary payload being published, used to compute a SHA256
+                     integrity hash. Ignored for non-PUBLISHED transitions.
 
         Returns:
             Updated DocumentMetadata instance.
@@ -384,6 +421,10 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                 return version.metadata
 
             if target_state == DocumentLifecycleState.PUBLISHED:
+                sha256_hash: str | None = None
+                if payload is not None:
+                    sha256_hash = await self._verification_service.compute_hash(payload)
+
                 if self._repository is not None:
                     child_ver, _ = await self._repository.publish_version(
                         document_id=document_id,
@@ -391,7 +432,13 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                         parent_version_id=version.parent_version_id,
                         published_at=published_at,
                         tenant_id=tenant_id,
+                        sha256_hash=sha256_hash,
                     )
+                    await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
+                    if version.parent_version_id is not None:
+                        await self._invalidate_metadata_cache(
+                            document_id, version.parent_version_id, tenant_id
+                        )
                     return child_ver.metadata
                 else:
                     # In-memory atomic publication with CAS check
@@ -442,11 +489,17 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                             "lifecycle_state": DocumentLifecycleState.PUBLISHED,
                             "is_immutable": True,
                             "published_at": timestamp,
+                            "sha256_hash": sha256_hash if sha256_hash is not None else version.metadata.sha256_hash,
                         }
                     )
                     self._versions[version_id] = version.model_copy(
                         update={"is_immutable": True, "metadata": child_meta}
                     )
+                    await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
+                    if version.parent_version_id is not None:
+                        await self._invalidate_metadata_cache(
+                            document_id, version.parent_version_id, tenant_id
+                        )
                     return child_meta
             else:
                 new_is_immutable = target_state in self.IMMUTABLE_STATES
@@ -459,6 +512,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                         published_at=published_at,
                         tenant_id=tenant_id,
                     )
+                    await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
                     return updated_ver.metadata
                 else:
                     updated_meta = version.metadata.model_copy(
@@ -470,6 +524,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                     self._versions[version_id] = version.model_copy(
                         update={"is_immutable": new_is_immutable, "metadata": updated_meta}
                     )
+                    await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
                     return updated_meta
 
     async def get_version(
@@ -509,6 +564,14 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         Raises:
             DocumentLifecycleError: If version_id does not exist or document ID mismatch.
         """
+        cache_store = self._cache_store
+        cache_key: str | None = None
+        if cache_store is not None and document_id is not None:
+            cache_key = self._metadata_cache_key(document_id, version_id, tenant_id)
+            cached_version = await cache_store.get(cache_key)
+            if cached_version is not None:
+                return cast(DocumentVersion, cached_version)
+
         version = await self._get_version_internal(
             version_id, document_id=document_id, tenant_id=tenant_id
         )
@@ -518,6 +581,10 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
             raise DocumentLifecycleError(
                 f"Document ID mismatch for version '{version_id}': expected '{document_id}', got '{version.document_id}'."
             )
+
+        if cache_key is not None and cache_store is not None:
+            await cache_store.set(cache_key, version, ttl_seconds=self.METADATA_CACHE_TTL_SECONDS)
+
         return version
 
     async def _get_version_internal(

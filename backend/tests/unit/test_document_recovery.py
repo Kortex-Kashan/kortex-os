@@ -14,6 +14,7 @@ from kortex.engines.document.recovery import (
     DocumentRecoveryManager,
     FailureMetadata,
 )
+from kortex.engines.storage.stores.cache_store import MemoryCacheStore
 
 
 @pytest.mark.asyncio
@@ -120,6 +121,62 @@ def test_document_recovery_calculate_backoff() -> None:
     # Default parameters
     assert recovery.calculate_backoff(attempt=1) == 0.001
     assert pytest.approx(recovery.calculate_backoff(attempt=2)) == 0.0015
+
+
+@pytest.mark.asyncio
+async def test_document_recovery_manager_cache_store_none_preserves_in_memory_behavior() -> None:
+    """Test that omitting cache_store preserves exactly today's in-memory-only behavior."""
+    recovery = DocumentRecoveryManager(cache_store=None)
+    assert recovery.cache_store is None
+
+    await recovery.checkpoint("req-cache-none", "stage-1", b"state")
+    checkpoints = await recovery.get_checkpoints("req-cache-none")
+    assert len(checkpoints) == 1
+
+
+@pytest.mark.asyncio
+async def test_document_recovery_manager_checkpoint_survives_fresh_instance_via_cache() -> None:
+    """Test checkpoint persistence via a shared ICacheStore across independent manager instances.
+
+    A fresh DocumentRecoveryManager configured with the same cache_store as a prior instance
+    must be able to observe checkpoints the prior instance wrote, proving Recovery Checkpoint
+    Persistence (Milestone 7) actually works rather than merely accepting the dependency.
+    """
+    shared_cache = MemoryCacheStore()
+
+    recovery_a = DocumentRecoveryManager(cache_store=shared_cache)
+    assert recovery_a.cache_store is shared_cache
+
+    await recovery_a.checkpoint("req-shared", "stage-1", b"[STAGE_1]")
+    await recovery_a.checkpoint("req-shared", "stage-2", b"[STAGE_2]")
+
+    # Fresh instance, no in-memory knowledge of "req-shared", but sharing the same cache_store.
+    recovery_b = DocumentRecoveryManager(cache_store=shared_cache)
+
+    checkpoints = await recovery_b.get_checkpoints("req-shared")
+    assert len(checkpoints) == 2
+    assert checkpoints[0].stage_id == "stage-1"
+    assert checkpoints[1].stage_id == "stage-2"
+
+    last = await recovery_b.resume("req-shared")
+    assert last is not None
+    assert last.stage_id == "stage-2"
+    assert last.state_data == b"[STAGE_2]"
+
+
+@pytest.mark.asyncio
+async def test_document_recovery_manager_rollback_invalidates_cache() -> None:
+    """Test that rollback() invalidates the cached checkpoint entry, not just the in-memory one."""
+    shared_cache = MemoryCacheStore()
+    recovery_a = DocumentRecoveryManager(cache_store=shared_cache)
+
+    await recovery_a.checkpoint("req-rollback", "stage-1", b"state")
+    assert await recovery_a.rollback("req-rollback") is True
+
+    # A fresh instance sharing the cache must not observe a stale, rolled-back checkpoint.
+    recovery_b = DocumentRecoveryManager(cache_store=shared_cache)
+    assert await recovery_b.get_checkpoints("req-rollback") == []
+    assert await recovery_b.resume("req-rollback") is None
 
 
 @pytest.mark.asyncio

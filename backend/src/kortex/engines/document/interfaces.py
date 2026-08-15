@@ -44,6 +44,7 @@ class IDocumentEngine(Protocol):
         document_id: str,
         version_id: str,
         target_state: DocumentLifecycleState,
+        payload: bytes | None = None,
     ) -> DocumentMetadata:
         """Transition document version to a new lifecycle state."""
         ...
@@ -82,6 +83,7 @@ class IDocumentLifecycleManager(Protocol):
         target_state: DocumentLifecycleState,
         published_at: str | None = None,
         tenant_id: str = "default",
+        payload: bytes | None = None,
     ) -> DocumentMetadata:
         """Transition document state adhering to state machine transition rules."""
         ...
@@ -438,6 +440,7 @@ class IDocumentRepository(Protocol):
         parent_version_id: str | None = None,
         published_at: str | None = None,
         tenant_id: str = "default",
+        sha256_hash: str | None = None,
     ) -> tuple[DocumentVersion, DocumentVersion | None]:
         """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document pointer.
 

@@ -248,6 +248,33 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                         self._profile_manager._repository = DocumentRepository(
                             data_store=self._data_store
                         )
+
+                # Resolve IFileStore/IObjectStore/ICacheStore alongside the IDataStore already
+                # resolved above, and populate the DocumentStorageBinder plus every subsystem's
+                # optional cache_store dependency. Explicit constructor injection always takes
+                # priority (mirrors the IDataStore wiring pattern above) — this only fills in
+                # stores that were never explicitly configured.
+                file_store = getattr(storage_engine, "file", None) if storage_engine is not None else None
+                object_store = getattr(storage_engine, "object", None) if storage_engine is not None else None
+                cache_store = getattr(storage_engine, "cache", None) if storage_engine is not None else None
+
+                if self._storage_binder.data_store is None and self._data_store is not None:
+                    self._storage_binder._data_store = self._data_store
+                if self._storage_binder.file_store is None and file_store is not None:
+                    self._storage_binder._file_store = file_store
+                if self._storage_binder.object_store is None and object_store is not None:
+                    self._storage_binder._object_store = object_store
+                if self._storage_binder.cache_store is None and cache_store is not None:
+                    self._storage_binder._cache_store = cache_store
+
+                if self._recovery_manager.cache_store is None and cache_store is not None:
+                    self._recovery_manager._cache_store = cache_store
+                if self._template_library.cache_store is None and cache_store is not None:
+                    self._template_library._cache_store = cache_store
+                if self._lifecycle_manager.cache_store is None and cache_store is not None:
+                    self._lifecycle_manager._cache_store = cache_store
+                if self._adapter_registry.cache_store is None and cache_store is not None:
+                    self._adapter_registry._cache_store = cache_store
             except Exception:
                 self.logger.debug(
                     "StorageEngine not resolved from Kernel container; DocumentLifecycleManager "
@@ -394,6 +421,24 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             is_completed = pipeline_res.is_success
             self._diagnostics.record_operation_executed(is_success=is_completed)
 
+            # Additive object storage persistence: OperationResult.output_bytes below is
+            # unaffected by this and always reflects pipeline_res.final_output_bytes exactly
+            # as before. A storage failure here is logged and never fails the operation itself.
+            if is_completed and pipeline_res.final_output_bytes and profile.output_bucket:
+                try:
+                    object_key = f"{binding_context.tenant_id}/{profile_id}/{request.request_id}"
+                    await self._storage_binder.store_document_output(
+                        bucket_name=profile.output_bucket,
+                        object_key=object_key,
+                        data=pipeline_res.final_output_bytes,
+                    )
+                except Exception:
+                    self.logger.debug(
+                        "Object storage output persistence failed for request '%s'; "
+                        "OperationResult is unaffected.",
+                        request.request_id,
+                    )
+
             if is_completed:
                 self._emitted_events.append(
                     DocumentOperationCompletedEvent(
@@ -443,8 +488,17 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         document_id: str,
         version_id: str,
         target_state: DocumentLifecycleState,
+        payload: bytes | None = None,
     ) -> DocumentMetadata:
-        """Transition document version to a new lifecycle state (IDocumentEngine protocol)."""
+        """Transition document version to a new lifecycle state (IDocumentEngine protocol).
+
+        Args:
+            document_id: Root document UUID.
+            version_id: Specific version UUID to transition.
+            target_state: Proposed target lifecycle state.
+            payload: Optional binary payload being published, used to compute a SHA256
+                     integrity hash when target_state is PUBLISHED. Ignored otherwise.
+        """
         try:
             prev_meta = await self._lifecycle_manager.get_lineage(document_id)
             from_state = prev_meta[-1].lifecycle_state.value if prev_meta else "UNKNOWN"
@@ -455,6 +509,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             document_id=document_id,
             version_id=version_id,
             target_state=target_state,
+            payload=payload,
         )
 
         # Emit lifecycle transitioned event
