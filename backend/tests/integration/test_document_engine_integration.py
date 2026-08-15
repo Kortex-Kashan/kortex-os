@@ -11,11 +11,14 @@ Specification (Version 3.0.0).
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
+import kortex.engines.document
 from kortex.core.base_engine import EngineState
 from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
@@ -833,17 +836,136 @@ async def test_failure_and_boundary_verification(tmp_path) -> None:
     assert len(res_crash.errors) > 0
 
 
-def test_architecture_compliance_assertions() -> None:
-    """10. Architecture Compliance assertions."""
-    engine = DocumentEngine()
+# Milestone 10: Architecture Compliance Audit verification (spec Section 13, Milestone 10,
+# bullet 4). These patterns scan Document Engine's own source tree — never test files — and
+# back the five checks in test_architecture_compliance_assertions below. Each check fails the
+# test the moment the real rule is violated; none of them are presence/snapshot checks.
+_ENGINE_IMPORT_RE = re.compile(
+    r"^\s*(?:from|import)\s+kortex\.engines\.(?P<engine>\w+)(?:\.(?P<submodule>\w+))?"
+)
+_STORAGE_PRIMITIVE_RE = re.compile(
+    r"\bimport\s+sqlite3\b|\bimport\s+asyncpg\b|\bimport\s+aiosqlite\b|"
+    r"\bcreate_engine\s*\(|\bcreate_async_engine\s*\(|(?<![\w.])open\s*\("
+)
+_PRINT_CALL_RE = re.compile(r"(?<![\w.])print\s*\(")
 
-    # Verify sandbox is bound
-    assert engine.sandbox is not None
-    assert engine.pipeline_executor.sandbox is engine.sandbox
+# Only the abstraction/DTO layer of the Storage Engine may be imported directly by Document
+# Engine source — never its concrete implementation modules (.engine, .stores.*). Declaring
+# "storage" as a Kernel dependency authorizes consuming this boundary, not reaching past it.
+_STORAGE_ABSTRACTION_SUBMODULES = {"interfaces", "models"}
 
-    # Verify local offline execution
-    assert engine.diagnostics()["version"] == "1.0.0"
-    assert engine.status() == "UNINITIALIZED"
+
+def _document_engine_source_files() -> list[Path]:
+    """Return every .py file in the Document Engine package (source only, never tests)."""
+    package_dir = Path(kortex.engines.document.__file__).parent
+    return sorted(package_dir.rglob("*.py"))
+
+
+@pytest.mark.asyncio
+async def test_architecture_compliance_assertions(tmp_path) -> None:
+    """10. Architecture Compliance Audit verification (Milestone 10).
+
+    Substantively verifies the five rules in docs/testing/ARCHITECTURE_AUDIT_STANDARD.md,
+    scoped to the Document Engine package: import boundary, storage-access boundary,
+    capability naming, tenant isolation, and no print(). Each assertion is tied to a real,
+    observable violation — not a hardcoded snapshot of current file/capability names.
+    """
+    source_files = _document_engine_source_files()
+    assert source_files, "Document Engine source scan found no files — scan path is wrong."
+
+    declared_dependencies = set(DocumentEngine().dependencies) | {"document"}
+
+    import_violations: list[str] = []
+    storage_access_violations: list[str] = []
+    print_violations: list[str] = []
+
+    for path in source_files:
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+
+            # Rule 1: Import boundary. Document Engine may only import from itself and from
+            # the abstraction layer of engines it declares as Kernel dependencies.
+            import_match = _ENGINE_IMPORT_RE.match(line)
+            if import_match is not None:
+                engine, submodule = import_match.group("engine"), import_match.group("submodule")
+                if engine not in declared_dependencies:
+                    import_violations.append(
+                        f"{path.name}:{lineno}: imports 'kortex.engines.{engine}', which is "
+                        f"not 'document' itself nor in its declared dependency contract "
+                        f"{sorted(declared_dependencies)}"
+                    )
+                elif engine == "storage" and submodule not in _STORAGE_ABSTRACTION_SUBMODULES:
+                    import_violations.append(
+                        f"{path.name}:{lineno}: imports 'kortex.engines.storage.{submodule}' — "
+                        f"only {sorted(_STORAGE_ABSTRACTION_SUBMODULES)} are within the Storage "
+                        f"Engine's abstraction boundary; its concrete implementation modules "
+                        f"must not be imported directly"
+                    )
+
+            # Rule 2: Storage-access boundary. Document Engine must consume Storage Engine only
+            # via its abstractions/repositories, never a raw DB driver or the filesystem.
+            if _STORAGE_PRIMITIVE_RE.search(line):
+                storage_access_violations.append(f"{path.name}:{lineno}: {stripped}")
+
+            # Rule 5: No print(). Checked in the same pass since it is the same kind of scan.
+            if _PRINT_CALL_RE.search(line):
+                print_violations.append(f"{path.name}:{lineno}: {stripped}")
+
+    assert not import_violations, "Import boundary violated:\n" + "\n".join(import_violations)
+    assert not storage_access_violations, (
+        "Storage-access boundary violated (raw DB/file I/O primitive found):\n"
+        + "\n".join(storage_access_violations)
+    )
+    assert not print_violations, (
+        "print() statement found in Document Engine source:\n" + "\n".join(print_violations)
+    )
+
+    # Rule 3: Capability naming. Every live, currently-declared capability must conform to
+    # kortex.<domain>.<resource>.<action> — checked against the real capabilities() list, not
+    # a hardcoded copy of it.
+    capability_name_re = re.compile(r"^kortex\.[a-z_]+\.[a-z_]+\.[a-z_]+$")
+    live_capabilities = DocumentEngine().capabilities()
+    assert live_capabilities, "DocumentEngine.capabilities() returned no capabilities to verify."
+    for cap_name in live_capabilities:
+        assert capability_name_re.match(cap_name), (
+            f"Capability name violates naming convention: '{cap_name}'"
+        )
+
+    # Rule 4: Tenant isolation. Real Kernel + real StorageEngine + real DocumentEngine boot,
+    # verifying the actual, already-established repository-level tenant boundary
+    # (DocumentRepository.get_version's tenant_id-scoped query) rather than merely checking
+    # that a tenant_id field exists on a model.
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_arch_compliance"))
+    document_engine = DocumentEngine()
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+    await kernel.boot()
+
+    assert document_engine.lifecycle_manager.repository is not None, (
+        "Tenant isolation check requires the repository-backed path; Kernel wiring did not "
+        "auto-configure a repository."
+    )
+
+    version = await document_engine.lifecycle_manager.create_version(
+        title="Architecture Compliance Tenant Isolation Doc",
+        author_id="arch-audit",
+        tenant_id="tenant-arch-a",
+    )
+
+    with pytest.raises(DocumentLifecycleError):
+        await document_engine.lifecycle_manager.get_version(
+            version.document_id, version.version_id, tenant_id="tenant-arch-b"
+        )
+
+    owned = await document_engine.lifecycle_manager.get_version(
+        version.document_id, version.version_id, tenant_id="tenant-arch-a"
+    )
+    assert owned.document_id == version.document_id
+
+    await kernel.shutdown()
 
 
 class TransientIntegrationAdapter(BaseDocumentAdapter):
