@@ -801,3 +801,158 @@ def test_architecture_compliance_assertions() -> None:
     # Verify local offline execution
     assert engine.diagnostics()["version"] == "1.0.0"
     assert engine.status() == "UNINITIALIZED"
+
+
+class TransientIntegrationAdapter(BaseDocumentAdapter):
+    """Adapter for integration testing transient recovery in DocumentEngine."""
+
+    def __init__(self, adapter_id: str = "kortex.adapter.transient_integ", fail_count: int = 1) -> None:
+        self._meta = AdapterMetadata(
+            adapter_id=adapter_id,
+            display_name="Transient Integ Adapter",
+            vendor="Kortex",
+            author="Dev",
+            version="1.0.0",
+            license="MIT",
+            description="Transient integration adapter",
+            supported_capabilities=[AdapterCapability.TRANSFORM],
+            supported_operations=[DocumentOperationType.TRANSFORM],
+        )
+        self.fail_count = fail_count
+        self.call_count = 0
+
+    @property
+    def metadata(self) -> AdapterMetadata:
+        return self._meta
+
+    async def execute(self, operation_type, binding_context, options) -> bytes:
+        self.call_count += 1
+        if self.call_count <= self.fail_count:
+            raise RuntimeError(f"Transient integration failure {self.call_count}")
+        return b"[TRANSIENT_INTEG_SUCCESS]"
+
+    def validate_schema(self, schema) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_document_engine_recovery_execution_path_integration(tmp_path) -> None:
+    """Exercise checkpointing, retry re-dispatch, and rollback through the real DocumentEngine.execute_profile() path."""
+    kernel = Kernel()
+    storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_recovery_integ"))
+    document_engine = DocumentEngine()
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(document_engine)
+
+    await kernel.boot()
+
+    # Register adapters
+    adapter1 = IntegrationDummyAdapter()
+    adapter2 = TransientIntegrationAdapter(fail_count=1)
+    document_engine.adapter_registry.register_adapter(adapter1)
+    document_engine.adapter_registry.register_adapter(adapter2)
+
+    # 1. Success with transient retry recovery
+    prof_id_success = f"prof-rec-integ-{uuid4()}"
+    pipeline_def = AdapterPipelineDefinition(
+        pipeline_id=f"pipe-{prof_id_success}",
+        profile_id=prof_id_success,
+        stages=[
+            PipelineStage(
+                stage_id="stage-gen",
+                adapter_id="kortex.adapter.integration_pdf",
+                required_capability=AdapterCapability.GENERATE,
+            ),
+            PipelineStage(
+                stage_id="stage-trans",
+                adapter_id="kortex.adapter.transient_integ",
+                required_capability=AdapterCapability.TRANSFORM,
+            ),
+        ],
+    )
+    profile = DocumentOperationProfile(
+        id=prof_id_success,
+        name="Recovery Integration Profile",
+        namespace="kortex.integ",
+        version="1.0.0",
+        description="Profile for testing real DocumentEngine execution recovery",
+        business_operation="RECOVERY_INTEG_OP",
+        adapter_pipeline=pipeline_def,
+    )
+    await document_engine.profile_manager.register_profile(profile)
+
+    req_success = OperationRequest(
+        request_id="req-integ-rec-1",
+        profile_id=prof_id_success,
+        business_operation="RECOVERY_INTEG_OP",
+        binding_context=BindingContext(context_id="ctx-integ-rec"),
+    )
+    result_success = await document_engine.execute_profile(prof_id_success, req_success)
+
+    assert result_success.status == "COMPLETED"
+    assert result_success.output_bytes == b"[TRANSIENT_INTEG_SUCCESS]"
+
+    # Verify recovery manager recorded checkpoints on both stages
+    checkpoints = await document_engine.recovery_manager.get_checkpoints("req-integ-rec-1")
+    assert len(checkpoints) == 2
+    assert checkpoints[0].stage_id == "stage-gen"
+    assert checkpoints[1].stage_id == "stage-trans"
+
+    # Verify failure telemetry recorded transient failure
+    failures = await document_engine.recovery_manager.get_failures("req-integ-rec-1")
+    assert len(failures) == 1
+    assert failures[0].stage_id == "stage-trans"
+
+    # 2. Terminal failure and rollback
+    failing_adapter = TransientIntegrationAdapter(adapter_id="kortex.adapter.always_fail_integ", fail_count=10)
+    document_engine.adapter_registry.register_adapter(failing_adapter)
+
+    prof_id_fail = f"prof-rec-fail-{uuid4()}"
+    pipeline_fail = AdapterPipelineDefinition(
+        pipeline_id=f"pipe-{prof_id_fail}",
+        profile_id=prof_id_fail,
+        stages=[
+            PipelineStage(
+                stage_id="stage-gen-ok",
+                adapter_id="kortex.adapter.integration_pdf",
+                required_capability=AdapterCapability.GENERATE,
+            ),
+            PipelineStage(
+                stage_id="stage-fail-term",
+                adapter_id="kortex.adapter.always_fail_integ",
+                required_capability=AdapterCapability.TRANSFORM,
+            ),
+        ],
+    )
+    profile_fail = DocumentOperationProfile(
+        id=prof_id_fail,
+        name="Recovery Fail Profile",
+        namespace="kortex.integ",
+        version="1.0.0",
+        description="Profile for testing rollback on retry exhaustion",
+        business_operation="RECOVERY_FAIL_OP",
+        adapter_pipeline=pipeline_fail,
+    )
+    await document_engine.profile_manager.register_profile(profile_fail)
+
+    req_fail = OperationRequest(
+        request_id="req-integ-rec-fail",
+        profile_id=prof_id_fail,
+        business_operation="RECOVERY_FAIL_OP",
+        binding_context=BindingContext(context_id="ctx-integ-rec-fail"),
+    )
+    result_fail = await document_engine.execute_profile(prof_id_fail, req_fail)
+
+    assert result_fail.status == "FAILED"
+    assert len(result_fail.errors) > 0
+
+    # 3 failures recorded
+    failures_term = await document_engine.recovery_manager.get_failures("req-integ-rec-fail")
+    assert len(failures_term) == 3
+
+    # Checkpoints were rolled back and cleared
+    checkpoints_term = await document_engine.recovery_manager.get_checkpoints("req-integ-rec-fail")
+    assert len(checkpoints_term) == 0
+
+    await kernel.shutdown()

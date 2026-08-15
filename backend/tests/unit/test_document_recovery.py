@@ -101,3 +101,39 @@ async def test_document_recovery_rollback_and_failures() -> None:
     # Rollback non-existent or empty request_id
     assert await recovery.rollback("req-2") is False
     assert await recovery.rollback("") is False
+
+
+def test_document_recovery_calculate_backoff() -> None:
+    """Test exponential backoff delay calculations."""
+    recovery = DocumentRecoveryManager()
+
+    # Attempt 1 -> base delay
+    assert recovery.calculate_backoff(attempt=1, backoff_factor=2.0, base_delay=0.01) == 0.01
+    assert recovery.calculate_backoff(attempt=0, backoff_factor=2.0, base_delay=0.01) == 0.01
+
+    # Attempt 2 -> base * 2.0^1 = 0.02
+    assert pytest.approx(recovery.calculate_backoff(attempt=2, backoff_factor=2.0, base_delay=0.01)) == 0.02
+
+    # Attempt 3 -> base * 2.0^2 = 0.04
+    assert pytest.approx(recovery.calculate_backoff(attempt=3, backoff_factor=2.0, base_delay=0.01)) == 0.04
+
+    # Default parameters
+    assert recovery.calculate_backoff(attempt=1) == 0.001
+    assert pytest.approx(recovery.calculate_backoff(attempt=2)) == 0.0015
+
+
+@pytest.mark.asyncio
+async def test_document_engine_recovery_manager_di() -> None:
+    """Test DocumentEngine constructor injection and properties for recovery_manager."""
+    from kortex.engines.document.engine import DocumentEngine
+
+    # Default recovery manager
+    engine_default = DocumentEngine()
+    assert isinstance(engine_default.recovery_manager, DocumentRecoveryManager)
+    assert engine_default.pipeline_executor.recovery_manager is engine_default.recovery_manager
+
+    # Custom recovery manager
+    custom_recovery = DocumentRecoveryManager()
+    engine_custom = DocumentEngine(recovery_manager=custom_recovery)
+    assert engine_custom.recovery_manager is custom_recovery
+    assert engine_custom.pipeline_executor.recovery_manager is custom_recovery

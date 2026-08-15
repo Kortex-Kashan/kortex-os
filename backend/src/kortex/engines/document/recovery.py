@@ -126,6 +126,26 @@ class DocumentRecoveryManager(IDocumentRecoveryProvider):
 
         return existed
 
+    def calculate_backoff(
+        self,
+        attempt: int,
+        backoff_factor: float = 1.5,
+        base_delay: float = 0.001,
+    ) -> float:
+        """Calculate exponential backoff duration for a retry attempt.
+
+        Args:
+            attempt: 1-indexed failure count / attempt number.
+            backoff_factor: Exponential multiplier.
+            base_delay: Initial delay in seconds (default 0.001s for fast execution).
+
+        Returns:
+            Calculated delay in seconds.
+        """
+        if attempt <= 1:
+            return base_delay
+        return base_delay * (backoff_factor ** (attempt - 1))
+
     async def retry_stage(
         self,
         request_id: str,

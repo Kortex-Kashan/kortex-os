@@ -7,6 +7,7 @@ in accordance with Section 10 and Section 14 of the Document Engine Implementati
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,7 @@ from kortex.engines.document.models import (
 
 if TYPE_CHECKING:
     from kortex.engines.document.operation_profile import DocumentOperationProfileManager
+    from kortex.engines.document.recovery import DocumentRecoveryManager
 
 
 class StageExecutionResult(BaseModel):
@@ -134,6 +136,7 @@ class AdapterPipelineExecutor:
     2. Immutability: Input definitions, requests, and contexts are never mutated.
     3. Safety: Declarative stage condition evaluation; zero eval/exec or arbitrary code execution.
     4. Fault Isolation: Stage errors in optional stages are isolated; errors in required stages safely stop execution.
+    5. Recovery: Automatic checkpointing, structured failure recording, exponential backoff retries, and rollback.
     """
 
     def __init__(
@@ -141,6 +144,7 @@ class AdapterPipelineExecutor:
         registry: DocumentAdapterRegistry | None = None,
         sandbox: Any | None = None,
         profile_manager: "DocumentOperationProfileManager | None" = None,
+        recovery_manager: "DocumentRecoveryManager | None" = None,
     ) -> None:
         """Initialize AdapterPipelineExecutor with an optional DocumentAdapterRegistry and sandbox.
 
@@ -151,10 +155,13 @@ class AdapterPipelineExecutor:
                               to resolve a profile_id to its real, registered adapter_pipeline.
                               When None, execute_pipeline() preserves its legacy single-stage
                               shim behavior (treating profile_id as an adapter_id).
+            recovery_manager: Optional DocumentRecoveryManager instance used for checkpointing,
+                              failure telemetry, retry backoff, and rollback on pipeline failure.
         """
         self._registry = registry if registry is not None else DocumentAdapterRegistry()
         self._sandbox = sandbox
         self._profile_manager = profile_manager
+        self._recovery_manager = recovery_manager
 
     @property
     def registry(self) -> DocumentAdapterRegistry:
@@ -170,6 +177,11 @@ class AdapterPipelineExecutor:
     def profile_manager(self) -> "DocumentOperationProfileManager | None":
         """Return the configured DocumentOperationProfileManager, or None if unset."""
         return self._profile_manager
+
+    @property
+    def recovery_manager(self) -> "DocumentRecoveryManager | None":
+        """Return the configured DocumentRecoveryManager, or None if unset."""
+        return self._recovery_manager
 
     def validate_pipeline_definition(self, definition: AdapterPipelineDefinition) -> None:
         """Validate an AdapterPipelineDefinition before execution.
@@ -224,6 +236,7 @@ class AdapterPipelineExecutor:
         definition: AdapterPipelineDefinition,
         context: BindingContext,
         initial_input: bytes | None = None,
+        request_id: str | None = None,
     ) -> PipelineExecutionResult:
         """Execute a validated AdapterPipelineDefinition against context data.
 
@@ -231,12 +244,14 @@ class AdapterPipelineExecutor:
             definition: AdapterPipelineDefinition object.
             context: BindingContext data payload.
             initial_input: Optional initial binary payload.
+            request_id: Optional operation request ID for recovery telemetry and checkpointing.
 
         Returns:
             PipelineExecutionResult containing stage results and aggregate outcome.
         """
         self.validate_pipeline_definition(definition)
 
+        req_id = request_id or context.context_id or definition.pipeline_id
         start_time = time.perf_counter()
         stage_results: list[StageExecutionResult] = []
         errors: list[str] = []
@@ -264,71 +279,130 @@ class AdapterPipelineExecutor:
                 )
                 continue
 
-            try:
-                adapter = self._registry.get_adapter_by_id(stage.adapter_id)
-                options = dict(stage.stage_options)
-                options["input_bytes"] = current_payload
+            max_retries = 3
+            backoff_factor = 1.5
+            stage_attempt = 0
+            stage_succeeded = False
 
-                # Map capability to operation type
-                op_type = (
-                    DocumentOperationType(stage.required_capability.value)
-                    if stage.required_capability.value in DocumentOperationType.__members__
-                    else DocumentOperationType.GENERATE
-                )
+            while not stage_succeeded:
+                stage_attempt += 1
+                attempt_start = time.perf_counter()
+                try:
+                    adapter = self._registry.get_adapter_by_id(stage.adapter_id)
+                    options = dict(stage.stage_options)
+                    options["input_bytes"] = current_payload
 
-                if self._sandbox is not None:
-                    output_bytes = await self._sandbox.execute_sandboxed(
-                        adapter_id=stage.adapter_id,
-                        operation_type=stage.required_capability.value,
-                        context=context,
-                        options=options,
-                    )
-                else:
-                    output_bytes = await adapter.execute(
-                        operation_type=op_type,
-                        binding_context=context,
-                        options=options,
+                    # Map capability to operation type
+                    op_type = (
+                        DocumentOperationType(stage.required_capability.value)
+                        if stage.required_capability.value in DocumentOperationType.__members__
+                        else DocumentOperationType.GENERATE
                     )
 
-                if output_bytes is not None:
-                    current_payload = output_bytes
+                    if self._sandbox is not None:
+                        output_bytes = await self._sandbox.execute_sandboxed(
+                            adapter_id=stage.adapter_id,
+                            operation_type=stage.required_capability.value,
+                            context=context,
+                            options=options,
+                        )
+                    else:
+                        output_bytes = await adapter.execute(
+                            operation_type=op_type,
+                            binding_context=context,
+                            options=options,
+                        )
 
-                stage_time_ms = (time.perf_counter() - stage_start) * 1000.0
-                stage_results.append(
-                    StageExecutionResult(
-                        stage_id=stage.stage_id,
-                        adapter_id=stage.adapter_id,
-                        capability=stage.required_capability,
-                        is_success=True,
-                        is_skipped=False,
-                        output_bytes=current_payload,
-                        execution_time_ms=stage_time_ms,
+                    if output_bytes is not None:
+                        current_payload = output_bytes
+
+                    stage_time_ms = (time.perf_counter() - attempt_start) * 1000.0
+                    stage_results.append(
+                        StageExecutionResult(
+                            stage_id=stage.stage_id,
+                            adapter_id=stage.adapter_id,
+                            capability=stage.required_capability,
+                            is_success=True,
+                            is_skipped=False,
+                            output_bytes=current_payload,
+                            execution_time_ms=stage_time_ms,
+                        )
                     )
-                )
+                    stage_succeeded = True
 
-            except Exception as err:
-                stage_time_ms = (time.perf_counter() - stage_start) * 1000.0
-                err_msg = f"Stage '{stage.stage_id}' execution failed: {err}"
+                    # Record successful stage checkpoint
+                    if self._recovery_manager is not None:
+                        await self._recovery_manager.checkpoint(
+                            request_id=req_id,
+                            stage_id=stage.stage_id,
+                            state_data=current_payload,
+                        )
 
-                stage_results.append(
-                    StageExecutionResult(
-                        stage_id=stage.stage_id,
-                        adapter_id=stage.adapter_id,
-                        capability=stage.required_capability,
-                        is_success=False,
-                        is_skipped=False,
-                        output_bytes=None,
-                        execution_time_ms=stage_time_ms,
-                        error_message=err_msg,
+                except Exception as err:
+                    stage_time_ms = (time.perf_counter() - attempt_start) * 1000.0
+                    err_msg = f"Stage '{stage.stage_id}' execution failed: {err}"
+
+                    # Record failure metadata in recovery manager
+                    if self._recovery_manager is not None:
+                        await self._recovery_manager.record_failure(
+                            request_id=req_id,
+                            stage_id=stage.stage_id,
+                            adapter_id=stage.adapter_id,
+                            error_code=type(err).__name__,
+                            stack_trace_snippet=str(err),
+                        )
+
+                    # Determine retry eligibility. Recovery is opt-in: without a configured
+                    # recovery_manager, a required-stage failure must behave exactly as it
+                    # did pre-Milestone-6 — exactly one attempt, no retry, no backoff, no
+                    # checkpoint, no failure telemetry, no rollback.
+                    can_retry = False
+                    if not stage.is_optional and self._recovery_manager is not None:
+                        can_retry = await self._recovery_manager.retry_stage(
+                            request_id=req_id,
+                            stage_id=stage.stage_id,
+                            max_retries=max_retries,
+                            backoff_factor=backoff_factor,
+                        )
+
+                    if can_retry:
+                        backoff_delay = 0.001
+                        if self._recovery_manager is not None and hasattr(
+                            self._recovery_manager, "calculate_backoff"
+                        ):
+                            backoff_delay = self._recovery_manager.calculate_backoff(
+                                attempt=stage_attempt,
+                                backoff_factor=backoff_factor,
+                            )
+                        await asyncio.sleep(backoff_delay)
+                        continue
+
+                    # Retries exhausted or non-retryable failure
+                    stage_results.append(
+                        StageExecutionResult(
+                            stage_id=stage.stage_id,
+                            adapter_id=stage.adapter_id,
+                            capability=stage.required_capability,
+                            is_success=False,
+                            is_skipped=False,
+                            output_bytes=None,
+                            execution_time_ms=stage_time_ms,
+                            error_message=err_msg,
+                        )
                     )
-                )
 
-                if stage.is_optional:
-                    errors.append(f"[Optional Stage Warning] {err_msg}")
-                else:
-                    errors.append(err_msg)
-                    pipeline_success = False
-                    break
+                    if stage.is_optional:
+                        errors.append(f"[Optional Stage Warning] {err_msg}")
+                        break
+                    else:
+                        errors.append(err_msg)
+                        pipeline_success = False
+                        if self._recovery_manager is not None:
+                            await self._recovery_manager.rollback(request_id=req_id)
+                        break
+
+            if not pipeline_success:
+                break
 
         total_time_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -405,7 +479,9 @@ class AdapterPipelineExecutor:
                 )
 
         try:
-            res = await self.execute_pipeline_definition(pipeline_def, context)
+            res = await self.execute_pipeline_definition(
+                pipeline_def, context, request_id=request.request_id
+            )
             exec_ms = (time.perf_counter() - start_time) * 1000.0
 
             return OperationResult(

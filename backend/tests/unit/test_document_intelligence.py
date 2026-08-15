@@ -96,3 +96,76 @@ async def test_default_document_recommendation_provider() -> None:
     )
     pipeline_rec = await recommender.recommend_adapter_pipeline("profile.payslip.v1", [adapter_meta])
     assert pipeline_rec == ["kortex.adapter.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_document_engine_intelligence_and_recommendation_di() -> None:
+    """Test DocumentEngine constructor injection and properties for intelligence & recommendation providers."""
+    from kortex.engines.document.engine import DocumentEngine
+
+    # 1. Default engine instantiation provides default providers
+    engine_default = DocumentEngine()
+    assert isinstance(engine_default.intelligence_provider, IDocumentIntelligenceProvider)
+    assert isinstance(engine_default.recommendation_provider, IDocumentRecommendationProvider)
+    assert isinstance(engine_default.intelligence_provider, DefaultDocumentIntelligenceProvider)
+    assert isinstance(engine_default.recommendation_provider, DefaultDocumentRecommendationProvider)
+
+    # 2. Custom injected provider instances
+    class CustomIntelligenceProvider(IDocumentIntelligenceProvider):
+        async def extract_concepts(self, document_id: str, version_id: str) -> dict[str, Any]:
+            return {"document_id": document_id, "custom": True}
+
+        async def analyze_document(
+            self, document_id: str, version_id: str, ontology: dict[str, Any] | None = None
+        ) -> Any:
+            return {"analyzed": True}
+
+        async def update_intelligence_incrementally(
+            self, document_id: str, delta_context: dict[str, Any]
+        ) -> dict[str, Any]:
+            return {"updated": True}
+
+        async def extract_knowledge_references(self, document_id: str) -> list[str]:
+            return ["custom.ref.1"]
+
+    class CustomRecommendationProvider(IDocumentRecommendationProvider):
+        async def recommend_template(self, user_intent: str, data_schema: dict[str, Any]) -> list[str]:
+            return ["custom.template.v1"]
+
+        async def recommend_operation_profile(self, business_operation: str, user_context: dict[str, Any]) -> str:
+            return "profile.custom.v1"
+
+        async def recommend_adapter_pipeline(self, profile_id: str, installed_adapters: list[AdapterMetadata]) -> list[str]:
+            return ["custom.adapter.v1"]
+
+    custom_intel = CustomIntelligenceProvider()
+    custom_rec = CustomRecommendationProvider()
+
+    engine_custom = DocumentEngine(
+        intelligence_provider=custom_intel,
+        recommendation_provider=custom_rec,
+    )
+
+    assert engine_custom.intelligence_provider is custom_intel
+    assert engine_custom.recommendation_provider is custom_rec
+
+    # Execute custom methods
+    c_res = await engine_custom.intelligence_provider.extract_concepts("doc-custom", "v-1")
+    assert c_res["custom"] is True
+
+    t_res = await engine_custom.recommendation_provider.recommend_template("any", {})
+    assert t_res == ["custom.template.v1"]
+
+
+@pytest.mark.asyncio
+async def test_intelligence_provider_deterministic_without_ontology() -> None:
+    """Test analyze_document when no ontology is supplied."""
+    provider = DefaultDocumentIntelligenceProvider()
+    model = await provider.analyze_document(document_id="doc-none", version_id="v-none", ontology=None)
+
+    assert model.document_id == "doc-none"
+    assert model.version_id == "v-none"
+    assert model.extracted_concepts == {"ontology_type": "GenericDocument"}
+    assert model.field_values == {}
+    assert model.confidence_scores == {"overall": 1.0}
+    assert model.knowledge_references == ["knowledge.entity.doc-none"]

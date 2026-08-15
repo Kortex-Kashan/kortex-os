@@ -251,6 +251,25 @@ class IDocumentIntelligenceProvider(Protocol):
         """Extract semantic concepts and structural relationships from document."""
         ...
 
+    async def analyze_document(
+        self,
+        document_id: str,
+        version_id: str,
+        ontology: dict[str, Any] | None = None,
+    ) -> Any:
+        """Perform comprehensive deterministic intelligence analysis on a document version."""
+        ...
+
+    async def update_intelligence_incrementally(
+        self, document_id: str, delta_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Update document intelligence state with delta context changes."""
+        ...
+
+    async def extract_knowledge_references(self, document_id: str) -> list[str]:
+        """Identify and link entity references to the KORTEX Knowledge Engine."""
+        ...
+
 
 @runtime_checkable
 class IDocumentRecommendationProvider(Protocol):
@@ -285,6 +304,39 @@ class IDocumentRecoveryProvider(Protocol):
 
     async def rollback(self, request_id: str) -> bool:
         """Execute rollback stack to clean up failed operation artifacts."""
+        ...
+
+    async def retry_stage(
+        self,
+        request_id: str,
+        stage_id: str,
+        max_retries: int = 3,
+        backoff_factor: float = 1.5,
+    ) -> bool:
+        """Calculate retry backoff and determine if a failed pipeline stage retry attempt is permitted."""
+        ...
+
+    async def resume(self, request_id: str) -> Any:
+        """Resume pipeline execution from the last valid stage checkpoint."""
+        ...
+
+    async def record_failure(
+        self,
+        request_id: str,
+        stage_id: str,
+        adapter_id: str,
+        error_code: str,
+        stack_trace_snippet: str,
+    ) -> Any:
+        """Record detailed failure context for telemetry and administrative inspection."""
+        ...
+
+    async def get_checkpoints(self, request_id: str) -> list[Any]:
+        """Return all checkpoints for a request ID."""
+        ...
+
+    async def get_failures(self, request_id: str) -> list[Any]:
+        """Return all failure metadata records for a request ID."""
         ...
 
 

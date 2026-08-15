@@ -793,3 +793,230 @@ async def test_pipeline_stage_with_macro_capability_executes_end_to_end() -> Non
     assert res.final_output_bytes is not None
     assert b"kortex.document.macro.v1" in res.final_output_bytes
 
+
+class TransientFailingAdapter(BaseDocumentAdapter):
+    """Adapter that fails a configured number of times before succeeding."""
+
+    def __init__(self, adapter_id: str = "kortex.adapter.transient", fail_count: int = 1) -> None:
+        self._meta = AdapterMetadata(
+            adapter_id=adapter_id,
+            display_name="Transient Adapter",
+            vendor="Kortex",
+            author="Dev",
+            version="1.0.0",
+            license="MIT",
+            description="Transient test adapter",
+            supported_capabilities=[AdapterCapability.GENERATE],
+            supported_operations=[DocumentOperationType.GENERATE],
+        )
+        self.fail_count = fail_count
+        self.call_count = 0
+
+    @property
+    def metadata(self) -> AdapterMetadata:
+        return self._meta
+
+    async def execute(self, operation_type, binding_context, options) -> bytes:
+        self.call_count += 1
+        if self.call_count <= self.fail_count:
+            raise RuntimeError(f"Transient failure on attempt {self.call_count}")
+        return b"[RECOVERED_OUTPUT]"
+
+    def validate_schema(self, schema) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_required_stage_failure_without_recovery_manager_does_not_retry() -> None:
+    """Recovery is opt-in: with no recovery_manager configured, a required-stage failure must
+    behave exactly as it did pre-Milestone-6 — exactly one execution attempt, no retry, no
+    backoff, and no recovery telemetry, since no recovery_manager exists to record any."""
+    registry = DocumentAdapterRegistry()
+    always_fail = TransientFailingAdapter(adapter_id="kortex.adapter.no_recovery_fail", fail_count=10)
+    registry.register_adapter(always_fail)
+
+    # No recovery_manager passed — this is the real AdapterPipelineExecutor execution path,
+    # not a mock of it.
+    executor = AdapterPipelineExecutor(registry=registry)
+    assert executor.recovery_manager is None
+
+    definition = AdapterPipelineDefinition(
+        pipeline_id="pipe-no-recovery",
+        profile_id="p-no-recovery",
+        stages=[
+            PipelineStage(
+                stage_id="s1",
+                adapter_id="kortex.adapter.no_recovery_fail",
+                required_capability=AdapterCapability.GENERATE,
+            )
+        ],
+    )
+
+    res = await executor.execute_pipeline_definition(
+        definition, BindingContext(context_id="ctx-no-recovery"), request_id="req-no-recovery-1"
+    )
+
+    assert always_fail.call_count == 1
+    assert res.is_success is False
+    assert len(res.stage_results) == 1
+    assert res.stage_results[0].is_success is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_recovery_checkpoints_created_on_success() -> None:
+    """Successful pipeline stages automatically record operational checkpoints in DocumentRecoveryManager."""
+    from kortex.engines.document.recovery import DocumentRecoveryManager
+
+    registry = DocumentAdapterRegistry()
+    pdf = MockPdfAdapter()
+    norm = MockNormalizerAdapter()
+    registry.register_adapter(pdf)
+    registry.register_adapter(norm)
+
+    recovery = DocumentRecoveryManager()
+    executor = AdapterPipelineExecutor(registry=registry, recovery_manager=recovery)
+
+    definition = AdapterPipelineDefinition(
+        pipeline_id="pipe-chk",
+        profile_id="p-chk",
+        stages=[
+            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM),
+        ],
+    )
+
+    res = await executor.execute_pipeline_definition(
+        definition, BindingContext(context_id="ctx-chk"), request_id="req-chk-1"
+    )
+    assert res.is_success is True
+
+    checkpoints = await recovery.get_checkpoints("req-chk-1")
+    assert len(checkpoints) == 2
+    assert checkpoints[0].stage_id == "s1"
+    assert checkpoints[0].state_data == b"[PDF_BYTES]"
+    assert checkpoints[1].stage_id == "s2"
+    assert checkpoints[1].state_data == b"[PDF_BYTES][NORMALIZED]"
+
+    # Resume retrieves the last valid checkpoint
+    last_chk = await recovery.resume("req-chk-1")
+    assert last_chk is not None
+    assert last_chk.stage_id == "s2"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_recovery_retries_transient_failure_and_succeeds() -> None:
+    """A transient stage failure triggers retry with backoff and successfully re-dispatches."""
+    from kortex.engines.document.recovery import DocumentRecoveryManager
+
+    registry = DocumentAdapterRegistry()
+    transient = TransientFailingAdapter(fail_count=2)
+    registry.register_adapter(transient)
+
+    recovery = DocumentRecoveryManager()
+    executor = AdapterPipelineExecutor(registry=registry, recovery_manager=recovery)
+
+    definition = AdapterPipelineDefinition(
+        pipeline_id="pipe-retry",
+        profile_id="p-retry",
+        stages=[
+            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.transient", required_capability=AdapterCapability.GENERATE),
+        ],
+    )
+
+    res = await executor.execute_pipeline_definition(
+        definition, BindingContext(context_id="ctx-retry"), request_id="req-retry-1"
+    )
+    assert res.is_success is True
+    assert res.final_output_bytes == b"[RECOVERED_OUTPUT]"
+    assert transient.call_count == 3  # Failed 2 times, succeeded on 3rd attempt
+
+    failures = await recovery.get_failures("req-retry-1")
+    assert len(failures) == 2
+    assert failures[0].error_code == "RuntimeError"
+
+    checkpoints = await recovery.get_checkpoints("req-retry-1")
+    assert len(checkpoints) == 1
+    assert checkpoints[0].state_data == b"[RECOVERED_OUTPUT]"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_recovery_exhausts_retries_and_rolls_back() -> None:
+    """When retries are exhausted on a required stage, rollback occurs and pipeline fails."""
+    from kortex.engines.document.recovery import DocumentRecoveryManager
+
+    registry = DocumentAdapterRegistry()
+    pdf = MockPdfAdapter()
+    always_fail = TransientFailingAdapter(adapter_id="kortex.adapter.fail", fail_count=10)
+    registry.register_adapter(pdf)
+    registry.register_adapter(always_fail)
+
+    recovery = DocumentRecoveryManager()
+    executor = AdapterPipelineExecutor(registry=registry, recovery_manager=recovery)
+
+    definition = AdapterPipelineDefinition(
+        pipeline_id="pipe-exhaust",
+        profile_id="p-exhaust",
+        stages=[
+            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.fail", required_capability=AdapterCapability.GENERATE),
+        ],
+    )
+
+    res = await executor.execute_pipeline_definition(
+        definition, BindingContext(context_id="ctx-exhaust"), request_id="req-exhaust-1"
+    )
+    assert res.is_success is False
+    assert len(res.errors) > 0
+
+    # 3 failures recorded for s2
+    failures = await recovery.get_failures("req-exhaust-1")
+    assert len(failures) == 3
+
+    # Rollback cleared checkpoints
+    checkpoints = await recovery.get_checkpoints("req-exhaust-1")
+    assert len(checkpoints) == 0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_recovery_optional_stage_failure_isolated() -> None:
+    """An optional stage failure records failure telemetry but does not trigger rollback or fail pipeline."""
+    from kortex.engines.document.recovery import DocumentRecoveryManager
+
+    registry = DocumentAdapterRegistry()
+    pdf = MockPdfAdapter()
+    always_fail = TransientFailingAdapter(adapter_id="kortex.adapter.opt_fail", fail_count=10)
+    norm = MockNormalizerAdapter()
+    registry.register_adapter(pdf)
+    registry.register_adapter(always_fail)
+    registry.register_adapter(norm)
+
+    recovery = DocumentRecoveryManager()
+    executor = AdapterPipelineExecutor(registry=registry, recovery_manager=recovery)
+
+    definition = AdapterPipelineDefinition(
+        pipeline_id="pipe-opt",
+        profile_id="p-opt",
+        stages=[
+            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.opt_fail", required_capability=AdapterCapability.GENERATE, is_optional=True),
+            PipelineStage(stage_id="s3", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM),
+        ],
+    )
+
+    res = await executor.execute_pipeline_definition(
+        definition, BindingContext(context_id="ctx-opt"), request_id="req-opt-1"
+    )
+    assert res.is_success is True
+    assert res.final_output_bytes == b"[PDF_BYTES][NORMALIZED]"
+
+    # s1 and s3 checkpoints exist
+    checkpoints = await recovery.get_checkpoints("req-opt-1")
+    assert len(checkpoints) == 2
+    assert checkpoints[0].stage_id == "s1"
+    assert checkpoints[1].stage_id == "s3"
+
+    # s2 failure recorded exactly once — proves the optional stage did not retry.
+    failures = await recovery.get_failures("req-opt-1")
+    assert len(failures) == 1
+    assert failures[0].stage_id == "s2"
+

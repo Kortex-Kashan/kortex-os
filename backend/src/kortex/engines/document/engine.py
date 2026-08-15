@@ -33,6 +33,10 @@ from kortex.engines.document.intelligence import (
     DefaultDocumentIntelligenceProvider,
     DefaultDocumentRecommendationProvider,
 )
+from kortex.engines.document.interfaces import (
+    IDocumentIntelligenceProvider,
+    IDocumentRecommendationProvider,
+)
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
 from kortex.engines.document.loader import DocumentAdapterLoader
 from kortex.engines.document.models import (
@@ -74,6 +78,8 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         recovery_manager: DocumentRecoveryManager | None = None,
         security_verifier: DocumentSecurityVerifier | None = None,
         storage_binder: DocumentStorageBinder | None = None,
+        intelligence_provider: IDocumentIntelligenceProvider | None = None,
+        recommendation_provider: IDocumentRecommendationProvider | None = None,
     ) -> None:
         """Initialize DocumentEngine facade using Dependency Injection."""
         super().__init__()
@@ -82,11 +88,6 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         )
         self._sandbox = (
             sandbox if sandbox is not None else AdapterSandbox(registry=self._adapter_registry)
-        )
-        self._pipeline_executor = (
-            pipeline_executor
-            if pipeline_executor is not None
-            else AdapterPipelineExecutor(registry=self._adapter_registry, sandbox=self._sandbox)
         )
         self._template_library = (
             template_library if template_library is not None else TemplateLibrary(load_defaults=True)
@@ -109,14 +110,33 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         self._recovery_manager = (
             recovery_manager if recovery_manager is not None else DocumentRecoveryManager()
         )
+        if pipeline_executor is not None:
+            self._pipeline_executor = pipeline_executor
+            if self._pipeline_executor.recovery_manager is None:
+                self._pipeline_executor._recovery_manager = self._recovery_manager
+        else:
+            self._pipeline_executor = AdapterPipelineExecutor(
+                registry=self._adapter_registry,
+                sandbox=self._sandbox,
+                profile_manager=self._profile_manager,
+                recovery_manager=self._recovery_manager,
+            )
         self._security_verifier = (
             security_verifier if security_verifier is not None else DocumentSecurityVerifier()
         )
         self._storage_binder = (
             storage_binder if storage_binder is not None else DocumentStorageBinder()
         )
-        self._intelligence_provider = DefaultDocumentIntelligenceProvider()
-        self._recommendation_provider = DefaultDocumentRecommendationProvider()
+        self._intelligence_provider = (
+            intelligence_provider
+            if intelligence_provider is not None
+            else DefaultDocumentIntelligenceProvider()
+        )
+        self._recommendation_provider = (
+            recommendation_provider
+            if recommendation_provider is not None
+            else DefaultDocumentRecommendationProvider()
+        )
 
         self._diagnostics = DocumentDiagnostics(
             registry=self._adapter_registry,
@@ -185,6 +205,16 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
     def storage_binder(self) -> DocumentStorageBinder:
         """Return configured DocumentStorageBinder."""
         return self._storage_binder
+
+    @property
+    def intelligence_provider(self) -> IDocumentIntelligenceProvider:
+        """Return configured IDocumentIntelligenceProvider."""
+        return self._intelligence_provider
+
+    @property
+    def recommendation_provider(self) -> IDocumentRecommendationProvider:
+        """Return configured IDocumentRecommendationProvider."""
+        return self._recommendation_provider
 
     @property
     def emitted_events(self) -> list[DocumentBaseEvent]:
@@ -357,6 +387,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                 definition=profile.adapter_pipeline,
                 context=binding_context,
                 initial_input=initial_bytes,
+                request_id=request.request_id,
             )
 
             exec_ms = (time.perf_counter() - start_time) * 1000.0
