@@ -18,6 +18,7 @@ from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document.exceptions import (
     DocumentOperationError,
     DocumentProfileNotFoundError,
+    DocumentTemplateError,
 )
 from kortex.engines.document.interfaces import IDocumentEngine
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
@@ -39,6 +40,7 @@ from kortex.engines.document.models import (
     ValidationReport,
 )
 from kortex.engines.document.operation_profile import DocumentOperationProfileManager
+from kortex.engines.document.security import DocumentStorageBinder
 from kortex.engines.document.template_binder import TemplateBinder
 from kortex.engines.document.template_library import TemplateLibrary
 
@@ -410,3 +412,107 @@ async def test_initialize_is_idempotent_when_called_twice() -> None:
     adapters = engine.list_adapters()
     dummy_matches = [a for a in adapters if a.adapter_id == "kortex.document.dummy.v1"]
     assert len(dummy_matches) == 1
+
+
+# =============================================================================
+# Milestone 9: Remaining Named Edge Cases (missing templates, storage errors)
+# =============================================================================
+
+class RaisingStorageBinder(DocumentStorageBinder):
+    """DocumentStorageBinder whose store_document_output always raises.
+
+    Used to force the storage-persistence failure path in execute_profile through the
+    engine's existing constructor-level dependency injection seam (storage_binder=...),
+    rather than monkeypatching engine internals.
+    """
+
+    async def store_document_output(
+        self,
+        bucket_name: str,
+        object_key: str,
+        data: bytes,
+        mime_type: str = "application/pdf",
+    ) -> Any:
+        raise RuntimeError("Simulated Object Store failure")
+
+
+@pytest.mark.asyncio
+async def test_execute_profile_raises_for_missing_required_template() -> None:
+    """M9 edge case: missing templates — execute_profile lets DocumentTemplateError from
+    TemplateLibrary.get_template() propagate uncaught, consistent with the already-tested
+    missing-profile behavior (DocumentProfileNotFoundError is likewise never converted to a
+    FAILED result).
+
+    Note: register_profile() (Milestone 5) validates required_template_id at registration
+    time, so a profile can never be registered against a template that never existed. This
+    test registers the template, registers the profile against it, then deletes the template
+    before calling execute_profile — the only way to reach execute_profile's own
+    template-resolution failure path.
+    """
+    engine = DocumentEngine()
+
+    schema = TemplateSchema(
+        template_id="tmpl.removed_after_registration",
+        name="Removable Template",
+        namespace="kortex.test.facade",
+        version="1.0.0",
+        description="Template removed after profile registration, to reach execute_profile's own missing-template path",
+    )
+    await engine.template_library.register_template(schema)
+
+    profile = create_facade_test_profile(
+        profile_id="p.missing_tmpl", required_template_id="tmpl.removed_after_registration"
+    )
+    await engine.profile_manager.register_profile(profile)
+
+    await engine.template_library.delete_template("tmpl.removed_after_registration")
+
+    req = OperationRequest(
+        request_id="req-missing-tmpl",
+        profile_id="p.missing_tmpl",
+        binding_context=BindingContext(context_id="c-missing-tmpl"),
+    )
+
+    with pytest.raises(DocumentTemplateError):
+        await engine.execute_profile("p.missing_tmpl", req)
+
+
+@pytest.mark.asyncio
+async def test_execute_profile_survives_storage_persistence_failure() -> None:
+    """M9 edge case: storage errors — a failure in store_document_output during
+    execute_profile's additive object-persistence step must be caught and logged, never flip
+    an otherwise-successful operation to FAILED, and never alter output_bytes. Forced via the
+    engine's existing storage_binder constructor injection point (RaisingStorageBinder).
+    """
+    engine = DocumentEngine(storage_binder=RaisingStorageBinder())
+    adapter = DummyFacadeAdapter()
+    engine.adapter_registry.register_adapter(adapter)
+
+    pipeline_def = AdapterPipelineDefinition(
+        pipeline_id="pipe-storage-fail",
+        profile_id="p.storage_fail",
+        stages=[
+            PipelineStage(
+                stage_id="s1",
+                adapter_id="kortex.adapter.facade_pdf",
+                required_capability=AdapterCapability.GENERATE,
+            )
+        ],
+    )
+    # create_facade_test_profile defaults output_bucket to "test_bucket", so execute_profile's
+    # object-persistence branch (is_completed and final_output_bytes and profile.output_bucket)
+    # is genuinely reached and RaisingStorageBinder's exception is genuinely exercised.
+    profile = create_facade_test_profile(profile_id="p.storage_fail", pipeline=pipeline_def)
+    await engine.profile_manager.register_profile(profile)
+
+    req = OperationRequest(
+        request_id="req-storage-fail",
+        profile_id="p.storage_fail",
+        binding_context=BindingContext(context_id="c-storage-fail"),
+    )
+
+    res = await engine.execute_profile("p.storage_fail", req)
+
+    assert res.status == "COMPLETED"
+    assert res.output_bytes == b"[FACADE_PDF_BYTES]"
+    assert len(res.errors) == 0
