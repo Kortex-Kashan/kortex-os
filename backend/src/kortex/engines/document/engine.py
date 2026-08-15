@@ -16,13 +16,19 @@ from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.document.adapter_pipeline import AdapterPipelineExecutor
 from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
 from kortex.engines.document.adapter_sandbox import AdapterSandbox
+from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.diagnostics import DocumentDiagnostics
 from kortex.engines.document.events import (
+    DocumentAdapterRegisteredEvent,
+    DocumentArchivedEvent,
     DocumentBaseEvent,
+    DocumentIntelligenceUpdatedEvent,
     DocumentLifecycleTransitionedEvent,
     DocumentOperationCompletedEvent,
     DocumentOperationFailedEvent,
     DocumentOperationStartedEvent,
+    DocumentPublishedEvent,
+    DocumentSupersededEvent,
 )
 from kortex.engines.document.exceptions import (
     AdapterNotFoundError,
@@ -32,6 +38,7 @@ from kortex.engines.document.exceptions import (
 from kortex.engines.document.intelligence import (
     DefaultDocumentIntelligenceProvider,
     DefaultDocumentRecommendationProvider,
+    DocumentIntelligenceModel,
 )
 from kortex.engines.document.interfaces import (
     IDocumentIntelligenceProvider,
@@ -145,6 +152,10 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             lifecycle_manager=self._lifecycle_manager,
         )
         self._emitted_events: list[DocumentBaseEvent] = []
+        # Set by initialize() when booted through a real Kernel; stays None for standalone
+        # construction (e.g. DocumentEngine() in unit tests). Enables _emit_event to publish
+        # to the real Kernel Event Engine in addition to local recording.
+        self._kernel: Any = None
 
     @property
     def name(self) -> str:
@@ -221,11 +232,36 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         """Return list of immutable system events emitted by the engine."""
         return list(self._emitted_events)
 
+    async def _emit_event(self, event: DocumentBaseEvent) -> None:
+        """Record an emitted event locally and publish it to the Kernel Event Engine.
+
+        Local recording into self._emitted_events always happens, preserving existing
+        behavior for standalone construction (DocumentEngine() with no Kernel, as used by
+        most unit tests) and for callers that inspect the emitted_events property directly.
+        Publication to the real Kernel Event Engine additionally occurs whenever this engine
+        was initialized with a Kernel exposing publish_event(); a publication failure is
+        logged and never propagates, since local event recording must never depend on Kernel
+        availability.
+        """
+        self._emitted_events.append(event)
+        if self._kernel is not None and hasattr(self._kernel, "publish_event"):
+            try:
+                await self._kernel.publish_event(
+                    topic=event.event_type,
+                    payload=event.model_dump(),
+                    sender=self.name,
+                )
+            except Exception:
+                self.logger.debug(
+                    "Failed to publish event '%s' to Kernel Event Engine.", event.event_type
+                )
+
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
     async def initialize(self, kernel: Any = None) -> None:
         """Initialize engine resources and register capabilities with Kernel."""
         self._set_state(EngineState.INITIALIZING)
+        self._kernel = kernel
 
         # Wire Storage Engine relational persistence from Kernel IoC container if registered.
         # Explicit constructor injection (lifecycle_manager with its own repository) always
@@ -306,6 +342,25 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     handler = self.generate_preview
                 elif cap == "kortex.document.adapter.list":
                     handler = self.list_adapters
+                elif cap == "kortex.document.intelligence.analyze":
+                    handler = self.analyze_document_intelligence
+                elif cap == "kortex.document.recommendation.get":
+                    handler = self.get_recommendation
+                elif cap == "kortex.document.adapter.register":
+                    handler = self.register_adapter
+
+                if handler is None:
+                    # Never register a capability with no working handler — a resolvable but
+                    # uninvocable capability is worse than one that simply isn't registered.
+                    # This is a defensive backstop: every capability declared by
+                    # DocumentDiagnostics.capabilities() above is mapped to a real handler, so
+                    # this only triggers if that list is ever extended without a matching branch.
+                    self.logger.warning(
+                        "Capability '%s' declared by capabilities() has no registered handler; "
+                        "skipping Kernel registration to avoid exposing an unusable capability.",
+                        cap,
+                    )
+                    continue
 
                 try:
                     kernel.register_capability(
@@ -315,7 +370,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                         handler=handler,
                     )
                 except TypeError:
-                    kernel.register_capability(cap, handler or self)
+                    kernel.register_capability(cap, handler)
 
         self._set_state(EngineState.READY)
 
@@ -370,7 +425,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             raise DocumentOperationError("Invalid OperationRequest: request_id missing.")
 
         # Emit operation started event
-        self._emitted_events.append(
+        await self._emit_event(
             DocumentOperationStartedEvent(request_id=request.request_id, profile_id=profile_id)
         )
 
@@ -392,7 +447,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             if not report.is_valid:
                 exec_ms = (time.perf_counter() - start_time) * 1000.0
                 self._diagnostics.record_operation_executed(is_success=False)
-                self._emitted_events.append(
+                await self._emit_event(
                     DocumentOperationFailedEvent(
                         request_id=request.request_id,
                         profile_id=profile_id,
@@ -440,7 +495,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     )
 
             if is_completed:
-                self._emitted_events.append(
+                await self._emit_event(
                     DocumentOperationCompletedEvent(
                         request_id=request.request_id,
                         profile_id=profile_id,
@@ -449,7 +504,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     )
                 )
             else:
-                self._emitted_events.append(
+                await self._emit_event(
                     DocumentOperationFailedEvent(
                         request_id=request.request_id,
                         profile_id=profile_id,
@@ -467,7 +522,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
 
         exec_ms = (time.perf_counter() - start_time) * 1000.0
         self._diagnostics.record_operation_executed(is_success=True)
-        self._emitted_events.append(
+        await self._emit_event(
             DocumentOperationCompletedEvent(
                 request_id=request.request_id,
                 profile_id=profile_id,
@@ -513,7 +568,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         )
 
         # Emit lifecycle transitioned event
-        self._emitted_events.append(
+        await self._emit_event(
             DocumentLifecycleTransitionedEvent(
                 document_id=document_id,
                 version_id=version_id,
@@ -521,6 +576,34 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                 to_state=target_state.value,
             )
         )
+
+        # Emit the more specific state-transition events. transition_lifecycle is the single
+        # correct production boundary for every lifecycle state change (PUBLISHED, SUPERSEDED,
+        # ARCHIVED all necessarily pass through here), so no additional facade method is needed
+        # to wire these — unlike DocumentCreatedEvent, which has no corresponding capability
+        # (see analyze_document_intelligence/register_adapter docstrings for the analogous
+        # reasoning on the other two previously-unwired events).
+        if target_state == DocumentLifecycleState.PUBLISHED:
+            await self._emit_event(
+                DocumentPublishedEvent(
+                    document_id=document_id,
+                    version_id=version_id,
+                    published_at=new_meta.published_at or "",
+                )
+            )
+            if new_meta.parent_version_id is not None:
+                await self._emit_event(
+                    DocumentSupersededEvent(
+                        document_id=document_id,
+                        superseded_version_id=new_meta.parent_version_id,
+                        new_version_id=version_id,
+                    )
+                )
+        elif target_state == DocumentLifecycleState.ARCHIVED:
+            await self._emit_event(
+                DocumentArchivedEvent(document_id=document_id, version_id=version_id)
+            )
+
         return new_meta
 
     async def bind_template(
@@ -569,6 +652,119 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
     def list_adapters(self) -> list[AdapterMetadata]:
         """Return list of metadata objects for all registered document adapters (IDocumentEngine protocol)."""
         return self._adapter_registry.list_adapters()
+
+    async def register_adapter(
+        self, adapter: BaseDocumentAdapter | AdapterMetadata
+    ) -> BaseDocumentAdapter:
+        """Register a new document adapter into DocumentAdapterRegistry.
+
+        Backs capability `kortex.document.adapter.register` (Section 17, item 7). Emits
+        DocumentAdapterRegisteredEvent — this is the correct production boundary for that
+        event since it is the one spec-declared capability whose action is "a new document
+        adapter is registered."
+
+        Args:
+            adapter: BaseDocumentAdapter subclass instance or AdapterMetadata.
+
+        Returns:
+            The registered BaseDocumentAdapter instance.
+
+        Raises:
+            DocumentAdapterError: If contract validation fails or version is duplicate.
+        """
+        registered = self._adapter_registry.register_adapter(adapter)
+        await self._emit_event(
+            DocumentAdapterRegisteredEvent(
+                adapter_id=registered.metadata.adapter_id,
+                display_name=registered.metadata.display_name,
+                vendor=registered.metadata.vendor,
+            )
+        )
+        return registered
+
+    async def analyze_document_intelligence(
+        self,
+        document_id: str,
+        version_id: str,
+        ontology: dict[str, Any] | None = None,
+    ) -> DocumentIntelligenceModel:
+        """Trigger intelligence analysis via IDocumentIntelligenceProvider.
+
+        Backs capability `kortex.document.intelligence.analyze` (Section 17, item 5). This is
+        an explicitly-invoked, standalone capability — consistent with the engine's AI-Optional
+        Design (Section 10), intelligence analysis is never triggered automatically as a side
+        effect of execute_profile or any other operation; a caller must invoke this capability
+        deliberately for analysis to occur.
+
+        Emits DocumentIntelligenceUpdatedEvent: analyze_document is the only capability that
+        computes/refreshes a document's DocumentIntelligenceModel, so a successful call here is
+        the correct production boundary for "intelligence metadata model is updated"
+        (Section 16). update_intelligence_incrementally() has no corresponding capability and
+        is intentionally not wired to this event for the same reason DocumentCreatedEvent is
+        not wired (see class docstring notes on transition_lifecycle) — no capability exposes
+        that action yet.
+
+        Args:
+            document_id: Root document UUID.
+            version_id: Specific version UUID.
+            ontology: Optional declarative ontology schema guiding extraction.
+
+        Returns:
+            Structured DocumentIntelligenceModel.
+        """
+        model = await self._intelligence_provider.analyze_document(
+            document_id, version_id, ontology=ontology
+        )
+        await self._emit_event(
+            DocumentIntelligenceUpdatedEvent(document_id=document_id, version_id=version_id)
+        )
+        return model
+
+    async def get_recommendation(self, recommendation_type: str, **kwargs: Any) -> Any:
+        """Query AI recommendations via IDocumentRecommendationProvider.
+
+        Backs capability `kortex.document.recommendation.get` (Section 17, item 6). The
+        underlying IDocumentRecommendationProvider protocol exposes three distinct recommendation
+        kinds (Section 10.2); since the spec declares exactly one canonical capability name for
+        all of them, recommendation_type selects which one to invoke rather than exposing three
+        separate capabilities not named anywhere in Section 17.
+
+        Args:
+            recommendation_type: One of "template", "operation_profile", "adapter_pipeline".
+            **kwargs: Forwarded to the corresponding IDocumentRecommendationProvider method:
+                - "template": user_intent (str), data_schema (dict, optional).
+                - "operation_profile": business_operation (str), user_context (dict, optional).
+                - "adapter_pipeline": profile_id (str), installed_adapters (list, optional —
+                  defaults to the currently registered adapters when omitted).
+
+        Returns:
+            The recommendation result; shape depends on recommendation_type.
+
+        Raises:
+            DocumentOperationError: If recommendation_type is not recognized.
+        """
+        if recommendation_type == "template":
+            return await self._recommendation_provider.recommend_template(
+                user_intent=kwargs.get("user_intent", ""),
+                data_schema=kwargs.get("data_schema", {}),
+            )
+        if recommendation_type == "operation_profile":
+            return await self._recommendation_provider.recommend_operation_profile(
+                business_operation=kwargs.get("business_operation", ""),
+                user_context=kwargs.get("user_context", {}),
+            )
+        if recommendation_type == "adapter_pipeline":
+            installed_adapters = kwargs.get("installed_adapters")
+            if installed_adapters is None:
+                installed_adapters = self._adapter_registry.list_adapters()
+            return await self._recommendation_provider.recommend_adapter_pipeline(
+                profile_id=kwargs.get("profile_id", ""),
+                installed_adapters=installed_adapters,
+            )
+        raise DocumentOperationError(
+            f"Unknown recommendation_type '{recommendation_type}'. Expected one of: "
+            f"'template', 'operation_profile', 'adapter_pipeline'."
+        )
 
 
 __all__ = ["DocumentEngine"]

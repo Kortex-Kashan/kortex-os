@@ -157,6 +157,38 @@ async def test_capability_registration_and_resolution(tmp_path) -> None:
     adapters_list = cap_list.handler()
     assert isinstance(adapters_list, list)
 
+    # Milestone 8 remediation: the three capabilities previously registered with
+    # handler=None (a real Kernel boot, not a mock) must now resolve to real, working
+    # handlers and be genuinely invocable end-to-end.
+    cap_intel = kernel.get_capability("kortex.document.intelligence.analyze")
+    assert cap_intel.provider == "document"
+    assert cap_intel.handler is not None
+    intel_result = await cap_intel.handler("doc-cap-1", "ver-cap-1")
+    assert intel_result.document_id == "doc-cap-1"
+
+    cap_rec = kernel.get_capability("kortex.document.recommendation.get")
+    assert cap_rec.provider == "document"
+    assert cap_rec.handler is not None
+    rec_result = await cap_rec.handler("operation_profile", business_operation="GENERATE_PAYROLL_SLIP")
+    assert rec_result == "profile.payslip.v1"
+
+    cap_register = kernel.get_capability("kortex.document.adapter.register")
+    assert cap_register.provider == "document"
+    assert cap_register.handler is not None
+    registered = await cap_register.handler(
+        AdapterMetadata(
+            adapter_id="kortex.adapter.cap_test",
+            display_name="Capability Test Adapter",
+            vendor="Kortex",
+            author="Dev",
+            version="1.0.0",
+            license="MIT",
+            description="Registered via kortex.document.adapter.register in a real Kernel boot",
+        )
+    )
+    assert registered.metadata.adapter_id == "kortex.adapter.cap_test"
+    assert document_engine.adapter_registry.get_adapter_by_id("kortex.adapter.cap_test") is not None
+
     await kernel.shutdown()
 
 
@@ -287,9 +319,19 @@ async def test_complete_end_to_end_document_flow(tmp_path) -> None:
     assert meta_pub.lifecycle_state == DocumentLifecycleState.PUBLISHED
     assert meta_pub.is_immutable is True
 
-    # 8. Verify system event publication
+    # 8. Verify system event publication — both the local emitted_events record AND real
+    # publication to the Kernel's Event Engine (Milestone 8 remediation: engine.py previously
+    # never called kernel.publish_event, so this wildcard subscription always silently
+    # received nothing; it now proves genuine Kernel Event Engine integration).
     await asyncio.sleep(0.05)
     assert len(document_engine.emitted_events) >= 3
+
+    assert len(received_events) >= 3
+    received_topics = {evt.topic for evt in received_events}
+    assert "document.operation.started" in received_topics
+    assert "document.operation.completed" in received_topics
+    assert "document.lifecycle.transitioned" in received_topics
+    assert "document.published" in received_topics
 
     await kernel.shutdown()
 

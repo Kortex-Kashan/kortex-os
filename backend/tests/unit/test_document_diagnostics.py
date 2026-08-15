@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.core.kernel import Kernel
 from kortex.engines.document.diagnostics import DocumentDiagnostics
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document.events import (
@@ -23,7 +24,11 @@ from kortex.engines.document.events import (
     DocumentPublishedEvent,
     DocumentSupersededEvent,
 )
+from kortex.engines.document.exceptions import DocumentOperationError
+from kortex.engines.document.intelligence import DocumentIntelligenceModel
 from kortex.engines.document.models import (
+    AdapterCapability,
+    AdapterMetadata,
     BindingContext,
     DocumentLifecycleState,
     DocumentOperationProfile,
@@ -267,4 +272,247 @@ async def test_document_engine_facade_additional_methods() -> None:
     # execute_profile with invalid request
     with pytest.raises(Exception):
         await engine.execute_profile("prof-1", None)  # type: ignore[arg-type]
+
+
+# =============================================================================
+# Milestone 8 Remediation: Capability Handlers, Kernel Event Publication
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_all_capabilities_have_working_handlers_via_real_kernel() -> None:
+    """Test that every capability DocumentDiagnostics.capabilities() declares is registered
+    with a real, invocable handler against the real Kernel (not a mock).
+
+    This directly verifies the M8 defect found during the prior audit: 3 of 8 declared
+    capabilities (intelligence.analyze, recommendation.get, adapter.register) were previously
+    registered with handler=None against a real Kernel, which would raise TypeError on
+    invocation. No exposed capability may have a None handler.
+    """
+    kernel = Kernel()
+    engine = DocumentEngine()
+    await engine.initialize(kernel)
+
+    declared = engine.capabilities()
+    assert len(declared) == 8
+
+    for cap_name in declared:
+        descriptor = kernel.get_capability(cap_name)
+        assert descriptor.handler is not None, f"Capability '{cap_name}' has no handler."
+
+
+@pytest.mark.asyncio
+async def test_adapter_register_capability_real_invocation_via_kernel() -> None:
+    """Test kortex.document.adapter.register: real Kernel dispatch, registry effect, and event."""
+    kernel = Kernel()
+    engine = DocumentEngine()
+    await engine.initialize(kernel)
+
+    cap = kernel.get_capability("kortex.document.adapter.register")
+    new_meta = AdapterMetadata(
+        adapter_id="kortex.adapter.m8_test",
+        display_name="M8 Test Adapter",
+        vendor="Kortex",
+        author="Dev",
+        version="1.0.0",
+        license="MIT",
+        description="Adapter registered via the M8 capability handler",
+        supported_capabilities=[AdapterCapability.GENERATE],
+    )
+
+    registered = await cap.handler(new_meta)
+    assert registered.metadata.adapter_id == "kortex.adapter.m8_test"
+
+    # Real registry effect, not just a return value.
+    assert engine.adapter_registry.get_adapter_by_id("kortex.adapter.m8_test") is not None
+
+    # DocumentAdapterRegisteredEvent was emitted for this registration.
+    reg_events = [e for e in engine.emitted_events if isinstance(e, DocumentAdapterRegisteredEvent)]
+    assert any(e.adapter_id == "kortex.adapter.m8_test" for e in reg_events)
+
+
+@pytest.mark.asyncio
+async def test_intelligence_analyze_capability_real_invocation_via_kernel() -> None:
+    """Test kortex.document.intelligence.analyze: real Kernel dispatch, result type, and event."""
+    kernel = Kernel()
+    engine = DocumentEngine()
+    await engine.initialize(kernel)
+
+    cap = kernel.get_capability("kortex.document.intelligence.analyze")
+    result = await cap.handler("doc-intel-1", "ver-intel-1", ontology={"entity": "Invoice"})
+
+    assert isinstance(result, DocumentIntelligenceModel)
+    assert result.document_id == "doc-intel-1"
+    assert result.version_id == "ver-intel-1"
+
+    updated_events = [
+        e for e in engine.emitted_events if isinstance(e, DocumentIntelligenceUpdatedEvent)
+    ]
+    assert len(updated_events) == 1
+    assert updated_events[0].document_id == "doc-intel-1"
+
+
+@pytest.mark.asyncio
+async def test_recommendation_get_capability_real_invocation_via_kernel() -> None:
+    """Test kortex.document.recommendation.get: real Kernel dispatch across all three
+    recommendation kinds, plus rejection of an unrecognized recommendation_type."""
+    kernel = Kernel()
+    engine = DocumentEngine()
+    await engine.initialize(kernel)
+
+    cap = kernel.get_capability("kortex.document.recommendation.get")
+
+    templates = await cap.handler("template", user_intent="generate payslip", data_schema={})
+    assert "payslip.declarative.v1" in templates
+
+    profile_id = await cap.handler(
+        "operation_profile", business_operation="GENERATE_PAYROLL_SLIP", user_context={}
+    )
+    assert profile_id == "profile.payslip.v1"
+
+    pipeline = await cap.handler("adapter_pipeline", profile_id="profile.payslip.v1")
+    assert isinstance(pipeline, list)
+
+    with pytest.raises(DocumentOperationError, match="Unknown recommendation_type"):
+        await cap.handler("not_a_real_type")
+
+
+@pytest.mark.asyncio
+async def test_transition_lifecycle_emits_published_superseded_archived_events() -> None:
+    """Test that transition_lifecycle emits DocumentPublishedEvent, DocumentSupersededEvent,
+    and DocumentArchivedEvent at the correct points in the real lifecycle transition flow."""
+    engine = DocumentEngine()
+
+    v1 = await engine.lifecycle_manager.create_version(
+        title="M8 Event Test Doc", author_id="user1"
+    )
+
+    # Genesis publish: DocumentPublishedEvent only, no DocumentSupersededEvent (no parent).
+    pub_meta = await engine.transition_lifecycle(
+        v1.document_id, v1.version_id, DocumentLifecycleState.PUBLISHED
+    )
+    assert pub_meta.lifecycle_state == DocumentLifecycleState.PUBLISHED
+
+    published_events = [e for e in engine.emitted_events if isinstance(e, DocumentPublishedEvent)]
+    assert len(published_events) == 1
+    assert published_events[0].document_id == v1.document_id
+    assert published_events[0].version_id == v1.version_id
+
+    superseded_events = [
+        e for e in engine.emitted_events if isinstance(e, DocumentSupersededEvent)
+    ]
+    assert len(superseded_events) == 0
+
+    # Child publish supersedes the parent: both DocumentPublishedEvent and
+    # DocumentSupersededEvent must fire.
+    v2 = await engine.lifecycle_manager.create_child_version(
+        parent_version_id=v1.version_id, document_id=v1.document_id, author_id="user1"
+    )
+    await engine.transition_lifecycle(v1.document_id, v2.version_id, DocumentLifecycleState.PUBLISHED)
+
+    superseded_events2 = [
+        e for e in engine.emitted_events if isinstance(e, DocumentSupersededEvent)
+    ]
+    assert len(superseded_events2) == 1
+    assert superseded_events2[0].superseded_version_id == v1.version_id
+    assert superseded_events2[0].new_version_id == v2.version_id
+
+    # Archive the (now superseded) parent version: DocumentArchivedEvent must fire.
+    await engine.transition_lifecycle(v1.document_id, v1.version_id, DocumentLifecycleState.ARCHIVED)
+
+    archived_events = [e for e in engine.emitted_events if isinstance(e, DocumentArchivedEvent)]
+    assert len(archived_events) == 1
+    assert archived_events[0].version_id == v1.version_id
+
+
+@pytest.mark.asyncio
+async def test_initialize_never_registers_a_capability_with_no_handler() -> None:
+    """Test the defensive backstop added in Milestone 8: if capabilities() ever declares a
+    name with no matching handler branch, initialize() must skip registering it with the
+    Kernel entirely — never register it with handler=None."""
+    from kortex.core.exceptions import CapabilityNotFoundError
+
+    kernel = Kernel()
+    engine = DocumentEngine()
+    engine.capabilities = lambda: [  # type: ignore[method-assign]
+        "kortex.document.operation.execute",
+        "kortex.document.unmapped.fake",
+    ]
+
+    await engine.initialize(kernel)
+
+    assert kernel.get_capability("kortex.document.operation.execute").handler is not None
+
+    with pytest.raises(CapabilityNotFoundError):
+        kernel.get_capability("kortex.document.unmapped.fake")
+
+
+@pytest.mark.asyncio
+async def test_events_are_published_to_real_kernel_event_engine() -> None:
+    """Test that DocumentEngine events actually reach the Kernel's real Event Engine bus,
+    not merely the local emitted_events list.
+
+    This directly verifies the M8 defect found during the prior audit: engine.py never called
+    kernel.publish_event, so a wildcard Kernel event subscription would never observe any
+    Document Engine event despite emitted_events being populated locally.
+    """
+    kernel = Kernel()
+    engine = DocumentEngine()
+    await engine.initialize(kernel)
+    await engine.start()
+
+    received: list[Any] = []
+    kernel.subscribe_event("*", lambda evt: received.append(evt))
+
+    profile = DocumentOperationProfile(
+        id="profile.m8.kernel_event.v1",
+        name="M8 Kernel Event Test Profile",
+        namespace="kortex.document",
+        version="1.0.0",
+        description="Profile used to verify real Kernel Event Engine publication",
+        business_operation="M8_KERNEL_EVENT_TEST",
+    )
+    await engine.profile_manager.register_profile(profile)
+
+    request = OperationRequest(
+        request_id="req-m8-kernel-evt-1",
+        profile_id="profile.m8.kernel_event.v1",
+        binding_context=BindingContext(context_id="ctx-m8-kernel-evt-1"),
+    )
+    result = await engine.execute_profile("profile.m8.kernel_event.v1", request)
+    assert result.status == "COMPLETED"
+
+    received_topics = {evt.topic for evt in received}
+    assert "document.operation.started" in received_topics
+    assert "document.operation.completed" in received_topics
+
+    started_evt = next(evt for evt in received if evt.topic == "document.operation.started")
+    assert started_evt.payload["request_id"] == "req-m8-kernel-evt-1"
+
+
+@pytest.mark.asyncio
+async def test_event_publication_failure_does_not_break_engine_when_kernel_lacks_publish_event() -> None:
+    """Test that _emit_event degrades gracefully (local recording still happens) when the
+    configured kernel-like object has no publish_event method or raises."""
+
+    class BrokenKernel:
+        def register_capability(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        async def publish_event(self, **kwargs: Any) -> None:
+            raise RuntimeError("Event Engine unavailable")
+
+    engine = DocumentEngine()
+    await engine.initialize(BrokenKernel())
+    await engine.start()
+
+    doc_ver = await engine.lifecycle_manager.create_version(title="Broken Kernel Doc", author_id="u1")
+    meta = await engine.transition_lifecycle(
+        doc_ver.document_id, doc_ver.version_id, DocumentLifecycleState.REVIEW
+    )
+    assert meta.lifecycle_state == DocumentLifecycleState.REVIEW
+
+    transition_events = [
+        e for e in engine.emitted_events if isinstance(e, DocumentLifecycleTransitionedEvent)
+    ]
+    assert len(transition_events) == 1
 

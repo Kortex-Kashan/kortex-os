@@ -6,7 +6,7 @@ enforcing Clean Architecture, Dependency Inversion, and strict type checking.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.models import (
@@ -27,6 +27,9 @@ from kortex.engines.document.models import (
     TemplateSchema,
     ValidationReport,
 )
+
+if TYPE_CHECKING:
+    from kortex.engines.document.intelligence import DocumentIntelligenceModel
 
 
 @runtime_checkable
@@ -63,6 +66,25 @@ class IDocumentEngine(Protocol):
 
     def list_adapters(self) -> list[AdapterMetadata]:
         """Return list of metadata objects for all registered document adapters."""
+        ...
+
+    async def register_adapter(
+        self, adapter: BaseDocumentAdapter | AdapterMetadata
+    ) -> BaseDocumentAdapter:
+        """Register a new document adapter into the Document Adapter Registry."""
+        ...
+
+    async def analyze_document_intelligence(
+        self,
+        document_id: str,
+        version_id: str,
+        ontology: dict[str, Any] | None = None,
+    ) -> "DocumentIntelligenceModel":
+        """Trigger intelligence analysis via IDocumentIntelligenceProvider."""
+        ...
+
+    async def get_recommendation(self, recommendation_type: str, **kwargs: Any) -> Any:
+        """Query AI recommendations via IDocumentRecommendationProvider."""
         ...
 
 
