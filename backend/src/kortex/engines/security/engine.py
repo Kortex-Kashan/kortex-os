@@ -1,16 +1,19 @@
 """
-KORTEX Security Engine Core Facade (Milestone M1).
+KORTEX Security Engine Core Facade (Milestone M1 + M2).
 
 Follows the exact lifecycle/registration conventions established by sibling
 engines (see `kortex.engines.storage.engine.StorageEngine`,
 `kortex.engines.registry.engine.RegistryEngine`).
 
 Milestone M1 scope: engine lifecycle (`BaseEngine`), Kernel/Registry capability
-registration, and the common diagnostics interface (`IEngineDiagnostics`). The
-four canonical Security capabilities are registered as explicit,
-non-functional placeholders — every invocation fails closed with a
-`NOT_IMPLEMENTED` error regardless of input. They never authenticate,
-authorize, decrypt secrets, issue tokens, or grant access.
+registration, and the common diagnostics interface (`IEngineDiagnostics`).
+Milestone M2 adds: `SecretStore` construction and activation of the
+`kortex.security.secret.get` capability with real (encrypted, fail-closed)
+behavior. `kortex.security.auth.authenticate`, `kortex.security.access.authorize`,
+and `kortex.security.signature.verify` remain exactly what they were in M1 —
+explicit, non-functional placeholders that fail closed with `NOT_IMPLEMENTED`
+under any input. None of this module's capabilities perform authentication,
+authorization, or signature verification.
 
 Authoritative Kernel capability interception/dispatch (i.e. actually routing
 every capability invocation through Security Engine's authorization decision)
@@ -24,9 +27,11 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, NoReturn, Optional
 
 from kortex.core.base_engine import BaseEngine, EngineState
-from kortex.engines.security.exceptions import SecurityEngineError
+from kortex.engines.security.exceptions import MasterKeyError, SecurityEngineError
 from kortex.engines.security.interfaces import ICryptoProvider, IEngineDiagnostics
 from kortex.engines.security.providers.local_crypto import LocalCrypto
+from kortex.engines.security.secrets import SecretStore
+from kortex.engines.storage.interfaces import IDataStore
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
@@ -40,28 +45,46 @@ _NOT_IMPLEMENTED_MESSAGE = (
     "a later milestone."
 )
 
+_MASTER_KEY_CONFIG_KEY = "KORTEX_MASTER_KEY"
+_SECRET_GET_CAPABILITY = "kortex.security.secret.get"
+
 # Canonical capability registration list, per Security Engine spec S15.
 _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
     ("kortex.security.auth.authenticate", "Authenticate a caller identity."),
     ("kortex.security.access.authorize", "Authorize a caller's requested capability."),
-    ("kortex.security.secret.get", "Resolve a secret handle to its plaintext value."),
+    (_SECRET_GET_CAPABILITY, "Resolve a secret handle to its plaintext value."),
     ("kortex.security.signature.verify", "Verify a cryptographic signature."),
 ]
 
 
 class SecurityEngine(BaseEngine, IEngineDiagnostics):
-    """KORTEX Security Engine Core Facade providing M1 lifecycle and capability placeholders."""
+    """KORTEX Security Engine Core Facade providing M1 lifecycle, M2 SecretStore, and capability placeholders."""
 
-    def __init__(self, crypto_provider: Optional[ICryptoProvider] = None) -> None:
+    def __init__(
+        self,
+        crypto_provider: Optional[ICryptoProvider] = None,
+        data_store: Optional[IDataStore] = None,
+        master_key: Optional[bytes] = None,
+    ) -> None:
         """Initialize SecurityEngine instance.
 
         Args:
             crypto_provider: Optional cryptographic provider override (defaults
-                to `LocalCrypto()`). Held for diagnostic reporting and future
-                milestones — M1's capability placeholders never invoke it.
+                to `LocalCrypto()`).
+            data_store: Optional explicit `IDataStore` injection, mirroring the
+                "explicit injection always takes priority" convention used by
+                sibling engines (e.g. Document Engine) — if omitted, resolved
+                from the Kernel's registered `storage` engine during `initialize()`.
+            master_key: Optional already-decoded 32-byte master key, for
+                deterministic tests — if omitted, resolved from the
+                `KORTEX_MASTER_KEY` configuration value during `initialize()`.
+                Never logged, never stored anywhere except as this attribute.
         """
         super().__init__()
         self._crypto_provider: ICryptoProvider = crypto_provider if crypto_provider is not None else LocalCrypto()
+        self._data_store_override: Optional[IDataStore] = data_store
+        self._master_key_override: Optional[bytes] = master_key
+        self._secret_store: Optional[SecretStore] = None
         self._registered_capabilities: List[str] = []
         self._metrics: Dict[str, Any] = {
             "capabilities_registered": 0,
@@ -81,32 +104,74 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
     # -- Lifecycle Implementation ---------------------------------------------
 
     async def initialize(self, kernel: Kernel) -> None:
-        """Register the four canonical M1 capability placeholders with the Kernel.
+        """Build the M2 `SecretStore` and register the four canonical capabilities.
 
-        None of these capabilities authenticate, authorize, decrypt secrets, or
-        grant access — every invocation fails closed with an explicit
-        `NOT_IMPLEMENTED` error, regardless of input.
+        `kortex.security.secret.get` delegates to a real, encrypted, fail-closed
+        `SecretStore`. The other three capabilities remain exactly what they
+        were in M1 — explicit, non-functional placeholders that fail closed
+        with `NOT_IMPLEMENTED` regardless of input. If the `SecretStore` cannot
+        be constructed securely (missing/malformed master key, missing
+        `IDataStore`), this method raises and the Kernel boot fails closed —
+        there is no fallback path that starts Security Engine without it.
         """
         self._set_state(EngineState.INITIALIZING)
-        self.logger.info("Initializing KORTEX Security Engine (Milestone M1)...")
+        self.logger.info("Initializing KORTEX Security Engine (Milestone M1 + M2)...")
 
         try:
+            self._secret_store = self._build_secret_store(kernel)
+
             for capability_name, description in _CANONICAL_CAPABILITIES:
+                if capability_name == _SECRET_GET_CAPABILITY:
+                    handler: Callable[..., Any] = self._secret_store.get_secret
+                    capability_description = f"{description} Encrypted, fail-closed (Milestone M2)."
+                else:
+                    handler = self._make_not_implemented_handler(capability_name)
+                    capability_description = (
+                        f"{description} NOT IMPLEMENTED - Milestone M1 structural placeholder only."
+                    )
                 kernel.register_capability(
                     name=capability_name,
-                    description=f"{description} NOT IMPLEMENTED - Milestone M1 structural placeholder only.",
+                    description=capability_description,
                     provider=self.name,
-                    handler=self._make_not_implemented_handler(capability_name),
+                    handler=handler,
                 )
                 self._registered_capabilities.append(capability_name)
 
             self._metrics["capabilities_registered"] = len(self._registered_capabilities)
             self._set_state(EngineState.READY)
-            self.logger.info("Security Engine initialized successfully (M1 placeholders only).")
+            self.logger.info("Security Engine initialized successfully (M2 SecretStore active).")
         except Exception as e:
             self._set_state(EngineState.FAILED)
             self.logger.error("Failed to initialize Security Engine: %s", e, exc_info=True)
             raise
+
+    def _build_secret_store(self, kernel: Kernel) -> SecretStore:
+        """Resolve `IDataStore` and the master key, then construct `SecretStore`.
+
+        Explicit constructor injection (`data_store`/`master_key` passed to
+        `SecurityEngine.__init__`) always takes priority, mirroring the same
+        convention used by Document/Connector Engine for `IDataStore` — this
+        only resolves from the Kernel when neither was already configured.
+        """
+        data_store = self._data_store_override
+        if data_store is None:
+            storage_engine = kernel.get_engine("storage")
+            resolved = getattr(storage_engine, "data", None)
+            if resolved is None:
+                raise SecurityEngineError("Storage Engine did not provide an IDataStore instance.")
+            data_store = resolved
+
+        master_key = self._master_key_override
+        if master_key is None:
+            raw_key = kernel.get_config(_MASTER_KEY_CONFIG_KEY)
+            if not raw_key:
+                raise MasterKeyError(
+                    f"{_MASTER_KEY_CONFIG_KEY} is not configured. "
+                    "Security Engine cannot initialize SecretStore without it."
+                )
+            master_key = SecretStore.decode_master_key(raw_key)
+
+        return SecretStore(data_store=data_store, crypto_provider=self._crypto_provider, master_key=master_key)
 
     async def start(self) -> None:
         """Start the Security Engine. No background services run in M1."""
@@ -152,8 +217,11 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
     def health(self) -> Dict[str, Any]:
         """Return diagnostic health checks.
 
-        Never reports authentication, authorization, secret storage, or audit
-        as implemented — those do not exist in M1.
+        `secret_store_implemented` reflects reality (True once `SecretStore`
+        has been constructed in `initialize()`). Authentication, authorization,
+        and audit remain honestly reported as not implemented — those do not
+        exist as of Milestone M2. Never exposes the master key or any
+        decrypted secret material.
         """
         return {
             "engine": self.name,
@@ -162,7 +230,7 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             "crypto_provider_configured": self._crypto_provider is not None,
             "authentication_implemented": False,
             "authorization_implemented": False,
-            "secret_store_implemented": False,
+            "secret_store_implemented": self._secret_store is not None,
             "audit_implemented": False,
         }
 
@@ -181,7 +249,6 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             "not_yet_implemented": [
                 "authentication",
                 "authorization",
-                "secret_storage",
                 "audit_enforcement",
                 "kernel_capability_dispatch",
             ],
@@ -193,7 +260,7 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
 
     def version(self) -> str:
         """Return semantic version string."""
-        return "0.1.0-m1"
+        return "0.2.0-m2"
 
     def capabilities(self) -> List[str]:
         """Return list of capability strings registered by this engine."""

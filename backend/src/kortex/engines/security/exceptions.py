@@ -40,7 +40,7 @@ class AuthorizationDeniedError(SecurityEngineError):
     """Raised when a caller is denied a requested permission or capability."""
 
 
-# -- Secret Storage (interfaces declared in M1; implemented in M2) ---------
+# -- Secret Storage (Milestone M2) -------------------------------------------
 
 
 class SecretNotFoundError(SecurityEngineError):
@@ -48,7 +48,25 @@ class SecretNotFoundError(SecurityEngineError):
 
 
 class SecretDecryptionError(SecurityEngineError):
-    """Raised when a stored secret cannot be decrypted or fails integrity verification."""
+    """Raised when a stored secret cannot be decrypted or fails integrity verification.
+
+    Covers ciphertext/tag/AAD tampering, malformed or truncated envelopes,
+    unsupported envelope version/algorithm, and key-identity mismatches.
+    """
+
+
+class MasterKeyError(SecurityEngineError):
+    """Raised when the SecretStore root encryption key is missing or malformed.
+
+    Never includes the key material itself, valid or not, in its message.
+    """
+
+
+class SecretStoreError(SecurityEngineError):
+    """Raised when a SecretStore storage-layer operation fails for a reason other
+    than a normal not-found/decryption-failure outcome (e.g. an underlying
+    `IDataStore` failure). Never silently converted into `False`/`None`.
+    """
 
 
 # -- Cryptographic Verification (implemented in M1) -------------------------

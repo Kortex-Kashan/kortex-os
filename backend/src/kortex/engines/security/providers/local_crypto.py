@@ -43,6 +43,34 @@ _ED25519_SIGNATURE_LENGTH_BYTES = 64
 _ED25519_PUBLIC_KEY_LENGTH_BYTES = 32
 
 
+def _require_bytes(value: object, name: str) -> bytes:
+    """Normalize any non-`bytes` input to `CryptoProviderError` (M2.1 hardening).
+
+    Every public method below accepts caller-supplied byte-like values; wrong
+    Python types (`None`, `int`, `str`, ...) must fail closed through the same
+    documented exception hierarchy as a wrong-length value, never as a raw
+    `TypeError`/`AttributeError` that a caller catching only `SecurityEngineError`
+    subclasses would miss.
+    """
+    if not isinstance(value, bytes):
+        raise CryptoProviderError(f"{name} must be bytes, got {type(value).__name__}.")
+    return value
+
+
+def _require_optional_bytes(value: object, name: str) -> bytes | None:
+    """Same as `_require_bytes`, but `None` is an accepted value (for `associated_data`)."""
+    if value is None:
+        return None
+    return _require_bytes(value, name)
+
+
+def _require_str(value: object, name: str) -> str:
+    """Normalize any non-`str` input to `CryptoProviderError` (M2.1 hardening)."""
+    if not isinstance(value, str):
+        raise CryptoProviderError(f"{name} must be str, got {type(value).__name__}.")
+    return value
+
+
 class LocalCrypto:
     """Local software cryptographic provider backed by the `cryptography` library.
 
@@ -56,6 +84,7 @@ class LocalCrypto:
 
         Deterministic: identical input always produces identical output.
         """
+        data = _require_bytes(data, "data")
         return hashlib.sha256(data).hexdigest()
 
     def verify_sha256(self, data: bytes, expected_hash: str) -> bool:
@@ -65,6 +94,8 @@ class LocalCrypto:
         comparison utility — this is NOT a substitute for Ed25519 signatures
         and provides no authenticity guarantee, only integrity-against-typos.
         """
+        data = _require_bytes(data, "data")
+        expected_hash = _require_str(expected_hash, "expected_hash")
         actual_hash = self.hash_sha256(data)
         return hmac.compare_digest(actual_hash, expected_hash.lower())
 
@@ -92,6 +123,7 @@ class LocalCrypto:
         Raises `CryptoProviderError` for malformed private key material — never
         silently signs with substitute/default key material.
         """
+        data = _require_bytes(data, "data")
         try:
             key = Ed25519PrivateKey.from_private_bytes(private_key)
         except (ValueError, TypeError) as exc:
@@ -106,6 +138,8 @@ class LocalCrypto:
         normal, expected outcome, not an exceptional one. Fails closed: any
         error path returns False, never True.
         """
+        if not isinstance(data, bytes) or not isinstance(signature, bytes) or not isinstance(public_key, bytes):
+            return False
         if len(signature) != _ED25519_SIGNATURE_LENGTH_BYTES:
             return False
         if len(public_key) != _ED25519_PUBLIC_KEY_LENGTH_BYTES:
@@ -136,6 +170,9 @@ class LocalCrypto:
         EVERY call — there is no caller-supplied-nonce parameter, by design,
         removing any possibility of nonce reuse through this API.
         """
+        plaintext = _require_bytes(plaintext, "plaintext")
+        key = _require_bytes(key, "key")
+        associated_data = _require_optional_bytes(associated_data, "associated_data")
         if len(key) != _AES_256_GCM_KEY_LENGTH_BYTES:
             raise CryptoProviderError(
                 f"AES-256-GCM requires a {_AES_256_GCM_KEY_LENGTH_BYTES}-byte key, got {len(key)} bytes."
@@ -162,6 +199,11 @@ class LocalCrypto:
         associated data) or invalid key/nonce length. Decryption failure NEVER
         returns partial or garbage plaintext — it always raises.
         """
+        nonce = _require_bytes(nonce, "nonce")
+        ciphertext = _require_bytes(ciphertext, "ciphertext")
+        tag = _require_bytes(tag, "tag")
+        key = _require_bytes(key, "key")
+        associated_data = _require_optional_bytes(associated_data, "associated_data")
         if len(key) != _AES_256_GCM_KEY_LENGTH_BYTES:
             raise CryptoProviderError(
                 f"AES-256-GCM requires a {_AES_256_GCM_KEY_LENGTH_BYTES}-byte key, got {len(key)} bytes."

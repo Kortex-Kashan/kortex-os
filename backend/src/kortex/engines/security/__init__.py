@@ -1,10 +1,12 @@
 """KORTEX Security Engine — RBAC, encryption, API keys, and audit logging.
 
-Milestone M1 (current package state): domain models, exception hierarchy,
-Protocol interfaces, and a local cryptographic provider (SHA-256, Ed25519,
-AES-256-GCM) exposed via `VerificationService`. Authentication, authorization,
-secret storage, audit enforcement, and Kernel capability registration are NOT
-implemented yet — see the Security Engine milestone plan.
+Milestone M1 + M2 (current package state): domain models, exception
+hierarchy, Protocol interfaces, a local cryptographic provider (SHA-256,
+Ed25519, AES-256-GCM) exposed via `VerificationService`, and an encrypted
+`SecretStore` (single master key + AAD-bound envelope, no key derivation, no
+key rotation). Authentication, authorization, audit enforcement, and Kernel
+capability dispatch middleware are NOT implemented yet — see the Security
+Engine milestone plan.
 """
 
 from kortex.engines.security.crypto import VerificationService
@@ -16,8 +18,10 @@ from kortex.engines.security.exceptions import (
     CryptoProviderError,
     InvalidSignatureError,
     InvalidTokenError,
+    MasterKeyError,
     SecretDecryptionError,
     SecretNotFoundError,
+    SecretStoreError,
     SecurityEngineError,
     TokenExpiredError,
 )
@@ -33,6 +37,7 @@ from kortex.engines.security.models import (
     TokenPayload,
 )
 from kortex.engines.security.providers.local_crypto import LocalCrypto
+from kortex.engines.security.secrets import SecretStore
 
 __all__ = [
     "AccessDecision",
@@ -44,11 +49,14 @@ __all__ = [
     "InvalidSignatureError",
     "InvalidTokenError",
     "LocalCrypto",
+    "MasterKeyError",
     "PermissionRequirement",
     "PrincipalType",
     "SecretDecryptionError",
     "SecretEntry",
     "SecretNotFoundError",
+    "SecretStore",
+    "SecretStoreError",
     "SecurityDiagnostics",
     "SecurityEngine",
     "SecurityEngineError",

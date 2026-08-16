@@ -2,13 +2,15 @@
 Unit tests for Boot Engine.
 """
 
-import pytest
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from kortex.engines.boot.engine import BootEngine
+import pytest
+
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.exceptions import KernelBootError
 from kortex.core.kernel import Kernel
+from kortex.engines.boot.engine import BootEngine
+from kortex.engines.security.exceptions import MasterKeyError
 
 
 class MockEngine(BaseEngine):
@@ -76,3 +78,65 @@ def test_boot_engine_missing_dependency_raises() -> None:
 
     with pytest.raises(KernelBootError):
         boot.resolve_dependency_order(engines)
+
+
+class _RaisingInitializeEngine(BaseEngine):
+    """Minimal engine whose `initialize()` always raises a supplied exception.
+
+    Used to regression-test BootEngine's exception-handling/logging path in
+    `boot_system()` — specifically that logging the failure never raises a
+    secondary exception that would mask the original error.
+    """
+
+    def __init__(self, name: str, error: Exception, deps: Optional[List[str]] = None) -> None:
+        self._name = name
+        self._deps = deps or []
+        self._error = error
+        super().__init__()
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def dependencies(self) -> List[str]:
+        return self._deps
+
+    async def initialize(self, kernel: Kernel) -> None:
+        raise self._error
+
+    async def start(self) -> None:
+        self._set_state(EngineState.RUNNING)
+
+    async def health_check(self) -> Dict[str, Any]:
+        return {"engine": self._name, "status": "healthy"}
+
+    async def stop(self) -> None:
+        self._set_state(EngineState.STOPPED)
+
+
+@pytest.mark.asyncio
+async def test_boot_system_preserves_master_key_error_as_boot_error_cause() -> None:
+    """Regression test for the fixed `%e`/`%s` logging format-string defect.
+
+    When an engine's `initialize()` raises `MasterKeyError`, `boot_system()`
+    must:
+      1. raise `KernelBootError` (boot fails),
+      2. with the original `MasterKeyError` preserved and inspectable as
+         `__cause__` (failure propagation is not lost or replaced),
+      3. without the `self.logger.critical(...)` call itself raising a
+         secondary `TypeError` (which would previously mask both of the above
+         with an unrelated logging-layer crash instead of the intended
+         `KernelBootError`).
+    """
+    kernel = Kernel()
+    boot = BootEngine()
+    original_error = MasterKeyError("KORTEX_MASTER_KEY is missing or empty.")
+    failing_engine = _RaisingInitializeEngine("failing_security_like_engine", error=original_error)
+    kernel.register_engine(failing_engine)
+
+    with pytest.raises(KernelBootError) as exc_info:
+        await boot.boot_system(kernel)
+
+    assert exc_info.value.__cause__ is original_error
+    assert isinstance(exc_info.value.__cause__, MasterKeyError)

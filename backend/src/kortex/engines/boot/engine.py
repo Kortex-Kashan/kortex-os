@@ -119,7 +119,7 @@ class BootEngine(BaseEngine):
             try:
                 await engine.initialize(kernel)
             except Exception as e:
-                self.logger.critical("Engine initialization failed for [%s]: %e", engine_name, e)
+                self.logger.critical("Engine initialization failed for [%s]: %s", engine_name, e)
                 raise KernelBootError(f"Failed to initialize engine '{engine_name}': {e}") from e
 
         # 2. Start Phase
@@ -129,7 +129,7 @@ class BootEngine(BaseEngine):
             try:
                 await engine.start()
             except Exception as e:
-                self.logger.critical("Engine start failed for [%s]: %e", engine_name, e)
+                self.logger.critical("Engine start failed for [%s]: %s", engine_name, e)
                 raise KernelBootError(f"Failed to start engine '{engine_name}': {e}") from e
 
         self.logger.info("KORTEX OS System Boot Sequence completed successfully.")

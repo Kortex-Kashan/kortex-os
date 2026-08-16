@@ -104,14 +104,15 @@ class SecretEntry(BaseModel):
     """An encrypted secret vault record.
 
     Per spec S5: `secret_handle`, `encrypted_payload`, `algorithm`, `created_at_utc`.
-    Persistence (`SecretStore`) is implemented in a later milestone (M2) — this
-    is a data contract only. `encrypted_payload` holds ciphertext, never plaintext.
+    `encrypted_payload` holds the full M2 AEAD envelope (version, algorithm_id,
+    key_id, nonce, tag, ciphertext — see `SecretStore`), never plaintext.
     """
 
     secret_handle: str = Field(min_length=1, description="Opaque handle string, e.g. 'secret:kortex/smtp_pass'.")
-    encrypted_payload: bytes = Field(description="AEAD ciphertext. Never plaintext.")
+    encrypted_payload: bytes = Field(description="Full AEAD envelope bytes. Never plaintext.")
     algorithm: str = Field(min_length=1, description="Cryptographic algorithm identifier, e.g. 'aes-256-gcm'.")
     created_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class TokenPayload(BaseModel):
@@ -154,3 +155,31 @@ class SecurityMetadata(BaseModel):
     classification: ClassificationLevel = ClassificationLevel.INTERNAL
     compliance_flags: List[str] = Field(default_factory=list)
     encryption_required: bool = False
+
+
+# -- SQLAlchemy ORM Model for IDataStore Persistence (Milestone M2) ----------
+
+from sqlalchemy import LargeBinary, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from kortex.core.db import BaseModel as SQLAlchemyBaseModel
+
+
+class SecretRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for an encrypted secret vault entry.
+
+    `id`, `created_at`, `updated_at` are provided by `SQLAlchemyBaseModel`
+    (the latter auto-updates on every mutation via `onupdate=`, satisfying
+    Decision 6's "update updated_at_utc on replacement" without extra code).
+    `encrypted_payload` holds the full AEAD envelope — never plaintext.
+    """
+
+    __tablename__ = "security_secrets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "secret_handle", name="uq_security_secrets_tenant_handle"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    secret_handle: Mapped[str] = mapped_column(String(512), index=True, nullable=False)
+    encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(32), nullable=False, default="aes-256-gcm")
