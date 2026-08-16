@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "asyncpg>=0.30.0",
     "httpx>=0.28.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
