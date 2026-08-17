@@ -1,14 +1,17 @@
 """KORTEX Security Engine — RBAC, encryption, API keys, and audit logging.
 
-Milestone M1 + M2 (current package state): domain models, exception
+Milestone M1 + M2 + M3 (current package state): domain models, exception
 hierarchy, Protocol interfaces, a local cryptographic provider (SHA-256,
-Ed25519, AES-256-GCM) exposed via `VerificationService`, and an encrypted
+Ed25519, AES-256-GCM) exposed via `VerificationService`, an encrypted
 `SecretStore` (single master key + AAD-bound envelope, no key derivation, no
-key rotation). Authentication, authorization, audit enforcement, and Kernel
-capability dispatch middleware are NOT implemented yet — see the Security
-Engine milestone plan.
+key rotation), and an `AuthenticationManager` (uniform Argon2id credential
+verification for USER/SERVICE_PRINCIPAL/AGENT, Ed25519-signed short-lived
+tokens, no revocation, no cache). Authorization, audit enforcement, and
+Kernel capability dispatch middleware are NOT implemented yet — see the
+Security Engine milestone plan.
 """
 
+from kortex.engines.security.auth import AuthenticationManager
 from kortex.engines.security.crypto import VerificationService
 from kortex.engines.security.diagnostics import SecurityDiagnostics
 from kortex.engines.security.engine import SecurityEngine
@@ -23,6 +26,7 @@ from kortex.engines.security.exceptions import (
     SecretNotFoundError,
     SecretStoreError,
     SecurityEngineError,
+    SigningKeyError,
     TokenExpiredError,
 )
 from kortex.engines.security.models import (
@@ -30,6 +34,7 @@ from kortex.engines.security.models import (
     ClassificationLevel,
     CryptographicSignature,
     PermissionRequirement,
+    PrincipalRecord,
     PrincipalType,
     SecretEntry,
     SecurityMetadata,
@@ -42,6 +47,7 @@ from kortex.engines.security.secrets import SecretStore
 __all__ = [
     "AccessDecision",
     "AuthenticationError",
+    "AuthenticationManager",
     "AuthorizationDeniedError",
     "ClassificationLevel",
     "CryptoProviderError",
@@ -51,6 +57,7 @@ __all__ = [
     "LocalCrypto",
     "MasterKeyError",
     "PermissionRequirement",
+    "PrincipalRecord",
     "PrincipalType",
     "SecretDecryptionError",
     "SecretEntry",
@@ -62,6 +69,7 @@ __all__ = [
     "SecurityEngineError",
     "SecurityMetadata",
     "SecurityPrincipal",
+    "SigningKeyError",
     "TokenExpiredError",
     "TokenPayload",
     "VerificationService",

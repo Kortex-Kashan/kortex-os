@@ -4,12 +4,13 @@ KORTEX Security Engine Abstract Interfaces & Protocols (Milestone M1).
 Defines the Protocol contracts for the Security Engine per
 `docs/architecture/security_engine_implementation_spec.md` v3.0.0 (S4).
 
-Only `ICryptoProvider`, `IVerificationService`, and `IEngineDiagnostics` are
+`ICryptoProvider`, `IVerificationService`, and `IEngineDiagnostics` are
 implemented as of M1 (see `providers/local_crypto.py`, `crypto.py`,
-`diagnostics.py`). `ISecurityEngine`, `IAuthenticationManager`,
-`IAuthorizationEngine`, and `ISecretStore` are declared here as forward
-contracts for later milestones (M2-M6) — they carry no implementation logic
-and must not be mistaken for functional behavior.
+`diagnostics.py`). `ISecretStore` is implemented as of M2 (`secrets.py`).
+`IAuthenticationManager` is implemented as of M3 (`auth.py`). `ISecurityEngine`
+and `IAuthorizationEngine` remain declared here as forward contracts for
+later milestones (M4/M6) — they carry no implementation logic and must not
+be mistaken for functional behavior.
 
 `IEngineDiagnostics` intentionally mirrors
 `kortex.engines.storage.interfaces.IEngineDiagnostics` exactly: this codebase's
@@ -52,6 +53,13 @@ class ICryptoProvider(Protocol):
 
     def sign_ed25519(self, data: bytes, private_key: bytes) -> bytes:
         """Sign `data` using a raw 32-byte Ed25519 private key. Returns a 64-byte signature."""
+        ...
+
+    def derive_ed25519_public_key(self, private_key: bytes) -> bytes:
+        """Derive the raw 32-byte public key corresponding to a raw 32-byte
+        Ed25519 private key. Never generates or persists key material — a
+        pure mathematical derivation over caller-supplied bytes.
+        """
         ...
 
     def verify_ed25519(self, data: bytes, signature: bytes, public_key: bytes) -> bool:
@@ -112,7 +120,7 @@ class IVerificationService(Protocol):
 
 @runtime_checkable
 class ISecretStore(Protocol):
-    """Encrypted secret vault protocol. Implemented in a later milestone (M2)."""
+    """Encrypted secret vault protocol. Implemented as of M2 (`secrets.py`)."""
 
     async def get_secret(self, secret_handle: str, tenant_id: str) -> str:
         """Resolve a secret handle to its decrypted plaintext value."""
@@ -129,7 +137,11 @@ class ISecretStore(Protocol):
 
 @runtime_checkable
 class IAuthenticationManager(Protocol):
-    """Local authentication protocol. Implemented in a later milestone (M3)."""
+    """Local authentication protocol. Implemented as of M3 (`auth.py`).
+
+    Deliberately has no `revoke_token` method — token revocation is an
+    explicit M3 non-goal (short-lived tokens only).
+    """
 
     async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
         """Verify credentials and return the resulting `SecurityPrincipal`."""

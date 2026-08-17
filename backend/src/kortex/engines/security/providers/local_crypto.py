@@ -130,6 +130,23 @@ class LocalCrypto:
             raise CryptoProviderError("Invalid Ed25519 private key material: expected 32 raw bytes.") from exc
         return key.sign(data)
 
+    def derive_ed25519_public_key(self, private_key: bytes) -> bytes:
+        """Derive the raw 32-byte public key for a raw 32-byte Ed25519 private key.
+
+        A pure mathematical derivation — recombines the exact two code paths
+        already used elsewhere in this class: `Ed25519PrivateKey.from_private_bytes`
+        (as in `sign_ed25519`) followed by `.public_key().public_bytes(...)`
+        (as in `generate_ed25519_keypair`). Raises `CryptoProviderError` for
+        malformed private key material — never derives from or falls back to
+        substitute/default key material.
+        """
+        private_key = _require_bytes(private_key, "private_key")
+        try:
+            key = Ed25519PrivateKey.from_private_bytes(private_key)
+        except (ValueError, TypeError) as exc:
+            raise CryptoProviderError("Invalid Ed25519 private key material: expected 32 raw bytes.") from exc
+        return key.public_key().public_bytes(encoding=Encoding.Raw, format=PublicFormat.Raw)
+
     def verify_ed25519(self, data: bytes, signature: bytes, public_key: bytes) -> bool:
         """Verify an Ed25519 `signature` over `data` against a raw 32-byte public key.
 

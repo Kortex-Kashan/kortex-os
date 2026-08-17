@@ -116,10 +116,14 @@ class SecretEntry(BaseModel):
 
 
 class TokenPayload(BaseModel):
-    """The claims encoded by an identity/session token.
+    """The claims encoded by an identity/session token, plus its detached
+    Ed25519 signature (Milestone M3).
 
-    Token issuance, signing, and verification are implemented in a later
-    milestone (M3) — this is the data contract for what a token asserts.
+    `signature` defaults to `None` so that claims-only construction (as used
+    by pre-M3 model-validation tests) remains valid — only a `TokenPayload`
+    returned by `AuthenticationManager.issue_token` carries a real signature.
+    `verify_token` must treat a `None` signature as an immediate fail-closed
+    rejection, never as "not yet checked."
     """
 
     token_id: str = Field(min_length=1, description="Unique identifier for this token instance.")
@@ -128,6 +132,9 @@ class TokenPayload(BaseModel):
     tenant_id: str = Field(min_length=1)
     issued_at_utc: datetime
     expires_at_utc: datetime
+    signature: bytes | None = Field(
+        default=None, description="Detached Ed25519 signature over the other claim fields. Never trusted unread."
+    )
 
 
 class CryptographicSignature(BaseModel):
@@ -159,7 +166,7 @@ class SecurityMetadata(BaseModel):
 
 # -- SQLAlchemy ORM Model for IDataStore Persistence (Milestone M2) ----------
 
-from sqlalchemy import LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from kortex.core.db import BaseModel as SQLAlchemyBaseModel
@@ -183,3 +190,40 @@ class SecretRecord(SQLAlchemyBaseModel):
     secret_handle: Mapped[str] = mapped_column(String(512), index=True, nullable=False)
     encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     algorithm: Mapped[str] = mapped_column(String(32), nullable=False, default="aes-256-gcm")
+
+
+class PrincipalRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for a Security Engine principal (Milestone M3).
+
+    Colocated in this module rather than in `kortex.engines.storage` or
+    `kortex.engines.identity`, following the same repo-wide convention
+    `SecretRecord` (above) and `kortex.engines.document.models.DocumentRecord`
+    already establish: each engine owns and defines its own persistence
+    models, consumed exclusively through `IDataStore` — Storage Engine
+    provides the I/O abstraction, not the schema. Auto-created via the
+    existing `Base.metadata.create_all()` boot path; no Alembic migration is
+    required, exactly as `SecretRecord` required none.
+
+    `credential_hash` holds a single Argon2id hash used uniformly for every
+    `PrincipalType` — a password hash for `USER`, a pre-shared-secret hash for
+    `SERVICE_PRINCIPAL`/`AGENT`. There is no plaintext credential field and no
+    reversible/encrypted credential storage: verification is always one-way.
+    `roles`/`attributes` are carried through into an authenticated
+    `SecurityPrincipal` as opaque identity metadata only — nothing in
+    Milestone M3 interprets, evaluates, or acts on them.
+    """
+
+    __tablename__ = "security_principals"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "principal_id", "principal_type", name="uq_security_principals_tenant_principal"
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    credential_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

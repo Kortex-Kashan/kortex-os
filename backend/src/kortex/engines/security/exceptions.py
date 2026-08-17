@@ -18,7 +18,7 @@ class SecurityEngineError(KortexError):
     """Base exception for all Security Engine errors."""
 
 
-# -- Authentication (interfaces declared in M1; implemented in M3) ----------
+# -- Authentication (Milestone M3) -------------------------------------------
 
 
 class AuthenticationError(SecurityEngineError):
@@ -31,6 +31,17 @@ class InvalidTokenError(AuthenticationError):
 
 class TokenExpiredError(AuthenticationError):
     """Raised when a session/identity token has passed its expiration time."""
+
+
+class SigningKeyError(SecurityEngineError):
+    """Raised when the AuthenticationManager's Ed25519 signing key is missing
+    or malformed.
+
+    Never includes the key material itself, valid or not, in its message.
+    Cryptographically separate from `MasterKeyError` (SecretStore's AES-256-GCM
+    root key) — the two keys are resolved from distinct configuration values
+    and never derived from one another.
+    """
 
 
 # -- Authorization (interfaces declared in M1; implemented in M4) -----------
