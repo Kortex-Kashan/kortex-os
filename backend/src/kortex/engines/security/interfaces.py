@@ -7,10 +7,11 @@ Defines the Protocol contracts for the Security Engine per
 `ICryptoProvider`, `IVerificationService`, and `IEngineDiagnostics` are
 implemented as of M1 (see `providers/local_crypto.py`, `crypto.py`,
 `diagnostics.py`). `ISecretStore` is implemented as of M2 (`secrets.py`).
-`IAuthenticationManager` is implemented as of M3 (`auth.py`). `ISecurityEngine`
-and `IAuthorizationEngine` remain declared here as forward contracts for
-later milestones (M4/M6) — they carry no implementation logic and must not
-be mistaken for functional behavior.
+`IAuthenticationManager` is implemented as of M3 (`auth.py`).
+`IAuthorizationEngine` is implemented as of M4 (`authorization.py`).
+`ISecurityEngine` remains declared here as a forward contract for a later
+milestone (M6) — it carries no implementation logic and must not be
+mistaken for functional behavior.
 
 `IEngineDiagnostics` intentionally mirrors
 `kortex.engines.storage.interfaces.IEngineDiagnostics` exactly: this codebase's
@@ -158,7 +159,7 @@ class IAuthenticationManager(Protocol):
 
 @runtime_checkable
 class IAuthorizationEngine(Protocol):
-    """Permission and policy evaluation protocol. Implemented in a later milestone (M4)."""
+    """Permission and policy evaluation protocol. Implemented as of M4 (`authorization.py`)."""
 
     async def evaluate_rbac(
         self, principal: SecurityPrincipal, requirement: PermissionRequirement

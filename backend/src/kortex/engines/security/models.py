@@ -227,3 +227,35 @@ class PrincipalRecord(SQLAlchemyBaseModel):
     credential_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
     roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class RolePermissionRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for a single RBAC role-to-permission grant (Milestone M4).
+
+    Colocated in `security/models.py` per the same cross-engine convention
+    `SecretRecord`/`PrincipalRecord`/`DocumentRecord` already establish.
+    Auto-created via the existing `Base.metadata.create_all()` boot path; no
+    Alembic migration required.
+
+    Deliberately global, not tenant-scoped — RBAC (this table) evaluates
+    static "can role X do Y" facts; tenant isolation is ABAC's
+    responsibility (`abac.py`), matching the frozen spec's own division
+    between "static role-to-permission matrices" (S8) and "dynamic
+    environmental attributes" including `tenant_id` (S9). A role's
+    permissions are the same regardless of which tenant a principal
+    belongs to.
+
+    One row per (role, permission) grant — a role's full permission set is
+    the union of every row matching that role. There is no provisioning
+    capability in M4 (matching M3's `PrincipalRecord` precedent): no role
+    has any row here unless a caller inserts it directly via `IDataStore`,
+    so RBAC fails closed (denies) for every role until explicitly granted.
+    """
+
+    __tablename__ = "security_role_permissions"
+    __table_args__ = (
+        UniqueConstraint("role", "permission", name="uq_security_role_permissions_role_permission"),
+    )
+
+    role: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    permission: Mapped[str] = mapped_column(String(255), nullable=False)

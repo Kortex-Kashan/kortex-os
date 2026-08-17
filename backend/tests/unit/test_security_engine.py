@@ -1,17 +1,20 @@
-"""Unit tests for the KORTEX Security Engine core facade (Milestone M1 + M2 + M3).
+"""Unit tests for the KORTEX Security Engine core facade (Milestone M1 + M2 + M3 + M4).
 
 Verifies engine identity, dependency declaration, `BaseEngine` lifecycle,
 Kernel/Registry capability registration, fail-closed capability placeholder
 behavior under a spread of inputs, Kernel dependency-ordered boot, fail-closed
-missing-dependency boot behavior, real `SecretStore`/`AuthenticationManager`
-delegation through the `kortex.security.secret.get`/`kortex.security.auth.authenticate`
-capabilities, fail-closed boot when the master key or the authentication
-signing key is missing/malformed, and diagnostic truthfulness.
+missing-dependency boot behavior, real `SecretStore`/`AuthenticationManager`/
+`AuthorizationEngine` delegation through the
+`kortex.security.secret.get`/`kortex.security.auth.authenticate`/
+`kortex.security.access.authorize` capabilities, fail-closed boot when the
+master key or the authentication signing key is missing/malformed, and
+diagnostic truthfulness.
 
-`kortex.security.access.authorize` and `kortex.security.signature.verify`
-remain M1 structural placeholders — they never authorize or verify anything.
-`kortex.security.secret.get` (M2) and `kortex.security.auth.authenticate` (M3)
-are real: encrypted/fail-closed, delegating to `SecretStore`/`AuthenticationManager`.
+`kortex.security.signature.verify` remains the sole M1 structural
+placeholder — it never verifies anything. `kortex.security.secret.get` (M2),
+`kortex.security.auth.authenticate` (M3), and `kortex.security.access.authorize`
+(M4) are real: encrypted/fail-closed, delegating to
+`SecretStore`/`AuthenticationManager`/`AuthorizationEngine`.
 """
 
 from __future__ import annotations
@@ -35,7 +38,14 @@ from kortex.engines.security.exceptions import (
     SecurityEngineError,
     SigningKeyError,
 )
-from kortex.engines.security.models import PrincipalRecord
+from kortex.engines.security.models import (
+    AccessDecision,
+    PermissionRequirement,
+    PrincipalRecord,
+    PrincipalType,
+    RolePermissionRecord,
+    SecurityPrincipal,
+)
 from kortex.engines.storage.engine import StorageEngine
 
 _CANONICAL_CAPABILITY_NAMES = [
@@ -45,7 +55,6 @@ _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.signature.verify",
 ]
 _STILL_PLACEHOLDER_CAPABILITY_NAMES = [
-    "kortex.security.access.authorize",
     "kortex.security.signature.verify",
 ]
 # Deterministic 32-byte test fixtures — never real production keys.
@@ -95,6 +104,17 @@ async def _seed_principal(storage_engine: StorageEngine, tenant_id: str, princip
                 attributes={},
             )
         )
+        await session.flush()
+
+    await storage_engine.data.execute_in_transaction(_action)
+
+
+async def _grant_role_permission(storage_engine: StorageEngine, role: str, permission: str) -> None:
+    """Insert a `RolePermissionRecord` directly via `IDataStore` — M4 has no
+    provisioning capability either."""
+
+    async def _action(session: AsyncSession) -> None:
+        session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=role, permission=permission))
         await session.flush()
 
     await storage_engine.data.execute_in_transaction(_action)
@@ -229,8 +249,8 @@ async def test_capabilities_reflects_all_four_registrations_after_initialize(tmp
 async def test_placeholder_capability_handler_fails_closed_for_every_input_shape(
     tmp_path: Path, capability_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> None:
-    """`auth.authenticate`, `access.authorize`, `signature.verify` remain M1
-    placeholders in M2 — every input must fail closed with NOT_IMPLEMENTED."""
+    """`signature.verify` is the sole remaining M1 placeholder as of M4 —
+    every input must fail closed with NOT_IMPLEMENTED."""
     kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
     descriptor = kernel.get_capability(capability_name)
 
@@ -245,18 +265,19 @@ async def test_capability_handler_never_returns_a_value(tmp_path: Path) -> None:
     """Structural guarantee: the placeholder handler always raises — there is
     no code path that could return a truthy/ALLOW-like value."""
     kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.access.authorize")
+    descriptor = kernel.get_capability("kortex.security.signature.verify")
 
     with pytest.raises(SecurityEngineError):
-        await descriptor.handler(principal="anyone", requirement="anything")
+        await descriptor.handler(data="anyone", signature="anything")
 
 
 @pytest.mark.asyncio
 async def test_security_engine_metrics_counts_not_implemented_invocations(tmp_path: Path) -> None:
-    """Uses a still-placeholder capability (`access.authorize`) — `secret.get`
-    is real as of M2 and no longer increments this counter."""
+    """Uses the sole still-placeholder capability (`signature.verify`) —
+    `secret.get`/`auth.authenticate`/`access.authorize` are real as of
+    M2/M3/M4 and no longer increment this counter."""
     kernel, _storage, security_engine = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.access.authorize")
+    descriptor = kernel.get_capability("kortex.security.signature.verify")
 
     assert security_engine.metrics()["not_implemented_invocations"] == 0
     with pytest.raises(SecurityEngineError):
@@ -320,6 +341,50 @@ async def test_auth_authenticate_capability_fails_closed_for_wrong_credential(tm
         await descriptor.handler(
             {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": "principal-1", "password": "wrong"}
         )
+
+
+# -- D4. access.authorize is REAL as of M4: delegates to AuthorizationEngine --------
+
+
+@pytest.mark.asyncio
+async def test_access_authorize_capability_allows_when_role_grants_permission(tmp_path: Path) -> None:
+    role = f"role-{tmp_path.name}"
+    kernel, storage_engine, security_engine = await _boot_kernel_with_security(tmp_path)
+    assert security_engine._authorization_engine is not None  # constructed during initialize()
+    await _grant_role_permission(storage_engine, role, "document.write")
+    descriptor = kernel.get_capability("kortex.security.access.authorize")
+
+    principal = SecurityPrincipal(
+        principal_id="p1",
+        principal_type=PrincipalType.USER,
+        tenant_id="tenant-a",
+        roles=[role],
+        attributes={"clearance_level": "INTERNAL"},
+    )
+    requirement = PermissionRequirement(capability_name="document.write", required_permissions=["document.write"])
+
+    decision = await descriptor.handler(principal, requirement, {"resource_tenant_id": "tenant-a"})
+
+    assert isinstance(decision, AccessDecision)
+    assert decision.is_allowed is True
+
+
+@pytest.mark.asyncio
+async def test_access_authorize_capability_denies_without_returning_placeholder_error(tmp_path: Path) -> None:
+    """A deny is a normal `AccessDecision` result, not a `NOT_IMPLEMENTED`
+    `SecurityEngineError` — proves this capability is real, not a
+    placeholder that merely stopped raising."""
+    kernel, _storage_engine, _security = await _boot_kernel_with_security(tmp_path)
+    descriptor = kernel.get_capability("kortex.security.access.authorize")
+
+    principal = SecurityPrincipal(principal_id="p1", principal_type=PrincipalType.USER, tenant_id="tenant-a", roles=[])
+    requirement = PermissionRequirement(capability_name="x", required_permissions=["x.read"])
+
+    decision = await descriptor.handler(principal, requirement)
+
+    assert isinstance(decision, AccessDecision)
+    assert decision.is_allowed is False
+    assert decision.decision_code != "NOT_IMPLEMENTED"
 
 
 # -- F. Dependency ordering (real Kernel boot) -------------------------------------
@@ -470,7 +535,7 @@ async def test_security_engine_health_reflects_real_secret_store_status(tmp_path
     health = security_engine.health()
 
     assert health["authentication_implemented"] is True  # real as of M3
-    assert health["authorization_implemented"] is False
+    assert health["authorization_implemented"] is True  # real as of M4
     assert health["secret_store_implemented"] is True  # real as of M2
     assert health["audit_implemented"] is False
 
@@ -481,10 +546,11 @@ async def test_security_engine_diagnostics_lists_not_yet_implemented_subsystems(
 
     detail = security_engine.diagnostics()
 
-    for expected in ("authorization", "audit_enforcement", "kernel_capability_dispatch"):
+    for expected in ("audit_enforcement", "kernel_capability_dispatch"):
         assert expected in detail["not_yet_implemented"]
     assert "secret_storage" not in detail["not_yet_implemented"]
     assert "authentication" not in detail["not_yet_implemented"]
+    assert "authorization" not in detail["not_yet_implemented"]
 
 
 def test_security_engine_version_is_stable_string() -> None:

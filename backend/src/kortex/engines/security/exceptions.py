@@ -44,11 +44,15 @@ class SigningKeyError(SecurityEngineError):
     """
 
 
-# -- Authorization (interfaces declared in M1; implemented in M4) -----------
+# -- Authorization (Milestone M4) --------------------------------------------
 
 
 class AuthorizationDeniedError(SecurityEngineError):
-    """Raised when a caller is denied a requested permission or capability."""
+    """Raised by `AuthorizationEngine.authorize_strict` when a caller is denied
+    a requested permission or capability. The non-strict `authorize`/
+    `evaluate_rbac`/`evaluate_abac` paths return a denying `AccessDecision`
+    instead of raising — a policy "no" is a normal, expected outcome, not an
+    exceptional one."""
 
 
 # -- Secret Storage (Milestone M2) -------------------------------------------
