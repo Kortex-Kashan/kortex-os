@@ -120,7 +120,7 @@ class CapabilityDispatcher:
         descriptor: "CapabilityDescriptor" = self._kernel.get_capability(request.capability_name)
 
         if not descriptor.requires_authentication:
-            return await self._invoke_handler(descriptor, request)
+            return await self._invoke_handler(request)
 
         security_engine = cast(SecurityEngine, self._kernel.get_engine("security"))
 
@@ -139,12 +139,20 @@ class CapabilityDispatcher:
 
         await security_engine.authorization_engine.authorize_strict(principal, requirement, dict(request.context))
 
-        return await self._invoke_handler(descriptor, request)
+        return await self._invoke_handler(request)
 
-    @staticmethod
-    async def _invoke_handler(descriptor: "CapabilityDescriptor", request: CapabilityRequest) -> Any:
-        """Invoke the resolved handler, awaiting the result only if it is
-        actually awaitable.
+    async def _invoke_handler(self, request: CapabilityRequest) -> Any:
+        """Resolve and invoke the real handler, awaiting the result only if
+        it is actually awaitable.
+
+        Milestone M8: the handler is resolved via `RegistryEngine`'s
+        internal, dispatcher-only `_resolve_handler()` — never via
+        `descriptor.handler`, which no longer exists. This is reached
+        through `Kernel`'s own already-private `_registry_engine`
+        attribute; `CapabilityDispatcher` lives inside the same trust
+        boundary as `Kernel` (it is constructed by `Kernel.__init__` and
+        holds a `Kernel` reference), so this is not a new public API —
+        no new method was added to `Kernel`'s public surface for this.
 
         Checking `inspect.isawaitable(result)` *after* calling — rather
         than `asyncio.iscoroutinefunction(handler)` *before* calling —
@@ -153,7 +161,7 @@ class CapabilityDispatcher:
         it inspects the object itself, not what calling it produces), in
         addition to plain sync and async functions.
         """
-        handler = descriptor.handler
+        handler = self._kernel._registry_engine._resolve_handler(request.capability_name)
         if handler is None:
             raise RuntimeError(f"Capability '{request.capability_name}' has no registered handler.")
         result = handler(**request.parameters)

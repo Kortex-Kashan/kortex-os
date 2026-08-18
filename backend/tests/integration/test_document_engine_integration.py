@@ -156,8 +156,9 @@ async def test_capability_registration_and_resolution(tmp_path) -> None:
     cap_list = kernel.get_capability("kortex.document.adapter.list")
     assert cap_list.provider == "document"
 
-    # Invoke capability handler directly through CapabilityDescriptor
-    adapters_list = cap_list.handler()
+    # Invoke capability handler directly via the M8 test-only accessor
+    # (CapabilityDescriptor itself never carries an executable handler).
+    adapters_list = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.adapter.list")()
     assert isinstance(adapters_list, list)
 
     # Milestone 8 remediation: the three capabilities previously registered with
@@ -165,20 +166,23 @@ async def test_capability_registration_and_resolution(tmp_path) -> None:
     # handlers and be genuinely invocable end-to-end.
     cap_intel = kernel.get_capability("kortex.document.intelligence.analyze")
     assert cap_intel.provider == "document"
-    assert cap_intel.handler is not None
-    intel_result = await cap_intel.handler("doc-cap-1", "ver-cap-1")
+    intel_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.intelligence.analyze")
+    assert intel_handler is not None
+    intel_result = await intel_handler("doc-cap-1", "ver-cap-1")
     assert intel_result.document_id == "doc-cap-1"
 
     cap_rec = kernel.get_capability("kortex.document.recommendation.get")
     assert cap_rec.provider == "document"
-    assert cap_rec.handler is not None
-    rec_result = await cap_rec.handler("operation_profile", business_operation="GENERATE_PAYROLL_SLIP")
+    rec_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.recommendation.get")
+    assert rec_handler is not None
+    rec_result = await rec_handler("operation_profile", business_operation="GENERATE_PAYROLL_SLIP")
     assert rec_result == "profile.payslip.v1"
 
     cap_register = kernel.get_capability("kortex.document.adapter.register")
     assert cap_register.provider == "document"
-    assert cap_register.handler is not None
-    registered = await cap_register.handler(
+    register_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.adapter.register")
+    assert register_handler is not None
+    registered = await register_handler(
         AdapterMetadata(
             adapter_id="kortex.adapter.cap_test",
             display_name="Capability Test Adapter",

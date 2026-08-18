@@ -214,7 +214,8 @@ async def test_all_four_canonical_capabilities_registered_with_kernel(tmp_path: 
     for capability_name in _CANONICAL_CAPABILITY_NAMES:
         descriptor = kernel.get_capability(capability_name)
         assert descriptor.provider == "security"
-        assert descriptor.handler is not None
+        assert not hasattr(descriptor, "handler")  # M8: descriptor never carries the real handler
+        assert kernel._registry_engine.get_raw_handler_for_testing(capability_name) is not None
 
 
 def test_capabilities_empty_before_initialize() -> None:
@@ -238,7 +239,7 @@ async def test_signature_verify_capability_verifies_real_signature(tmp_path: Pat
     """`signature.verify` is real as of M6 — verifies valid Ed25519 signatures
     and fails closed (returns False) on invalid/malformed signatures."""
     kernel, _storage, security_engine = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.signature.verify")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.signature.verify")
 
     crypto = LocalCrypto()
     priv, pub = crypto.generate_ed25519_keypair()
@@ -246,23 +247,23 @@ async def test_signature_verify_capability_verifies_real_signature(tmp_path: Pat
     sig = crypto.sign_ed25519(data, priv)
 
     # Valid signature
-    assert await descriptor.handler(data=data, signature=sig, public_key=pub) is True
+    assert await raw_handler(data=data, signature=sig, public_key=pub) is True
 
     # Tampered data
-    assert await descriptor.handler(data=b"Tampered data", signature=sig, public_key=pub) is False
+    assert await raw_handler(data=b"Tampered data", signature=sig, public_key=pub) is False
 
     # Bad signature
-    assert await descriptor.handler(data=data, signature=b"bad_sig", public_key=pub) is False
+    assert await raw_handler(data=data, signature=b"bad_sig", public_key=pub) is False
 
 
 @pytest.mark.asyncio
 async def test_signature_verify_capability_fails_closed_on_malformed_input(tmp_path: Path) -> None:
     """Malformed inputs return False (fail-closed) without crashing."""
     kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.signature.verify")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.signature.verify")
 
-    assert await descriptor.handler(data=None, signature=None) is False
-    assert await descriptor.handler(data="text", signature="not_hex", public_key="not_hex") is False
+    assert await raw_handler(data=None, signature=None) is False
+    assert await raw_handler(data="text", signature="not_hex", public_key="not_hex") is False
 
 
 
@@ -275,9 +276,9 @@ async def test_secret_get_capability_put_then_get_round_trip(tmp_path: Path) -> 
     assert security_engine._secret_store is not None  # constructed during initialize()
 
     await security_engine._secret_store.put_secret("secret:kortex/test", "tenant-a", "top-secret-value")
-    descriptor = kernel.get_capability("kortex.security.secret.get")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.secret.get")
 
-    plaintext = await descriptor.handler("secret:kortex/test", "tenant-a")
+    plaintext = await raw_handler("secret:kortex/test", "tenant-a")
 
     assert plaintext == "top-secret-value"
 
@@ -285,10 +286,10 @@ async def test_secret_get_capability_put_then_get_round_trip(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_secret_get_capability_fails_closed_for_missing_secret(tmp_path: Path) -> None:
     kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.secret.get")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.secret.get")
 
     with pytest.raises(SecretNotFoundError):
-        await descriptor.handler("secret:kortex/does-not-exist", "tenant-a")
+        await raw_handler("secret:kortex/does-not-exist", "tenant-a")
 
 
 # -- D3. auth.authenticate is REAL as of M3: delegates to AuthenticationManager -----
@@ -301,9 +302,9 @@ async def test_auth_authenticate_capability_round_trip(tmp_path: Path) -> None:
     assert security_engine._authentication_manager is not None  # constructed during initialize()
 
     await _seed_principal(storage_engine, tenant_id, "principal-1", "correct-secret")
-    descriptor = kernel.get_capability("kortex.security.auth.authenticate")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.auth.authenticate")
 
-    principal = await descriptor.handler(
+    principal = await raw_handler(
         {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": "principal-1", "password": "correct-secret"}
     )
 
@@ -316,10 +317,10 @@ async def test_auth_authenticate_capability_fails_closed_for_wrong_credential(tm
     tenant_id = f"tenant-{tmp_path.name}"
     kernel, storage_engine, _security = await _boot_kernel_with_security(tmp_path)
     await _seed_principal(storage_engine, tenant_id, "principal-1", "correct-secret")
-    descriptor = kernel.get_capability("kortex.security.auth.authenticate")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.auth.authenticate")
 
     with pytest.raises(AuthenticationError):
-        await descriptor.handler(
+        await raw_handler(
             {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": "principal-1", "password": "wrong"}
         )
 
@@ -333,7 +334,7 @@ async def test_access_authorize_capability_allows_when_role_grants_permission(tm
     kernel, storage_engine, security_engine = await _boot_kernel_with_security(tmp_path)
     assert security_engine._authorization_engine is not None  # constructed during initialize()
     await _grant_role_permission(storage_engine, role, "document.write")
-    descriptor = kernel.get_capability("kortex.security.access.authorize")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.access.authorize")
 
     principal = SecurityPrincipal(
         principal_id="p1",
@@ -344,7 +345,7 @@ async def test_access_authorize_capability_allows_when_role_grants_permission(tm
     )
     requirement = PermissionRequirement(capability_name="document.write", required_permissions=["document.write"])
 
-    decision = await descriptor.handler(principal, requirement, {"resource_tenant_id": "tenant-a"})
+    decision = await raw_handler(principal, requirement, {"resource_tenant_id": "tenant-a"})
 
     assert isinstance(decision, AccessDecision)
     assert decision.is_allowed is True
@@ -356,12 +357,12 @@ async def test_access_authorize_capability_denies_without_returning_placeholder_
     `SecurityEngineError` — proves this capability is real, not a
     placeholder that merely stopped raising."""
     kernel, _storage_engine, _security = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.access.authorize")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.access.authorize")
 
     principal = SecurityPrincipal(principal_id="p1", principal_type=PrincipalType.USER, tenant_id="tenant-a", roles=[])
     requirement = PermissionRequirement(capability_name="x", required_permissions=["x.read"])
 
-    decision = await descriptor.handler(principal, requirement)
+    decision = await raw_handler(principal, requirement)
 
     assert isinstance(decision, AccessDecision)
     assert decision.is_allowed is False

@@ -79,11 +79,10 @@ async def test_kernel_capability_lookup_and_execution(tmp_path) -> None:
     assert register_driver_cap.provider == "connector"
 
     driver = DummyConnectorDriver()
-    register_driver_cap.handler(driver)
+    kernel._registry_engine.get_raw_handler_for_testing("kortex.connector.driver.register")(driver)
 
     # 2. Look up driver listing capability
-    list_drivers_cap = kernel.get_capability("kortex.connector.driver.list")
-    drivers = list_drivers_cap.handler()
+    drivers = kernel._registry_engine.get_raw_handler_for_testing("kortex.connector.driver.list")()
     assert len(drivers) == 1
     assert drivers[0].driver_id == "connector-dummy"
 
@@ -97,12 +96,12 @@ async def test_kernel_capability_lookup_and_execution(tmp_path) -> None:
     await connector_engine.profile_manager.register_profile(profile)
 
     # 3. Look up profile retrieval capability
-    get_profile_cap = kernel.get_capability("kortex.connector.profile.get")
-    fetched_profile = await get_profile_cap.handler("prof-cap-1")
+    fetched_profile = await kernel._registry_engine.get_raw_handler_for_testing(
+        "kortex.connector.profile.get"
+    )("prof-cap-1")
     assert fetched_profile.profile_id == "prof-cap-1"
 
     # 4. Look up action execution capability
-    execute_action_cap = kernel.get_capability("kortex.connector.action.execute")
     req = ActionRequest(
         request_id="req-cap-exec-1",
         profile_id="prof-cap-1",
@@ -111,7 +110,9 @@ async def test_kernel_capability_lookup_and_execution(tmp_path) -> None:
         correlation_id="corr-cap-1",
     )
 
-    res: ActionResult = await execute_action_cap.handler(req)
+    res: ActionResult = await kernel._registry_engine.get_raw_handler_for_testing(
+        "kortex.connector.action.execute"
+    )(req)
     assert res.status == "SUCCESS"
     assert res.request_id == "req-cap-exec-1"
     assert res.correlation_id == "corr-cap-1"

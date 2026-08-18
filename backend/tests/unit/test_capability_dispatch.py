@@ -411,9 +411,9 @@ async def test_access_authorize_capability_remains_independently_callable(tmp_pa
 
     from kortex.engines.security.models import PermissionRequirement
 
-    descriptor = kernel.get_capability("kortex.security.access.authorize")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.access.authorize")
     requirement = PermissionRequirement(capability_name="doc.write", required_permissions=["doc.write"])
-    decision = await descriptor.handler(principal, requirement, {"resource_tenant_id": tenant_id})
+    decision = await raw_handler(principal, requirement, {"resource_tenant_id": tenant_id})
     assert decision.is_allowed is True
 
     # Calling this capability directly never itself authorizes execution of

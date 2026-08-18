@@ -37,8 +37,10 @@ async def test_storage_engine_kernel_boot_integration(tmp_path) -> None:
     cap_obj = kernel.get_capability("kortex.storage.object.put")
     assert cap_obj.provider == "storage"
 
-    # Invoke capability handler directly via capability lookup
-    file_meta = await cap_file.handler("docs/integration.txt", b"Integration Payload")
+    # Invoke capability handler directly via the M8 test-only accessor
+    file_meta = await kernel._registry_engine.get_raw_handler_for_testing(
+        "kortex.storage.file.store"
+    )("docs/integration.txt", b"Integration Payload")
     assert file_meta.relative_path == "docs/integration.txt"
 
     # Verify health check aggregation

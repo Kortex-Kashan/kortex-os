@@ -61,7 +61,6 @@ class CapabilityDescriptor(BaseModel):
     provider: str = Field(description="Name of the providing module or engine")
     parameters_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON schema for parameters")
     returns_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON schema for return value")
-    handler: Optional[Any] = Field(default=None, exclude=True, description="Callable execution reference")
     required_permissions: Optional[List[str]] = Field(
         default=None,
         description=(
@@ -104,6 +103,18 @@ class RegistryEngine(BaseEngine):
         }
         self._handlers: Dict[str, Any] = {}
         self._capabilities: Dict[str, CapabilityDescriptor] = {}
+        self._capability_handlers: Dict[str, Optional[Callable[..., Any]]] = {}
+        """Milestone M8: the SOLE store of real capability handler callables.
+
+        Deliberately separate from `_capabilities` (which holds the public
+        `CapabilityDescriptor` returned by `get_capability()`/
+        `list_capabilities()`). A `CapabilityDescriptor` never carries a
+        reference to its handler — only this private dict does, and it is
+        resolved exclusively via `_resolve_handler()` (dispatcher-internal)
+        or `get_raw_handler_for_testing()` (test-only). This closes the
+        direct `descriptor.handler(...)` bypass of `Kernel.invoke_capability()`
+        found during M8 adversarial hardening.
+        """
 
     @property
     def name(self) -> str:
@@ -272,18 +283,25 @@ class RegistryEngine(BaseEngine):
             provider=provider,
             parameters_schema=parameters_schema or {},
             returns_schema=returns_schema or {},
-            handler=handler,
             required_permissions=required_permissions,
             requires_authentication=requires_authentication,
             security_classification=security_classification,
         )
         self._capabilities[name] = descriptor
+        self._capability_handlers[name] = handler
         self.register_resource(name, RegistryCategory.CAPABILITY, handler, description=description, provider=provider)
         self.logger.info("Registered Capability: '%s' (Provider: %s)", name, provider)
         return descriptor
 
     def get_capability(self, name: str) -> CapabilityDescriptor:
-        """Fetch capability descriptor by name."""
+        """Fetch capability descriptor by name.
+
+        The returned `CapabilityDescriptor` never contains, references, or
+        otherwise provides execution access to the real capability handler
+        (Milestone M8) — it is pure introspection metadata. The only
+        sanctioned production execution path remains
+        `Kernel.invoke_capability()`.
+        """
         if name not in self._capabilities:
             raise CapabilityNotFoundError(f"Capability '{name}' not found in registry.")
         return self._capabilities[name]
@@ -291,3 +309,49 @@ class RegistryEngine(BaseEngine):
     def list_capabilities(self) -> List[CapabilityDescriptor]:
         """List all discoverable capabilities."""
         return list(self._capabilities.values())
+
+    def _resolve_handler(self, name: str) -> Optional[Callable[..., Any]]:
+        """Internal, dispatcher-only handler resolution (Milestone M8).
+
+        NOT part of the public contract — not exposed on `Kernel`, not
+        intended for any caller other than
+        `kortex.core.dispatch.CapabilityDispatcher._invoke_handler`, reached
+        via `Kernel`'s own already-private `_registry_engine` attribute
+        (the dispatcher lives inside the same trust boundary as `Kernel`
+        itself; this is not a new public API). Deliberately never returns
+        anything derived from a caller-supplied `CapabilityDescriptor`.
+        """
+        if name not in self._capabilities:
+            raise CapabilityNotFoundError(f"Capability '{name}' not found in registry.")
+        return self._capability_handlers[name]
+
+    def get_raw_handler_for_testing(self, name: str) -> Optional[Callable[..., Any]]:
+        """TEST-ONLY accessor for a capability's raw handler (Milestone M8).
+
+        Exists solely so existing unit/integration tests that deliberately
+        exercise a capability handler in isolation — without full Kernel
+        dispatch machinery — keep working after `CapabilityDescriptor.handler`
+        was removed. Bypasses authentication, RBAC, ABAC, tenant, and
+        classification enforcement entirely, exactly like the pre-M8
+        `descriptor.handler` did.
+
+        Production code must never call this. Doing so reintroduces the
+        exact bypass this milestone closed.
+        """
+        return self._resolve_handler(name)
+
+    def set_raw_handler_for_testing(self, name: str, handler: Callable[..., Any]) -> None:
+        """TEST-ONLY: substitute a registered capability's handler (Milestone M8).
+
+        Preserves the existing test pattern of swapping a capability's
+        handler for a spy/counting handler while the capability's real
+        metadata (`required_permissions`, `requires_authentication`,
+        `security_classification`) and the full `Kernel.invoke_capability`
+        enforcement path remain exactly as registered — the substituted
+        handler still only runs after authentication/RBAC/ABAC succeed.
+
+        Production code must never call this.
+        """
+        if name not in self._capabilities:
+            raise CapabilityNotFoundError(f"Capability '{name}' not found in registry.")
+        self._capability_handlers[name] = handler

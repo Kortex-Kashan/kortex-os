@@ -296,8 +296,9 @@ async def test_all_capabilities_have_working_handlers_via_real_kernel() -> None:
     assert len(declared) == 8
 
     for cap_name in declared:
-        descriptor = kernel.get_capability(cap_name)
-        assert descriptor.handler is not None, f"Capability '{cap_name}' has no handler."
+        assert kernel._registry_engine.get_raw_handler_for_testing(cap_name) is not None, (
+            f"Capability '{cap_name}' has no handler."
+        )
 
 
 @pytest.mark.asyncio
@@ -307,7 +308,7 @@ async def test_adapter_register_capability_real_invocation_via_kernel() -> None:
     engine = DocumentEngine()
     await engine.initialize(kernel)
 
-    cap = kernel.get_capability("kortex.document.adapter.register")
+    cap_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.adapter.register")
     new_meta = AdapterMetadata(
         adapter_id="kortex.adapter.m8_test",
         display_name="M8 Test Adapter",
@@ -319,7 +320,7 @@ async def test_adapter_register_capability_real_invocation_via_kernel() -> None:
         supported_capabilities=[AdapterCapability.GENERATE],
     )
 
-    registered = await cap.handler(new_meta)
+    registered = await cap_handler(new_meta)
     assert registered.metadata.adapter_id == "kortex.adapter.m8_test"
 
     # Real registry effect, not just a return value.
@@ -337,8 +338,8 @@ async def test_intelligence_analyze_capability_real_invocation_via_kernel() -> N
     engine = DocumentEngine()
     await engine.initialize(kernel)
 
-    cap = kernel.get_capability("kortex.document.intelligence.analyze")
-    result = await cap.handler("doc-intel-1", "ver-intel-1", ontology={"entity": "Invoice"})
+    cap_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.intelligence.analyze")
+    result = await cap_handler("doc-intel-1", "ver-intel-1", ontology={"entity": "Invoice"})
 
     assert isinstance(result, DocumentIntelligenceModel)
     assert result.document_id == "doc-intel-1"
@@ -359,21 +360,21 @@ async def test_recommendation_get_capability_real_invocation_via_kernel() -> Non
     engine = DocumentEngine()
     await engine.initialize(kernel)
 
-    cap = kernel.get_capability("kortex.document.recommendation.get")
+    cap_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.document.recommendation.get")
 
-    templates = await cap.handler("template", user_intent="generate payslip", data_schema={})
+    templates = await cap_handler("template", user_intent="generate payslip", data_schema={})
     assert "payslip.declarative.v1" in templates
 
-    profile_id = await cap.handler(
+    profile_id = await cap_handler(
         "operation_profile", business_operation="GENERATE_PAYROLL_SLIP", user_context={}
     )
     assert profile_id == "profile.payslip.v1"
 
-    pipeline = await cap.handler("adapter_pipeline", profile_id="profile.payslip.v1")
+    pipeline = await cap_handler("adapter_pipeline", profile_id="profile.payslip.v1")
     assert isinstance(pipeline, list)
 
     with pytest.raises(DocumentOperationError, match="Unknown recommendation_type"):
-        await cap.handler("not_a_real_type")
+        await cap_handler("not_a_real_type")
 
 
 @pytest.mark.asyncio
@@ -440,7 +441,7 @@ async def test_initialize_never_registers_a_capability_with_no_handler() -> None
 
     await engine.initialize(kernel)
 
-    assert kernel.get_capability("kortex.document.operation.execute").handler is not None
+    assert kernel._registry_engine.get_raw_handler_for_testing("kortex.document.operation.execute") is not None
 
     with pytest.raises(CapabilityNotFoundError):
         kernel.get_capability("kortex.document.unmapped.fake")

@@ -186,7 +186,7 @@ async def test_production_capability_permission_matrix(tmp_path: Path) -> None:
 async def test_workflow_start_succeeds_with_required_permission(tmp_path: Path) -> None:
     kernel, storage_engine, security_engine = await _build_full_kernel(tmp_path)
     spy = _Spy()
-    kernel.get_capability("kortex.workflow.instance.start").handler = spy
+    kernel._registry_engine.set_raw_handler_for_testing("kortex.workflow.instance.start", spy)
 
     tenant_id = _tenant(tmp_path, "-a")
     role = f"workflow-starter-{tenant_id}"
@@ -212,7 +212,7 @@ async def test_workflow_start_succeeds_with_required_permission(tmp_path: Path) 
 async def test_workflow_start_denied_without_required_permission(tmp_path: Path) -> None:
     kernel, storage_engine, security_engine = await _build_full_kernel(tmp_path)
     spy = _Spy()
-    kernel.get_capability("kortex.workflow.instance.start").handler = spy
+    kernel._registry_engine.set_raw_handler_for_testing("kortex.workflow.instance.start", spy)
 
     tenant_id = _tenant(tmp_path, "-b")
     role = f"workflow-starter-{tenant_id}"
@@ -238,7 +238,7 @@ async def test_workflow_start_denied_without_required_permission(tmp_path: Path)
 async def test_workflow_start_denied_without_authentication(tmp_path: Path) -> None:
     kernel, _storage_engine, _security_engine = await _build_full_kernel(tmp_path)
     spy = _Spy()
-    kernel.get_capability("kortex.workflow.instance.start").handler = spy
+    kernel._registry_engine.set_raw_handler_for_testing("kortex.workflow.instance.start", spy)
 
     request = CapabilityRequest(capability_name="kortex.workflow.instance.start", session_token=None)
     with pytest.raises(AuthenticationError):
@@ -253,7 +253,7 @@ async def test_workflow_start_denied_without_authentication(tmp_path: Path) -> N
 async def test_workflow_start_denied_on_tenant_mismatch_despite_valid_permission(tmp_path: Path) -> None:
     kernel, storage_engine, security_engine = await _build_full_kernel(tmp_path)
     spy = _Spy()
-    kernel.get_capability("kortex.workflow.instance.start").handler = spy
+    kernel._registry_engine.set_raw_handler_for_testing("kortex.workflow.instance.start", spy)
 
     tenant_id = _tenant(tmp_path, "-c")
     role = f"workflow-starter-{tenant_id}"
@@ -291,7 +291,7 @@ async def test_workflow_start_denied_on_tenant_mismatch_despite_valid_permission
 async def test_storage_cache_set_permission_not_overridable_by_request(tmp_path: Path) -> None:
     kernel, storage_engine, security_engine = await _build_full_kernel(tmp_path)
     spy = _Spy()
-    kernel.get_capability("kortex.storage.cache.set").handler = spy
+    kernel._registry_engine.set_raw_handler_for_testing("kortex.storage.cache.set", spy)
 
     tenant_id = _tenant(tmp_path, "-f")
     # No roles/permissions granted at all.

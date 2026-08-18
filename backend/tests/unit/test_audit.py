@@ -458,7 +458,7 @@ async def test_signature_verify_capability_and_facade(tmp_path: Path) -> None:
     assert await sec_engine.verify_signature(b"Tampered payload", sig_obj) is False
 
     # 2. Capability handler `kortex.security.signature.verify`
-    verify_handler = kernel.get_capability("kortex.security.signature.verify").handler
+    verify_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.signature.verify")
     assert verify_handler is not None
 
     # Call with CryptographicSignature
@@ -582,7 +582,7 @@ async def test_authorize_capability_dispatch_records_audit_entry_on_grant_and_de
     kernel, storage, security_engine = await _boot_kernel_with_security_and_event(tmp_path)
     role = f"role-{uuid.uuid4().hex}"
     await _grant_role_permission_for_audit_test(storage, role, "document.write")
-    descriptor = kernel.get_capability("kortex.security.access.authorize")
+    raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.access.authorize")
 
     tenant_id = f"tenant-authz-{uuid.uuid4().hex}"
     principal = SecurityPrincipal(
@@ -592,8 +592,8 @@ async def test_authorize_capability_dispatch_records_audit_entry_on_grant_and_de
     allowed_req = PermissionRequirement(capability_name="document.write", required_permissions=["document.write"])
     denied_req = PermissionRequirement(capability_name="document.delete", required_permissions=["document.delete"])
 
-    decision_allow = await descriptor.handler(principal, allowed_req, {"resource_tenant_id": tenant_id})
-    decision_deny = await descriptor.handler(principal, denied_req, {"resource_tenant_id": tenant_id})
+    decision_allow = await raw_handler(principal, allowed_req, {"resource_tenant_id": tenant_id})
+    decision_deny = await raw_handler(principal, denied_req, {"resource_tenant_id": tenant_id})
     assert decision_allow.is_allowed is True
     assert decision_deny.is_allowed is False
 

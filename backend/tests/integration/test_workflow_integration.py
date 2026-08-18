@@ -67,8 +67,10 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
     start_cap = kernel.get_capability("kortex.workflow.instance.start")
     assert start_cap.provider == "workflow"
 
-    # Execute capability to start workflow instance
-    instance = await start_cap.handler("wf_integ", {"project": "kortex_os"})
+    # Execute capability to start workflow instance (M8 test-only accessor)
+    instance = await kernel._registry_engine.get_raw_handler_for_testing(
+        "kortex.workflow.instance.start"
+    )("wf_integ", {"project": "kortex_os"})
     assert instance.definition_id == "wf_integ"
 
     await asyncio.sleep(0.05)
@@ -82,7 +84,6 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
     assert str(instance.id) in persisted_snapshot.decode("utf-8")
 
     # Approve step via capability
-    approve_cap = kernel.get_capability("kortex.workflow.instance.approve")
     pending_tickets = await workflow_engine.approval_manager.list_pending_requests(role_filter="SUPERVISOR")
     assert len(pending_tickets) == 1
 
@@ -92,7 +93,7 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
         decision=ApprovalState.APPROVED,
     )
 
-    await approve_cap.handler(decision)
+    await kernel._registry_engine.get_raw_handler_for_testing("kortex.workflow.instance.approve")(decision)
     await asyncio.sleep(0.05)
 
     # Verify workflow completed cleanly
