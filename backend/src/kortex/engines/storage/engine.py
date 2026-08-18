@@ -115,24 +115,28 @@ class StorageEngine(BaseEngine, IEngineDiagnostics):
                 description="Acquire relational database AsyncSession",
                 provider=self.name,
                 handler=self._data_store.get_session,
+                required_permissions=["storage:read"],
             )
             kernel.register_capability(
                 name="kortex.storage.file.store",
                 description="Store file in sandboxed file system",
                 provider=self.name,
                 handler=self._file_store.write_file,
+                required_permissions=["storage:write"],
             )
             kernel.register_capability(
                 name="kortex.storage.object.put",
                 description="Store binary blob object in container bucket",
                 provider=self.name,
                 handler=self._object_store.put_object,
+                required_permissions=["storage:write"],
             )
             kernel.register_capability(
                 name="kortex.storage.cache.set",
                 description="Store key-value entry in ephemeral cache",
                 provider=self.name,
                 handler=self._cache_store.set,
+                required_permissions=["storage:write"],
             )
 
             self._set_state(EngineState.READY)

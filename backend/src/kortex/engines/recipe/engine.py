@@ -90,60 +90,70 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
                 description="Load and parse raw recipe specification payload",
                 provider=self.name,
                 handler=self.load_package,
+                required_permissions=["recipe:write"],
             )
             kernel.register_capability(
                 name="kortex.recipe.validate",
                 description="Validate recipe structure, security rules, and permissions",
                 provider=self.name,
                 handler=self.validate,
+                required_permissions=["recipe:read"],
             )
             kernel.register_capability(
                 name="kortex.recipe.compile",
                 description="Compile declarative Recipe into executable WorkflowDefinition",
                 provider=self.name,
                 handler=self.compile,
+                required_permissions=["recipe:read"],
             )
             kernel.register_capability(
                 name="kortex.recipe.install",
                 description="Install recipe package into workspace",
                 provider=self.name,
                 handler=self.install,
+                required_permissions=["recipe:write"],
             )
             kernel.register_capability(
                 name="kortex.recipe.remove",
                 description="Uninstall recipe package version from workspace",
                 provider=self.name,
                 handler=self.remove,
+                required_permissions=["recipe:write"],
             )
             kernel.register_capability(
                 name="kortex.recipe.upgrade",
                 description="Upgrade existing installed recipe package",
                 provider=self.name,
                 handler=self.upgrade,
+                required_permissions=["recipe:write"],
             )
             kernel.register_capability(
                 name="kortex.recipe.package",
                 description="Create standalone .kortex-recipe archive package",
                 provider=self.name,
                 handler=self.package,
+                required_permissions=["recipe:write"],
             )
             kernel.register_capability(
                 name="kortex.recipe.search",
                 description="Search registered recipe catalog",
                 provider=self.name,
                 handler=self.search,
+                required_permissions=["recipe:read"],
             )
             kernel.register_capability(
                 name="kortex.recipe.list",
                 description="List all registered recipe assets",
                 provider=self.name,
                 handler=self.list_recipes,
+                required_permissions=["recipe:read"],
             )
             kernel.register_capability(
                 name="kortex.recipe.info",
                 description="Get detailed metadata for a registered recipe",
                 provider=self.name,
                 handler=self.info,
+                required_permissions=["recipe:read"],
             )
 
             self._set_state(EngineState.READY)

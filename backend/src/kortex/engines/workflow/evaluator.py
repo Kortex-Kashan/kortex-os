@@ -48,14 +48,22 @@ class StepEvaluator:
         self,
         instance: WorkflowInstance,
         step: WorkflowStep,
-        capability_resolver: Optional[Callable[[str], Any]] = None,
+        capability_dispatcher: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], Any]] = None,
     ) -> ExecutionResult:
         """Execute a single workflow step with retry policies and compensation registration.
 
         Args:
             instance: Active WorkflowInstance.
             step: WorkflowStep to execute.
-            capability_resolver: Optional callable resolving capability handlers by name.
+            capability_dispatcher: Optional async callable of the form
+                `(capability_name, parameters, context) -> result`, routing
+                the call through the Kernel's enforced dispatch boundary
+                (`Kernel.invoke_capability`). Unlike the prior
+                `capability_resolver`, a lookup/authentication/authorization
+                failure here propagates as a real exception rather than
+                being silently swallowed into a fake success — the `except`
+                block below already handles it via the normal retry/failure
+                path, no new failure-handling logic is needed.
 
         Returns:
             ExecutionResult descriptor.
@@ -90,15 +98,10 @@ class StepEvaluator:
                 logger.debug("Executing step '%s' (Attempt %d/%d)", step.id, attempts, policy.max_attempts)
                 
                 output = None
-                if step.capability_name and capability_resolver:
-                    handler = capability_resolver(step.capability_name)
-                    if handler:
-                        if asyncio.iscoroutinefunction(handler):
-                            output = await handler(**step.parameters)
-                        else:
-                            output = handler(**step.parameters)
-                    else:
-                        output = f"Executed capability {step.capability_name}"
+                if step.capability_name and capability_dispatcher:
+                    call_parameters = dict(step.parameters)
+                    authz_context = call_parameters.pop("_authz_context", {})
+                    output = await capability_dispatcher(step.capability_name, call_parameters, authz_context)
                 else:
                     output = f"Step {step.id} executed successfully"
 
@@ -149,13 +152,20 @@ class StepEvaluator:
     async def execute_compensation_stack(
         self,
         instance: WorkflowInstance,
-        capability_resolver: Optional[Callable[[str], Any]] = None,
+        capability_dispatcher: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Execute registered compensation actions in LIFO (reverse) order upon workflow failure.
 
         Args:
             instance: Active WorkflowInstance.
-            capability_resolver: Optional capability resolver callback.
+            capability_dispatcher: Optional async dispatcher callback, same
+                shape as `execute_step`'s. Compensation actions reuse the
+                same `instance` (and therefore the same session token, if
+                any) as the original steps — no separate system-internal
+                security context exists for compensation in this milestone;
+                this is a deliberate, minimal choice, not a silent one, and
+                is flagged in the completion report as an open design point
+                rather than assumed settled.
 
         Returns:
             List of compensation execution result records.
@@ -167,13 +177,10 @@ class StepEvaluator:
             action: CompensationAction = instance.compensation_stack.pop()
             try:
                 logger.info("Executing compensation action '%s'", action.name)
-                if action.capability_name and capability_resolver:
-                    handler = capability_resolver(action.capability_name)
-                    if handler:
-                        if asyncio.iscoroutinefunction(handler):
-                            await handler(**action.parameters)
-                        else:
-                            handler(**action.parameters)
+                if action.capability_name and capability_dispatcher:
+                    call_parameters = dict(action.parameters)
+                    authz_context = call_parameters.pop("_authz_context", {})
+                    await capability_dispatcher(action.capability_name, call_parameters, authz_context)
                 results.append({"action_id": action.id, "name": action.name, "status": "COMPENSATED"})
             except Exception as e:
                 logger.error("Failed compensation action '%s': %s", action.name, e)

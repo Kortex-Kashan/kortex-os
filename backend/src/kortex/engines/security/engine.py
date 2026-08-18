@@ -69,6 +69,21 @@ _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
     ("kortex.security.signature.verify", "Verify a cryptographic signature."),
 ]
 
+# RBAC permission requirements per capability. `kortex.security.auth.authenticate`
+# is deliberately absent: it is the bootstrap-exempt capability
+# (`requires_authentication=False`), so no RBAC permission requirement applies to
+# it. `kortex.security.access.authorize` is intentionally given `security:read`
+# rather than left unclassified — this capability only *exposes* an authorization
+# decision to a caller; it does not perform the enforcement check on itself, so
+# requiring `security:read` here is not circular with `Kernel.invoke_capability`'s
+# own internal call to `AuthorizationEngine.authorize_strict`, which never goes
+# through this capability lookup.
+_CANONICAL_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
+    _ACCESS_AUTHORIZE_CAPABILITY: ["security:read"],
+    _SECRET_GET_CAPABILITY: ["security:read"],
+    "kortex.security.signature.verify": ["security:read"],
+}
+
 
 class SecurityEngine(BaseEngine, IEngineDiagnostics):
     """KORTEX Security Engine Core Facade providing M1 lifecycle, M2 SecretStore, M3 AuthenticationManager,
@@ -125,6 +140,32 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
         """Names of prerequisite foundation engines."""
         return ["storage", "registry"]
 
+    @property
+    def authentication_manager(self) -> AuthenticationManager:
+        """Return the initialized `AuthenticationManager`.
+
+        Exists so the Kernel's capability dispatcher (`kortex.core.dispatch`)
+        can call `verify_token()` directly, without reaching into a private
+        attribute. Raises `SecurityEngineError` if accessed before
+        `initialize()` has completed — never returns `None` silently.
+        """
+        if self._authentication_manager is None:
+            raise SecurityEngineError("AuthenticationManager is not initialized.")
+        return self._authentication_manager
+
+    @property
+    def authorization_engine(self) -> AuthorizationEngine:
+        """Return the initialized `AuthorizationEngine`.
+
+        Exists so the Kernel's capability dispatcher (`kortex.core.dispatch`)
+        can call `authorize_strict()` directly, without reaching into a
+        private attribute. Raises `SecurityEngineError` if accessed before
+        `initialize()` has completed — never returns `None` silently.
+        """
+        if self._authorization_engine is None:
+            raise SecurityEngineError("AuthorizationEngine is not initialized.")
+        return self._authorization_engine
+
     # -- Lifecycle Implementation ---------------------------------------------
 
     async def initialize(self, kernel: Kernel) -> None:
@@ -152,12 +193,17 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             self._authorization_engine = self._build_authorization_engine(kernel)
 
             for capability_name, description in _CANONICAL_CAPABILITIES:
+                requires_authentication = True
                 if capability_name == _SECRET_GET_CAPABILITY:
                     handler: Callable[..., Any] = self._secret_store.get_secret
                     capability_description = f"{description} Encrypted, fail-closed (Milestone M2)."
                 elif capability_name == _AUTH_AUTHENTICATE_CAPABILITY:
                     handler = self._authentication_manager.authenticate
                     capability_description = f"{description} Fail-closed (Milestone M3)."
+                    # The one bootstrap exception: must be reachable before any
+                    # session token exists. Enforced (not just declared here) by
+                    # RegistryEngine.register_capability's own allowlist check.
+                    requires_authentication = False
                 elif capability_name == _ACCESS_AUTHORIZE_CAPABILITY:
                     handler = self._authorization_engine.authorize
                     capability_description = f"{description} Fail-closed, hybrid RBAC+ABAC (Milestone M4)."
@@ -171,6 +217,8 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
                     description=capability_description,
                     provider=self.name,
                     handler=handler,
+                    requires_authentication=requires_authentication,
+                    required_permissions=_CANONICAL_CAPABILITY_PERMISSIONS.get(capability_name),
                 )
                 self._registered_capabilities.append(capability_name)
 

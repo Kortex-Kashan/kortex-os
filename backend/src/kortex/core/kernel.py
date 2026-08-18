@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.container import Container
 from kortex.core.db import DatabaseEngineManager
+from kortex.core.dispatch import CapabilityDispatcher, CapabilityRequest
 from kortex.core.exceptions import KernelStateError, ResourceAlreadyExistsError, ResourceNotFoundError
 from kortex.engines.boot.engine import BootEngine
 from kortex.engines.configuration.engine import ConfigurationEngine
@@ -67,6 +68,10 @@ class Kernel:
         self._container.register_instance("container", self._container)
         self._container.register_type(Kernel, self)
         self._container.register_instance("db", self._db_manager)
+
+        # Capability enforcement boundary — a plain coordinating object, not
+        # a BaseEngine, not lifecycle-managed. See `kortex.core.dispatch`.
+        self._dispatcher = CapabilityDispatcher(self)
 
     @property
     def state(self) -> KernelState:
@@ -230,8 +235,24 @@ class Kernel:
         handler: Optional[Callable[..., Any]] = None,
         parameters_schema: Optional[Dict[str, Any]] = None,
         returns_schema: Optional[Dict[str, Any]] = None,
+        required_permissions: Optional[List[str]] = None,
+        requires_authentication: bool = True,
+        security_classification: str = "INTERNAL",
     ) -> CapabilityDescriptor:
-        """Register a capability with the Registry Engine."""
+        """Register a capability with the Registry Engine.
+
+        Only permitted while the Kernel is at `CREATED` or `BOOTING`.
+        Capability registration happens inside each engine's `initialize()`,
+        which itself runs while the Kernel is `BOOTING` (see `boot()` below)
+        — so this gate must allow both states, unlike `register_engine`,
+        which only ever runs before `boot()` starts and therefore only
+        needs to allow `CREATED`.
+        """
+        if self._state not in (KernelState.CREATED, KernelState.BOOTING):
+            raise KernelStateError(
+                f"Cannot register capability '{name}' after Kernel boot sequence has completed "
+                f"(state={self._state.value})."
+            )
         return self._registry_engine.register_capability(
             name=name,
             description=description,
@@ -239,11 +260,28 @@ class Kernel:
             handler=handler,
             parameters_schema=parameters_schema,
             returns_schema=returns_schema,
+            required_permissions=required_permissions,
+            requires_authentication=requires_authentication,
+            security_classification=security_classification,
         )
 
     def get_capability(self, name: str) -> CapabilityDescriptor:
         """Look up a capability descriptor."""
         return self._registry_engine.get_capability(name)
+
+    async def invoke_capability(self, request: CapabilityRequest) -> Any:
+        """Sanctioned execution path for a capability request.
+
+        Resolves the capability, authenticates and authorizes the caller
+        against the resolved `CapabilityDescriptor`'s own metadata (never
+        from `request` itself), and only then invokes the handler. Decision
+        logic lives entirely in Security Engine's unmodified
+        `AuthenticationManager`/`AuthorizationEngine` — this method only
+        coordinates calling them in order, consistent with the Kernel's
+        "execution coordination, no business logic" mandate (see module
+        docstring).
+        """
+        return await self._dispatcher.dispatch(request)
 
     def list_capabilities(self) -> List[CapabilityDescriptor]:
         """List all registered capabilities."""

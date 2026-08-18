@@ -10,7 +10,7 @@ Implementation Specification (Version 3.0.0).
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Dict, List
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.document.adapter_pipeline import AdapterPipelineExecutor
@@ -65,6 +65,19 @@ from kortex.engines.document.security import DocumentSecurityVerifier, DocumentS
 from kortex.engines.document.template_binder import TemplateBinder
 from kortex.engines.document.template_library import TemplateLibrary
 from kortex.engines.storage.interfaces import IDataStore, IEngineDiagnostics
+
+# RBAC permission requirements per Document Engine capability, keyed by the
+# same capability names returned by `DocumentDiagnostics.capabilities()`.
+_DOCUMENT_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
+    "kortex.document.operation.execute": ["document:execute"],
+    "kortex.document.lifecycle.transition": ["document:write"],
+    "kortex.document.template.bind": ["document:write"],
+    "kortex.document.preview.generate": ["document:read"],
+    "kortex.document.adapter.list": ["document:read"],
+    "kortex.document.intelligence.analyze": ["document:read"],
+    "kortex.document.recommendation.get": ["document:read"],
+    "kortex.document.adapter.register": ["document:write"],
+}
 
 
 class DocumentEngine(BaseEngine, IEngineDiagnostics):
@@ -368,6 +381,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                         description=f"Document Engine capability: {cap}",
                         provider=self.name,
                         handler=handler,
+                        required_permissions=_DOCUMENT_CAPABILITY_PERMISSIONS.get(cap),
                     )
                 except TypeError:
                     kernel.register_capability(cap, handler)

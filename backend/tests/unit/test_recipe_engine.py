@@ -59,7 +59,7 @@ async def test_recipe_engine_lifecycle_and_capabilities() -> None:
             self.capabilities: dict = {}
             self.container = DummyContainer()
 
-        def register_capability(self, name: str, description: str, provider: str, handler: any) -> None:
+        def register_capability(self, name: str, description: str, provider: str, handler: any, **kwargs: any) -> None:
             self.capabilities[name] = handler
 
     kernel = DummyKernel()

@@ -108,6 +108,21 @@ class WorkflowContext(BaseModel):
     variables: Dict[str, Any] = Field(default_factory=dict, description="Input and runtime context variables")
     step_outputs: Dict[str, Any] = Field(default_factory=dict, description="Outputs collected from executed steps")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata and system tags")
+    session_token: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Opaque caller-supplied session token blob, stored verbatim as a plain, JSON-safe dict — "
+            "never a Security Engine `TokenPayload` import here, to keep Workflow models decoupled "
+            "from Security Engine types. Fields match `TokenPayload` exactly except `signature`, which "
+            "MUST be a hex string here (not raw bytes) so this context remains "
+            "`model_dump_json()`-safe (used by both snapshot persistence and secret-leakage "
+            "inspection) — raw signature bytes are not UTF-8-representable and break JSON "
+            "serialization outright. `workflow/engine.py`'s dispatch closure decodes it back to bytes "
+            "and reconstructs a real `TokenPayload`, which `AuthenticationManager.verify_token()` "
+            "cryptographically verifies — storing or reconstructing it here is schema validation only, "
+            "never proof of authenticity."
+        ),
+    )
 
 
 class WorkflowDefinition(BaseModel):

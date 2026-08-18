@@ -201,24 +201,28 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 description="Execute an action against an external integration via profile",
                 provider=self.name,
                 handler=self.execute_action,
+                required_permissions=["connector:execute"],
             )
             kernel.register_capability(
                 name="kortex.connector.driver.register",
                 description="Register a connector driver in the engine registry",
                 provider=self.name,
                 handler=self.register_driver,
+                required_permissions=["connector:write"],
             )
             kernel.register_capability(
                 name="kortex.connector.driver.list",
                 description="List metadata of all registered connector drivers",
                 provider=self.name,
                 handler=self.list_drivers,
+                required_permissions=["connector:read"],
             )
             kernel.register_capability(
                 name="kortex.connector.profile.get",
                 description="Retrieve a connector profile by ID",
                 provider=self.name,
                 handler=self.get_profile,
+                required_permissions=["connector:read"],
             )
 
             self._set_state(EngineState.READY)

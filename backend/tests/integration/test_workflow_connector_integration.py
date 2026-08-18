@@ -21,13 +21,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import Any
+import uuid as uuid_module
+from typing import Any, Dict
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import httpcore
 import httpx
 import pytest
+from argon2 import PasswordHasher
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.base_engine import EngineState
 from kortex.core.kernel import Kernel
@@ -44,6 +47,8 @@ from kortex.engines.connector.models import (
     ConnectorActionType,
     ConnectorProfile,
 )
+from kortex.engines.security.engine import SecurityEngine
+from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.exceptions import WorkflowExecutionError
@@ -59,6 +64,97 @@ from kortex.engines.workflow.models import (
     WorkflowStatus,
     WorkflowStep,
 )
+
+# -- Enforcement-Boundary Test Helpers ----------------------------------------
+#
+# Every capability defaults to `requires_authentication=True` (Kernel
+# Capability Enforcement Boundary milestone). `kortex.connector.action.execute`
+# is registered by ConnectorEngine without overriding this default, so any
+# workflow step invoking it through the Kernel's enforced dispatch path now
+# genuinely needs a signed session token AND a `resource_tenant_id` in ABAC
+# context (M4's own unconditional missing-tenant-denies rule, unchanged).
+# These helpers add exactly that — real, unmodified AuthenticationManager/
+# AuthorizationEngine machinery, not a mock or a bypass.
+
+_TEST_MASTER_KEY = b"\x22" * 32
+_TEST_SIGNING_KEY = b"\x33" * 32
+
+
+def _register_security_engine(kernel: Kernel) -> SecurityEngine:
+    """Register a `SecurityEngine` with deterministic test key material
+    (constructor overrides, bypassing `KORTEX_MASTER_KEY`/
+    `KORTEX_AUTH_SIGNING_PRIVATE_KEY` env resolution entirely) before boot."""
+    security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
+    kernel.register_engine(security_engine)
+    return security_engine
+
+
+async def _issue_test_session_token(security_engine: SecurityEngine, data_store: Any) -> tuple[Dict[str, Any], str]:
+    """Seed a `PrincipalRecord` directly via `IDataStore` — matching the
+    established test-seeding convention in `test_authentication_manager.py`
+    (M3 has no provisioning capability) — then authenticate and issue a
+    genuine, Ed25519-signed session token for it, returned as a plain dict
+    matching `TokenPayload`'s own field shape, alongside the tenant_id it
+    was issued for.
+
+    `tenant_id` is a fresh `uuid4()` value every call, never a fixed
+    constant — the Kernel's `DatabaseEngineManager` defaults to a single
+    shared `kortex_local.db` file reused across every test process/run
+    (confirmed elsewhere in this test suite's own conventions), so a fixed
+    tenant/principal id would collide across tests via
+    `security_principals`' `(tenant_id, principal_id, principal_type)`
+    unique constraint.
+    """
+    tenant_id = f"tenant-wf-conn-it-{uuid_module.uuid4()}"
+    principal_id = "principal-wf-conn-it"
+    credential_hash = PasswordHasher().hash("test-credential")
+    # `kortex.connector.action.execute` — the only production capability
+    # this suite dispatches through the Kernel — now declares
+    # `required_permissions=["connector:execute"]`. A role scoped to this
+    # tenant's own fresh uuid4() grants exactly that, avoiding collisions
+    # with other tests sharing `kortex_local.db`'s `security_role_permissions`
+    # table (which has no tenant scoping of its own).
+    role = f"wf-conn-it-role-{tenant_id}"
+
+    async def _seed(session: AsyncSession) -> None:
+        session.add(
+            PrincipalRecord(
+                id=str(uuid_module.uuid4()),
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                principal_type="USER",
+                enabled=True,
+                credential_hash=credential_hash,
+                roles=[role],
+                # `CapabilityDescriptor.security_classification` defaults to
+                # "INTERNAL" (kortex.core.dispatch), and abac.py denies
+                # unless principal clearance rank >= the requirement's rank
+                # — a principal with no `clearance_level` defaults to PUBLIC
+                # (rank 0), which would fail every default-classified
+                # capability's ABAC check. Grant INTERNAL explicitly.
+                attributes={"clearance_level": "INTERNAL"},
+            )
+        )
+        session.add(RolePermissionRecord(id=str(uuid_module.uuid4()), role=role, permission="connector:execute"))
+
+    await data_store.execute_in_transaction(_seed)
+
+    principal = await security_engine.authentication_manager.authenticate(
+        {
+            "principal_type": "USER",
+            "tenant_id": tenant_id,
+            "principal_id": principal_id,
+            "password": "test-credential",
+        }
+    )
+    token = await security_engine.authentication_manager.issue_token(principal)
+    token_dict = token.model_dump()
+    # `WorkflowContext.session_token` requires a JSON-safe dict — hex-encode
+    # the raw signature bytes (see `workflow/models.py`'s field docstring
+    # and `workflow/engine.py`'s dispatch closure, which decodes it back).
+    if token_dict.get("signature") is not None:
+        token_dict["signature"] = token_dict["signature"].hex()
+    return token_dict, tenant_id
 
 
 # -- Mock HTTP Transport Infrastructure ---------------------------------------
@@ -204,8 +300,10 @@ async def test_e2e_workflow_to_connector_http_execution(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
 
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     # Register HTTP Rest Connector Driver & Connector Profile
     http_driver = HttpRestConnectorDriver()
@@ -236,7 +334,7 @@ async def test_e2e_workflow_to_connector_http_execution(tmp_path) -> None:
         id="step_fetch",
         name="Fetch External Data Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
 
@@ -254,7 +352,7 @@ async def test_e2e_workflow_to_connector_http_execution(tmp_path) -> None:
     )
 
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -286,17 +384,9 @@ async def test_actual_workflow_retry_default(tmp_path) -> None:
     workflow_engine = WorkflowEngine()
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
-    await kernel.boot()
+    security_engine = _register_security_engine(kernel)
 
-    # Step created with NO retry_policy supplied (defaults to None on WorkflowStep model)
-    step_default = WorkflowStep(
-        id="step_no_policy",
-        name="Step Without Explicit Policy",
-        capability_name="custom.flaky.capability",
-    )
-    assert step_default.retry_policy is None, "WorkflowStep.retry_policy model field default must be None"
-
-    attempts_tracker = []
+    attempts_tracker: list[int] = []
 
     async def flaky_capability_handler() -> str:
         attempts_tracker.append(len(attempts_tracker) + 1)
@@ -304,6 +394,9 @@ async def test_actual_workflow_retry_default(tmp_path) -> None:
             raise RuntimeError(f"Transient error on attempt {len(attempts_tracker)}")
         return "success_on_attempt_3"
 
+    # Registration must happen before boot — capability registration is only
+    # permitted while the Kernel is CREATED or BOOTING (Kernel Capability
+    # Enforcement Boundary milestone's registration-time state gate).
     kernel.register_capability(
         name="custom.flaky.capability",
         description="Flaky capability requiring 3 attempts",
@@ -311,10 +404,22 @@ async def test_actual_workflow_retry_default(tmp_path) -> None:
         handler=flaky_capability_handler,
     )
 
+    await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
+
+    # Step created with NO retry_policy supplied (defaults to None on WorkflowStep model)
+    step_default = WorkflowStep(
+        id="step_no_policy",
+        name="Step Without Explicit Policy",
+        capability_name="custom.flaky.capability",
+        parameters={"_authz_context": {"resource_tenant_id": tenant_id}},
+    )
+    assert step_default.retry_policy is None, "WorkflowStep.retry_policy model field default must be None"
+
     wf_def = WorkflowDefinition(id="wf_default_retry", name="Default Retry WF", steps=[step_default])
     def_id = workflow_engine.register_definition(wf_def)
 
-    instance = await workflow_engine.start_workflow(def_id)
+    instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
     # Default RetryPolicy has initial_delay_seconds=1.0 & backoff_factor=2.0 (wait up to 5s for retries)
     for _ in range(500):
         if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
@@ -339,7 +444,9 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -366,7 +473,7 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
         id="step_ampdef",
         name="Step Amp Def",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
     )
     wf_def = WorkflowDefinition(id="wf_ampdef", name="Amp Def WF", steps=[step])
     def_id = workflow_engine.register_definition(wf_def)
@@ -402,7 +509,7 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
     p_ssrf = patch.object(SSRFHardenedTransport, "__init__", patched_ssrf_init)
 
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -429,21 +536,13 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
-    await kernel.boot()
+    security_engine = _register_security_engine(kernel)
 
-    driver = HttpRestConnectorDriver()
-    connector_engine.register_driver(driver)
-
-    profile = ConnectorProfile(
-        profile_id="prof-mult-1",
-        name="Mult Profile",
-        driver_id="connector-http-rest",
-        options={"base_url": "http://api.example.com"},
-        max_retries=2,
-    )
-    await connector_engine.profile_manager.register_profile(profile)
-
-    # Capability wrapper that raises an exception if ConnectorEngine returns a FAILED ActionResult
+    # Capability wrapper that raises an exception if ConnectorEngine returns a FAILED ActionResult.
+    # Registered before boot — capability registration is only permitted
+    # while the Kernel is CREATED or BOOTING. The handler closure only calls
+    # `connector_engine.execute_action` at request time, after boot has
+    # completed, so capturing the (not-yet-initialized) engine here is safe.
     orig_connector_exec = connector_engine.execute_action
 
     async def strict_connector_handler(request: ActionRequest) -> ActionResult:
@@ -459,6 +558,21 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
         handler=strict_connector_handler,
     )
 
+    await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
+
+    driver = HttpRestConnectorDriver()
+    connector_engine.register_driver(driver)
+
+    profile = ConnectorProfile(
+        profile_id="prof-mult-1",
+        name="Mult Profile",
+        driver_id="connector-http-rest",
+        options={"base_url": "http://api.example.com"},
+        max_retries=2,
+    )
+    await connector_engine.profile_manager.register_profile(profile)
+
     req_id = f"wf-mult-{uuid4()}-step_mult"
     req = ActionRequest(
         request_id=req_id,
@@ -471,7 +585,7 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
         id="step_mult",
         name="Step Mult",
         capability_name="kortex.connector.strict_action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=3, initial_delay_seconds=0.001, backoff_factor=1.0, jitter=False),
     )
     wf_def = WorkflowDefinition(id="wf_mult", name="Mult WF", steps=[step])
@@ -508,7 +622,7 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
     p_ssrf = patch.object(SSRFHardenedTransport, "__init__", patched_ssrf_init)
 
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -532,9 +646,11 @@ async def test_step_evaluator_is_completely_generic(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
-    await kernel.boot()
+    security_engine = _register_security_engine(kernel)
 
-    # Register capability directly to verify StepEvaluator invokes any arbitrary handler
+    # Register capability directly to verify StepEvaluator invokes any arbitrary handler.
+    # Must happen before boot — capability registration is only permitted
+    # while the Kernel is CREATED or BOOTING.
     invoked_args = {}
 
     async def custom_capability_handler(request: Any) -> str:
@@ -548,17 +664,20 @@ async def test_step_evaluator_is_completely_generic(tmp_path) -> None:
         handler=custom_capability_handler,
     )
 
+    await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
+
     step = WorkflowStep(
         id="generic_step",
         name="Generic Step",
         capability_name="custom.generic.capability",
-        parameters={"request": "test_payload_val"},
+        parameters={"request": "test_payload_val", "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_generic", name="Generic WF", steps=[step])
     def_id = workflow_engine.register_definition(wf_def)
 
-    instance = await workflow_engine.start_workflow(def_id)
+    instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
     for _ in range(100):
         if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
             break
@@ -595,7 +714,9 @@ async def test_action_request_mapping_verification(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     dummy_id = str(uuid4())
     req = ActionRequest(
@@ -611,13 +732,13 @@ async def test_action_request_mapping_verification(tmp_path) -> None:
         id="step_map",
         name="Map Verification Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_map", name="Map WF", steps=[step])
     def_id = workflow_engine.register_definition(wf_def)
 
-    instance = await workflow_engine.start_workflow(def_id)
+    instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
     for _ in range(100):
         if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
             break
@@ -649,7 +770,9 @@ async def test_connector_pipeline_execution_and_rate_limiting(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -676,7 +799,7 @@ async def test_connector_pipeline_execution_and_rate_limiting(tmp_path) -> None:
         id="step_pipe",
         name="Pipeline Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_pipeline", name="Pipeline WF", steps=[step])
@@ -685,7 +808,7 @@ async def test_connector_pipeline_execution_and_rate_limiting(tmp_path) -> None:
     p_dns, p_pinned, p_ssrf, mock_backend = setup_mock_transport(status_code=200, body=b'{"pipeline": "passed"}')
 
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -708,7 +831,9 @@ async def test_http_success_propagates_to_step_output(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -734,7 +859,7 @@ async def test_http_success_propagates_to_step_output(tmp_path) -> None:
         id="step_succ",
         name="Success Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_succ", name="Succ WF", steps=[step])
@@ -745,7 +870,7 @@ async def test_http_success_propagates_to_step_output(tmp_path) -> None:
         body=b'{"user": "alice", "role": "admin"}',
     )
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -770,7 +895,9 @@ async def test_http_failure_propagates_to_step_failure(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -796,7 +923,7 @@ async def test_http_failure_propagates_to_step_failure(tmp_path) -> None:
         id="step_fail",
         name="Fail Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_fail", name="Fail WF", steps=[step])
@@ -807,7 +934,7 @@ async def test_http_failure_propagates_to_step_failure(tmp_path) -> None:
         body=b'{"error": "Internal Server Error"}',
     )
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -833,7 +960,9 @@ async def test_rbac_capability_permission_denied_before_network(tmp_path) -> Non
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -860,7 +989,7 @@ async def test_rbac_capability_permission_denied_before_network(tmp_path) -> Non
         id="step_rbac",
         name="RBAC Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req_unauth},
+        parameters={"request": req_unauth, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_rbac", name="RBAC WF", steps=[step])
@@ -868,7 +997,7 @@ async def test_rbac_capability_permission_denied_before_network(tmp_path) -> Non
 
     p_dns, p_pinned, p_ssrf, mock_backend = setup_mock_transport(status_code=200)
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -911,7 +1040,9 @@ async def test_secret_token_isolation_across_context_logs_and_events(tmp_path, c
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -938,7 +1069,7 @@ async def test_secret_token_isolation_across_context_logs_and_events(tmp_path, c
         id="step_sec",
         name="Secret Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_sec", name="Secret WF", steps=[step])
@@ -946,7 +1077,7 @@ async def test_secret_token_isolation_across_context_logs_and_events(tmp_path, c
 
     p_dns, p_pinned, p_ssrf, _ = setup_mock_transport(status_code=200, body=b'{"ok": true}')
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -1009,7 +1140,9 @@ async def test_response_header_sanitization(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -1035,7 +1168,7 @@ async def test_response_header_sanitization(tmp_path) -> None:
         id="step_hdrsan",
         name="Header San Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_hdrsan", name="Header San WF", steps=[step])
@@ -1061,7 +1194,7 @@ async def test_response_header_sanitization(tmp_path) -> None:
         body=b'{"data": "clean"}',
     )
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -1120,7 +1253,9 @@ async def test_idempotency_key_header_propagation(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -1151,7 +1286,7 @@ async def test_idempotency_key_header_propagation(tmp_path) -> None:
         id="step_idem",
         name="Idempotency Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_idem", name="Idem WF", steps=[step])
@@ -1159,7 +1294,7 @@ async def test_idempotency_key_header_propagation(tmp_path) -> None:
 
     p_dns, p_pinned, p_ssrf, mock_backend = setup_mock_transport(status_code=200, body=b'{"charged": true}')
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         for _ in range(100):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
@@ -1189,7 +1324,9 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -1215,7 +1352,7 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
         id="step_cancel",
         name="Cancel Step",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req},
+        parameters={"request": req, "_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
     wf_def = WorkflowDefinition(id="wf_cancel", name="Cancel WF", steps=[step])
@@ -1281,7 +1418,7 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
 
     with p_dns, p_pinned, p_ssrf:
         def_id = workflow_engine.register_definition(wf_def)
-        instance = await workflow_engine.start_workflow(def_id)
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         # Find background task executing workflow instance steps
         await asyncio.sleep(0.05)
         # Cancel active workflow tasks
@@ -1313,7 +1450,33 @@ async def test_failed_connector_step_participates_in_compensation_stack(tmp_path
     kernel.register_engine(storage_engine)
     kernel.register_engine(workflow_engine)
     kernel.register_engine(connector_engine)
+    security_engine = _register_security_engine(kernel)
+
+    compensation_executed = []
+
+    async def mock_comp_handler(**kwargs) -> None:
+        compensation_executed.append(kwargs)
+
+    async def failing_capability_handler() -> None:
+        raise RuntimeError("Step 2 catastrophic failure")
+
+    # Both must be registered before boot — capability registration is only
+    # permitted while the Kernel is CREATED or BOOTING.
+    kernel.register_capability(
+        name="kortex.test.compensation",
+        description="Compensation capability",
+        provider="test",
+        handler=mock_comp_handler,
+    )
+    kernel.register_capability(
+        name="kortex.test.failing_step",
+        description="Failing capability",
+        provider="test",
+        handler=failing_capability_handler,
+    )
+
     await kernel.boot()
+    session_token, tenant_id = await _issue_test_session_token(security_engine, storage_engine.data)
 
     driver = HttpRestConnectorDriver()
     connector_engine.register_driver(driver)
@@ -1327,23 +1490,11 @@ async def test_failed_connector_step_participates_in_compensation_stack(tmp_path
     )
     await connector_engine.profile_manager.register_profile(profile)
 
-    compensation_executed = []
-
-    async def mock_comp_handler(**kwargs) -> None:
-        compensation_executed.append(kwargs)
-
-    kernel.register_capability(
-        name="kortex.test.compensation",
-        description="Compensation capability",
-        provider="test",
-        handler=mock_comp_handler,
-    )
-
     # Step 1: Successful step that registers a LIFO compensation action
     comp_action = CompensationAction(
         name="Rollback Reservation",
         capability_name="kortex.test.compensation",
-        parameters={"reservation_id": "res-123"},
+        parameters={"reservation_id": "res-123", "_authz_context": {"resource_tenant_id": tenant_id}},
     )
     req_succ = ActionRequest(
         request_id=f"wf-comp-{uuid4()}-step_comp_succ",
@@ -1356,26 +1507,17 @@ async def test_failed_connector_step_participates_in_compensation_stack(tmp_path
         id="step_comp_succ",
         name="Successful Step with Compensation",
         capability_name="kortex.connector.action.execute",
-        parameters={"request": req_succ},
+        parameters={"request": req_succ, "_authz_context": {"resource_tenant_id": tenant_id}},
         compensation_action=comp_action,
         retry_policy=RetryPolicy(max_attempts=1),
     )
 
     # Step 2: Step that raises an exception, triggering workflow failure and compensation rollback
-    async def failing_capability_handler() -> None:
-        raise RuntimeError("Step 2 catastrophic failure")
-
-    kernel.register_capability(
-        name="kortex.test.failing_step",
-        description="Failing capability",
-        provider="test",
-        handler=failing_capability_handler,
-    )
-
     step_fail = WorkflowStep(
         id="step_failing",
         name="Failing Step",
         capability_name="kortex.test.failing_step",
+        parameters={"_authz_context": {"resource_tenant_id": tenant_id}},
         retry_policy=RetryPolicy(max_attempts=1),
     )
 
@@ -1384,9 +1526,17 @@ async def test_failed_connector_step_participates_in_compensation_stack(tmp_path
 
     p_dns, p_pinned, p_ssrf, _ = setup_mock_transport(status_code=200, body=b'{"reserved": true}')
     with p_dns, p_pinned, p_ssrf:
-        instance = await workflow_engine.start_workflow(def_id)
-        for _ in range(100):
-            if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
+        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
+        # `instance.state` transitions to FAILED *before*
+        # `execute_compensation_stack` is awaited (engine.py's own existing
+        # ordering, unchanged here), and `compensation_stack.pop()` removes
+        # an action from the stack immediately, before its dispatch is even
+        # awaited — so neither `state` nor `compensation_stack` reliably
+        # signals that compensation has actually *finished* now that
+        # dispatch performs real async I/O (a fresh `verify_token` DB
+        # lookup). Poll on the actual completion signal instead.
+        for _ in range(200):
+            if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED) and compensation_executed:
                 break
             await asyncio.sleep(0.01)
 

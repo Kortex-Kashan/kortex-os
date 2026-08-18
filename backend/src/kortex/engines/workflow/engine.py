@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from uuid import UUID
 
 from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.core.dispatch import CapabilityRequest
 from kortex.core.exceptions import ResourceAlreadyExistsError, ResourceNotFoundError
+from kortex.engines.security.models import TokenPayload
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.approval import MemoryApprovalManager
 from kortex.engines.workflow.evaluator import StepEvaluator
@@ -122,24 +124,28 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 description="Start a workflow instance execution",
                 provider=self.name,
                 handler=self.start_workflow,
+                required_permissions=["workflow:start"],
             )
             kernel.register_capability(
                 name="kortex.workflow.instance.approve",
                 description="Submit a decision for an approval step",
                 provider=self.name,
                 handler=self.submit_approval_decision,
+                required_permissions=["workflow:approve"],
             )
             kernel.register_capability(
                 name="kortex.workflow.instance.cancel",
                 description="Cancel an active workflow instance",
                 provider=self.name,
                 handler=self.cancel_workflow,
+                required_permissions=["workflow:cancel"],
             )
             kernel.register_capability(
                 name="kortex.workflow.state.get",
                 description="Get current state of a workflow instance",
                 provider=self.name,
                 handler=self.get_instance,
+                required_permissions=["workflow:read"],
             )
 
             self._set_state(EngineState.READY)
@@ -234,12 +240,18 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self,
         definition_id: str,
         initial_context: Optional[Dict[str, Any]] = None,
+        session_token: Optional[Dict[str, Any]] = None,
     ) -> WorkflowInstance:
         """Instantiate and start executing a registered workflow definition.
 
         Args:
             definition_id: ID of registered WorkflowDefinition.
             initial_context: Initial context variables dict.
+            session_token: Optional opaque session token blob (matching
+                `TokenPayload`'s own field shape), carried through to every
+                recipe step's capability dispatch via `Kernel.invoke_capability()`.
+                A workflow started without one can only execute capabilities
+                registered with `requires_authentication=False`.
 
         Returns:
             Instantiated WorkflowInstance object.
@@ -247,7 +259,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         definition = self.get_definition(definition_id)
 
         # Create instance
-        context = WorkflowContext(variables=initial_context or {})
+        context = WorkflowContext(variables=initial_context or {}, session_token=session_token)
         instance = WorkflowInstance(
             definition_id=definition.id,
             definition_version=definition.version,
@@ -276,14 +288,43 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         start_time = time.time()
         step_results: List[ExecutionResult] = []
 
-        def resolver(cap_name: str) -> Any:
-            if self._kernel:
-                try:
-                    desc = self._kernel.get_capability(cap_name)
-                    return desc.handler
-                except Exception:
-                    return None
-            return None
+        async def dispatch(capability_name: str, parameters: Dict[str, Any], context: Dict[str, Any]) -> Any:
+            """Enforced capability dispatch for this workflow run.
+
+            Routes every capability invocation through `Kernel.invoke_capability()`
+            — the Kernel-mediated authentication+authorization boundary —
+            rather than resolving and calling a raw handler directly. Unlike
+            the prior resolver, this never silently swallows a lookup/
+            authentication/authorization failure into a fake success; any
+            resulting exception propagates to `execute_step`'s existing
+            retry/failure/compensation handling unchanged.
+            """
+            if not self._kernel:
+                raise WorkflowExecutionError(
+                    f"Cannot invoke capability '{capability_name}': Workflow Engine has no Kernel reference."
+                )
+            session_token = None
+            if instance.context.session_token:
+                token_fields = dict(instance.context.session_token)
+                raw_signature = token_fields.get("signature")
+                if isinstance(raw_signature, str):
+                    # `WorkflowContext.session_token` is a JSON-safe dict —
+                    # `signature` is stored hex-encoded (raw bytes aren't
+                    # UTF-8-representable and would break
+                    # `WorkflowContext.model_dump_json()`, used both by
+                    # snapshot persistence and by callers inspecting context
+                    # for secret leakage). Decode it back to bytes here,
+                    # immediately before constructing the real `TokenPayload`
+                    # that `AuthenticationManager.verify_token()` verifies.
+                    token_fields["signature"] = bytes.fromhex(raw_signature)
+                session_token = TokenPayload(**token_fields)
+            request = CapabilityRequest(
+                capability_name=capability_name,
+                session_token=session_token,
+                parameters=parameters,
+                context=context,
+            )
+            return await self._kernel.invoke_capability(request)
 
         while instance.current_step_index < len(definition.steps):
             if instance.state not in (WorkflowState.RUNNING, WorkflowState.APPROVED):
@@ -297,7 +338,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             if instance.state == WorkflowState.APPROVED:
                 WorkflowStateMachine.transition(instance, WorkflowState.RUNNING)
 
-            res = await self._evaluator.execute_step(instance, step, capability_resolver=resolver)
+            res = await self._evaluator.execute_step(instance, step, capability_dispatcher=dispatch)
             step_results.append(res)
             self._metrics["steps_executed"] += 1
 
@@ -307,7 +348,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 self._metrics["workflows_failed"] += 1
 
                 # Execute LIFO compensation stack rollback
-                comp_results = await self._evaluator.execute_compensation_stack(instance, capability_resolver=resolver)
+                comp_results = await self._evaluator.execute_compensation_stack(instance, capability_dispatcher=dispatch)
                 self._metrics["compensations_executed"] += len(comp_results)
 
                 await self._persist_instance_snapshot(instance)

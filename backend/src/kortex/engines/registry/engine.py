@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
 
 
+_BOOTSTRAP_EXEMPT_CAPABILITY = "kortex.security.auth.authenticate"
+"""The one capability permitted to register with `requires_authentication=False` —
+it must be reachable before any session token exists. Enforced in
+`RegistryEngine.register_capability`, not merely documented as a convention."""
+
+
 class RegistryCategory(str, enum.Enum):
     """Resource registration categories."""
 
@@ -56,6 +62,36 @@ class CapabilityDescriptor(BaseModel):
     parameters_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON schema for parameters")
     returns_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON schema for return value")
     handler: Optional[Any] = Field(default=None, exclude=True, description="Callable execution reference")
+    required_permissions: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "RBAC permission keys required to execute this capability, sourced exclusively from this "
+            "descriptor by the Kernel dispatcher (`kortex.core.dispatch`) — never from a caller's "
+            "request. `None` means this capability has never been explicitly classified: it still "
+            "requires authentication when `requires_authentication` is True, but no RBAC permission "
+            "check is performed for it. `None` does not mean unrestricted, does not grant permissions, "
+            "and does not disable ABAC or classification checks. An empty list `[]` means explicitly "
+            "classified as requiring zero specific permissions."
+        ),
+    )
+    requires_authentication: bool = Field(
+        default=True,
+        description=(
+            "Whether the Kernel dispatcher requires a verified session token before invoking this "
+            "capability's handler. Only 'kortex.security.auth.authenticate' may register with this set "
+            "to False — enforced in `register_capability` below, not merely a convention. Every other "
+            "capability defaults to True."
+        ),
+    )
+    security_classification: str = Field(
+        default="INTERNAL",
+        description=(
+            "Minimum security classification governing this capability, stored as a plain string so "
+            "the Registry stays independent of Security Engine's `ClassificationLevel` enum. "
+            "Interpreted by the Kernel dispatcher, which fails closed to RESTRICTED on any unparseable "
+            "value."
+        ),
+    )
 
 
 class RegistryEngine(BaseEngine):
@@ -206,10 +242,29 @@ class RegistryEngine(BaseEngine):
         handler: Optional[Callable[..., Any]] = None,
         parameters_schema: Optional[Dict[str, Any]] = None,
         returns_schema: Optional[Dict[str, Any]] = None,
+        required_permissions: Optional[List[str]] = None,
+        requires_authentication: bool = True,
+        security_classification: str = "INTERNAL",
     ) -> CapabilityDescriptor:
-        """Register an AI-discoverable capability."""
+        """Register an AI-discoverable capability.
+
+        `requires_authentication=False` is a bootstrap carve-out reserved
+        exclusively for `kortex.security.auth.authenticate` — the one
+        capability that must be reachable before any session token exists.
+        Any other capability name attempting to register with
+        `requires_authentication=False` is rejected here: this invariant
+        was not enforced anywhere in the platform before this milestone, so
+        it is enforced at this single, authoritative capability-registration
+        choke point rather than left as an unenforced convention.
+        """
         if name in self._capabilities:
             raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
+
+        if not requires_authentication and name != _BOOTSTRAP_EXEMPT_CAPABILITY:
+            raise ValueError(
+                f"Capability '{name}' cannot register with requires_authentication=False; "
+                f"only '{_BOOTSTRAP_EXEMPT_CAPABILITY}' may bypass authentication."
+            )
 
         descriptor = CapabilityDescriptor(
             name=name,
@@ -218,6 +273,9 @@ class RegistryEngine(BaseEngine):
             parameters_schema=parameters_schema or {},
             returns_schema=returns_schema or {},
             handler=handler,
+            required_permissions=required_permissions,
+            requires_authentication=requires_authentication,
+            security_classification=security_classification,
         )
         self._capabilities[name] = descriptor
         self.register_resource(name, RegistryCategory.CAPABILITY, handler, description=description, provider=provider)
