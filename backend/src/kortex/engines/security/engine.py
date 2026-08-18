@@ -1,5 +1,4 @@
-"""
-KORTEX Security Engine Core Facade (Milestone M1 + M2 + M3 + M4).
+"""KORTEX Security Engine Core Facade (Milestone M1 + M2 + M3 + M4 + M5 + M6).
 
 Follows the exact lifecycle/registration conventions established by sibling
 engines (see `kortex.engines.storage.engine.StorageEngine`,
@@ -9,85 +8,112 @@ Milestone M1 scope: engine lifecycle (`BaseEngine`), Kernel/Registry capability
 registration, and the common diagnostics interface (`IEngineDiagnostics`).
 Milestone M2 adds: `SecretStore` construction and activation of the
 `kortex.security.secret.get` capability with real (encrypted, fail-closed)
-behavior. Milestone M3 adds: `AuthenticationManager` construction and
-activation of the `kortex.security.auth.authenticate` capability with real
-(fail-closed) behavior. Milestone M4 adds: `AuthorizationEngine` construction
-and activation of the `kortex.security.access.authorize` capability with real
-hybrid RBAC+ABAC (fail-closed) behavior. `kortex.security.signature.verify`
-remains exactly what it was in M1 — an explicit, non-functional placeholder
-that fails closed with `NOT_IMPLEMENTED` under any input. Authentication does
-not imply authorization, and vice versa — `AuthorizationEngine` evaluates
-policy against a caller-supplied `SecurityPrincipal`; it does not itself
-verify that principal was ever genuinely authenticated.
-
-Authoritative Kernel capability interception/dispatch (i.e. actually routing
-every capability invocation through Security Engine's authorization decision)
-remains a later, platform-wide gap — nothing in this module creates a
-dispatcher or authorization middleware. `kortex.security.access.authorize` is
-real and directly callable, exactly like `secret.get`/`auth.authenticate`
-before it, but nothing in the Kernel/Registry routes capability invocation
-through it automatically.
+behavior.
+Milestone M3 adds: `AuthenticationManager` construction and activation of the
+`kortex.security.auth.authenticate` capability with real (fail-closed) behavior.
+Milestone M4 adds: `AuthorizationEngine` construction and activation of the
+`kortex.security.access.authorize` capability with real hybrid RBAC+ABAC
+(fail-closed) behavior.
+Milestone M5 adds: Capability Enforcement Boundary integration via
+`CapabilityDispatcher` in `kortex.core.dispatch`.
+Milestone M6 adds: `AuditManager` construction for immutable audit trail
+generation (`UniversalAuditEntry`) persisted in `IDataStore` and published to
+`EventEngine`, activation of the 4th canonical capability
+`kortex.security.signature.verify` via `VerificationService`, and full
+implementation of the `ISecurityEngine` protocol.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, NoReturn, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
 from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.engines.security.audit import AuditManager
 from kortex.engines.security.auth import AuthenticationManager
 from kortex.engines.security.authorization import AuthorizationEngine
-from kortex.engines.security.exceptions import MasterKeyError, SecurityEngineError, SigningKeyError
-from kortex.engines.security.interfaces import ICryptoProvider, IEngineDiagnostics
+from kortex.engines.security.crypto import VerificationService
+from kortex.engines.security.events import (
+    SecurityAccessDeniedEvent,
+    SecurityAccessGrantedEvent,
+    SecurityAuthFailureEvent,
+    SecurityAuthSuccessEvent,
+)
+from kortex.engines.security.exceptions import (
+    MasterKeyError,
+    SecurityEngineError,
+    SigningKeyError,
+)
+from kortex.engines.security.interfaces import (
+    ICryptoProvider,
+    IEngineDiagnostics,
+    ISecurityEngine,
+)
+from kortex.engines.security.models import (
+    AccessDecision,
+    CryptographicSignature,
+    PermissionRequirement,
+    SecretEntry,
+    SecurityPrincipal,
+)
 from kortex.engines.security.providers.local_crypto import LocalCrypto
 from kortex.engines.security.secrets import SecretStore
 from kortex.engines.storage.interfaces import ICacheStore, IDataStore
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
+    from kortex.engines.event.engine import EventEngine
 
 logger = logging.getLogger("kortex.engines.security")
-
-_NOT_IMPLEMENTED_MESSAGE = (
-    "Security Engine capability '{name}' is not implemented in Milestone M1. "
-    "This capability is a structural placeholder only — it never authenticates, "
-    "authorizes, decrypts secrets, or grants access. Real enforcement lands in "
-    "a later milestone."
-)
 
 _MASTER_KEY_CONFIG_KEY = "KORTEX_MASTER_KEY"
 _AUTH_SIGNING_KEY_CONFIG_KEY = "KORTEX_AUTH_SIGNING_PRIVATE_KEY"
 _SECRET_GET_CAPABILITY = "kortex.security.secret.get"
 _AUTH_AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate"
 _ACCESS_AUTHORIZE_CAPABILITY = "kortex.security.access.authorize"
+_SIGNATURE_VERIFY_CAPABILITY = "kortex.security.signature.verify"
 
 # Canonical capability registration list, per Security Engine spec S15.
 _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
-    ("kortex.security.auth.authenticate", "Authenticate a caller identity."),
-    ("kortex.security.access.authorize", "Authorize a caller's requested capability."),
+    (_AUTH_AUTHENTICATE_CAPABILITY, "Authenticate a caller identity."),
+    (_ACCESS_AUTHORIZE_CAPABILITY, "Authorize a caller's requested capability."),
     (_SECRET_GET_CAPABILITY, "Resolve a secret handle to its plaintext value."),
-    ("kortex.security.signature.verify", "Verify a cryptographic signature."),
+    (_SIGNATURE_VERIFY_CAPABILITY, "Verify a cryptographic signature."),
 ]
 
 # RBAC permission requirements per capability. `kortex.security.auth.authenticate`
 # is deliberately absent: it is the bootstrap-exempt capability
 # (`requires_authentication=False`), so no RBAC permission requirement applies to
-# it. `kortex.security.access.authorize` is intentionally given `security:read`
-# rather than left unclassified — this capability only *exposes* an authorization
-# decision to a caller; it does not perform the enforcement check on itself, so
-# requiring `security:read` here is not circular with `Kernel.invoke_capability`'s
-# own internal call to `AuthorizationEngine.authorize_strict`, which never goes
-# through this capability lookup.
+# it.
 _CANONICAL_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
     _ACCESS_AUTHORIZE_CAPABILITY: ["security:read"],
     _SECRET_GET_CAPABILITY: ["security:read"],
-    "kortex.security.signature.verify": ["security:read"],
+    _SIGNATURE_VERIFY_CAPABILITY: ["security:read"],
+}
+
+# Maps `PrincipalType` (auth/RBAC vocabulary: USER/SERVICE_PRINCIPAL/AGENT) to
+# `UniversalAuditEntry.actor_type`'s own, separate frozen vocabulary
+# (shared_domain_models.md S11: HUMAN/AI_AGENT/SYSTEM_ENGINE/CONNECTOR).
+# SERVICE_PRINCIPAL -> CONNECTOR is an implementation decision (closest
+# available category for an external service credential), not a frozen
+# mandate — flagged as such rather than silently assumed.
+_PRINCIPAL_TYPE_TO_ACTOR_TYPE: Dict[str, str] = {
+    "USER": "HUMAN",
+    "AGENT": "AI_AGENT",
+    "SERVICE_PRINCIPAL": "CONNECTOR",
 }
 
 
-class SecurityEngine(BaseEngine, IEngineDiagnostics):
-    """KORTEX Security Engine Core Facade providing M1 lifecycle, M2 SecretStore, M3 AuthenticationManager,
-    M4 AuthorizationEngine, and the remaining capability placeholder (signature.verify)."""
+def _actor_type_for_principal_type(principal_type: str) -> str:
+    """Fail-closed to `SYSTEM_ENGINE` for any unrecognized principal type
+    string, rather than propagating an unknown value into the audit trail."""
+    return _PRINCIPAL_TYPE_TO_ACTOR_TYPE.get(principal_type, "SYSTEM_ENGINE")
+
+
+class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
+    """KORTEX Security Engine Core Facade providing M1 lifecycle, M2 SecretStore,
+    M3 AuthenticationManager, M4 AuthorizationEngine, M5 Capability Enforcement,
+    and M6 AuditManager + Signature Verification."""
 
     def __init__(
         self,
@@ -95,39 +121,41 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
         data_store: Optional[IDataStore] = None,
         master_key: Optional[bytes] = None,
         signing_private_key: Optional[bytes] = None,
+        event_engine: Optional[EventEngine] = None,
     ) -> None:
         """Initialize SecurityEngine instance.
 
         Args:
             crypto_provider: Optional cryptographic provider override (defaults
                 to `LocalCrypto()`).
-            data_store: Optional explicit `IDataStore` injection, mirroring the
-                "explicit injection always takes priority" convention used by
-                sibling engines (e.g. Document Engine) — if omitted, resolved
-                from the Kernel's registered `storage` engine during `initialize()`.
+            data_store: Optional explicit `IDataStore` injection — if omitted,
+                resolved from the Kernel's registered `storage` engine during
+                `initialize()`.
             master_key: Optional already-decoded 32-byte master key, for
                 deterministic tests — if omitted, resolved from the
                 `KORTEX_MASTER_KEY` configuration value during `initialize()`.
-                Never logged, never stored anywhere except as this attribute.
             signing_private_key: Optional already-decoded 32-byte Ed25519
                 signing key, for deterministic tests — if omitted, resolved
                 from the `KORTEX_AUTH_SIGNING_PRIVATE_KEY` configuration value
-                during `initialize()`. Cryptographically and operationally
-                separate from `master_key` — never derived from it, never
-                shared with `SecretStore`.
+                during `initialize()`.
+            event_engine: Optional explicit `EventEngine` injection — if omitted,
+                resolved from the Kernel during `initialize()`.
         """
         super().__init__()
         self._crypto_provider: ICryptoProvider = crypto_provider if crypto_provider is not None else LocalCrypto()
         self._data_store_override: Optional[IDataStore] = data_store
         self._master_key_override: Optional[bytes] = master_key
         self._signing_private_key_override: Optional[bytes] = signing_private_key
+        self._event_engine_override: Optional[EventEngine] = event_engine
         self._secret_store: Optional[SecretStore] = None
         self._authentication_manager: Optional[AuthenticationManager] = None
         self._authorization_engine: Optional[AuthorizationEngine] = None
+        self._audit_manager: Optional[AuditManager] = None
+        self._verification_service: VerificationService = VerificationService(crypto_provider=self._crypto_provider)
         self._registered_capabilities: List[str] = []
         self._metrics: Dict[str, Any] = {
             "capabilities_registered": 0,
-            "not_implemented_invocations": 0,
+            "signature_verifications": 0,
         }
 
     @property
@@ -144,10 +172,8 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
     def authentication_manager(self) -> AuthenticationManager:
         """Return the initialized `AuthenticationManager`.
 
-        Exists so the Kernel's capability dispatcher (`kortex.core.dispatch`)
-        can call `verify_token()` directly, without reaching into a private
-        attribute. Raises `SecurityEngineError` if accessed before
-        `initialize()` has completed — never returns `None` silently.
+        Raises `SecurityEngineError` if accessed before `initialize()` has
+        completed.
         """
         if self._authentication_manager is None:
             raise SecurityEngineError("AuthenticationManager is not initialized.")
@@ -157,40 +183,55 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
     def authorization_engine(self) -> AuthorizationEngine:
         """Return the initialized `AuthorizationEngine`.
 
-        Exists so the Kernel's capability dispatcher (`kortex.core.dispatch`)
-        can call `authorize_strict()` directly, without reaching into a
-        private attribute. Raises `SecurityEngineError` if accessed before
-        `initialize()` has completed — never returns `None` silently.
+        Raises `SecurityEngineError` if accessed before `initialize()` has
+        completed.
         """
         if self._authorization_engine is None:
             raise SecurityEngineError("AuthorizationEngine is not initialized.")
         return self._authorization_engine
 
+    @property
+    def secret_store(self) -> SecretStore:
+        """Return the initialized `SecretStore`.
+
+        Raises `SecurityEngineError` if accessed before `initialize()` has
+        completed.
+        """
+        if self._secret_store is None:
+            raise SecurityEngineError("SecretStore is not initialized.")
+        return self._secret_store
+
+    @property
+    def audit_manager(self) -> AuditManager:
+        """Return the initialized `AuditManager` (Milestone M6).
+
+        Raises `SecurityEngineError` if accessed before `initialize()` has
+        completed.
+        """
+        if self._audit_manager is None:
+            raise SecurityEngineError("AuditManager is not initialized.")
+        return self._audit_manager
+
+    @property
+    def verification_service(self) -> VerificationService:
+        """Return the initialized `VerificationService`."""
+        return self._verification_service
+
     # -- Lifecycle Implementation ---------------------------------------------
 
     async def initialize(self, kernel: Kernel) -> None:
-        """Build the M2 `SecretStore`, M3 `AuthenticationManager`, and M4
-        `AuthorizationEngine`, then register the four canonical capabilities.
-
-        `kortex.security.secret.get` delegates to a real, encrypted, fail-closed
-        `SecretStore`. `kortex.security.auth.authenticate` delegates to a real,
-        fail-closed `AuthenticationManager`. `kortex.security.access.authorize`
-        delegates to a real, fail-closed `AuthorizationEngine` (hybrid RBAC+ABAC).
-        `kortex.security.signature.verify` remains exactly what it was in M1 —
-        an explicit, non-functional placeholder that fails closed with
-        `NOT_IMPLEMENTED` regardless of input. If `SecretStore`,
-        `AuthenticationManager`, or `AuthorizationEngine` cannot be constructed
-        securely (missing/malformed key material, missing `IDataStore`), this
-        method raises and the Kernel boot fails closed — there is no fallback
-        path that starts Security Engine without them.
+        """Build the M2 `SecretStore`, M3 `AuthenticationManager`, M4
+        `AuthorizationEngine`, and M6 `AuditManager`, then register the four
+        canonical capabilities.
         """
         self._set_state(EngineState.INITIALIZING)
-        self.logger.info("Initializing KORTEX Security Engine (Milestone M1 + M2 + M3)...")
+        self.logger.info("Initializing KORTEX Security Engine (Milestones M1-M6)...")
 
         try:
             self._secret_store = self._build_secret_store(kernel)
             self._authentication_manager = self._build_authentication_manager(kernel)
             self._authorization_engine = self._build_authorization_engine(kernel)
+            self._audit_manager = self._build_audit_manager(kernel)
 
             for capability_name, description in _CANONICAL_CAPABILITIES:
                 requires_authentication = True
@@ -198,20 +239,24 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
                     handler: Callable[..., Any] = self._secret_store.get_secret
                     capability_description = f"{description} Encrypted, fail-closed (Milestone M2)."
                 elif capability_name == _AUTH_AUTHENTICATE_CAPABILITY:
-                    handler = self._authentication_manager.authenticate
-                    capability_description = f"{description} Fail-closed (Milestone M3)."
-                    # The one bootstrap exception: must be reachable before any
-                    # session token exists. Enforced (not just declared here) by
-                    # RegistryEngine.register_capability's own allowlist check.
+                    # `self.authenticate` (not the raw manager method) so this
+                    # capability's real dispatch path is also audited (M6).
+                    handler = self.authenticate
+                    capability_description = f"{description} Fail-closed, audited (Milestones M3 + M6)."
+                    # The bootstrap exception: reachable before any session token exists.
                     requires_authentication = False
                 elif capability_name == _ACCESS_AUTHORIZE_CAPABILITY:
-                    handler = self._authorization_engine.authorize
-                    capability_description = f"{description} Fail-closed, hybrid RBAC+ABAC (Milestone M4)."
+                    # `self.authorize` (not the raw engine method) so this
+                    # capability's real dispatch path is also audited (M6).
+                    handler = self.authorize
+                    capability_description = f"{description} Fail-closed, hybrid RBAC+ABAC, audited (Milestones M4 + M6)."
+                elif capability_name == _SIGNATURE_VERIFY_CAPABILITY:
+                    handler = self._verify_signature_capability_handler
+                    capability_description = f"{description} Cryptographic verification (Milestone M6)."
                 else:
                     handler = self._make_not_implemented_handler(capability_name)
-                    capability_description = (
-                        f"{description} NOT IMPLEMENTED - Milestone M1 structural placeholder only."
-                    )
+                    capability_description = f"{description} NOT IMPLEMENTED."
+
                 kernel.register_capability(
                     name=capability_name,
                     description=capability_description,
@@ -226,21 +271,15 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             self._set_state(EngineState.READY)
             self.logger.info(
                 "Security Engine initialized successfully "
-                "(M2 SecretStore + M3 Authentication + M4 Authorization active)."
+                "(M2 SecretStore + M3 Auth + M4 Authorization + M6 Audit active)."
             )
         except Exception as e:
             self._set_state(EngineState.FAILED)
             self.logger.error("Failed to initialize Security Engine: %s", e, exc_info=True)
             raise
 
-    def _build_secret_store(self, kernel: Kernel) -> SecretStore:
-        """Resolve `IDataStore` and the master key, then construct `SecretStore`.
-
-        Explicit constructor injection (`data_store`/`master_key` passed to
-        `SecurityEngine.__init__`) always takes priority, mirroring the same
-        convention used by Document/Connector Engine for `IDataStore` — this
-        only resolves from the Kernel when neither was already configured.
-        """
+    def _resolve_data_store(self, kernel: Kernel) -> IDataStore:
+        """Resolve `IDataStore` from override or Kernel `storage` engine."""
         data_store = self._data_store_override
         if data_store is None:
             storage_engine = kernel.get_engine("storage")
@@ -248,7 +287,11 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             if resolved is None:
                 raise SecurityEngineError("Storage Engine did not provide an IDataStore instance.")
             data_store = resolved
+        return data_store
 
+    def _build_secret_store(self, kernel: Kernel) -> SecretStore:
+        """Resolve `IDataStore` and master key, then construct `SecretStore`."""
+        data_store = self._resolve_data_store(kernel)
         master_key = self._master_key_override
         if master_key is None:
             raw_key = kernel.get_config(_MASTER_KEY_CONFIG_KEY)
@@ -262,22 +305,8 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
         return SecretStore(data_store=data_store, crypto_provider=self._crypto_provider, master_key=master_key)
 
     def _build_authentication_manager(self, kernel: Kernel) -> AuthenticationManager:
-        """Resolve `IDataStore` and the Ed25519 signing key, then construct `AuthenticationManager`.
-
-        Reuses `_build_secret_store`'s already-resolved `IDataStore` resolution
-        convention (explicit constructor injection first, else the Kernel's
-        registered `storage` engine) — `AuthenticationManager` has no
-        dependency on `SecretStore` itself, only on the same `IDataStore`
-        resolution path.
-        """
-        data_store = self._data_store_override
-        if data_store is None:
-            storage_engine = kernel.get_engine("storage")
-            resolved = getattr(storage_engine, "data", None)
-            if resolved is None:
-                raise SecurityEngineError("Storage Engine did not provide an IDataStore instance.")
-            data_store = resolved
-
+        """Resolve `IDataStore` and Ed25519 signing key, then construct `AuthenticationManager`."""
+        data_store = self._resolve_data_store(kernel)
         signing_private_key = self._signing_private_key_override
         if signing_private_key is None:
             raw_key = kernel.get_config(_AUTH_SIGNING_KEY_CONFIG_KEY)
@@ -293,44 +322,42 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
         )
 
     def _build_authorization_engine(self, kernel: Kernel) -> AuthorizationEngine:
-        """Resolve `IDataStore` and the shared `ICacheStore`, then construct `AuthorizationEngine`.
-
-        Reuses the same `IDataStore` resolution convention as
-        `_build_secret_store`/`_build_authentication_manager`.
-        `AuthorizationEngine` needs no key material — unlike `SecretStore`/
-        `AuthenticationManager`, it has no boot-time bootstrap failure mode
-        of its own beyond the already-covered missing-`IDataStore` case.
-
-        `cache_store` is resolved via `getattr(storage_engine, "cache", None)`
-        — the exact same optional-resolution pattern `document/engine.py`
-        already uses for its own cache-backed sub-components. It is never
-        required: a `None` cache disables the S16/S18 permission-matrix
-        cache but never changes RBAC/ABAC correctness (see `rbac.py`). Only
-        resolved when `data_store` itself is Kernel-resolved — mirroring
-        the existing convention that a full constructor-injection override
-        (test determinism) bypasses Kernel resolution entirely, including
-        for the cache.
-        """
-        data_store = self._data_store_override
+        """Resolve `IDataStore` and shared `ICacheStore`, then construct `AuthorizationEngine`."""
+        data_store = self._resolve_data_store(kernel)
         cache_store: Optional[ICacheStore] = None
-        if data_store is None:
+        if self._data_store_override is None:
             storage_engine = kernel.get_engine("storage")
-            resolved = getattr(storage_engine, "data", None)
-            if resolved is None:
-                raise SecurityEngineError("Storage Engine did not provide an IDataStore instance.")
-            data_store = resolved
             cache_store = getattr(storage_engine, "cache", None)
 
         return AuthorizationEngine(data_store=data_store, cache_store=cache_store)
 
+    def _build_audit_manager(self, kernel: Kernel) -> AuditManager:
+        """Resolve `IDataStore` and optional `EventEngine`, then construct `AuditManager`."""
+        data_store = self._resolve_data_store(kernel)
+        event_engine = self._event_engine_override
+        if event_engine is None:
+            try:
+                resolved_event = kernel.get_engine("event")
+                if resolved_event is not None:
+                    event_engine = cast("EventEngine", resolved_event)
+            except Exception:
+                event_engine = None
+
+
+        return AuditManager(
+            data_store=data_store,
+            event_engine=event_engine,
+            crypto_provider=self._crypto_provider,
+        )
+
     async def start(self) -> None:
-        """Start the Security Engine. No background services run in M1."""
+        """Start the Security Engine."""
         self.ensure_state(EngineState.READY)
         self._set_state(EngineState.RUNNING)
         self.logger.info("Security Engine is RUNNING.")
 
     async def stop(self) -> None:
-        """Gracefully shut down the Security Engine. No resources to release in M1."""
+        """Gracefully shut down the Security Engine."""
         if self._state in (EngineState.STOPPED, EngineState.UNINITIALIZED):
             return
 
@@ -343,38 +370,229 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
         """Perform diagnostic health check."""
         return self.health()
 
-    # -- Capability Placeholder Handler ---------------------------------------
+    # -- Capability Handlers --------------------------------------------------
+
+    async def _verify_signature_capability_handler(
+        self,
+        data: bytes | str,
+        signature: bytes | str | Dict[str, Any] | CryptographicSignature,
+        public_key: Optional[bytes | str] = None,
+        algorithm: str = "ed25519",
+        **_extra: Any,
+    ) -> bool:
+        """Capability handler for `kortex.security.signature.verify`."""
+        self._metrics["signature_verifications"] += 1
+        try:
+            data_bytes = data.encode("utf-8") if isinstance(data, str) else data
+            if not isinstance(data_bytes, bytes):
+                return False
+
+            if isinstance(signature, CryptographicSignature):
+                return self._verification_service.verify_signature(data_bytes, signature)
+
+            if isinstance(signature, dict):
+                raw_sig = signature.get("signature")
+                raw_pub = signature.get("public_key")
+                alg = str(signature.get("algorithm", "ed25519"))
+
+                sig_bytes = bytes.fromhex(raw_sig) if isinstance(raw_sig, str) else raw_sig
+                pub_bytes = bytes.fromhex(raw_pub) if isinstance(raw_pub, str) else raw_pub
+
+                if not isinstance(sig_bytes, bytes) or not isinstance(pub_bytes, bytes):
+                    return False
+
+                sig_obj = CryptographicSignature(
+                    algorithm=alg,
+                    signature=sig_bytes,
+                    public_key=pub_bytes,
+                )
+                return self._verification_service.verify_signature(data_bytes, sig_obj)
+
+            # Raw signature bytes or hex
+            sig_b = bytes.fromhex(signature) if isinstance(signature, str) else signature
+            if not isinstance(sig_b, bytes) or public_key is None:
+                return False
+
+            pub_b = bytes.fromhex(public_key) if isinstance(public_key, str) else public_key
+            if not isinstance(pub_b, bytes):
+                return False
+
+            sig_obj = CryptographicSignature(
+                algorithm=algorithm,
+                signature=sig_b,
+                public_key=pub_b,
+            )
+            return self._verification_service.verify_signature(data_bytes, sig_obj)
+        except Exception:
+            return False
 
     def _make_not_implemented_handler(self, capability_name: str) -> Callable[..., Any]:
-        """Build a handler that fails closed for `capability_name` under any input.
+        """Build a handler that fails closed for unimplemented capabilities."""
 
-        Accepts arbitrary positional/keyword arguments — missing, malformed,
-        empty, or unexpected input all produce the identical explicit failure.
-        There is no success path and no ALLOW path.
-        """
-
-        async def _handler(*_args: Any, **_kwargs: Any) -> NoReturn:
-            self._metrics["not_implemented_invocations"] += 1
+        async def _handler(*_args: Any, **_kwargs: Any) -> Any:
             raise SecurityEngineError(
-                _NOT_IMPLEMENTED_MESSAGE.format(name=capability_name),
+                f"Security Engine capability '{capability_name}' is not implemented.",
                 code="NOT_IMPLEMENTED",
             )
 
         return _handler
 
+    # -- ISecurityEngine Protocol Implementation ------------------------------
+
+    async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
+        """Authenticate a caller identity.
+
+        Records an audit entry and publishes a typed success/failure event
+        (Milestone M6) — identity for the audit record comes from the
+        supplied `credentials` on failure (the only identity available
+        before a `SecurityPrincipal` exists) and from the resulting
+        `SecurityPrincipal` on success.
+        """
+        # `credentials` is untrusted, caller-supplied input — `AuthenticationManager.authenticate`
+        # is required to fail closed with `AuthenticationError` even for non-dict shapes (`None`,
+        # a bare string, etc.), so this audit-context extraction must never itself raise for those
+        # shapes ahead of the real authentication check.
+        safe_credentials: Dict[str, Any] = credentials if isinstance(credentials, dict) else {}
+        raw_tenant_id = safe_credentials.get("tenant_id")
+        raw_principal_id = safe_credentials.get("principal_id")
+        attempted_tenant_id = str(raw_tenant_id) if raw_tenant_id else "unknown"
+        attempted_principal_id = str(raw_principal_id) if raw_principal_id else "unknown"
+        attempted_principal_type = str(safe_credentials.get("principal_type") or "USER")
+
+        try:
+            principal = await self.authentication_manager.authenticate(credentials)
+        except Exception as exc:
+            await self._record_security_audit(
+                action=_AUTH_AUTHENTICATE_CAPABILITY,
+                actor_id=attempted_principal_id,
+                actor_type=_actor_type_for_principal_type(attempted_principal_type),
+                tenant_id=attempted_tenant_id,
+                context={"result": "failure", "reason": type(exc).__name__},
+            )
+            if self._audit_manager is not None:
+                await self._audit_manager.publish_security_event(
+                    SecurityAuthFailureEvent(
+                        tenant_id=attempted_tenant_id,
+                        principal_id=attempted_principal_id,
+                        reason=type(exc).__name__,
+                    )
+                )
+            raise
+
+        await self._record_security_audit(
+            action=_AUTH_AUTHENTICATE_CAPABILITY,
+            actor_id=principal.principal_id,
+            actor_type=_actor_type_for_principal_type(principal.principal_type.value),
+            tenant_id=principal.tenant_id,
+            context={"result": "success"},
+        )
+        if self._audit_manager is not None:
+            await self._audit_manager.publish_security_event(
+                SecurityAuthSuccessEvent(
+                    tenant_id=principal.tenant_id,
+                    principal_id=principal.principal_id,
+                    principal_type=principal.principal_type.value,
+                )
+            )
+        return principal
+
+    async def authorize(
+        self,
+        principal: SecurityPrincipal,
+        requirement: PermissionRequirement,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AccessDecision:
+        """Authorize a caller's requested capability.
+
+        Records an audit entry and publishes a typed grant/deny event
+        (Milestone M6) for every decision, not only denials — both are
+        "security events" per the frozen audit requirement.
+        """
+        decision = await self.authorization_engine.authorize(principal, requirement, context)
+
+        await self._record_security_audit(
+            action=requirement.capability_name,
+            actor_id=principal.principal_id,
+            actor_type=_actor_type_for_principal_type(principal.principal_type.value),
+            tenant_id=principal.tenant_id,
+            context={"decision_code": decision.decision_code, "is_allowed": decision.is_allowed},
+        )
+        if self._audit_manager is not None:
+            if decision.is_allowed:
+                await self._audit_manager.publish_security_event(
+                    SecurityAccessGrantedEvent(
+                        tenant_id=principal.tenant_id,
+                        principal_id=principal.principal_id,
+                        capability_name=requirement.capability_name,
+                        decision_code=decision.decision_code,
+                    )
+                )
+            else:
+                await self._audit_manager.publish_security_event(
+                    SecurityAccessDeniedEvent(
+                        tenant_id=principal.tenant_id,
+                        principal_id=principal.principal_id,
+                        capability_name=requirement.capability_name,
+                        reason=decision.reason,
+                        decision_code=decision.decision_code,
+                    )
+                )
+        return decision
+
+    async def _record_security_audit(
+        self,
+        action: str,
+        actor_id: str,
+        actor_type: str,
+        tenant_id: str,
+        resource_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Best-effort audit recording (Milestone M6).
+
+        Audit-persistence failure is logged and swallowed rather than
+        propagated — an audit-store outage must not itself become a
+        fail-closed lockout of authentication/authorization, mirroring
+        `AuditManager.record_audit_entry`'s own non-blocking treatment of
+        event-publish failures. This is an implementation decision, not a
+        frozen mandate; the spec does not state what should happen if audit
+        persistence itself fails.
+        """
+        if self._audit_manager is None:
+            return
+        try:
+            await self._audit_manager.record_event(
+                action=action,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                tenant_id=tenant_id,
+                resource_id=resource_id,
+                context=context or {},
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to record security audit entry for '%s': %s", action, exc)
+
+    async def verify_signature(self, data: bytes, signature: CryptographicSignature) -> bool:
+        """Verify a cryptographic signature."""
+        self._metrics["signature_verifications"] += 1
+        return self._verification_service.verify_signature(data, signature)
+
+    async def get_secret(self, secret_handle: str, tenant_id: str) -> str:
+        """Resolve a secret handle to its plaintext value."""
+        return await self.secret_store.get_secret(secret_handle, tenant_id)
+
+    async def put_secret(self, secret_handle: str, tenant_id: str, plaintext: str) -> SecretEntry:
+        """Encrypt and persist a secret under a handle."""
+        return await self.secret_store.put_secret(secret_handle, tenant_id, plaintext)
+
+    async def delete_secret(self, secret_handle: str, tenant_id: str) -> bool:
+        """Delete a secret entry."""
+        return await self.secret_store.delete_secret(secret_handle, tenant_id)
+
     # -- Common Diagnostics Interface (IEngineDiagnostics) -------------------
 
     def health(self) -> Dict[str, Any]:
-        """Return diagnostic health checks.
-
-        `secret_store_implemented`/`authentication_implemented`/
-        `authorization_implemented` reflect reality (True once `SecretStore`/
-        `AuthenticationManager`/`AuthorizationEngine` have been constructed in
-        `initialize()`). Audit remains honestly reported as not implemented —
-        it does not exist as of Milestone M4. Never exposes the master key,
-        the authentication signing key, or any decrypted secret/credential
-        material.
-        """
+        """Return diagnostic health checks."""
         return {
             "engine": self.name,
             "status": self._state.value,
@@ -383,7 +601,7 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             "authentication_implemented": self._authentication_manager is not None,
             "authorization_implemented": self._authorization_engine is not None,
             "secret_store_implemented": self._secret_store is not None,
-            "audit_implemented": False,
+            "audit_implemented": self._audit_manager is not None,
         }
 
     def metrics(self) -> Dict[str, Any]:
@@ -398,10 +616,7 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
             "state": self._state.value,
             "capabilities": self.capabilities(),
             "metrics": self.metrics(),
-            "not_yet_implemented": [
-                "audit_enforcement",
-                "kernel_capability_dispatch",
-            ],
+            "not_yet_implemented": [],
         }
 
     def status(self) -> str:
@@ -410,7 +625,7 @@ class SecurityEngine(BaseEngine, IEngineDiagnostics):
 
     def version(self) -> str:
         """Return semantic version string."""
-        return "0.4.0-m4"
+        return "0.6.0-m6"
 
     def capabilities(self) -> List[str]:
         """Return list of capability strings registered by this engine."""

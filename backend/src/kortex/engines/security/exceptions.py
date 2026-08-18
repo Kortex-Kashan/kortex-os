@@ -98,3 +98,10 @@ class CryptoProviderError(SecurityEngineError):
     AES-256-GCM authentication tag failure indicating tampered ciphertext,
     tag, or associated data.
     """
+
+
+# -- Audit Enforcement (Milestone M6) ---------------------------------------
+
+
+class AuditError(SecurityEngineError):
+    """Raised when an audit log recording, persistence, or querying operation fails."""

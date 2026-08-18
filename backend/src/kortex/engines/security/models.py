@@ -21,11 +21,13 @@ implemented — it is not a permanent duplicate.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
 
 
 class PrincipalType(str, Enum):
@@ -259,3 +261,58 @@ class RolePermissionRecord(SQLAlchemyBaseModel):
 
     role: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     permission: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class UniversalAuditEntry(BaseModel):
+    """The Universal Audit Entry model (Milestone M6).
+
+    Per `docs/architecture/shared_domain_models.md` S11 &
+    `docs/architecture/security_engine_implementation_spec.md` S5/S10.
+    Immutable once created (`frozen=True`).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    audit_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique UUID identifying audit record.")
+    timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of action.")
+    action: str = Field(min_length=1, description="Canonical capability or action name executed.")
+    actor_id: str = Field(min_length=1, description="Identifier of actor performing action (User/Agent/System).")
+    actor_type: str = Field(
+        default="SYSTEM_ENGINE",
+        description=(
+            "Type of actor, per shared_domain_models.md S11: HUMAN, AI_AGENT, SYSTEM_ENGINE, or CONNECTOR. "
+            "Not a Python enum here (kept as plain str, consistent with the frozen field spec), so this is "
+            "advisory, not enforced — callers constructing entries directly are responsible for using this "
+            "vocabulary rather than `PrincipalType`'s own (USER/SERVICE_PRINCIPAL/AGENT), which is a "
+            "different, unrelated vocabulary for a different model."
+        ),
+    )
+    tenant_id: str = Field(min_length=1, description="Multi-tenant organization identifier.")
+    resource_id: Optional[str] = Field(default=None, description="Identifier of target resource acted upon.")
+    previous_state_hash: Optional[str] = Field(default=None, description="SHA256 content hash of resource prior to action.")
+    new_state_hash: Optional[str] = Field(default=None, description="SHA256 content hash of resource after action.")
+    client_ip: Optional[str] = Field(default=None, description="Optional client IP or node location.")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Structured execution context data.")
+
+
+class AuditRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for an immutable audit log entry (Milestone M6).
+
+    Colocated in `security/models.py` per the same cross-engine convention
+    `SecretRecord`/`PrincipalRecord`/`RolePermissionRecord` already establish.
+    Auto-created via the existing `Base.metadata.create_all()` boot path.
+    """
+
+    __tablename__ = "security_audit_records"
+
+    audit_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    timestamp_utc: Mapped[datetime] = mapped_column(index=True, nullable=False)
+    action: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    previous_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    new_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

@@ -21,7 +21,7 @@ Protocol rather than import a shared one.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from kortex.engines.security.models import (
     AccessDecision,
@@ -30,7 +30,9 @@ from kortex.engines.security.models import (
     SecretEntry,
     SecurityPrincipal,
     TokenPayload,
+    UniversalAuditEntry,
 )
+
 
 
 @runtime_checkable
@@ -178,14 +180,43 @@ class IAuthorizationEngine(Protocol):
 
 
 @runtime_checkable
+class IAuditManager(Protocol):
+    """Audit enforcement manager protocol. Implemented as of Milestone M6 (`audit.py`)."""
+
+    async def record_audit_entry(self, entry: UniversalAuditEntry) -> UniversalAuditEntry:
+        """Record an immutable audit entry."""
+        ...
+
+    async def get_audit_entries(
+        self,
+        tenant_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        action: Optional[str] = None,
+        actor_id: Optional[str] = None,
+    ) -> List[UniversalAuditEntry]:
+        """Query immutable audit entries for a tenant."""
+        ...
+
+    async def get_audit_entry(self, audit_id: str, tenant_id: str) -> Optional[UniversalAuditEntry]:
+        """Retrieve a specific audit entry by ID."""
+        ...
+
+
+@runtime_checkable
 class ISecurityEngine(Protocol):
-    """Primary Security Engine facade protocol. Implemented in a later milestone (M6)."""
+    """Primary Security Engine facade protocol. Implemented as of Milestone M6."""
 
     async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
         """Authenticate a caller."""
         ...
 
-    async def authorize(self, principal: SecurityPrincipal, requirement: PermissionRequirement) -> AccessDecision:
+    async def authorize(
+        self,
+        principal: SecurityPrincipal,
+        requirement: PermissionRequirement,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AccessDecision:
         """Authorize a caller's requested capability."""
         ...
 
@@ -196,6 +227,7 @@ class ISecurityEngine(Protocol):
     async def get_secret(self, secret_handle: str, tenant_id: str) -> str:
         """Resolve a secret handle to its plaintext value."""
         ...
+
 
 
 @runtime_checkable

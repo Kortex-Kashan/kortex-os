@@ -46,7 +46,9 @@ from kortex.engines.security.models import (
     RolePermissionRecord,
     SecurityPrincipal,
 )
+from kortex.engines.security.providers.local_crypto import LocalCrypto
 from kortex.engines.storage.engine import StorageEngine
+
 
 _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.auth.authenticate",
@@ -228,61 +230,40 @@ async def test_capabilities_reflects_all_four_registrations_after_initialize(tmp
     assert len(security_engine.capabilities()) == 4
 
 
-# -- E. Capability failure behavior: placeholders fail closed for every input shape --
+# -- E. Capability verification: signature.verify is REAL as of M6 -----------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capability_name", _STILL_PLACEHOLDER_CAPABILITY_NAMES)
-@pytest.mark.parametrize(
-    ("args", "kwargs"),
-    [
-        ((), {}),
-        ((None,), {}),
-        (("",), {}),
-        (({},), {}),
-        (({"unexpected": "value"},), {}),
-        (("arbitrary-string-input",), {}),
-        ((1, 2, 3), {"a": "b"}),
-    ],
-    ids=["no-args", "none", "empty-string", "empty-dict", "malformed-dict", "arbitrary-string", "unexpected-mixed"],
-)
-async def test_placeholder_capability_handler_fails_closed_for_every_input_shape(
-    tmp_path: Path, capability_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
-) -> None:
-    """`signature.verify` is the sole remaining M1 placeholder as of M4 —
-    every input must fail closed with NOT_IMPLEMENTED."""
-    kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability(capability_name)
-
-    with pytest.raises(SecurityEngineError) as exc_info:
-        await descriptor.handler(*args, **kwargs)
-
-    assert exc_info.value.code == "NOT_IMPLEMENTED"
-
-
-@pytest.mark.asyncio
-async def test_capability_handler_never_returns_a_value(tmp_path: Path) -> None:
-    """Structural guarantee: the placeholder handler always raises — there is
-    no code path that could return a truthy/ALLOW-like value."""
-    kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
-    descriptor = kernel.get_capability("kortex.security.signature.verify")
-
-    with pytest.raises(SecurityEngineError):
-        await descriptor.handler(data="anyone", signature="anything")
-
-
-@pytest.mark.asyncio
-async def test_security_engine_metrics_counts_not_implemented_invocations(tmp_path: Path) -> None:
-    """Uses the sole still-placeholder capability (`signature.verify`) —
-    `secret.get`/`auth.authenticate`/`access.authorize` are real as of
-    M2/M3/M4 and no longer increment this counter."""
+async def test_signature_verify_capability_verifies_real_signature(tmp_path: Path) -> None:
+    """`signature.verify` is real as of M6 — verifies valid Ed25519 signatures
+    and fails closed (returns False) on invalid/malformed signatures."""
     kernel, _storage, security_engine = await _boot_kernel_with_security(tmp_path)
     descriptor = kernel.get_capability("kortex.security.signature.verify")
 
-    assert security_engine.metrics()["not_implemented_invocations"] == 0
-    with pytest.raises(SecurityEngineError):
-        await descriptor.handler("anyone", "anything")
-    assert security_engine.metrics()["not_implemented_invocations"] == 1
+    crypto = LocalCrypto()
+    priv, pub = crypto.generate_ed25519_keypair()
+    data = b"Test signature payload"
+    sig = crypto.sign_ed25519(data, priv)
+
+    # Valid signature
+    assert await descriptor.handler(data=data, signature=sig, public_key=pub) is True
+
+    # Tampered data
+    assert await descriptor.handler(data=b"Tampered data", signature=sig, public_key=pub) is False
+
+    # Bad signature
+    assert await descriptor.handler(data=data, signature=b"bad_sig", public_key=pub) is False
+
+
+@pytest.mark.asyncio
+async def test_signature_verify_capability_fails_closed_on_malformed_input(tmp_path: Path) -> None:
+    """Malformed inputs return False (fail-closed) without crashing."""
+    kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
+    descriptor = kernel.get_capability("kortex.security.signature.verify")
+
+    assert await descriptor.handler(data=None, signature=None) is False
+    assert await descriptor.handler(data="text", signature="not_hex", public_key="not_hex") is False
+
 
 
 # -- D2. secret.get is REAL as of M2: delegates to SecretStore, fails closed -------
@@ -537,7 +518,7 @@ async def test_security_engine_health_reflects_real_secret_store_status(tmp_path
     assert health["authentication_implemented"] is True  # real as of M3
     assert health["authorization_implemented"] is True  # real as of M4
     assert health["secret_store_implemented"] is True  # real as of M2
-    assert health["audit_implemented"] is False
+    assert health["audit_implemented"] is True  # real as of M6
 
 
 @pytest.mark.asyncio
@@ -546,11 +527,11 @@ async def test_security_engine_diagnostics_lists_not_yet_implemented_subsystems(
 
     detail = security_engine.diagnostics()
 
-    for expected in ("audit_enforcement", "kernel_capability_dispatch"):
-        assert expected in detail["not_yet_implemented"]
+    assert detail["not_yet_implemented"] == []
     assert "secret_storage" not in detail["not_yet_implemented"]
     assert "authentication" not in detail["not_yet_implemented"]
     assert "authorization" not in detail["not_yet_implemented"]
+
 
 
 def test_security_engine_version_is_stable_string() -> None:
