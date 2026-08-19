@@ -1,8 +1,8 @@
 """
 KORTEX Knowledge Engine Exception Hierarchy (Milestone M1 base; graph
 exceptions added in Milestone M2, lineage exceptions added in Milestone M3,
-annotation exceptions added in Milestone M4, per this module's own
-original roadmap).
+annotation exceptions added in Milestone M4, source-provider exceptions
+added in Milestone M5, per this module's own original roadmap).
 
 All Knowledge Engine exceptions inherit from `KortexError`
 (`kortex.core.exceptions`), following the existing KORTEX exception
@@ -111,3 +111,17 @@ class KnowledgeAnnotationNotFoundError(KnowledgeEngineError):
     tenant, is rejected at write time — mirroring M2's endpoint-existence
     check on `add_relationship` and M3's identity-match check on
     `supersede`."""
+
+
+# -- Knowledge Source Providers (Milestone M5) -------------------------------
+
+
+class KnowledgeSourceIngestionError(KnowledgeEngineError):
+    """Raised by an `IKnowledgeSourceProvider.ingest()` implementation when
+    ingestion cannot proceed: a malformed/empty `tenant_id` (fail-closed —
+    ingestion never silently returns an empty result for invalid identity
+    input, unlike `KnowledgeLineageManager.get_current`'s deliberate
+    `Optional`-return contract for a merely *absent* record), or any other
+    ingestion-time failure a concrete provider needs to normalize into the
+    Knowledge Engine's own exception hierarchy rather than propagating a
+    raw, provider-internal exception type."""
