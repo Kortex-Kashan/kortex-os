@@ -623,7 +623,13 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
 
     with p_dns, p_pinned, p_ssrf:
         instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
-        for _ in range(100):
+        # 9 real connector attempts plus, as of Milestone M5's dispatch-level
+        # audit hook, 3 additional audited authenticate+authorize round trips
+        # to IDataStore (one pair per workflow-level attempt) push total
+        # completion slightly past a 1-second poll ceiling; 3 seconds keeps
+        # ample headroom without masking a genuine hang (observed completion
+        # is ~1.3-2s).
+        for _ in range(300):
             if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED):
                 break
             await asyncio.sleep(0.01)

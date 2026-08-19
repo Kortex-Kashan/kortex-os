@@ -571,3 +571,158 @@ def test_malformed_session_token_rejected_by_model_validation() -> None:
 
     with pytest.raises(ValidationError):
         CapabilityRequest(capability_name="dispatch.test.malformed", session_token={"not": "a valid token shape"})
+
+
+# -- 21. Audit/security hook: dispatch produces an audit trail (Milestone M5) -----
+
+
+@pytest.mark.asyncio
+async def test_successful_dispatch_records_authentication_and_authorization_audit_entries(tmp_path: Path) -> None:
+    """Every dispatched invocation must be observable through Security
+    Engine's existing Milestone M6 `AuditManager` — not merely enforced.
+    Proves both the token-verification step and the authorization decision
+    are recorded, with the correct outcome, for a successful invocation."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    handler = _CallCountingHandler()
+    kernel.register_capability(
+        name="dispatch.test.audited_allow",
+        description="test",
+        provider="test",
+        handler=handler,
+        required_permissions=["dispatch.audit_read"],
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path)
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[_TEST_ROLE])
+    await _grant_role_permission(storage_engine.data, _TEST_ROLE, "dispatch.audit_read")
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name="dispatch.test.audited_allow",
+        session_token=token,
+        context={"resource_tenant_id": tenant_id},
+    )
+    result = await kernel.invoke_capability(request)
+    assert result == "handler-invoked"
+
+    auth_entries = await security_engine.audit_manager.get_audit_entries(
+        tenant_id=tenant_id, action="kortex.kernel.dispatch.authenticate"
+    )
+    assert len(auth_entries) == 1
+    assert auth_entries[0].actor_id == "principal-1"
+    assert auth_entries[0].context["result"] == "success"
+
+    authz_entries = await security_engine.audit_manager.get_audit_entries(
+        tenant_id=tenant_id, action="dispatch.test.audited_allow"
+    )
+    assert len(authz_entries) == 1
+    assert authz_entries[0].actor_id == "principal-1"
+    assert authz_entries[0].context["is_allowed"] is True
+
+
+@pytest.mark.asyncio
+async def test_denied_dispatch_still_records_authorization_audit_entry(tmp_path: Path) -> None:
+    """An RBAC denial must still be recorded to the audit trail — a
+    security-relevant decision is auditable regardless of outcome, per the
+    architecture spec's "all security events, access grants, denials"
+    mandate. The handler must never execute either way."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    handler = _CallCountingHandler()
+    kernel.register_capability(
+        name="dispatch.test.audited_deny",
+        description="test",
+        provider="test",
+        handler=handler,
+        required_permissions=["dispatch.admin"],
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path)
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[_TEST_ROLE])
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name="dispatch.test.audited_deny",
+        session_token=token,
+        context={"resource_tenant_id": tenant_id},
+    )
+    with pytest.raises(AuthorizationDeniedError):
+        await kernel.invoke_capability(request)
+    assert handler.call_count == 0
+
+    authz_entries = await security_engine.audit_manager.get_audit_entries(
+        tenant_id=tenant_id, action="dispatch.test.audited_deny"
+    )
+    assert len(authz_entries) == 1
+    assert authz_entries[0].context["is_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_authentication_failure_records_audit_entry_using_claimed_identity(tmp_path: Path) -> None:
+    """A failed token verification must still be recorded, using the
+    *claimed* (unverified) identity from the presented token — the only
+    identity available before verification succeeds."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    handler = _CallCountingHandler()
+    kernel.register_capability(
+        name="dispatch.test.audited_auth_fail", description="test", provider="test", handler=handler
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path)
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1")
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+    tampered = token.model_copy(update={"principal_id": "someone-else"})
+
+    request = CapabilityRequest(capability_name="dispatch.test.audited_auth_fail", session_token=tampered)
+    with pytest.raises(SecurityEngineError):
+        await kernel.invoke_capability(request)
+    assert handler.call_count == 0
+
+    auth_entries = await security_engine.audit_manager.get_audit_entries(
+        tenant_id=tenant_id, action="kortex.kernel.dispatch.authenticate"
+    )
+    assert len(auth_entries) == 1
+    assert auth_entries[0].actor_id == "someone-else"  # claimed, unverified identity
+    assert auth_entries[0].context["result"] == "failure"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_publishes_typed_security_events(tmp_path: Path) -> None:
+    """The dispatch boundary must publish the same typed
+    `SecurityAuthSuccessEvent`/`SecurityAccessGrantedEvent` signals Security
+    Engine's own audited capabilities already publish — proving the audit
+    hook is wired through `EventEngine`, not only the durable audit log."""
+    from kortex.engines.security.events import SecurityAccessGrantedEvent, SecurityAuthSuccessEvent
+
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    handler = _CallCountingHandler()
+    kernel.register_capability(
+        name="dispatch.test.audited_events",
+        description="test",
+        provider="test",
+        handler=handler,
+        required_permissions=["dispatch.audit_events"],
+    )
+    await kernel.boot()
+
+    received: list[Any] = []
+    kernel.subscribe_event(SecurityAuthSuccessEvent.model_fields["event_type"].default, lambda e: received.append(e))
+    kernel.subscribe_event(SecurityAccessGrantedEvent.model_fields["event_type"].default, lambda e: received.append(e))
+
+    tenant_id = _tenant(tmp_path)
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[_TEST_ROLE])
+    await _grant_role_permission(storage_engine.data, _TEST_ROLE, "dispatch.audit_events")
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name="dispatch.test.audited_events",
+        session_token=token,
+        context={"resource_tenant_id": tenant_id},
+    )
+    await kernel.invoke_capability(request)
+
+    received_topics = {event.topic for event in received}
+    assert "kortex.event.security.auth.success" in received_topics
+    assert "kortex.event.security.access.granted" in received_topics
