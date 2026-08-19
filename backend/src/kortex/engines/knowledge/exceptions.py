@@ -2,7 +2,8 @@
 KORTEX Knowledge Engine Exception Hierarchy (Milestone M1 base; graph
 exceptions added in Milestone M2, lineage exceptions added in Milestone M3,
 annotation exceptions added in Milestone M4, source-provider exceptions
-added in Milestone M5, per this module's own original roadmap).
+added in Milestone M5, trust-promotion exceptions added in Milestone M6,
+per this module's own original roadmap).
 
 All Knowledge Engine exceptions inherit from `KortexError`
 (`kortex.core.exceptions`), following the existing KORTEX exception
@@ -80,19 +81,6 @@ class KnowledgeLineageConsistencyError(KnowledgeEngineError):
     `version_id` (a stale or concurrent-modification supersession attempt)."""
 
 
-class KnowledgePromotionNotEnforcedError(KnowledgeEngineError):
-    """Raised unconditionally by `promote()` in Milestone M3.
-
-    Trust-state promotion is deliberately not implemented here: `promote()`
-    exists only so `KnowledgeLineageManager` structurally satisfies
-    `IKnowledgeRecordManager`. Milestone M6 delivers the real state
-    transition together with its `USER`-only actor-type enforcement as a
-    single unit — Milestone M3 must never provide a working, unenforced
-    transition in the interim, which would create a window where any actor
-    type could promote a record to `HUMAN_CONFIRMED`/`HUMAN_CORRECTED`.
-    """
-
-
 # -- Knowledge Annotations (Milestone M4) ------------------------------------
 
 
@@ -125,3 +113,29 @@ class KnowledgeSourceIngestionError(KnowledgeEngineError):
     ingestion-time failure a concrete provider needs to normalize into the
     Knowledge Engine's own exception hierarchy rather than propagating a
     raw, provider-internal exception type."""
+
+
+# -- Knowledge Trust Promotion (Milestone M6) --------------------------------
+
+
+class KnowledgePromotionNotAuthorizedError(KnowledgeEngineError):
+    """Raised by `promote()` when `actor_type` is not `USER`. Trust-state
+    promotion to `HUMAN_CONFIRMED`/`HUMAN_CORRECTED` requires an explicit
+    human action — `AGENT` and `SERVICE_PRINCIPAL` actors are always
+    denied, regardless of any other argument. Checked before any record
+    lookup is performed, so a non-`USER` caller cannot use `promote()` as
+    an oracle to distinguish "record doesn't exist" from "denied" — both
+    an unknown `record_id` and a legitimate one are rejected identically
+    for a non-`USER` actor."""
+
+
+class KnowledgeInvalidTrustTransitionError(KnowledgeEngineError):
+    """Raised by `promote()` when the requested trust-state transition is
+    not a valid promotion. Covers two cases: `new_trust_state` is not one
+    of the confirmed states (`HUMAN_CONFIRMED`/`HUMAN_CORRECTED`) — this
+    method promotes *to* confirmed trust, never to `SOURCE_EVIDENCE`/
+    `AI_CANDIDATE`; and the record's *current* trust state is already
+    confirmed — `promote()` only applies to an unconfirmed record
+    (`SOURCE_EVIDENCE`/`AI_CANDIDATE`), so a repeated or redundant
+    promotion attempt on an already-confirmed record is rejected rather
+    than silently accepted."""

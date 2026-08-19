@@ -1,9 +1,11 @@
 """
-KORTEX Knowledge Engine — Record Lineage & Supersession (Milestone M3).
+KORTEX Knowledge Engine — Record Lineage, Supersession & Trust Promotion
+(Milestone M3 lineage/supersession; Milestone M6 trust promotion).
 
 Implements `IKnowledgeRecordManager` (`interfaces.py`) for `KnowledgeRecord`
 version management: creation, current-version lookup, full lineage
-reconstruction, and atomic supersession.
+reconstruction, atomic supersession, and (Milestone M6) trust-state
+promotion.
 
 In-memory only, tenant-scoped, mirroring the storage-agnostic conventions
 already established by Milestone M2's `KnowledgeGraph` — persistence is
@@ -12,13 +14,42 @@ declared `async` in the committed Protocol (unlike `IKnowledgeGraph`'s
 synchronous ones), so this implementation is `async` to match that
 contract exactly, even though its internals do no actual I/O yet.
 
-`promote()` exists only so `KnowledgeLineageManager` structurally satisfies
-`IKnowledgeRecordManager`; it unconditionally raises
-`KnowledgePromotionNotEnforcedError`. Milestone M6 delivers the real
-trust-state transition together with its `USER`-only actor-type
-enforcement as a single unit — this milestone must never provide a
-working, unenforced transition, which would create a window where any
-actor type could promote a record to `HUMAN_CONFIRMED`/`HUMAN_CORRECTED`.
+`promote()` (Milestone M6) enforces that only a `USER`-type actor may
+promote a record's trust state, and only from an unconfirmed state
+(`SOURCE_EVIDENCE`/`AI_CANDIDATE`) to a confirmed one
+(`HUMAN_CONFIRMED`/`HUMAN_CORRECTED`) — `AGENT`/`SERVICE_PRINCIPAL` are
+always denied, and the actor-type check runs *before* any record lookup,
+so a non-`USER` caller cannot use this method as an existence oracle
+(an unknown `record_id` and a real one are rejected identically for a
+denied actor). A successful promotion replaces the current version's
+stored `KnowledgeRecord` with a `model_copy(update={"trust_state": ...})`
+copy at the *same* `version_id` — it never creates a new lineage version
+(that is `supersede()`'s concern; `KnowledgeAnnotationType.CORRECTION`'s
+own docstring assigns version-creating corrections to `supersede()`, not
+to `promote()`), so `get_lineage()`'s chain is unaffected by a promotion.
+Promoting an already-confirmed record, or targeting anything other than a
+confirmed state, is rejected as an invalid transition — not silently
+accepted as a no-op.
+
+Documented residual, found during Milestone M6's adversarial audit and
+deliberately NOT changed here: `create_record()` and `supersede()` accept
+a caller-supplied `trust_state` — including `HUMAN_CONFIRMED`/
+`HUMAN_CORRECTED` — with no actor-type check at all, unlike `promote()`.
+This is not an oversight this milestone silently left in place; it follows
+directly from the committed `IKnowledgeRecordManager` Protocol itself,
+whose `create_record`/`supersede` signatures carry no `actor_id`/
+`actor_type` parameters at all (`promote()`'s signature uniquely does) —
+a deliberate Milestone M1 API asymmetry that places responsibility for
+*who* may call `create_record`/`supersede` with a confirmed trust state
+outside `KnowledgeLineageManager` entirely (a capability-dispatch/Security
+Engine boundary, mirroring the pattern already established for the
+unrelated Kernel capability-enforcement boundary elsewhere in this
+codebase), not inside this milestone's scope. Restricting
+`create_record`/`supersede` to unconfirmed-only trust states here would be
+an unevidenced redesign of already-committed M3 behavior, not a proven M6
+requirement — see `test_create_record_and_supersede_accept_confirmed_trust_state_directly_by_design`
+in `test_knowledge_lineage.py` for the explicit, intentional proof of this
+characteristic.
 
 `KnowledgeRecord` is frozen (Milestone M1 design, unchanged here).
 `supersede` therefore never mutates a stored record in place — it replaces
@@ -56,8 +87,9 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 from kortex.engines.knowledge.exceptions import (
+    KnowledgeInvalidTrustTransitionError,
     KnowledgeLineageConsistencyError,
-    KnowledgePromotionNotEnforcedError,
+    KnowledgePromotionNotAuthorizedError,
     KnowledgeRecordNotFoundError,
 )
 from kortex.engines.knowledge.models import (
@@ -65,6 +97,10 @@ from kortex.engines.knowledge.models import (
     KnowledgeRecord,
     KnowledgeRecordStatus,
     KnowledgeTrustState,
+)
+
+_CONFIRMED_TRUST_STATES = frozenset(
+    {KnowledgeTrustState.HUMAN_CONFIRMED, KnowledgeTrustState.HUMAN_CORRECTED}
 )
 
 
@@ -205,16 +241,53 @@ class KnowledgeLineageManager:
         actor_type: KnowledgeActorType,
         new_trust_state: KnowledgeTrustState,
     ) -> KnowledgeRecord:
-        """Not implemented in Milestone M3 — always raises
-        `KnowledgePromotionNotEnforcedError`.
+        """Promote the current version of `record_id` from an unconfirmed
+        trust state (`SOURCE_EVIDENCE`/`AI_CANDIDATE`) to a confirmed one
+        (`HUMAN_CONFIRMED`/`HUMAN_CORRECTED`).
 
-        Trust-state promotion enforcement (restricting promotion to `USER`
-        actors) is Milestone M6 behavior, delivered together with the real
-        state-transition mechanism as a single unit. This method exists
-        only so `KnowledgeLineageManager` structurally satisfies
-        `IKnowledgeRecordManager`; it never performs a state change.
+        Raises:
+            KnowledgePromotionNotAuthorizedError: `actor_type` is not
+                `USER`. Checked before any record lookup — a non-`USER`
+                caller cannot distinguish an unknown `record_id` from a
+                real one by the error raised.
+            KnowledgeRecordNotFoundError: `record_id` was never created for
+                `tenant_id` (only reached for a `USER` actor).
+            KnowledgeInvalidTrustTransitionError: `new_trust_state` is not
+                a confirmed state, or the record's current trust state is
+                already confirmed (promotion is not idempotent and does
+                not apply to an already-confirmed record).
+
+        On success, replaces the stored current version with a
+        `model_copy(update={"trust_state": new_trust_state})` copy at the
+        same `version_id` — `actor_id` is used only for this authorization
+        decision; `KnowledgeRecord` (frozen, Milestone M1) has no field
+        recording who promoted it.
         """
-        raise KnowledgePromotionNotEnforcedError(
-            "Trust-state promotion is not yet implemented — it is deferred to Milestone M6, "
-            "which delivers the real transition together with its USER-only enforcement."
-        )
+        if actor_type != KnowledgeActorType.USER:
+            raise KnowledgePromotionNotAuthorizedError(
+                f"Trust-state promotion of record '{record_id}' requires a USER actor; "
+                f"actor_type={actor_type.value!r} is not permitted."
+            )
+
+        record_key = (tenant_id, record_id)
+        current_version_id = self._current_version_id.get(record_key)
+        if current_version_id is None:
+            raise KnowledgeRecordNotFoundError(f"Record '{record_id}' not found for tenant '{tenant_id}'.")
+
+        current_record = self._versions[(tenant_id, record_id, current_version_id)]
+
+        if new_trust_state not in _CONFIRMED_TRUST_STATES:
+            raise KnowledgeInvalidTrustTransitionError(
+                f"Cannot promote record '{record_id}' to trust_state={new_trust_state.value!r}: "
+                f"promote() may only target a confirmed trust state "
+                f"(HUMAN_CONFIRMED/HUMAN_CORRECTED)."
+            )
+        if current_record.trust_state in _CONFIRMED_TRUST_STATES:
+            raise KnowledgeInvalidTrustTransitionError(
+                f"Record '{record_id}' is already at trust_state={current_record.trust_state.value!r}; "
+                f"promote() only applies to an unconfirmed record (SOURCE_EVIDENCE/AI_CANDIDATE)."
+            )
+
+        promoted_record = current_record.model_copy(update={"trust_state": new_trust_state})
+        self._versions[(tenant_id, record_id, current_version_id)] = promoted_record
+        return promoted_record
