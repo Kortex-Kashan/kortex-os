@@ -87,6 +87,17 @@ class KnowledgeGraph:
         # Outgoing-edge index: (tenant_id, source_node_id) -> [relationship, ...]
         self._outgoing: Dict[Tuple[str, str], List[KnowledgeRelationship]] = {}
 
+    def list_nodes(self, tenant_id: str) -> List[KnowledgeNode]:
+        """Return every node registered for `tenant_id`. Added in Milestone
+        M8 so a search coordinator can enumerate candidate nodes without
+        reaching into `_nodes` directly — purely additive; `IKnowledgeGraph`'s
+        frozen Protocol (M1) is unchanged and does not declare this method.
+        Synchronous, matching every other method on this class. Returns an
+        empty list for an unknown/empty tenant — not an error, consistent
+        with `find_neighbors`'s own empty-result convention for an isolated
+        node."""
+        return [node for (t, _node_id), node in self._nodes.items() if t == tenant_id]
+
     def add_node(self, node: KnowledgeNode) -> KnowledgeNode:
         """Add a node to the graph. Raises `KnowledgeDuplicateNodeError` if
         `(tenant_id, node_id)` already exists — duplicates are always

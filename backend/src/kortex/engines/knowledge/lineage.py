@@ -330,6 +330,23 @@ class KnowledgeLineageManager:
             self._current_version_id[record_key] = current_record.version_id
             return current_record
 
+    async def list_current_records(self, tenant_id: str) -> List[KnowledgeRecord]:
+        """Return the current version of every record for `tenant_id`.
+        Added in Milestone M8 so a search coordinator can enumerate
+        candidate records without reaching into `_versions` directly —
+        purely additive; `IKnowledgeRecordManager`'s frozen Protocol (M1)
+        is unchanged and does not declare this method. Acquires the same
+        lock every mutating method uses (see Milestone M7's concurrency
+        finding) so a concurrent create_record/supersede/promote cannot
+        produce a torn read. Returns an empty list for an unknown/empty
+        tenant — not an error."""
+        async with self._lock:
+            return [
+                self._versions[(t, record_id, version_id)]
+                for (t, record_id), version_id in self._current_version_id.items()
+                if t == tenant_id
+            ]
+
     async def get_current(self, record_id: str, tenant_id: str) -> Optional[KnowledgeRecord]:
         """Return the current version of `record_id`, scoped to `tenant_id`,
         or `None` if the record does not exist — a normal outcome per this
