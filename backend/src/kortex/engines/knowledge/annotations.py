@@ -1,0 +1,128 @@
+"""
+KORTEX Knowledge Engine — Annotation Management (Milestone M4).
+
+Implements `IKnowledgeAnnotationManager` (`interfaces.py`) for
+`KnowledgeAnnotation` storage and retrieval: non-destructive human
+remarks/corrections/context notes attached to `KnowledgeRecord`s.
+
+In-memory only, tenant-scoped, mirroring the storage-agnostic conventions
+already established by Milestone M2's `KnowledgeGraph` and Milestone M3's
+`KnowledgeLineageManager` — persistence is explicitly Milestone M7, not
+here. `IKnowledgeAnnotationManager`'s methods are declared `async` in the
+committed Protocol, so this implementation is `async` to match that
+contract exactly, even though its internals do no actual I/O yet.
+
+Scope boundary (deliberate, evidence-based — not an oversight):
+`models.py`'s own `KnowledgeAnnotation` docstring states that a
+`CORRECTION`-type annotation "triggers creation of a new superseding
+`KnowledgeRecord` version." That auto-triggering is NOT implemented here.
+The committed `IKnowledgeAnnotationManager.add_annotation(annotation)`
+signature accepts only a `KnowledgeAnnotation` — a free-text `content: str`
+plus identity/actor fields — which carries none of the structured data
+(`record_type`, `trust_state`, `created_by_type`, `content: Dict[str, Any]`,
+etc.) that `IKnowledgeRecordManager.supersede()` requires to construct a
+new `KnowledgeRecord` version. Wiring `add_annotation` directly to
+`supersede()` would require either changing the frozen Milestone M1
+`IKnowledgeAnnotationManager`/`KnowledgeAnnotation` contracts (out of
+scope — M1-M3 are frozen) or inventing a new, uncommitted cross-manager
+composition mechanism (speculative architecture with no precedent
+anywhere in this repository). This manager therefore stores every
+annotation — including `CORRECTION`-type ones — as the non-destructive,
+coexisting record the model docstring itself also confirms ("Conflicting
+remarks on the same record simply coexist; no automatic conflict
+resolution is performed by the domain model"). Actually wiring
+`CORRECTION` to real record supersession is left to whichever future
+milestone extends the committed interfaces to carry that capability.
+
+This manager never validates that `target_record_id` refers to an
+existing `KnowledgeRecord`. Like `KnowledgeGraph` and
+`KnowledgeLineageManager`, it is a standalone, storage-agnostic component
+with no constructor-time dependency on any other engine's manager
+(consistent with both of those managers' own `__init__(self) -> None`
+signatures) — cross-manager referential validation between annotations
+and the records they target is a composition-root concern belonging to a
+later facade milestone, not to M4.
+
+Tenant isolation is a structural invariant: internal storage is keyed by
+`(tenant_id, annotation_id)`, matching the pattern established by M2/M3.
+`(tenant_id, annotation_id)` duplicates are rejected, mirroring M2's
+duplicate-node/-relationship precedent. A `supersedes_annotation_id` that
+is provided must reference an existing annotation attached to the *same*
+`(tenant_id, target_record_id)` — this is basic referential integrity,
+mirroring M2's requirement that a relationship's endpoints must exist and
+M3's requirement that `new_version`'s identity match the call's own
+record/tenant — a dangling, cross-record, or cross-tenant supersession
+reference is rejected, not silently accepted.
+
+`list_annotations` returns every annotation attached to `target_record_id`
+— including ones with a non-null `supersedes_annotation_id` — in
+insertion order. No filtering or conflict-resolution is performed, per the
+model's own documented characteristic; callers that want only "the
+latest" annotation must interpret the `supersedes_annotation_id` chain
+themselves. An unknown `target_record_id` yields an empty list, not an
+error — this manager has no internal notion of "record exists" to
+validate against (it does not store records), so a `target_record_id`
+with zero annotations is indistinguishable from one that happens to be
+unrecognized, and both are normal, non-exceptional outcomes.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, List, Tuple
+
+from kortex.engines.knowledge.exceptions import (
+    KnowledgeAnnotationNotFoundError,
+    KnowledgeDuplicateAnnotationError,
+)
+from kortex.engines.knowledge.models import KnowledgeAnnotation
+
+
+class KnowledgeAnnotationManager:
+    """In-memory, tenant-scoped annotation manager (Milestone M4)."""
+
+    def __init__(self) -> None:
+        self._annotations: Dict[Tuple[str, str], KnowledgeAnnotation] = {}
+        # (tenant_id, target_record_id) -> [annotation_id, ...] in insertion order.
+        self._by_target: Dict[Tuple[str, str], List[str]] = {}
+
+    async def add_annotation(self, annotation: KnowledgeAnnotation) -> KnowledgeAnnotation:
+        """Attach a new, non-destructive annotation to a `KnowledgeRecord`.
+
+        Raises:
+            KnowledgeDuplicateAnnotationError: `(tenant_id, annotation_id)`
+                already exists.
+            KnowledgeAnnotationNotFoundError: `supersedes_annotation_id` is
+                set but does not reference an existing annotation attached
+                to the same `(tenant_id, target_record_id)`.
+        """
+        key = (annotation.tenant_id, annotation.annotation_id)
+        if key in self._annotations:
+            raise KnowledgeDuplicateAnnotationError(
+                f"Annotation '{annotation.annotation_id}' already exists for tenant "
+                f"'{annotation.tenant_id}'."
+            )
+
+        if annotation.supersedes_annotation_id is not None:
+            superseded_key = (annotation.tenant_id, annotation.supersedes_annotation_id)
+            superseded = self._annotations.get(superseded_key)
+            if superseded is None or superseded.target_record_id != annotation.target_record_id:
+                raise KnowledgeAnnotationNotFoundError(
+                    f"supersedes_annotation_id={annotation.supersedes_annotation_id!r} does not "
+                    f"reference an existing annotation on target_record_id="
+                    f"{annotation.target_record_id!r} for tenant '{annotation.tenant_id}'."
+                )
+
+        self._annotations[key] = annotation
+        target_key = (annotation.tenant_id, annotation.target_record_id)
+        self._by_target.setdefault(target_key, []).append(annotation.annotation_id)
+        return annotation
+
+    async def list_annotations(self, target_record_id: str, tenant_id: str) -> List[KnowledgeAnnotation]:
+        """Return every annotation attached to `target_record_id`, scoped to
+        `tenant_id`, in insertion order. Returns an empty list if none
+        exist — an unrecognized `target_record_id` is not an error here,
+        since this manager never validates `target_record_id` against any
+        stored `KnowledgeRecord`."""
+        target_key = (tenant_id, target_record_id)
+        annotation_ids = self._by_target.get(target_key, [])
+        return [self._annotations[(tenant_id, annotation_id)] for annotation_id in annotation_ids]

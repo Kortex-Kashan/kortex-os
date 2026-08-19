@@ -1,7 +1,8 @@
 """
 KORTEX Knowledge Engine Exception Hierarchy (Milestone M1 base; graph
 exceptions added in Milestone M2, lineage exceptions added in Milestone M3,
-per this module's own original roadmap).
+annotation exceptions added in Milestone M4, per this module's own
+original roadmap).
 
 All Knowledge Engine exceptions inherit from `KortexError`
 (`kortex.core.exceptions`), following the existing KORTEX exception
@@ -90,3 +91,23 @@ class KnowledgePromotionNotEnforcedError(KnowledgeEngineError):
     transition in the interim, which would create a window where any actor
     type could promote a record to `HUMAN_CONFIRMED`/`HUMAN_CORRECTED`.
     """
+
+
+# -- Knowledge Annotations (Milestone M4) ------------------------------------
+
+
+class KnowledgeDuplicateAnnotationError(KnowledgeEngineError):
+    """Raised when `add_annotation` is called with an `annotation_id` that
+    already exists for the given `tenant_id`. Duplicate identity
+    registration is always rejected rather than silently overwritten,
+    mirroring M2's `KnowledgeDuplicateNodeError`/`KnowledgeDuplicateRelationshipError`."""
+
+
+class KnowledgeAnnotationNotFoundError(KnowledgeEngineError):
+    """Raised when `add_annotation` is given a `supersedes_annotation_id`
+    that does not reference an existing annotation attached to the same
+    `(tenant_id, target_record_id)`. A dangling reference, or one pointing
+    at an annotation attached to a *different* record or a *different*
+    tenant, is rejected at write time — mirroring M2's endpoint-existence
+    check on `add_relationship` and M3's identity-match check on
+    `supersede`."""
