@@ -1,6 +1,7 @@
 """
 KORTEX Knowledge Engine Exception Hierarchy (Milestone M1 base; graph
-exceptions added in Milestone M2 per this module's own original roadmap).
+exceptions added in Milestone M2, lineage exceptions added in Milestone M3,
+per this module's own original roadmap).
 
 All Knowledge Engine exceptions inherit from `KortexError`
 (`kortex.core.exceptions`), following the existing KORTEX exception
@@ -53,3 +54,39 @@ class KnowledgeGraphCycleError(KnowledgeEngineError):
     `RELATES_TO` and `REFERENCES` are not hierarchical and legitimately
     form cycles in normal use (e.g. mutual references), so they are never
     subject to this check."""
+
+
+# -- Knowledge Lineage (Milestone M3) ----------------------------------------
+
+
+class KnowledgeRecordNotFoundError(KnowledgeEngineError):
+    """Raised when `get_lineage`/`supersede` reference a `record_id` that
+    was never created for the given `tenant_id`. Distinct from
+    `get_current`'s contract: `get_current` returns `None` for a missing
+    record (its own declared `Optional[KnowledgeRecord]` return type makes
+    that a normal, non-exceptional outcome), while every other lineage
+    operation treats a wholly unknown `record_id` as an error."""
+
+
+class KnowledgeLineageConsistencyError(KnowledgeEngineError):
+    """Raised when a lineage operation would violate the "exactly one
+    version chain, exactly one CURRENT version" invariant for a given
+    `(tenant_id, record_id)`. Covers two cases: `create_record` called for
+    a `record_id` that already has a version chain (an initial version can
+    only ever be created once — later versions arrive via `supersede`, not
+    `create_record`); and `supersede` called with a `new_version` whose
+    `parent_version_id` does not match the actual current version's
+    `version_id` (a stale or concurrent-modification supersession attempt)."""
+
+
+class KnowledgePromotionNotEnforcedError(KnowledgeEngineError):
+    """Raised unconditionally by `promote()` in Milestone M3.
+
+    Trust-state promotion is deliberately not implemented here: `promote()`
+    exists only so `KnowledgeLineageManager` structurally satisfies
+    `IKnowledgeRecordManager`. Milestone M6 delivers the real state
+    transition together with its `USER`-only actor-type enforcement as a
+    single unit — Milestone M3 must never provide a working, unenforced
+    transition in the interim, which would create a window where any actor
+    type could promote a record to `HUMAN_CONFIRMED`/`HUMAN_CORRECTED`.
+    """
