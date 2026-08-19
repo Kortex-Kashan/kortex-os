@@ -90,6 +90,17 @@ Tenant isolation is a structural invariant: internal storage is keyed by
 Milestone M2's established pattern — identical `record_id` values across
 tenants never collide.
 
+Persistence error normalization (closure hardening, found during the post-M8
+reconciliation audit): every `execute_in_transaction` call made by this
+manager now goes through a private `_execute_in_transaction` helper that
+wraps any non-`KnowledgeEngineError` failure in `KnowledgePersistenceError`
+(original exception preserved as `__cause__`), rather than letting a raw
+storage-layer exception escape unnormalized — closing the one gap where
+this module's own established convention (every failure mode is a
+`KnowledgeEngineError` subclass) did not hold. Domain-level rejections
+(`KnowledgeLineageConsistencyError`, etc.) are raised exactly as before —
+only genuine storage failures are wrapped.
+
 `get_current` returns `Optional[KnowledgeRecord]` — per the interface's own
 declared return type, a missing record is a normal, non-exceptional
 outcome for this one method. `get_lineage` and `supersede` instead raise
@@ -111,15 +122,17 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.knowledge.exceptions import (
+    KnowledgeEngineError,
     KnowledgeInvalidTrustTransitionError,
     KnowledgeLineageConsistencyError,
+    KnowledgePersistenceError,
     KnowledgePromotionNotAuthorizedError,
     KnowledgeRecordNotFoundError,
 )
@@ -162,6 +175,23 @@ class KnowledgeLineageManager:
         # sequence per manager instance, restoring that atomicity.
         self._lock = asyncio.Lock()
 
+    async def _execute_in_transaction(self, action: Any) -> Any:
+        """Run `action` via the configured `IDataStore`, normalizing any
+        non-`KnowledgeEngineError` failure into `KnowledgePersistenceError`
+        (original exception preserved as `__cause__`). A domain-level
+        `KnowledgeEngineError` raised from within `action` itself (none
+        currently are) would pass through unchanged — only genuine storage
+        failures are wrapped here."""
+        assert self._data_store is not None
+        try:
+            return await self._data_store.execute_in_transaction(action)
+        except KnowledgeEngineError:
+            raise
+        except Exception as exc:
+            raise KnowledgePersistenceError(
+                f"Knowledge lineage persistence operation failed: {exc}"
+            ) from exc
+
     async def load(self) -> None:
         """Hydrate in-memory state from the configured `IDataStore`
         (Milestone M7). No-op if no `data_store` was provided at
@@ -176,7 +206,7 @@ class KnowledgeLineageManager:
             return list(result.scalars().all())
 
         async with self._lock:
-            rows = await self._data_store.execute_in_transaction(_action)
+            rows = await self._execute_in_transaction(_action)
             for row in rows:
                 record = KnowledgeRecord(
                     record_id=row.record_id,
@@ -227,7 +257,7 @@ class KnowledgeLineageManager:
                 )
             )
 
-        await self._data_store.execute_in_transaction(_action)
+        await self._execute_in_transaction(_action)
 
     async def _persist_version_fields(self, record: KnowledgeRecord) -> None:
         """Durably update the mutable columns (`status`,
@@ -252,7 +282,7 @@ class KnowledgeLineageManager:
                 )
             )
 
-        await self._data_store.execute_in_transaction(_action)
+        await self._execute_in_transaction(_action)
 
     async def _persist_supersession(self, old_record: KnowledgeRecord, new_record: KnowledgeRecord) -> None:
         """Durably apply both halves of a supersession — updating the old
@@ -292,7 +322,7 @@ class KnowledgeLineageManager:
                 )
             )
 
-        await self._data_store.execute_in_transaction(_action)
+        await self._execute_in_transaction(_action)
 
     async def create_record(self, record: KnowledgeRecord) -> KnowledgeRecord:
         """Create the initial version of a new record identity.

@@ -1,20 +1,13 @@
 """
-KORTEX Knowledge Engine Exception Hierarchy (Milestone M1 base; graph
-exceptions added in Milestone M2, lineage exceptions added in Milestone M3,
-annotation exceptions added in Milestone M4, source-provider exceptions
-added in Milestone M5, trust-promotion exceptions added in Milestone M6,
-per this module's own original roadmap).
+KORTEX Knowledge Engine Exception Hierarchy.
 
 All Knowledge Engine exceptions inherit from `KortexError`
 (`kortex.core.exceptions`), following the existing KORTEX exception
-conventions.
-
-Concrete subclasses are added incrementally as the milestones that need
-them land (graph errors in M2, lineage errors in M3, annotation errors in
-M4, source-provider errors in M5, trust-promotion errors in M6,
-persistence errors in M7, search errors in M8, pack-verification errors in
-M9, facade errors in M11), matching the established convention in
-`kortex.engines.security.exceptions`.
+conventions. Concrete subclasses are added incrementally as the
+functionality that needs them is implemented (graph, lineage, annotation,
+source-provider, trust-promotion, persistence-failure normalization,
+pack-loading, and facade/source-resolution errors), matching the
+established convention in `kortex.engines.security.exceptions`.
 """
 
 from __future__ import annotations
@@ -139,3 +132,75 @@ class KnowledgeInvalidTrustTransitionError(KnowledgeEngineError):
     (`SOURCE_EVIDENCE`/`AI_CANDIDATE`), so a repeated or redundant
     promotion attempt on an already-confirmed record is rejected rather
     than silently accepted."""
+
+
+# -- Persistence Error Normalization ------------------------------------------
+
+
+class KnowledgePersistenceError(KnowledgeEngineError):
+    """Raised when an underlying `IDataStore` operation fails during a
+    `KnowledgeLineageManager`, `KnowledgeAnnotationManager`, or
+    `KnowledgePackManager` persistence call. Wraps the original exception
+    (always available via `__cause__`, using `raise ... from exc` at every
+    call site) rather than letting a raw storage-layer exception type
+    escape unnormalized — every other Knowledge Engine failure mode is
+    already a `KnowledgeEngineError` subclass; this closes the one gap
+    where that convention did not hold. Raised only for genuine storage
+    failures — a domain-level rejection (e.g. a duplicate identity or an
+    invalid transition) is still raised as its own specific
+    `KnowledgeEngineError` subclass exactly as before, never wrapped in
+    this one, since those are not storage failures."""
+
+
+# -- Knowledge Pack Loading ----------------------------------------------------
+
+
+class KnowledgeDuplicatePackError(KnowledgeEngineError):
+    """Raised when `load_pack()` is called with an `(tenant_id, asset_id)`
+    that has already been loaded. Duplicate identity registration is
+    always rejected rather than silently overwritten, mirroring every
+    other manager's own duplicate-identity convention
+    (`KnowledgeDuplicateNodeError`, `KnowledgeDuplicateAnnotationError`,
+    etc.)."""
+
+
+class KnowledgePackNotFoundError(KnowledgeEngineError):
+    """Raised when `load_pack()`'s `pack.storage_key`/`pack.bucket_name`
+    does not resolve to an actual object in the configured `IObjectStore`
+    (wraps the underlying `ResourceNotFoundError` — see
+    `kortex.core.exceptions` — as `__cause__`). Distinct from
+    `KnowledgePersistenceError`: this is "the referenced object genuinely
+    does not exist," a normal, expected failure mode for a malformed or
+    stale `KnowledgePack` reference, not an operational storage failure."""
+
+
+class KnowledgePackIntegrityError(KnowledgeEngineError):
+    """Raised when the object retrieved from storage does not match
+    `pack.checksum_sha256` (SHA-256 mismatch) or `pack.size_bytes` (byte
+    count mismatch). A corrupted or tampered-with pack must never be
+    loaded — this check is the load-bearing integrity gate for the entire
+    pack-loading operation and always runs before any durable pack record
+    is written."""
+
+
+class KnowledgeInvalidManifestError(KnowledgeEngineError):
+    """Raised when `pack.manifest` is empty. `KnowledgePack.manifest` is an
+    untyped `Dict[str, Any]` (Milestone M1 design — no `KortexAssetManifest`
+    schema implementation exists anywhere in this codebase to validate
+    against, per `models.py`'s own documented rationale), so this is
+    deliberately a structural check only (content must exist at all), never
+    a semantic/key-schema validation — inventing key-level requirements
+    beyond what is actually documented anywhere would be unevidenced
+    scope, not a genuine requirement."""
+
+
+# -- Knowledge Engine Facade ---------------------------------------------------
+
+
+class KnowledgeSourceNotFoundError(KnowledgeEngineError):
+    """Raised by `KnowledgeEngine.index_source()` when `source_id` does not
+    match any source provider registered with the facade. Distinct from
+    `KnowledgeSourceIngestionError` (Milestone M5), which is raised by a
+    provider's own `ingest()` for a malformed *argument* to an otherwise
+    correctly-resolved provider; this error means resolution itself
+    failed — the requested provider does not exist at all."""

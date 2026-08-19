@@ -9,14 +9,13 @@ Protocol's own sync declaration — not "corrected" to async) and
 Scope (per the audited M5 roadmap): this milestone delivers exactly one
 concrete, fully synthetic/deterministic-in-shape provider — no real
 Document/Connector/Recipe Engine I/O, no provider registry or
-multi-provider dispatch (the one place a `source_id` string is actually
-resolved to a provider instance in any committed contract is
-`IKnowledgeEngine.index_source()`, Milestone M11 — building that mechanism
-now would be speculative infrastructure with no M5-scoped consumer), and no
-production coupling to `KnowledgeLineageManager` or `KnowledgeGraph`
-(`ingest()` only *produces* `KnowledgeRecord`s; persisting them via
-`create_record()` is `index_source()`'s M11 job, per that method's own
-docstring: "delegating to that source's `IKnowledgeSourceProvider.ingest()`").
+multi-provider dispatch of its own, and no production coupling to
+`KnowledgeLineageManager` or `KnowledgeGraph` (`ingest()` only *produces*
+`KnowledgeRecord`s; persisting them via `create_record()` is
+`KnowledgeEngine.index_source()`'s job — implemented in `engine.py`, which
+resolves a `source_id` string to a provider instance via its own small
+internal registry and calls `create_record()` for each returned record;
+`sources.py` itself never gains that responsibility).
 
 `KnowledgeRecord` (frozen since M1) has no dedicated field recording which
 source produced a record. Rather than modify that frozen model, provenance

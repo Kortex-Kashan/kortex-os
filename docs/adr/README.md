@@ -35,6 +35,7 @@ An ADR documents a significant technical or architectural decision, including th
 | ADR Number | Title | Date | Status | Target Component |
 | :--- | :--- | :--- | :--- | :--- |
 | `ADR-0000` | Ratification of KORTEX OS Architecture Version 1.0.0 | 2026-08-08 | `ACCEPTED` | System-Wide Architecture |
+| `ADR-0001` | Knowledge Engine Redesigned Scope, and Pack Loader / Facade Closure | 2026-08-20 | `PROPOSED` | Knowledge Engine (`kortex.engines.knowledge`) |
 
 ---
 

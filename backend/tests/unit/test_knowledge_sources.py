@@ -177,7 +177,7 @@ async def test_ingest_rejects_none_tenant_id_despite_declared_type() -> None:
         await provider.ingest(None)  # type: ignore[arg-type]
 
 
-# -- Cross-milestone scope boundary (M5 must not couple to M3/M2 production code) --
+# -- Cross-milestone scope boundary (M5 must not couple to lineage/graph production code) --
 
 
 def test_sources_module_has_zero_production_references_to_lineage_or_graph() -> None:
@@ -185,10 +185,10 @@ def test_sources_module_has_zero_production_references_to_lineage_or_graph() -> 
     `test_correction_annotation_never_mutates_or_references_any_record_manager`:
     `sources.py` must never *import* `kortex.engines.knowledge.lineage` or
     `kortex.engines.knowledge.graph` — persisting ingested records into
-    lineage is `IKnowledgeEngine.index_source()`'s Milestone M11 job, not
-    M5's. Checked against the module's actual import graph and top-level
-    names, not its docstring prose (which legitimately discusses this very
-    boundary in words)."""
+    lineage is `KnowledgeEngine.index_source()`'s job (`engine.py`), not
+    `sources.py`'s. Checked against the module's actual import graph and
+    top-level names, not its docstring prose (which legitimately discusses
+    this very boundary in words)."""
     import kortex.engines.knowledge.sources as sources_module
 
     imported_module_names = {

@@ -63,8 +63,8 @@ mutated in place, only superseded by a new version), and a
 Workflow Engine's `ApprovalDecision` — an annotation is never edited, only
 superseded by a new annotation via `supersedes_annotation_id`).
 `KnowledgeNode`, `KnowledgeRelationship`, and `KnowledgePack` remain
-mutable — their mutation semantics belong to later milestones (graph
-updates in M2, pack ingestion in M9), not to M1.
+mutable — their mutation semantics belong to later functionality (graph
+updates in `graph.py`, pack ingestion/verification in `packs.py`).
 """
 
 from __future__ import annotations
@@ -256,7 +256,12 @@ class KnowledgePack(BaseModel):
     Locally mirrors `UniversalAsset` (`shared_domain_models.md` §7); no shared
     implementation exists to import.
 
-    Mutable — pack ingestion/verification is a Milestone M6 (`packs.py`) concern.
+    Mutable — pack ingestion/verification is implemented in `packs.py`
+    (`KnowledgePackManager`). This field previously (incorrectly) attributed
+    that responsibility to "Milestone M6," which actually delivered trust
+    promotion (`lineage.py::promote`) — a stale cross-reference from before
+    an internal renumbering, corrected here; it never reflected real
+    behavior.
     """
 
     asset_id: str = Field(..., min_length=1)
@@ -281,8 +286,19 @@ class KnowledgeQuery(BaseModel):
     (`SOURCE_EVIDENCE`/`AI_CANDIDATE`) so that a query never surfaces
     unconfirmed knowledge as current truth unless explicitly requested.
     `as_of` establishes the contract for point-in-time/historical
-    resolution; the actual lineage-walk resolution logic is Milestone M3/M8
-    behavior, not implemented here.
+    resolution; the actual lineage-walk resolution logic is implemented in
+    `search.py` (`KnowledgeSearchEngine._resolve_as_of`).
+
+    `filters: Dict[str, Any]` is **reserved and currently unimplemented**.
+    No authoritative specification anywhere in this repository defines its
+    key/value schema or matching semantics, and no implementation
+    (`graph.py`, `lineage.py`, `search.py`) reads it — every candidate is
+    evaluated only against `query_text`/`entity_types`/`trust_states`/
+    `as_of`/`max_results`. The field is kept on the frozen model (removing
+    it would be an unevidenced, unnecessary breaking change) and a caller
+    may populate it, but doing so currently has no effect on any search
+    result. Do not infer or add ad hoc filtering behavior for arbitrary
+    keys without an authoritative specification defining them first.
     """
 
     model_config = ConfigDict(frozen=True)

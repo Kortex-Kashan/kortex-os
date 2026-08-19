@@ -38,7 +38,7 @@
 
 - [ ] AI Engine (Ollama integration, streaming, structured output)
 - [ ] Tool Engine (Capability → LLM tool schema)
-- [ ] Knowledge Engine (RAG, vector store, chunking)
+- [x] Knowledge Engine (directed graph, versioned lineage & trust promotion, annotations, source ingestion, multi-modal search, knowledge pack loader — `KnowledgeEngine`, `kortex.engines.knowledge`; no vector store/RAG — see `docs/architecture/ARCHITECTURE_VERSION_1.0.md` §17)
 - [ ] Document Intelligence Engine (PDF parsing, OCR)
 
 ## Phase 5: Advanced Business Engines & Approvals

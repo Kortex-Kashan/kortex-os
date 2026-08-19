@@ -33,6 +33,12 @@ Every ORM row stores the domain enum/UUID/datetime fields as plain
 strings (`.value` for enums, ISO-compatible via SQLAlchemy's native
 `DateTime` support) — the domain models (`models.py`, frozen since M1) are
 never modified; this module only mirrors their shape for durability.
+
+`KnowledgePackRow` (added for the pack-loader closure work) follows the
+identical pattern for `KnowledgePack` (Milestone M1 domain model, loading/
+verification implemented in `packs.py`/`KnowledgePackManager`) — same
+`core.db.BaseModel` inheritance, same tenant-scoped unique-identity
+convention as the two rows above.
 """
 
 from __future__ import annotations
@@ -40,7 +46,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import JSON, BigInteger, DateTime, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from kortex.core.db import BaseModel
@@ -108,3 +114,28 @@ class KnowledgeAnnotationRow(BaseModel):
     # architecture; no evidence anywhere assigns multi-process concurrent
     # writers to the same store to this milestone.
     insertion_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+
+class KnowledgePackRow(BaseModel):
+    """Durable row for one verified, loaded `KnowledgePack` (`models.py`,
+    Milestone M1 domain model; loading/verification implemented in
+    `packs.py`). Identity is `(tenant_id, asset_id)` — matching
+    `KnowledgePackManager`'s own in-memory keying exactly, and mirroring
+    `KnowledgeRecordRow`/`KnowledgeAnnotationRow`'s established pattern:
+    inherits `core.db.BaseModel`, no new persistence mechanism."""
+
+    __tablename__ = "knowledge_packs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "asset_id", name="uq_knowledge_packs_identity"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    asset_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    manifest: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    digital_signature: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    bucket_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    loaded_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

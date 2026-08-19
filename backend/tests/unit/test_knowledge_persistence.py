@@ -34,6 +34,7 @@ from kortex.engines.knowledge.models import (
     KnowledgeRecordType,
     KnowledgeTrustState,
 )
+from kortex.engines.knowledge.exceptions import KnowledgePersistenceError
 from kortex.engines.knowledge.persistence import KnowledgeRecordRow
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 
@@ -203,8 +204,9 @@ async def test_lineage_tenant_isolation_preserved_across_reload(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_create_record_persistence_failure_leaves_no_partial_state() -> None:
     manager = KnowledgeLineageManager(data_store=_FailingDataStore())
-    with pytest.raises(RuntimeError):
+    with pytest.raises(KnowledgePersistenceError) as exc_info:
         await manager.create_record(_record("rec-1", "v1"))
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
     # No in-memory state whatsoever -- the failed durable write must have
     # prevented the in-memory mutation from happening at all.
@@ -220,8 +222,9 @@ async def test_supersede_persistence_failure_leaves_no_partial_state(tmp_path: P
     await manager.create_record(_record("rec-1", "v1"))
 
     manager._data_store = _FailingDataStore()  # simulate a subsequent storage outage
-    with pytest.raises(RuntimeError):
+    with pytest.raises(KnowledgePersistenceError) as exc_info:
         await manager.supersede("rec-1", "tenant-a", _record("rec-1", "v2", parent_version_id="v1"))
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
     # The original current version must be completely unaffected by the failed attempt.
     current = await manager.get_current("rec-1", "tenant-a")
@@ -239,10 +242,11 @@ async def test_promote_persistence_failure_leaves_no_partial_state(tmp_path: Pat
     await manager.create_record(_record("rec-1", "v1", trust_state=KnowledgeTrustState.AI_CANDIDATE))
 
     manager._data_store = _FailingDataStore()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(KnowledgePersistenceError) as exc_info:
         await manager.promote(
             "rec-1", "tenant-a", "actor-1", KnowledgeActorType.USER, KnowledgeTrustState.HUMAN_CONFIRMED
         )
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
     current = await manager.get_current("rec-1", "tenant-a")
     assert current is not None
@@ -301,8 +305,9 @@ async def test_annotation_tenant_isolation_preserved_across_reload(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_add_annotation_persistence_failure_leaves_no_partial_state() -> None:
     manager = KnowledgeAnnotationManager(data_store=_FailingDataStore())
-    with pytest.raises(RuntimeError):
+    with pytest.raises(KnowledgePersistenceError) as exc_info:
         await manager.add_annotation(_annotation("a1"))
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
     assert await manager.list_annotations("rec-1", "tenant-a") == []
     assert manager._annotations == {}

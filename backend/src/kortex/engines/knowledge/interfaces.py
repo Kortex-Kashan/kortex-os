@@ -9,16 +9,21 @@ the organizational-memory contracts (`IKnowledgeRecordManager`,
 `IKnowledgeAnnotationManager`) added by the Chief Architect's redesigned M1
 scope.
 
-`IKnowledgeGraph` is implemented as of Milestone M2 (`graph.py`).
-`IKnowledgeRecordManager` is implemented as of Milestone M3 (`lineage.py`) —
-its `promote()` contract expresses the domain operation only; the
-actor-type enforcement restricting promotion to `USER`-type actors is
-Milestone M6 behavior, not implemented here.
-`IKnowledgeAnnotationManager` is implemented as of Milestone M4 (`annotations.py`).
-`IKnowledgeSourceProvider` is implemented as of Milestone M5 (`sources.py`).
-`IKnowledgeSearchEngine` is implemented as of Milestone M8 (`search.py`).
-`IKnowledgeEngine` is implemented as of Milestone M11 (`engine.py`).
-`IEngineDiagnostics` is implemented as of Milestone M11 (`diagnostics.py`).
+`IKnowledgeGraph` is implemented in `graph.py`.
+`IKnowledgeRecordManager` is implemented in `lineage.py` — its `promote()`
+contract expresses the domain operation only; the actor-type enforcement
+restricting promotion to `USER`-type actors is implemented there too, in
+`promote()` itself.
+`IKnowledgeAnnotationManager` is implemented in `annotations.py`.
+`IKnowledgeSourceProvider` is implemented in `sources.py`.
+`IKnowledgeSearchEngine` is implemented in `search.py`.
+`IKnowledgeEngine` is implemented by the `KnowledgeEngine` facade
+(`engine.py`), a `BaseEngine` subclass registering `kortex.knowledge.*`
+capabilities with the Kernel.
+`IEngineDiagnostics` is implemented directly on `KnowledgeEngine`
+(`engine.py`) — no separate `diagnostics.py` file, matching every sibling
+engine's own convention of implementing this Protocol directly on the
+engine class rather than in a dedicated file.
 
 None of these Protocols carry implementation logic in Milestone M1 — they
 are forward contracts only, following the same convention already
@@ -160,7 +165,8 @@ class IKnowledgeSearchEngine(Protocol):
 
 @runtime_checkable
 class IKnowledgeEngine(Protocol):
-    """Primary Knowledge Engine facade protocol. Implemented as of Milestone M11 (`engine.py`)."""
+    """Primary Knowledge Engine facade protocol. Implemented by the
+    `KnowledgeEngine` facade (`engine.py`)."""
 
     async def query_knowledge(self, query: KnowledgeQuery) -> KnowledgeQueryResult:
         """Execute a knowledge query."""

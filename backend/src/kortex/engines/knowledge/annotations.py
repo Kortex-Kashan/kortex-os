@@ -59,6 +59,13 @@ resolution is performed by the domain model"). Actually wiring
 `CORRECTION` to real record supersession is left to whichever future
 milestone extends the committed interfaces to carry that capability.
 
+Persistence error normalization (closure hardening, found during the post-M8
+reconciliation audit): `add_annotation`/`load` now go through a private
+`_execute_in_transaction` helper that wraps any non-`KnowledgeEngineError`
+storage failure in `KnowledgePersistenceError` (original exception preserved
+as `__cause__`), matching `KnowledgeLineageManager`'s identical fix and
+closing the same established-convention gap.
+
 This manager never validates that `target_record_id` refers to an
 existing `KnowledgeRecord`. Like `KnowledgeGraph` and
 `KnowledgeLineageManager`, it is a standalone, storage-agnostic component
@@ -96,7 +103,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,6 +111,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kortex.engines.knowledge.exceptions import (
     KnowledgeAnnotationNotFoundError,
     KnowledgeDuplicateAnnotationError,
+    KnowledgeEngineError,
+    KnowledgePersistenceError,
 )
 from kortex.engines.knowledge.models import KnowledgeActorType, KnowledgeAnnotation, KnowledgeAnnotationType
 from kortex.engines.knowledge.persistence import KnowledgeAnnotationRow
@@ -122,6 +131,20 @@ class KnowledgeAnnotationManager:
         # See module docstring's Milestone M7 concurrency finding.
         self._lock = asyncio.Lock()
 
+    async def _execute_in_transaction(self, action: Any) -> Any:
+        """Run `action` via the configured `IDataStore`, normalizing any
+        non-`KnowledgeEngineError` failure into `KnowledgePersistenceError`
+        (original exception preserved as `__cause__`)."""
+        assert self._data_store is not None
+        try:
+            return await self._data_store.execute_in_transaction(action)
+        except KnowledgeEngineError:
+            raise
+        except Exception as exc:
+            raise KnowledgePersistenceError(
+                f"Knowledge annotation persistence operation failed: {exc}"
+            ) from exc
+
     async def load(self) -> None:
         """Hydrate in-memory state from the configured `IDataStore`
         (Milestone M7). No-op if no `data_store` was provided at
@@ -138,7 +161,7 @@ class KnowledgeAnnotationManager:
             return list(result.scalars().all())
 
         async with self._lock:
-            rows = await self._data_store.execute_in_transaction(_action)
+            rows = await self._execute_in_transaction(_action)
             for row in rows:
                 annotation = KnowledgeAnnotation(
                     annotation_id=row.annotation_id,
@@ -180,7 +203,7 @@ class KnowledgeAnnotationManager:
                 )
             )
 
-        await self._data_store.execute_in_transaction(_action)
+        await self._execute_in_transaction(_action)
 
     async def add_annotation(self, annotation: KnowledgeAnnotation) -> KnowledgeAnnotation:
         """Attach a new, non-destructive annotation to a `KnowledgeRecord`.
