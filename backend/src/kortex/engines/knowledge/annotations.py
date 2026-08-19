@@ -5,12 +5,37 @@ Implements `IKnowledgeAnnotationManager` (`interfaces.py`) for
 `KnowledgeAnnotation` storage and retrieval: non-destructive human
 remarks/corrections/context notes attached to `KnowledgeRecord`s.
 
-In-memory only, tenant-scoped, mirroring the storage-agnostic conventions
-already established by Milestone M2's `KnowledgeGraph` and Milestone M3's
-`KnowledgeLineageManager` — persistence is explicitly Milestone M7, not
-here. `IKnowledgeAnnotationManager`'s methods are declared `async` in the
-committed Protocol, so this implementation is `async` to match that
-contract exactly, even though its internals do no actual I/O yet.
+Tenant-scoped, in-memory by default; optionally durable (Milestone M7) via
+`IDataStore` (`kortex.engines.storage`), passed as an optional `data_store`
+constructor argument — omitting it preserves Milestone M4's original,
+purely in-memory behavior exactly, so every existing caller/test
+constructing `KnowledgeAnnotationManager()` with no arguments is
+unaffected. `IKnowledgeAnnotationManager`'s methods are declared `async`
+in the committed Protocol, which is precisely what makes real,
+transactional persistence possible here with no contract change at all.
+
+When `data_store` is provided, `add_annotation` persists via
+`persistence.KnowledgeAnnotationRow` *before* the in-memory dictionaries
+are touched: if the durable write raises, the in-memory state is left
+exactly as it was before the call. `load()` performs the reverse
+direction — reading every row back into memory, ordered by
+`KnowledgeAnnotationRow.insertion_sequence` (a `time.monotonic_ns()` value
+stamped at persist time, not the domain `KnowledgeAnnotation.created_at`
+field, which two annotations from the same caller can share at typical
+timestamp resolution, and not the row's own UUID `id`, which sorts
+arbitrarily) so `list_annotations`'s documented insertion order is
+preserved across a reload — and must be called explicitly after
+construction, since `__init__` cannot itself be `async`.
+
+Milestone M7 concurrency finding (reproduced and fixed during this
+milestone's adversarial audit): persisting introduces a genuine `await`
+suspension point inside `add_annotation` where none existed in Milestone
+M4 (its check-then-act sequence was implicitly atomic with no
+`data_store`, since nothing inside it ever actually suspended). Two
+concurrent calls for the same `(tenant_id, annotation_id)` could otherwise
+both pass the duplicate check before either persisted. An `asyncio.Lock`
+serializes each call's full check-through-persist-through-memory-write
+sequence per manager instance, restoring that atomicity.
 
 Scope boundary (deliberate, evidence-based — not an oversight):
 `models.py`'s own `KnowledgeAnnotation` docstring states that a
@@ -68,22 +93,94 @@ unrecognized, and both are normal, non-exceptional outcomes.
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+import asyncio
+import time
+import uuid
+from typing import Dict, List, Optional, Tuple
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.knowledge.exceptions import (
     KnowledgeAnnotationNotFoundError,
     KnowledgeDuplicateAnnotationError,
 )
-from kortex.engines.knowledge.models import KnowledgeAnnotation
+from kortex.engines.knowledge.models import KnowledgeActorType, KnowledgeAnnotation, KnowledgeAnnotationType
+from kortex.engines.knowledge.persistence import KnowledgeAnnotationRow
+from kortex.engines.storage.interfaces import IDataStore
 
 
 class KnowledgeAnnotationManager:
-    """In-memory, tenant-scoped annotation manager (Milestone M4)."""
+    """Tenant-scoped annotation manager (Milestone M4), optionally durable
+    via `IDataStore` (Milestone M7)."""
 
-    def __init__(self) -> None:
+    def __init__(self, data_store: Optional[IDataStore] = None) -> None:
         self._annotations: Dict[Tuple[str, str], KnowledgeAnnotation] = {}
         # (tenant_id, target_record_id) -> [annotation_id, ...] in insertion order.
         self._by_target: Dict[Tuple[str, str], List[str]] = {}
+        self._data_store = data_store
+        # See module docstring's Milestone M7 concurrency finding.
+        self._lock = asyncio.Lock()
+
+    async def load(self) -> None:
+        """Hydrate in-memory state from the configured `IDataStore`
+        (Milestone M7). No-op if no `data_store` was provided at
+        construction — pure in-memory mode, identical to Milestone M4's
+        original behavior. Must be called explicitly after construction
+        (`__init__` cannot itself `await`)."""
+        if self._data_store is None:
+            return
+
+        async def _action(session: AsyncSession) -> List[KnowledgeAnnotationRow]:
+            result = await session.execute(
+                select(KnowledgeAnnotationRow).order_by(KnowledgeAnnotationRow.insertion_sequence)
+            )
+            return list(result.scalars().all())
+
+        async with self._lock:
+            rows = await self._data_store.execute_in_transaction(_action)
+            for row in rows:
+                annotation = KnowledgeAnnotation(
+                    annotation_id=row.annotation_id,
+                    tenant_id=row.tenant_id,
+                    target_record_id=row.target_record_id,
+                    annotation_type=KnowledgeAnnotationType(row.annotation_type),
+                    actor_id=row.actor_id,
+                    actor_type=KnowledgeActorType(row.actor_type),
+                    content=row.content,
+                    created_at=row.annotation_created_at,
+                    supersedes_annotation_id=row.supersedes_annotation_id,
+                )
+                self._annotations[(row.tenant_id, row.annotation_id)] = annotation
+                target_key = (row.tenant_id, row.target_record_id)
+                self._by_target.setdefault(target_key, []).append(row.annotation_id)
+
+    async def _persist_annotation(self, annotation: KnowledgeAnnotation) -> None:
+        """Durably insert one new row. No-op if no `data_store` was
+        configured. Raises on failure — never silently swallowed, since
+        the caller relies on it to decide whether the in-memory mutation
+        may proceed."""
+        if self._data_store is None:
+            return
+
+        async def _action(session: AsyncSession) -> None:
+            session.add(
+                KnowledgeAnnotationRow(
+                    id=str(uuid.uuid4()),
+                    tenant_id=annotation.tenant_id,
+                    annotation_id=annotation.annotation_id,
+                    target_record_id=annotation.target_record_id,
+                    annotation_type=annotation.annotation_type.value,
+                    actor_id=annotation.actor_id,
+                    actor_type=annotation.actor_type.value,
+                    content=annotation.content,
+                    annotation_created_at=annotation.created_at,
+                    supersedes_annotation_id=annotation.supersedes_annotation_id,
+                    insertion_sequence=time.monotonic_ns(),
+                )
+            )
+
+        await self._data_store.execute_in_transaction(_action)
 
     async def add_annotation(self, annotation: KnowledgeAnnotation) -> KnowledgeAnnotation:
         """Attach a new, non-destructive annotation to a `KnowledgeRecord`.
@@ -95,27 +192,30 @@ class KnowledgeAnnotationManager:
                 set but does not reference an existing annotation attached
                 to the same `(tenant_id, target_record_id)`.
         """
-        key = (annotation.tenant_id, annotation.annotation_id)
-        if key in self._annotations:
-            raise KnowledgeDuplicateAnnotationError(
-                f"Annotation '{annotation.annotation_id}' already exists for tenant "
-                f"'{annotation.tenant_id}'."
-            )
-
-        if annotation.supersedes_annotation_id is not None:
-            superseded_key = (annotation.tenant_id, annotation.supersedes_annotation_id)
-            superseded = self._annotations.get(superseded_key)
-            if superseded is None or superseded.target_record_id != annotation.target_record_id:
-                raise KnowledgeAnnotationNotFoundError(
-                    f"supersedes_annotation_id={annotation.supersedes_annotation_id!r} does not "
-                    f"reference an existing annotation on target_record_id="
-                    f"{annotation.target_record_id!r} for tenant '{annotation.tenant_id}'."
+        async with self._lock:
+            key = (annotation.tenant_id, annotation.annotation_id)
+            if key in self._annotations:
+                raise KnowledgeDuplicateAnnotationError(
+                    f"Annotation '{annotation.annotation_id}' already exists for tenant "
+                    f"'{annotation.tenant_id}'."
                 )
 
-        self._annotations[key] = annotation
-        target_key = (annotation.tenant_id, annotation.target_record_id)
-        self._by_target.setdefault(target_key, []).append(annotation.annotation_id)
-        return annotation
+            if annotation.supersedes_annotation_id is not None:
+                superseded_key = (annotation.tenant_id, annotation.supersedes_annotation_id)
+                superseded = self._annotations.get(superseded_key)
+                if superseded is None or superseded.target_record_id != annotation.target_record_id:
+                    raise KnowledgeAnnotationNotFoundError(
+                        f"supersedes_annotation_id={annotation.supersedes_annotation_id!r} does not "
+                        f"reference an existing annotation on target_record_id="
+                        f"{annotation.target_record_id!r} for tenant '{annotation.tenant_id}'."
+                    )
+
+            await self._persist_annotation(annotation)
+
+            self._annotations[key] = annotation
+            target_key = (annotation.tenant_id, annotation.target_record_id)
+            self._by_target.setdefault(target_key, []).append(annotation.annotation_id)
+            return annotation
 
     async def list_annotations(self, target_record_id: str, tenant_id: str) -> List[KnowledgeAnnotation]:
         """Return every annotation attached to `target_record_id`, scoped to
