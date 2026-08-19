@@ -894,3 +894,149 @@ async def test_missing_permission_key_silently_skips_connector_check(tmp_path: P
 
     result = await _dispatch_connector_action(kernel, tenant_id, token, granted_permissions=_UNSET)
     assert result.status == "SUCCESS"
+
+
+# =============================================================================
+# F. Identity/role/tenant-authority forgery via caller-supplied data
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_forged_identity_and_role_claims_in_context_and_parameters_are_ignored(tmp_path: Path) -> None:
+    """An attacker holding a valid but unprivileged token cannot smuggle a
+    privileged identity/role by embedding fake `principal_id`/`roles`
+    claims in `parameters` or `context`. The only identity the dispatcher
+    ever trusts comes from `AuthenticationManager.verify_token()`, and the
+    only roles ever consulted come from a server-side DB lookup keyed on
+    that verified `principal_id` -- never from caller-supplied data."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    spy = _Spy()
+    kernel.register_capability(
+        name="adv.test.forge_identity",
+        description="test",
+        provider="test",
+        handler=spy,
+        required_permissions=["adv.forge.protected"],
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path, "-fi")
+    victim_role = f"role-{tenant_id}-victim"
+    await _grant_role_permission(storage_engine.data, victim_role, "adv.forge.protected")
+    await _seed_principal(storage_engine.data, tenant_id, "principal-victim", roles=[victim_role])
+    await _seed_principal(storage_engine.data, tenant_id, "principal-attacker")  # zero roles/permissions
+    attacker_token = await _issue_token(security_engine, tenant_id, "principal-attacker")
+
+    request = CapabilityRequest(
+        capability_name="adv.test.forge_identity",
+        session_token=attacker_token,
+        parameters={"principal_id": "principal-victim", "roles": [victim_role], "actor_id": "principal-victim"},
+        context={
+            "resource_tenant_id": tenant_id,
+            "principal_id": "principal-victim",
+            "roles": [victim_role],
+            "identity": "principal-victim",
+        },
+    )
+    with pytest.raises(AuthorizationDeniedError):
+        await kernel.invoke_capability(request)
+    assert spy.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_forged_tenant_authority_via_parameters_is_ignored(tmp_path: Path) -> None:
+    """`resource_tenant_id` supplied in `parameters` (not `context`) must
+    have zero effect on the ABAC tenant check -- only `context` is ever
+    consulted for authorization; `parameters` reaches only the handler,
+    never the security decision. Must be denied exactly like a wholly
+    missing tenant context, not silently accepted from the wrong field."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    spy = _Spy()
+    kernel.register_capability(name="adv.test.forge_tenant", description="test", provider="test", handler=spy)
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path, "-ft")
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1")
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name="adv.test.forge_tenant",
+        session_token=token,
+        parameters={"resource_tenant_id": tenant_id},
+        context={},
+    )
+    with pytest.raises(AuthorizationDeniedError):
+        await kernel.invoke_capability(request)
+    assert spy.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_invocation_is_deterministic(tmp_path: Path) -> None:
+    """The same request, dispatched twice through the sanctioned path, must
+    produce the same authorization outcome both times and invoke the
+    handler exactly once per call -- `CapabilityDispatcher` holds no
+    per-request instance state (see its own class docstring), so no hidden
+    state can accumulate across calls."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    spy = _Spy()
+    kernel.register_capability(
+        name="adv.test.repeatable",
+        description="test",
+        provider="test",
+        handler=spy,
+        required_permissions=["adv.repeatable.read"],
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path, "-rep")
+    role = f"role-{tenant_id}"
+    await _grant_role_permission(storage_engine.data, role, "adv.repeatable.read")
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[role])
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name="adv.test.repeatable",
+        session_token=token,
+        context={"resource_tenant_id": tenant_id},
+    )
+    result1 = await kernel.invoke_capability(request)
+    result2 = await kernel.invoke_capability(request)
+    assert result1 == result2 == "handler-invoked"
+    assert spy.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_handler_receives_only_exploded_parameters_never_request_or_context(tmp_path: Path) -> None:
+    """The handler is invoked as `handler(**request.parameters)` -- it never
+    receives the `CapabilityRequest` object, the verified `session_token`,
+    or `context` itself, so it structurally cannot inspect or silently
+    replace the security identity/context that authorized its own
+    invocation (Core Invariant #12)."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    received: Dict[str, Any] = {}
+
+    async def handler(**kwargs: Any) -> str:
+        received.update(kwargs)
+        return "ok"
+
+    kernel.register_capability(
+        name="adv.test.no_context_leak", description="test", provider="test", handler=handler
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path, "-ncl")
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1")
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name="adv.test.no_context_leak",
+        session_token=token,
+        parameters={"value": 42},
+        context={"resource_tenant_id": tenant_id, "secret_marker": "should-never-reach-handler"},
+    )
+    await kernel.invoke_capability(request)
+
+    assert received == {"value": 42}
+    assert "session_token" not in received
+    assert "context" not in received
+    assert "secret_marker" not in received
