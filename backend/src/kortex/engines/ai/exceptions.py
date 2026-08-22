@@ -31,7 +31,31 @@ class AIProviderError(AIOrchestrationError):
     """
 
 
+class ProviderAlreadyRegisteredError(AIOrchestrationError):
+    """Raised by `ProviderRegistry.register` when `provider_id` is already registered.
+
+    Subclasses `AIOrchestrationError` directly, not `AIProviderError`:
+    this is a registry bookkeeping failure, not a provider execution
+    failure, mirroring Connector Engine's own separation between
+    `ConnectorDriverError` (registry-level) and `ConnectorOperationError`
+    (execution-level).
+    """
+
+
+class ProviderNotFoundError(AIOrchestrationError):
+    """Raised when a requested `provider_id` is not registered in `ProviderRegistry`."""
+
+
+class ProviderValidationError(AIOrchestrationError):
+    """Raised when a provider object or its metadata fails registration validation
+    (not a `BaseAIProvider`, inaccessible/invalid `metadata` property, or empty
+    `provider_id`)."""
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
+    "ProviderAlreadyRegisteredError",
+    "ProviderNotFoundError",
+    "ProviderValidationError",
 ]

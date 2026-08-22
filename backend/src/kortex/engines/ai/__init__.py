@@ -10,7 +10,13 @@ from kortex.engines.ai.events import (
     AIToolInvokedEvent,
     AgentTaskCompletedEvent,
 )
-from kortex.engines.ai.exceptions import AIOrchestrationError, AIProviderError
+from kortex.engines.ai.exceptions import (
+    AIOrchestrationError,
+    AIProviderError,
+    ProviderAlreadyRegisteredError,
+    ProviderNotFoundError,
+    ProviderValidationError,
+)
 from kortex.engines.ai.interfaces import (
     IAIMemoryManager,
     IAIOrchestrationEngine,
@@ -26,6 +32,7 @@ from kortex.engines.ai.models import (
     LLMRequest,
     LLMResponse,
 )
+from kortex.engines.ai.registry import ProviderRegistry
 
 __all__ = [
     "AIBaseEvent",
@@ -46,5 +53,9 @@ __all__ = [
     "IModelRouter",
     "LLMRequest",
     "LLMResponse",
+    "ProviderAlreadyRegisteredError",
+    "ProviderNotFoundError",
+    "ProviderRegistry",
+    "ProviderValidationError",
     "ToolAuthorizer",
 ]
