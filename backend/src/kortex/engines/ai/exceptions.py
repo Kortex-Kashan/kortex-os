@@ -133,6 +133,31 @@ class KnowledgeRetrievalError(AIOrchestrationError):
     """
 
 
+class ToolInvocationError(AIOrchestrationError):
+    """Base exception for all tool invocation failures in the AI Engine."""
+
+
+class ToolValidationError(ToolInvocationError):
+    """Raised when tool arguments fail schema validation, exceed byte size limits,
+    or tool definitions contain invalid names/parameters."""
+
+
+class ToolNotFoundError(ToolInvocationError):
+    """Raised when a requested tool name is not registered in the ToolRegistry."""
+
+
+class ToolAuthorizationError(ToolInvocationError):
+    """Raised when a tool authorizer explicitly denies invocation of a capability."""
+
+
+class ToolExecutionError(ToolInvocationError):
+    """Raised when an underlying tool execution port throws an unhandled error."""
+
+
+class ToolTimeoutError(ToolInvocationError):
+    """Raised when a tool execution exceeds its configured timeout threshold."""
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
@@ -147,4 +172,11 @@ __all__ = [
     "ProviderValidationError",
     "RoutingError",
     "RoutingValidationError",
+    "ToolAuthorizationError",
+    "ToolExecutionError",
+    "ToolInvocationError",
+    "ToolNotFoundError",
+    "ToolTimeoutError",
+    "ToolValidationError",
 ]
+
