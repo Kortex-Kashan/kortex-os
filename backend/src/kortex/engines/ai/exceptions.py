@@ -84,9 +84,36 @@ class ProviderNotRoutableError(RoutingError):
     """
 
 
+class MemoryValidationError(AIOrchestrationError):
+    """Raised when conversation-memory arguments are invalid.
+
+    Covers a blank/whitespace `tenant_id` or `conversation_id`, and a
+    request whose own `tenant_id`/`conversation_id` disagree with the
+    explicit arguments given to `append_history` — the latter would
+    otherwise store one tenant's content under another tenant's key.
+
+    Note there is deliberately no `MemoryError` base class: that name is a
+    Python builtin, and shadowing it inside this package would make
+    `except MemoryError` mean different things depending on import order.
+    The two concrete errors subclass `AIOrchestrationError` directly.
+    """
+
+
+class ConversationStoreError(AIOrchestrationError):
+    """Raised when a conversation store operation fails.
+
+    Covers transaction/storage failures and a lost sequence race (surfaced
+    as an integrity violation rather than a silently duplicated ordinal).
+    Never swallowed: a history failure means the conversation record is
+    wrong, which callers must be able to detect.
+    """
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
+    "ConversationStoreError",
+    "MemoryValidationError",
     "NoRoutableProviderError",
     "ProviderAlreadyRegisteredError",
     "ProviderNotFoundError",

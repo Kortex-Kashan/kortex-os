@@ -738,18 +738,39 @@ async def test_selection_creates_no_reservation() -> None:
 
 
 def test_ai_package_imports_no_forbidden_dependency() -> None:
-    """I9: the AI engine must never reach into Security Engine, the DI
-    container, or the Kernel. Enforced structurally so a future edit cannot
-    silently introduce the coupling.
+    """I9 (refined per M4 spec section 8.1): dependency direction is enforced
+    **per module**, which is stricter than the original package-wide rule.
+
+    `persistence.py` is the single designated infrastructure adapter and may
+    import SQLAlchemy, the ORM base, and the Storage Engine's interfaces.
+    Every other module keeps the original narrow allowlist. Authority
+    boundaries — Security Engine, the Kernel, the DI container — plus
+    Knowledge Engine remain forbidden **everywhere, without exception**.
     """
     import kortex.engines.ai as ai_package
 
     package_dir = pathlib.Path(ai_package.__file__).parent
-    allowed_prefixes = ("kortex.engines.ai", "kortex.core.exceptions")
-    forbidden_exact = ("kortex.engines.security", "kortex.core.container", "kortex.core.kernel")
+
+    base_allowed = ("kortex.engines.ai", "kortex.core.exceptions")
+    adapter_allowed = (*base_allowed, "kortex.core.db", "kortex.engines.storage")
+    adapter_module = "persistence.py"
+
+    # Forbidden in every module, including the adapter. Security/Kernel/container
+    # are authority boundaries; Knowledge must stay behind a port (M4 spec 8.3).
+    forbidden_everywhere = (
+        "kortex.engines.security",
+        "kortex.core.container",
+        "kortex.core.kernel",
+        "kortex.engines.knowledge",
+    )
+    # Third-party infrastructure permitted only in the adapter.
+    restricted_third_party = ("sqlalchemy",)
 
     offenders: list[str] = []
     for source_file in sorted(package_dir.glob("*.py")):
+        is_adapter = source_file.name == adapter_module
+        allowed_prefixes = adapter_allowed if is_adapter else base_allowed
+
         tree = ast.parse(source_file.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             module_names: list[str] = []
@@ -757,12 +778,19 @@ def test_ai_package_imports_no_forbidden_dependency() -> None:
                 module_names.append(node.module)
             elif isinstance(node, ast.Import):
                 module_names.extend(alias.name for alias in node.names)
+
             for module_name in module_names:
+                if any(module_name.startswith(bad) for bad in forbidden_everywhere):
+                    offenders.append(f"{source_file.name} -> {module_name} (forbidden everywhere)")
+                    continue
+                if not is_adapter and any(
+                    module_name.startswith(bad) for bad in restricted_third_party
+                ):
+                    offenders.append(f"{source_file.name} -> {module_name} (adapter-only)")
+                    continue
                 if not module_name.startswith("kortex"):
                     continue
-                if any(module_name.startswith(bad) for bad in forbidden_exact) or not any(
-                    module_name.startswith(good) for good in allowed_prefixes
-                ):
+                if not any(module_name.startswith(good) for good in allowed_prefixes):
                     offenders.append(f"{source_file.name} -> {module_name}")
 
     assert offenders == []
