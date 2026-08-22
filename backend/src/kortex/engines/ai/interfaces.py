@@ -19,7 +19,8 @@ later without removing a method a caller may already depend on.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, runtime_checkable
 
 from kortex.engines.ai.models import AIProviderMetadata, LLMRequest, LLMResponse
 
@@ -163,11 +164,81 @@ class IAIOrchestrationEngine(Protocol):
         ...
 
 
+@runtime_checkable
+class IEngineDiagnostics(Protocol):
+    """Standardized diagnostics interface exposed by all KORTEX System Engines."""
+
+    def health(self) -> dict[str, Any]:
+        """Return operational health status and diagnostic checks."""
+        ...
+
+    def metrics(self) -> dict[str, Any]:
+        """Return runtime performance and throughput metrics."""
+        ...
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return detailed technical diagnostics and system environment details."""
+        ...
+
+    def status(self) -> str:
+        """Return current engine state name string."""
+        ...
+
+    def version(self) -> str:
+        """Return semantic version string of the engine."""
+        ...
+
+    def capabilities(self) -> list[str]:
+        """Return list of capability strings registered by the engine."""
+        ...
+
+
+@runtime_checkable
+class IKernelBridge(Protocol):
+    """Bridge protocol decoupling the AI engine from concrete Kernel runtime."""
+
+    def register_capability(
+        self,
+        name: str,
+        description: str,
+        provider: str,
+        handler: Callable[..., Any] | None = None,
+        parameters_schema: dict[str, Any] | None = None,
+        returns_schema: dict[str, Any] | None = None,
+        required_permissions: list[str] | None = None,
+        requires_authentication: bool = True,
+        security_classification: str = "INTERNAL",
+    ) -> object:
+        """Register a canonical system capability with the Kernel Registry."""
+        ...
+
+    async def publish_event(
+        self,
+        topic: str,
+        payload: dict[str, Any] | None = None,
+        sender: str = "ai",
+    ) -> object:
+        """Publish an asynchronous system event to the Kernel Event Engine."""
+        ...
+
+    async def invoke_capability(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        tenant_id: str,
+        user_id: str | None = None,
+    ) -> object:
+        """Invoke a registered capability through the Kernel enforcement boundary."""
+        ...
+
+
 __all__ = [
     "IAIMemoryManager",
     "IAIOrchestrationEngine",
     "IAIToolInvoker",
     "IBaseAIProvider",
+    "IEngineDiagnostics",
+    "IKernelBridge",
     "IModelRouter",
     "ToolAuthorizer",
 ]

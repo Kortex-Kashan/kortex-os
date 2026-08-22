@@ -21,6 +21,17 @@ from kortex.engines.ai.agent import (
     ResumeToken,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.diagnostics import (
+    CANONICAL_CAPABILITIES,
+    AIDiagnostics,
+)
+from kortex.engines.ai.engine import (
+    AIOrchestrationEngine,
+    EngineAgentContextPort,
+    KernelSecurityApprovalPolicy,
+    KernelToolExecutionPort,
+    RouterLLMExecutionPort,
+)
 from kortex.engines.ai.events import (
     AgentTaskCompletedEvent,
     AIBaseEvent,
@@ -60,6 +71,8 @@ from kortex.engines.ai.interfaces import (
     IAIOrchestrationEngine,
     IAIToolInvoker,
     IBaseAIProvider,
+    IEngineDiagnostics,
+    IKernelBridge,
     IModelRouter,
     ToolAuthorizer,
 )
@@ -125,6 +138,7 @@ from kortex.engines.ai.tools import (
 
 __all__ = [
     "ASSISTANT_MARKER",
+    "CANONICAL_CAPABILITIES",
     "CONFIDENTIAL",
     "DEFAULT_ALLOWED_CLASSIFICATIONS",
     "DEFAULT_TOOL_TIMEOUT_SECONDS",
@@ -146,9 +160,11 @@ __all__ = [
     "TRUNCATION_SUFFIX",
     "USER_MARKER",
     "AIBaseEvent",
+    "AIDiagnostics",
     "AIGenerationCompletedEvent",
     "AIGenerationStartedEvent",
     "AIMemoryManager",
+    "AIOrchestrationEngine",
     "AIOrchestrationError",
     "AIProviderError",
     "AIProviderMetadata",
@@ -175,6 +191,7 @@ __all__ = [
     "ConversationTurn",
     "CredentialRequirement",
     "EndpointType",
+    "EngineAgentContextPort",
     "IAIMemoryManager",
     "IAIOrchestrationEngine",
     "IAIToolInvoker",
@@ -182,6 +199,8 @@ __all__ = [
     "IApprovalPolicy",
     "IBaseAIProvider",
     "IConversationStore",
+    "IEngineDiagnostics",
+    "IKernelBridge",
     "IKnowledgeQueryPort",
     "ILLMExecutionPort",
     "IModelRouter",
@@ -192,6 +211,8 @@ __all__ = [
     "InMemoryKnowledgeQueryPort",
     "InMemoryLLMExecutionPort",
     "InMemoryToolExecutionPort",
+    "KernelSecurityApprovalPolicy",
+    "KernelToolExecutionPort",
     "KnowledgeRetrievalError",
     "LLMOutputParser",
     "LLMRequest",
@@ -208,6 +229,7 @@ __all__ = [
     "ProviderValidationError",
     "ResumeToken",
     "RetrievedDocument",
+    "RouterLLMExecutionPort",
     "RoutingContext",
     "RoutingError",
     "RoutingValidationError",

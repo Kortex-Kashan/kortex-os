@@ -1,0 +1,673 @@
+"""KORTEX OS AI Orchestration Engine — Core Facade (`AIOrchestrationEngine`).
+
+Governed by the ratified Milestone 8 specification:
+docs/architecture/ai_engine_m8_facade_and_integration_spec.md
+
+This module implements `AIOrchestrationEngine`, extending `BaseEngine` and conforming
+to `IEngineDiagnostics` and `IAIOrchestrationEngine`. It serves as the single public entry
+point orchestrating ProviderRegistry, ModelRouter, AIMemoryManager, ContextComposer,
+AIToolInvoker, AgentOrchestrator, and AIDiagnostics.
+
+Invariants:
+- Pure Facade: Contains zero business logic, zero routing math, zero prompt parsing,
+  zero SQL, and zero loop detection.
+- Decoupled from Kernel: Interacts with Kernel strictly via `IKernelBridge`.
+- Decoupled from Security: All authorization decisions are delegated to Security Engine.
+- Context Single-Point Rule: Composes single-turn generation context in the facade,
+  and delegates multi-step agent step composition to `EngineAgentContextPort`.
+- Non-blocking Event Publishing: Event bus degradation never fails AI generation turns.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.engines.ai.agent import (
+    AgentExecutionResult,
+    AgentOrchestrator,
+    AgentStep,
+    AgentTask,
+    IAgentContextPort,
+    IApprovalPolicy,
+    ILLMExecutionPort,
+    ResumeToken,
+)
+from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.diagnostics import AIDiagnostics
+from kortex.engines.ai.events import (
+    AgentTaskCompletedEvent,
+    AIBaseEvent,
+    AIGenerationCompletedEvent,
+    AIGenerationStartedEvent,
+    AIToolInvokedEvent,
+)
+from kortex.engines.ai.interfaces import (
+    IEngineDiagnostics,
+    IKernelBridge,
+    ToolAuthorizer,
+)
+from kortex.engines.ai.memory import (
+    AIMemoryManager,
+    InMemoryConversationStore,
+    require_identifier,
+)
+from kortex.engines.ai.models import (
+    AIProviderMetadata,
+    LLMRequest,
+    LLMResponse,
+)
+from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
+from kortex.engines.ai.registry import ProviderRegistry
+from kortex.engines.ai.router import ModelRouter, RoutingContext
+from kortex.engines.ai.tools import (
+    AIToolInvoker,
+    InMemoryToolExecutionPort,
+    IToolExecutionPort,
+    ToolCall,
+    ToolRegistry,
+    ToolResult,
+)
+
+logger = logging.getLogger("kortex.engines.ai")
+
+
+# ---------------------------------------------------------------------------
+# Production Port Adapters
+# ---------------------------------------------------------------------------
+
+
+class RouterLLMExecutionPort(ILLMExecutionPort):
+    """Production adapter for `ILLMExecutionPort` using `ModelRouter` and `ProviderRegistry`."""
+
+    def __init__(
+        self,
+        router: ModelRouter,
+        registry: ProviderRegistry,
+        default_routing_context: RoutingContext | None = None,
+    ) -> None:
+        self._router = router
+        self._registry = registry
+        self._default_context = default_routing_context or RoutingContext(allow_cloud=False)
+
+    async def generate_step(self, request: LLMRequest) -> LLMResponse:
+        """Route to an eligible provider and execute a single reasoning step."""
+        context_dict = self._default_context.model_dump()
+        provider_meta = await self._router.select_model(request, context_dict)
+        provider = self._registry.get(provider_meta.provider_id)
+        return await provider.generate_text(request)
+
+
+class EngineAgentContextPort(IAgentContextPort):
+    """Production adapter for `IAgentContextPort` using `ContextComposer` and `AIMemoryManager`."""
+
+    def __init__(
+        self,
+        composer: ContextComposer,
+        memory_manager: AIMemoryManager | None = None,
+    ) -> None:
+        self._composer = composer
+        self._memory_manager = memory_manager
+
+    async def build_step_context(
+        self,
+        task: AgentTask,
+        steps: list[AgentStep],
+    ) -> LLMRequest:
+        """Assemble an `LLMRequest` for the next reasoning step with prompt, RAG, and history."""
+        # Render step history into prompt body for multi-step continuity
+        history_lines: list[str] = []
+        if steps:
+            history_lines.append("\nExecution History:")
+            for s in steps:
+                history_lines.append(f"Step {s.step_number}:")
+                if s.thought:
+                    history_lines.append(f"  Thought: {s.thought}")
+                for tc in s.tool_calls:
+                    history_lines.append(f"  Tool Call: {tc.tool_name}({tc.arguments})")
+                for tr in s.tool_results:
+                    history_lines.append(f"  Tool Result: status={tr.status.value}, output={tr.output}")
+                if s.response_text:
+                    history_lines.append(f"  Response: {s.response_text}")
+
+        history_block = "\n".join(history_lines)
+        full_prompt = f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
+
+        raw_request = LLMRequest(
+            request_id=f"req-{uuid.uuid4().hex}",
+            tenant_id=task.tenant_id,
+            user_id=task.user_id,
+            conversation_id=task.conversation_id,
+            prompt=full_prompt,
+            system_instruction=task.system_instruction,
+        )
+
+        # ContextComposer handles RAG retrieval and safe marker injection
+        return await self._composer.compose(raw_request)
+
+
+class KernelSecurityApprovalPolicy(IApprovalPolicy):
+    """Production adapter for `IApprovalPolicy` delegating policy to Security Engine or mutations check."""
+
+    def __init__(
+        self,
+        tool_registry: ToolRegistry | None = None,
+        security_authorizer: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None,
+    ) -> None:
+        self._tool_registry = tool_registry
+        self._security_authorizer = security_authorizer
+
+    async def requires_approval(
+        self,
+        task: AgentTask,
+        proposed_calls: list[ToolCall],
+    ) -> bool:
+        """Evaluate if proposed tool calls require human approval."""
+        if not task.require_human_approval_for_mutations:
+            return False
+
+        if self._tool_registry is not None:
+            for call in proposed_calls:
+                try:
+                    tool_def = self._tool_registry.get_tool(call.tool_name)
+                    if tool_def.is_mutation:
+                        return True
+                except Exception:
+                    # Unknown tool default: assume mutation for safety
+                    return True
+        return False
+
+
+class KernelToolExecutionPort(IToolExecutionPort):
+    """Production adapter for `IToolExecutionPort` dispatching to `IKernelBridge`."""
+
+    def __init__(self, kernel_bridge: IKernelBridge) -> None:
+        self._kernel_bridge = kernel_bridge
+
+    async def execute_tool(
+        self,
+        tenant_id: str,
+        capability_name: str,
+        arguments: dict[str, object],
+        authorizer: ToolAuthorizer | None = None,
+    ) -> object:
+        """Execute capability handler through Kernel enforcement boundary."""
+        require_identifier(tenant_id, "tenant_id")
+        if authorizer is not None:
+            is_allowed = await authorizer(capability_name, arguments)
+            if not is_allowed:
+                from kortex.engines.ai.exceptions import ToolAuthorizationError
+                raise ToolAuthorizationError(f"Authorization denied for capability '{capability_name}'.")
+
+        return await self._kernel_bridge.invoke_capability(
+            name=capability_name,
+            arguments=arguments,
+            tenant_id=tenant_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Engine Facade
+# ---------------------------------------------------------------------------
+
+
+class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
+    """Core runtime facade and orchestrator for KORTEX AI Orchestration Engine."""
+
+    def __init__(
+        self,
+        provider_registry: ProviderRegistry | None = None,
+        model_router: ModelRouter | None = None,
+        memory_manager: AIMemoryManager | None = None,
+        context_composer: ContextComposer | None = None,
+        tool_invoker: AIToolInvoker | None = None,
+        tool_registry: ToolRegistry | None = None,
+        agent_orchestrator: AgentOrchestrator | None = None,
+        diagnostics: AIDiagnostics | None = None,
+    ) -> None:
+        """Initialize AIOrchestrationEngine with optional component injections.
+
+        If components are omitted, sensible default subsystem instances are created.
+        """
+        super().__init__()
+        self._provider_registry = (
+            provider_registry if provider_registry is not None else ProviderRegistry()
+        )
+        self._model_router = (
+            model_router if model_router is not None else ModelRouter(registry=self._provider_registry)
+        )
+        self._memory_manager = (
+            memory_manager
+            if memory_manager is not None
+            else AIMemoryManager(store=InMemoryConversationStore())
+        )
+        self._tool_registry = (
+            tool_registry if tool_registry is not None else ToolRegistry()
+        )
+        self._tool_invoker = (
+            tool_invoker
+            if tool_invoker is not None
+            else AIToolInvoker(
+                registry=self._tool_registry,
+                execution_port=InMemoryToolExecutionPort(),
+            )
+        )
+        self._context_composer = (
+            context_composer
+            if context_composer is not None
+            else ContextComposer(
+                memory=self._memory_manager,
+                pipeline=PromptPipeline(),
+            )
+        )
+        self._diagnostics = (
+            diagnostics
+            if diagnostics is not None
+            else AIDiagnostics(
+                provider_registry=self._provider_registry,
+                model_router=self._model_router,
+                memory_manager=self._memory_manager,
+                tool_registry=self._tool_registry,
+            )
+        )
+
+        # Wire AgentOrchestrator with production adapters
+        if agent_orchestrator is not None:
+            self._agent_orchestrator = agent_orchestrator
+        else:
+            llm_port = RouterLLMExecutionPort(
+                router=self._model_router,
+                registry=self._provider_registry,
+            )
+            ctx_port = EngineAgentContextPort(
+                composer=self._context_composer,
+                memory_manager=self._memory_manager,
+            )
+            approval_policy = KernelSecurityApprovalPolicy(
+                tool_registry=self._tool_registry,
+            )
+            self._agent_orchestrator = AgentOrchestrator(
+                tool_invoker=self._tool_invoker,
+                llm_port=llm_port,
+                context_port=ctx_port,
+                approval_policy=approval_policy,
+            )
+
+        self._kernel: IKernelBridge | None = None
+
+    @property
+    def name(self) -> str:
+        """Unique engine identifier string."""
+        return "ai"
+
+    @property
+    def dependencies(self) -> list[str]:
+        """Prerequisite foundation engines for Kernel boot sequence."""
+        return ["configuration", "registry", "event", "storage"]
+
+    @property
+    def provider_registry(self) -> ProviderRegistry:
+        """Access the provider registry subsystem."""
+        return self._provider_registry
+
+    @property
+    def model_router(self) -> ModelRouter:
+        """Access the model router subsystem."""
+        return self._model_router
+
+    @property
+    def memory_manager(self) -> AIMemoryManager:
+        """Access the conversation memory manager subsystem."""
+        return self._memory_manager
+
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        """Access the tool registry subsystem."""
+        return self._tool_registry
+
+    @property
+    def tool_invoker(self) -> AIToolInvoker:
+        """Access the tool invoker subsystem."""
+        return self._tool_invoker
+
+    @property
+    def agent_orchestrator(self) -> AgentOrchestrator:
+        """Access the agent orchestrator subsystem."""
+        return self._agent_orchestrator
+
+    # -- BaseEngine Lifecycle Implementations ---------------------------------
+
+    async def initialize(self, kernel: IKernelBridge) -> None:  # type: ignore[override]
+        """Initialize engine resources and register canonical capabilities with Kernel."""
+        self.ensure_state(EngineState.UNINITIALIZED)
+        self._set_state(EngineState.INITIALIZING)
+        self.logger.info("Initializing KORTEX AI Orchestration Engine...")
+
+        try:
+            self._kernel = kernel
+
+            # Register 6 canonical capabilities with the Kernel Registry
+            kernel.register_capability(
+                name="kortex.ai.response.generate",
+                description="Generate an LLM response with context composition and model routing",
+                provider=self.name,
+                handler=self.generate_response,
+                required_permissions=["ai:generate"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.agent.orchestrate",
+                description="Orchestrate a bounded multi-step agent reasoning workflow",
+                provider=self.name,
+                handler=self.orchestrate_agent,
+                required_permissions=["ai:orchestrate"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.agent.resume",
+                description="Resume a paused agent reasoning workflow with verified token",
+                provider=self.name,
+                handler=self.resume_agent,
+                required_permissions=["ai:orchestrate"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.tool.invoke",
+                description="Invoke an authorized AI tool capability",
+                provider=self.name,
+                handler=self.invoke_tool,
+                required_permissions=["ai:execute"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.provider.register",
+                description="Register an AI provider with the engine registry",
+                provider=self.name,
+                handler=self.register_provider,
+                required_permissions=["ai:manage"],
+                security_classification="RESTRICTED",
+            )
+            kernel.register_capability(
+                name="kortex.ai.provider.list",
+                description="List metadata of all registered AI providers",
+                provider=self.name,
+                handler=self.list_providers,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+
+            self._set_state(EngineState.READY)
+            self.logger.info("AI Orchestration Engine initialized successfully.")
+        except Exception as exc:
+            self._set_state(EngineState.FAILED)
+            self.logger.error("Failed to initialize AI Orchestration Engine: %s", exc, exc_info=True)
+            raise
+
+    async def start(self) -> None:
+        """Transition engine state to RUNNING."""
+        self.ensure_state(EngineState.READY, EngineState.STOPPED)
+        self._set_state(EngineState.RUNNING)
+        self.logger.info("AI Orchestration Engine is RUNNING.")
+
+    async def health_check(self) -> dict[str, Any]:
+        """Return diagnostic health information (BaseEngine async contract)."""
+        return self._diagnostics.health()
+
+    async def stop(self) -> None:
+        """Gracefully shut down active tasks and release resources."""
+        self.ensure_state(EngineState.RUNNING, EngineState.READY)
+        self._set_state(EngineState.STOPPING)
+        self._set_state(EngineState.STOPPED)
+        self.logger.info("AI Orchestration Engine stopped.")
+
+    # -- Diagnostics Delegation (IEngineDiagnostics Protocol) ----------------
+
+    def health(self) -> dict[str, Any]:
+        """Return operational health status and subsystem checks."""
+        return self._diagnostics.health()
+
+    def metrics(self) -> dict[str, Any]:
+        """Return runtime performance and state metrics."""
+        return self._diagnostics.metrics()
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return detailed technical diagnostics."""
+        return self._diagnostics.diagnostics()
+
+    def status(self) -> str:
+        """Return current engine state name string."""
+        return self._state.value
+
+    def version(self) -> str:
+        """Return engine semantic version string."""
+        return "1.0.0"
+
+    def capabilities(self) -> list[str]:
+        """Return canonical capability strings declared by the engine."""
+        return self._diagnostics.capabilities()
+
+    # -- Facade Capability Handlers ------------------------------------------
+
+    async def generate_response(
+        self,
+        request: LLMRequest,
+        routing_context: RoutingContext | None = None,
+    ) -> LLMResponse:
+        """Generate an AI text response with context composition, routing, and history tracking."""
+        start_time = time.perf_counter()
+        require_identifier(request.tenant_id, "tenant_id")
+        require_identifier(request.conversation_id, "conversation_id")
+
+        # 1. Publish start event (non-blocking)
+        await self._publish_event(
+            AIGenerationStartedEvent(
+                request_id=request.request_id,
+                tenant_id=request.tenant_id,
+                conversation_id=request.conversation_id,
+            )
+        )
+
+        try:
+            # 2. Single-point Context Composition (RAG + Prompt Template)
+            enriched_request = await self._context_composer.compose(request)
+
+            # 3. Model Routing
+            effective_context = routing_context or RoutingContext(allow_cloud=False)
+            provider_meta = await self._model_router.select_model(
+                enriched_request, effective_context.model_dump()
+            )
+
+            # 4. Provider Resolution & Execution
+            provider = self._provider_registry.get(provider_meta.provider_id)
+            response = await provider.generate_text(enriched_request)
+
+            # 5. History Recording
+            await self._memory_manager.append_history(
+                tenant_id=request.tenant_id,
+                conversation_id=request.conversation_id,
+                request=request,
+                response=response,
+            )
+
+            # 6. Record Diagnostics
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            self._diagnostics.record_generation(is_success=True, latency_ms=latency_ms)
+
+            # 7. Publish completion event
+            await self._publish_event(
+                AIGenerationCompletedEvent(
+                    request_id=request.request_id,
+                    tenant_id=request.tenant_id,
+                    conversation_id=request.conversation_id,
+                    execution_time_ms=latency_ms,
+                )
+            )
+
+            return response
+
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            self._diagnostics.record_generation(
+                is_success=False,
+                latency_ms=latency_ms,
+                error_category=type(exc).__name__,
+            )
+            self.logger.warning("AI generation failed: %s", exc)
+            raise
+
+    async def orchestrate_agent(
+        self,
+        task: AgentTask,
+        authorizer: ToolAuthorizer | None = None,
+    ) -> AgentExecutionResult:
+        """Orchestrate a bounded multi-step agent reasoning workflow."""
+        start_time = time.perf_counter()
+        try:
+            result = await self._agent_orchestrator.run_task(task, authorizer=authorizer)
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+            self._diagnostics.record_agent_task(
+                status=result.status.value,
+                latency_ms=latency_ms,
+                total_steps=result.total_steps,
+            )
+
+            await self._publish_event(
+                AgentTaskCompletedEvent(
+                    task_id=task.task_id,
+                    tenant_id=task.tenant_id,
+                    status=result.status.value,
+                )
+            )
+            return result
+
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            self._diagnostics.record_agent_task(
+                status="FAILED",
+                latency_ms=latency_ms,
+                total_steps=0,
+                error_category=type(exc).__name__,
+            )
+            self.logger.warning("Agent orchestration failed: %s", exc)
+            raise
+
+    async def resume_agent(
+        self,
+        task: AgentTask,
+        resume_token: ResumeToken,
+        approved_tool_calls: list[ToolCall],
+        authorizer: ToolAuthorizer | None = None,
+    ) -> AgentExecutionResult:
+        """Resume a paused agent workflow with a verified ResumeToken."""
+        start_time = time.perf_counter()
+        try:
+            result = await self._agent_orchestrator.resume_task(
+                task=task,
+                resume_token=resume_token,
+                approved_tool_calls=approved_tool_calls,
+                authorizer=authorizer,
+            )
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+            self._diagnostics.record_agent_task(
+                status=result.status.value,
+                latency_ms=latency_ms,
+                total_steps=result.total_steps,
+            )
+
+            await self._publish_event(
+                AgentTaskCompletedEvent(
+                    task_id=task.task_id,
+                    tenant_id=task.tenant_id,
+                    status=result.status.value,
+                )
+            )
+            return result
+
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            self._diagnostics.record_agent_task(
+                status="FAILED",
+                latency_ms=latency_ms,
+                total_steps=0,
+                error_category=type(exc).__name__,
+            )
+            self.logger.warning("Agent resume failed: %s", exc)
+            raise
+
+    async def invoke_tool(
+        self,
+        tenant_id: str,
+        tool_call: ToolCall,
+        authorizer: ToolAuthorizer | None = None,
+    ) -> ToolResult:
+        """Invoke an authorized tool capability through the tool invoker subsystem."""
+        start_time = time.perf_counter()
+        try:
+            result = await self._tool_invoker.invoke_tool(
+                tenant_id=tenant_id,
+                tool_call=tool_call,
+                authorizer=authorizer,
+            )
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+            self._diagnostics.record_tool_invocation(
+                status=result.status.value,
+                latency_ms=latency_ms,
+            )
+
+            await self._publish_event(
+                AIToolInvokedEvent(
+                    request_id=tool_call.call_id,
+                    tenant_id=tenant_id,
+                    tool_name=tool_call.tool_name,
+                )
+            )
+            return result
+
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            self._diagnostics.record_tool_invocation(
+                status="ERROR",
+                latency_ms=latency_ms,
+                error_category=type(exc).__name__,
+            )
+            self.logger.warning("Tool invocation failed: %s", exc)
+            raise
+
+    def register_provider(self, provider: BaseAIProvider) -> None:
+        """Register an AI provider in the provider registry."""
+        self._provider_registry.register(provider)
+
+    def list_providers(self) -> list[AIProviderMetadata]:
+        """List metadata of all registered AI providers."""
+        return self._provider_registry.list_providers()
+
+    # -- Internal Event Helper -----------------------------------------------
+
+    async def _publish_event(self, event: AIBaseEvent) -> None:
+        """Publish a system event via the Kernel Event Engine safely without throwing."""
+        if self._kernel is None:
+            return
+        try:
+            await self._kernel.publish_event(
+                topic=event.event_type,
+                payload=event.model_dump(),
+                sender=self.name,
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to publish event %s: %s", event.event_type, exc)
+
+
+__all__ = [
+    "AIOrchestrationEngine",
+    "EngineAgentContextPort",
+    "KernelSecurityApprovalPolicy",
+    "KernelToolExecutionPort",
+    "RouterLLMExecutionPort",
+]

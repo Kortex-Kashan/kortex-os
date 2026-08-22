@@ -751,7 +751,11 @@ def test_ai_package_imports_no_forbidden_dependency() -> None:
 
     package_dir = pathlib.Path(ai_package.__file__).parent
 
-    base_allowed = ("kortex.engines.ai", "kortex.core.exceptions")
+    base_allowed = (
+        "kortex.engines.ai",
+        "kortex.core.exceptions",
+        "kortex.core.base_engine",
+    )
     adapter_allowed = (*base_allowed, "kortex.core.db", "kortex.engines.storage")
     adapter_module = "persistence.py"
 
