@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.events import (
+    AgentTaskCompletedEvent,
     AIBaseEvent,
     AIGenerationCompletedEvent,
     AIGenerationStartedEvent,
     AIToolInvokedEvent,
-    AgentTaskCompletedEvent,
 )
 from kortex.engines.ai.exceptions import (
     AIOrchestrationError,
     AIProviderError,
+    ContextCompositionError,
     ConversationStoreError,
+    KnowledgeRetrievalError,
     MemoryValidationError,
     NoRoutableProviderError,
     ProviderAlreadyRegisteredError,
@@ -23,12 +25,6 @@ from kortex.engines.ai.exceptions import (
     RoutingError,
     RoutingValidationError,
 )
-from kortex.engines.ai.memory import (
-    AIMemoryManager,
-    ConversationTurn,
-    IConversationStore,
-    InMemoryConversationStore,
-)
 from kortex.engines.ai.interfaces import (
     IAIMemoryManager,
     IAIOrchestrationEngine,
@@ -37,6 +33,16 @@ from kortex.engines.ai.interfaces import (
     IModelRouter,
     ToolAuthorizer,
 )
+from kortex.engines.ai.memory import (
+    ASSISTANT_MARKER,
+    USER_MARKER,
+    AIMemoryManager,
+    ConversationTurn,
+    IConversationStore,
+    InMemoryConversationStore,
+    require_identifier,
+    sanitize_context_content,
+)
 from kortex.engines.ai.models import (
     AIProviderMetadata,
     CredentialRequirement,
@@ -44,10 +50,43 @@ from kortex.engines.ai.models import (
     LLMRequest,
     LLMResponse,
 )
+from kortex.engines.ai.pipeline import (
+    KNOWLEDGE_MARKER,
+    MARKER_SENTINEL,
+    RESERVED_CONTEXT_MARKERS,
+    TOOL_MARKER,
+    ContextComposer,
+    PromptPipeline,
+)
 from kortex.engines.ai.registry import MetadataOnlyAIProvider, ProviderRegistry
+from kortex.engines.ai.retrieval import (
+    CONFIDENTIAL,
+    DEFAULT_ALLOWED_CLASSIFICATIONS,
+    INTERNAL,
+    KNOWN_CLASSIFICATIONS,
+    PUBLIC,
+    RESTRICTED,
+    IKnowledgeQueryPort,
+    InMemoryKnowledgeQueryPort,
+    RetrievedDocument,
+    normalize_allowed_classifications,
+    normalize_classification,
+)
 from kortex.engines.ai.router import ModelRouter, RoutingContext
 
 __all__ = [
+    "ASSISTANT_MARKER",
+    "CONFIDENTIAL",
+    "DEFAULT_ALLOWED_CLASSIFICATIONS",
+    "INTERNAL",
+    "KNOWLEDGE_MARKER",
+    "KNOWN_CLASSIFICATIONS",
+    "MARKER_SENTINEL",
+    "PUBLIC",
+    "RESERVED_CONTEXT_MARKERS",
+    "RESTRICTED",
+    "TOOL_MARKER",
+    "USER_MARKER",
     "AIBaseEvent",
     "AIGenerationCompletedEvent",
     "AIGenerationStartedEvent",
@@ -58,6 +97,8 @@ __all__ = [
     "AIToolInvokedEvent",
     "AgentTaskCompletedEvent",
     "BaseAIProvider",
+    "ContextComposer",
+    "ContextCompositionError",
     "ConversationStoreError",
     "ConversationTurn",
     "CredentialRequirement",
@@ -67,21 +108,30 @@ __all__ = [
     "IAIToolInvoker",
     "IBaseAIProvider",
     "IConversationStore",
+    "IKnowledgeQueryPort",
     "IModelRouter",
     "InMemoryConversationStore",
+    "InMemoryKnowledgeQueryPort",
+    "KnowledgeRetrievalError",
     "LLMRequest",
     "LLMResponse",
     "MemoryValidationError",
     "MetadataOnlyAIProvider",
     "ModelRouter",
     "NoRoutableProviderError",
+    "PromptPipeline",
     "ProviderAlreadyRegisteredError",
     "ProviderNotFoundError",
     "ProviderNotRoutableError",
     "ProviderRegistry",
     "ProviderValidationError",
+    "RetrievedDocument",
     "RoutingContext",
     "RoutingError",
     "RoutingValidationError",
     "ToolAuthorizer",
+    "normalize_allowed_classifications",
+    "normalize_classification",
+    "require_identifier",
+    "sanitize_context_content",
 ]

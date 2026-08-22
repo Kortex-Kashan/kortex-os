@@ -109,10 +109,36 @@ class ConversationStoreError(AIOrchestrationError):
     """
 
 
+class ContextCompositionError(AIOrchestrationError):
+    """Raised when a context-composition request is inconsistent.
+
+    Principally the anti-dead-port rule: asking for knowledge retrieval
+    when no `IKnowledgeQueryPort` is configured. Connector Engine's
+    `secret_resolver` shows the failure mode this prevents — an injection
+    port that ships unwired and silently no-ops, so the capability appears
+    present while doing nothing.
+    """
+
+
+class KnowledgeRetrievalError(AIOrchestrationError):
+    """Raised when knowledge retrieval was requested and could not be completed.
+
+    Retrieval is opt-in, so a caller reaching this asked for grounded
+    context. Returning an ungrounded answer that is indistinguishable from
+    a grounded one is the worse outcome, so retrieval failures surface
+    rather than degrade. Also raised when an adapter violates the port
+    contract by returning more documents than it was asked for.
+
+    Never carries retrieved content: documents are tenant-sensitive.
+    """
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
+    "ContextCompositionError",
     "ConversationStoreError",
+    "KnowledgeRetrievalError",
     "MemoryValidationError",
     "NoRoutableProviderError",
     "ProviderAlreadyRegisteredError",

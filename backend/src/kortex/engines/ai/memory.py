@@ -36,7 +36,7 @@ _MARKER_SENTINEL = "[["
 _MARKER_SENTINEL_NEUTRALIZED = "[ ["
 
 
-def _sanitize_for_rendering(content: str) -> str:
+def sanitize_context_content(content: str) -> str:
     """Neutralize any role-marker sentinel occurring inside content.
 
     `LLMRequest` is single-turn (`prompt`, `system_instruction`,
@@ -50,12 +50,30 @@ def _sanitize_for_rendering(content: str) -> str:
     transition — the only place the defense is actually needed — happens
     here. Deliberately lossy in the adversarial case: security over
     fidelity.
+
+    Public because it is the *single* implementation of this defense for
+    the whole engine: Milestone 5's context assembly reuses it for
+    knowledge documents and caller-supplied entries rather than
+    duplicating it. A security primitive with two implementations is a
+    security primitive with two behaviours.
+
+    Idempotent on raw content, but it must NOT be applied to an
+    already-rendered entry: re-running it over ``[[user]]\\ntext`` would
+    rewrite the marker itself into ``[ [user]]`` and destroy it.
     """
     return content.replace(_MARKER_SENTINEL, _MARKER_SENTINEL_NEUTRALIZED)
 
 
-def _require_identifier(value: str, field_name: str) -> str:
-    """Reject a blank or whitespace-only identifier before any query runs."""
+def require_identifier(value: str, field_name: str) -> str:
+    """Reject a blank or whitespace-only identifier before any query runs.
+
+    Public for the same reason `sanitize_context_content` is public: it is
+    the single implementation of this guard for the whole engine.
+    Milestone 5's `ContextComposer` reuses it to validate identifiers
+    *before* reaching the knowledge port, not just before the memory
+    store — an untrusted, unvalidated tenant_id must never cross any
+    retrieval boundary, not only this module's own.
+    """
     if not value or not value.strip():
         raise MemoryValidationError(f"{field_name} must not be empty or whitespace-only.")
     return value
@@ -189,8 +207,8 @@ class AIMemoryManager:
         is not possible — no tokenizer exists in the platform and
         `AIProviderMetadata` carries no context-window field.
         """
-        _require_identifier(tenant_id, "tenant_id")
-        _require_identifier(conversation_id, "conversation_id")
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(conversation_id, "conversation_id")
         return await self._store.recent_turns(
             tenant_id, conversation_id, limit=self._max_history_turns
         )
@@ -206,9 +224,9 @@ class AIMemoryManager:
         turns = await self.get_turns(tenant_id, conversation_id)
         rendered: list[str] = []
         for turn in turns:
-            rendered.append(f"{USER_MARKER}\n{_sanitize_for_rendering(turn.user_content)}")
+            rendered.append(f"{USER_MARKER}\n{sanitize_context_content(turn.user_content)}")
             rendered.append(
-                f"{ASSISTANT_MARKER}\n{_sanitize_for_rendering(turn.assistant_content)}"
+                f"{ASSISTANT_MARKER}\n{sanitize_context_content(turn.assistant_content)}"
             )
         return rendered
 
@@ -226,8 +244,8 @@ class AIMemoryManager:
         silently trusting either side would store one tenant's content under
         another tenant's key, which is a cross-tenant write.
         """
-        _require_identifier(tenant_id, "tenant_id")
-        _require_identifier(conversation_id, "conversation_id")
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(conversation_id, "conversation_id")
 
         if request.tenant_id != tenant_id:
             raise MemoryValidationError(
@@ -257,4 +275,6 @@ __all__ = [
     "ConversationTurn",
     "IConversationStore",
     "InMemoryConversationStore",
+    "require_identifier",
+    "sanitize_context_content",
 ]
