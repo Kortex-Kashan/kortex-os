@@ -158,9 +158,68 @@ class ToolTimeoutError(ToolInvocationError):
     """Raised when a tool execution exceeds its configured timeout threshold."""
 
 
+# ---------------------------------------------------------------------------
+# M7 — Agent Orchestration exceptions
+# ---------------------------------------------------------------------------
+
+
+class AgentOrchestrationError(AIOrchestrationError):
+    """Base exception for all M7 Agent Orchestration failures.
+
+    Every leaf type carries a `task_id` field so callers can correlate
+    exceptions with the agent task that raised them. Sensitive content
+    (tenant data, prompt text, tool arguments) is NEVER included in
+    exception messages.
+    """
+
+    def __init__(self, task_id: str, message: str) -> None:
+        super().__init__(message)
+        self.task_id = task_id
+
+
+class AgentValidationError(AgentOrchestrationError):
+    """Raised when an `AgentTask` is malformed, identifiers are invalid,
+    or a `ResumeToken` fails verification (mismatch, expiry, or bad hash)."""
+
+
+class AgentExecutionTimeoutError(AgentOrchestrationError):
+    """Raised when an agent task exceeds its overall `timeout_seconds` budget.
+
+    Maps to `AgentStatus.TIMED_OUT`.
+    """
+
+
+class AgentStepLimitExceededError(AgentOrchestrationError):
+    """Raised when an agent task exceeds its `max_steps` budget.
+
+    Maps to `AgentStatus.STEP_LIMIT_EXCEEDED`.
+    """
+
+
+class AgentLoopDetectedError(AgentOrchestrationError):
+    """Raised when an agent produces identical tool call batches on
+    `LOOP_DETECTION_WINDOW` consecutive iterations with no state change.
+
+    Maps to `AgentStatus.LOOP_DETECTED`.
+    """
+
+
+class AgentCancelledError(AgentOrchestrationError):
+    """Raised when an agent task is explicitly cancelled via a cancellation token.
+
+    Maps to `AgentStatus.CANCELLED`.
+    """
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
+    "AgentCancelledError",
+    "AgentExecutionTimeoutError",
+    "AgentLoopDetectedError",
+    "AgentOrchestrationError",
+    "AgentStepLimitExceededError",
+    "AgentValidationError",
     "ContextCompositionError",
     "ConversationStoreError",
     "KnowledgeRetrievalError",
