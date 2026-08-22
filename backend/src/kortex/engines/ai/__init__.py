@@ -13,9 +13,13 @@ from kortex.engines.ai.events import (
 from kortex.engines.ai.exceptions import (
     AIOrchestrationError,
     AIProviderError,
+    NoRoutableProviderError,
     ProviderAlreadyRegisteredError,
     ProviderNotFoundError,
+    ProviderNotRoutableError,
     ProviderValidationError,
+    RoutingError,
+    RoutingValidationError,
 )
 from kortex.engines.ai.interfaces import (
     IAIMemoryManager,
@@ -32,7 +36,8 @@ from kortex.engines.ai.models import (
     LLMRequest,
     LLMResponse,
 )
-from kortex.engines.ai.registry import ProviderRegistry
+from kortex.engines.ai.registry import MetadataOnlyAIProvider, ProviderRegistry
+from kortex.engines.ai.router import ModelRouter, RoutingContext
 
 __all__ = [
     "AIBaseEvent",
@@ -53,9 +58,16 @@ __all__ = [
     "IModelRouter",
     "LLMRequest",
     "LLMResponse",
+    "MetadataOnlyAIProvider",
+    "ModelRouter",
+    "NoRoutableProviderError",
     "ProviderAlreadyRegisteredError",
     "ProviderNotFoundError",
+    "ProviderNotRoutableError",
     "ProviderRegistry",
     "ProviderValidationError",
+    "RoutingContext",
+    "RoutingError",
+    "RoutingValidationError",
     "ToolAuthorizer",
 ]

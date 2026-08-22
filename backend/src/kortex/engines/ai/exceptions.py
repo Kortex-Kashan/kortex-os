@@ -52,10 +52,46 @@ class ProviderValidationError(AIOrchestrationError):
     `provider_id`)."""
 
 
+class RoutingError(AIOrchestrationError):
+    """Base exception for `ModelRouter` routing failures.
+
+    Distinct from both `AIProviderError` (provider *execution* failures) and
+    the registry bookkeeping errors above: a routing failure means no
+    suitable provider could be *chosen*, which is neither a registry
+    integrity problem nor an execution problem. A common base is provided
+    (unlike the flat registry errors) because callers have a real need to
+    catch "any routing failure" as one category.
+    """
+
+
+class RoutingValidationError(RoutingError):
+    """Raised when a routing context is malformed, contains an unknown key,
+    or carries a value of the wrong type.
+
+    Messages report offending field names and error types only — never the
+    submitted values.
+    """
+
+
+class NoRoutableProviderError(RoutingError):
+    """Raised when no registered provider satisfies the routing constraints."""
+
+
+class ProviderNotRoutableError(RoutingError):
+    """Raised when an explicitly pinned provider is registered but cannot be
+    routed to — it is metadata-only (non-executable), or it misreports its
+    own identity relative to the registry key it is stored under.
+    """
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
+    "NoRoutableProviderError",
     "ProviderAlreadyRegisteredError",
     "ProviderNotFoundError",
+    "ProviderNotRoutableError",
     "ProviderValidationError",
+    "RoutingError",
+    "RoutingValidationError",
 ]
