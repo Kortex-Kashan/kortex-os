@@ -33,6 +33,7 @@ import asyncio
 import datetime
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections import deque
@@ -57,6 +58,8 @@ from kortex.engines.ai.tools import (
     ToolCall,
     ToolResult,
 )
+
+logger = logging.getLogger("kortex.engines.ai.agent")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -563,6 +566,7 @@ class AgentOrchestrator:
         context_port: IAgentContextPort,
         approval_policy: IApprovalPolicy,
         output_parser: LLMOutputParser | None = None,
+        telemetry: object | None = None,
     ) -> None:
         """Args:
         tool_invoker: M6 AIToolInvoker for tool schema validation and execution.
@@ -570,12 +574,14 @@ class AgentOrchestrator:
         context_port: Port for prompt context assembly (M5/M4 hidden behind this).
         approval_policy: Injected policy; decides whether approval is required.
         output_parser: Parser for LLM output; defaults to LLMOutputParser().
+        telemetry: Optional Tier 2 telemetry emitter for agent events.
         """
         self._tool_invoker = tool_invoker
         self._llm_port = llm_port
         self._context_port = context_port
         self._approval_policy = approval_policy
         self._parser = output_parser if output_parser is not None else LLMOutputParser()
+        self._telemetry = telemetry
 
     async def run_task(
         self,
@@ -785,6 +791,18 @@ class AgentOrchestrator:
                 len(recent_hashes) == LOOP_DETECTION_WINDOW
                 and len(set(recent_hashes)) == 1
             ):
+                if self._telemetry and hasattr(self._telemetry, "emit_agent_loop_detected"):
+                    try:
+                        first_tool_name = tool_calls[0].tool_name if tool_calls else "unknown"
+                        await self._telemetry.emit_agent_loop_detected(
+                            task_id=task.task_id,
+                            tenant_id=task.tenant_id,
+                            user_id="user-task",
+                            tool_name=first_tool_name,
+                            step_count=step_count,
+                        )
+                    except Exception as te_exc:
+                        logger.debug("Failed to emit agent loop telemetry: %s", te_exc)
                 return self._terminal(
                     task=task,
                     status=AgentStatus.LOOP_DETECTED,

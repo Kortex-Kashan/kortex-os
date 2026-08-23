@@ -379,12 +379,14 @@ class AIToolInvoker:
         registry: IToolRegistry,
         execution_port: IToolExecutionPort,
         default_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
+        telemetry: object | None = None,
     ) -> None:
         self._registry = registry
         self._execution_port = execution_port
         self._default_timeout_seconds = max(
             MIN_TOOL_TIMEOUT_SECONDS, min(default_timeout_seconds, MAX_TOOL_TIMEOUT_SECONDS)
         )
+        self._telemetry = telemetry
 
     async def invoke(
         self,

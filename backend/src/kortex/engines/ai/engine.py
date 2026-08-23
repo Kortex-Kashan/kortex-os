@@ -40,11 +40,7 @@ from kortex.engines.ai.agent import (
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.events import (
-    AgentTaskCompletedEvent,
     AIBaseEvent,
-    AIGenerationCompletedEvent,
-    AIGenerationStartedEvent,
-    AIToolInvokedEvent,
 )
 from kortex.engines.ai.interfaces import (
     IEngineDiagnostics,
@@ -64,6 +60,7 @@ from kortex.engines.ai.models import (
 from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
 from kortex.engines.ai.registry import ProviderRegistry
 from kortex.engines.ai.router import ModelRouter, RoutingContext
+from kortex.engines.ai.telemetry import AITelemetryEmitter
 from kortex.engines.ai.tools import (
     AIToolInvoker,
     InMemoryToolExecutionPort,
@@ -228,6 +225,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         tool_registry: ToolRegistry | None = None,
         agent_orchestrator: AgentOrchestrator | None = None,
         diagnostics: AIDiagnostics | None = None,
+        telemetry: AITelemetryEmitter | None = None,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
 
@@ -274,6 +272,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 tool_registry=self._tool_registry,
             )
         )
+        self._telemetry = (
+            telemetry
+            if telemetry is not None
+            else AITelemetryEmitter(diagnostics=self._diagnostics)
+        )
 
         # Wire AgentOrchestrator with production adapters
         if agent_orchestrator is not None:
@@ -295,6 +298,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 llm_port=llm_port,
                 context_port=ctx_port,
                 approval_policy=approval_policy,
+                telemetry=self._telemetry,
             )
 
         self._kernel: IKernelBridge | None = None
@@ -339,6 +343,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         """Access the agent orchestrator subsystem."""
         return self._agent_orchestrator
 
+    @property
+    def telemetry(self) -> AITelemetryEmitter:
+        """Access the telemetry subsystem."""
+        return self._telemetry
+
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
     async def initialize(self, kernel: IKernelBridge) -> None:  # type: ignore[override]
@@ -349,6 +358,8 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
 
         try:
             self._kernel = kernel
+            if self._telemetry._kernel_bridge is None:
+                self._telemetry._kernel_bridge = kernel
 
             # Register 6 canonical capabilities with the Kernel Registry
             kernel.register_capability(
@@ -462,13 +473,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
 
-        # 1. Publish start event (non-blocking)
-        await self._publish_event(
-            AIGenerationStartedEvent(
-                request_id=request.request_id,
-                tenant_id=request.tenant_id,
-                conversation_id=request.conversation_id,
-            )
+        # 1. Emit generation started event
+        await self._telemetry.emit_generation_started(
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            request_id=request.request_id,
         )
 
         try:
@@ -493,26 +503,26 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 response=response,
             )
 
-            # 6. Record Diagnostics
+            # 6. Record Diagnostics & Emit completion event
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            self._diagnostics.record_generation(is_success=True, latency_ms=latency_ms)
-
-            # 7. Publish completion event
-            await self._publish_event(
-                AIGenerationCompletedEvent(
-                    request_id=request.request_id,
-                    tenant_id=request.tenant_id,
-                    conversation_id=request.conversation_id,
-                    execution_time_ms=latency_ms,
-                )
+            await self._telemetry.emit_generation_completed(
+                tenant_id=request.tenant_id,
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                request_id=request.request_id,
+                latency_ms=latency_ms,
+                token_usage=response.token_usage,
             )
 
             return response
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            self._diagnostics.record_generation(
-                is_success=False,
+            await self._telemetry.emit_generation_failed(
+                tenant_id=request.tenant_id,
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                request_id=request.request_id,
                 latency_ms=latency_ms,
                 error_category=type(exc).__name__,
             )
@@ -530,27 +540,24 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             result = await self._agent_orchestrator.run_task(task, authorizer=authorizer)
             latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-            self._diagnostics.record_agent_task(
-                status=result.status.value,
-                latency_ms=latency_ms,
+            await self._telemetry.emit_agent_completed(
+                task_id=task.task_id,
+                tenant_id=task.tenant_id,
+                user_id=getattr(task, "user_id", "user-task"),
                 total_steps=result.total_steps,
-            )
-
-            await self._publish_event(
-                AgentTaskCompletedEvent(
-                    task_id=task.task_id,
-                    tenant_id=task.tenant_id,
-                    status=result.status.value,
-                )
+                latency_ms=latency_ms,
+                status=result.status.value,
             )
             return result
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            self._diagnostics.record_agent_task(
-                status="FAILED",
-                latency_ms=latency_ms,
+            await self._telemetry.emit_agent_failed(
+                task_id=task.task_id,
+                tenant_id=task.tenant_id,
+                user_id=getattr(task, "user_id", "user-task"),
                 total_steps=0,
+                latency_ms=latency_ms,
                 error_category=type(exc).__name__,
             )
             self.logger.warning("Agent orchestration failed: %s", exc)
@@ -574,27 +581,24 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
             latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-            self._diagnostics.record_agent_task(
-                status=result.status.value,
-                latency_ms=latency_ms,
+            await self._telemetry.emit_agent_completed(
+                task_id=task.task_id,
+                tenant_id=task.tenant_id,
+                user_id=getattr(task, "user_id", "user-task"),
                 total_steps=result.total_steps,
-            )
-
-            await self._publish_event(
-                AgentTaskCompletedEvent(
-                    task_id=task.task_id,
-                    tenant_id=task.tenant_id,
-                    status=result.status.value,
-                )
+                latency_ms=latency_ms,
+                status=result.status.value,
             )
             return result
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            self._diagnostics.record_agent_task(
-                status="FAILED",
-                latency_ms=latency_ms,
+            await self._telemetry.emit_agent_failed(
+                task_id=task.task_id,
+                tenant_id=task.tenant_id,
+                user_id=getattr(task, "user_id", "user-task"),
                 total_steps=0,
+                latency_ms=latency_ms,
                 error_category=type(exc).__name__,
             )
             self.logger.warning("Agent resume failed: %s", exc)
@@ -608,6 +612,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     ) -> ToolResult:
         """Invoke an authorized tool capability through the tool invoker subsystem."""
         start_time = time.perf_counter()
+        await self._telemetry.emit_tool_invoked(
+            tenant_id=tenant_id,
+            tool_name=tool_call.tool_name,
+            request_id=tool_call.call_id,
+        )
         try:
             result = await self._tool_invoker.invoke_tool(
                 tenant_id=tenant_id,
@@ -616,26 +625,39 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
             latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-            self._diagnostics.record_tool_invocation(
-                status=result.status.value,
-                latency_ms=latency_ms,
-            )
-
-            await self._publish_event(
-                AIToolInvokedEvent(
-                    request_id=tool_call.call_id,
+            if result.status.value == "SUCCESS":
+                self._diagnostics.record_tool_invocation(
+                    status="SUCCESS",
+                    latency_ms=latency_ms,
+                )
+            elif result.status.value == "DENIED":
+                await self._telemetry.emit_tool_denied(
                     tenant_id=tenant_id,
                     tool_name=tool_call.tool_name,
+                    request_id=tool_call.call_id,
+                    reason=result.error_message or "Denied",
+                    latency_ms=latency_ms,
                 )
-            )
+            else:
+                await self._telemetry.emit_tool_failed(
+                    tenant_id=tenant_id,
+                    tool_name=tool_call.tool_name,
+                    request_id=tool_call.call_id,
+                    error_category=result.status.value,
+                    latency_ms=latency_ms,
+                    is_timeout=(result.status.value == "TIMEOUT"),
+                )
+
             return result
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            self._diagnostics.record_tool_invocation(
-                status="ERROR",
-                latency_ms=latency_ms,
+            await self._telemetry.emit_tool_failed(
+                tenant_id=tenant_id,
+                tool_name=tool_call.tool_name,
+                request_id=tool_call.call_id,
                 error_category=type(exc).__name__,
+                latency_ms=latency_ms,
             )
             self.logger.warning("Tool invocation failed: %s", exc)
             raise

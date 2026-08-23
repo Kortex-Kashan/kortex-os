@@ -1,4 +1,4 @@
-"""KORTEX AI Engine — LLM orchestration, prompt management, and structured outputs."""
+"""KORTEX AI Engine — LLM orchestration, prompt management, structured outputs, and telemetry."""
 
 from __future__ import annotations
 
@@ -39,10 +39,20 @@ from kortex.engines.ai.engine import (
     RouterLLMExecutionPort,
 )
 from kortex.engines.ai.events import (
+    AgentLoopDetectedEvent,
     AgentTaskCompletedEvent,
+    AgentTaskFailedEvent,
     AIBaseEvent,
     AIGenerationCompletedEvent,
+    AIGenerationFailedEvent,
     AIGenerationStartedEvent,
+    AIProviderFailureEvent,
+    AIProviderFallbackEvent,
+    AIProviderTimeoutEvent,
+    AISecurityDeniedEvent,
+    AISecurityValidationFailedEvent,
+    AIToolDeniedEvent,
+    AIToolFailedEvent,
     AIToolInvokedEvent,
 )
 from kortex.engines.ai.exceptions import (
@@ -137,6 +147,17 @@ from kortex.engines.ai.retrieval import (
     normalize_classification,
 )
 from kortex.engines.ai.router import ModelRouter, RoutingContext
+from kortex.engines.ai.telemetry import (
+    AITelemetryEmitter,
+    sanitize_telemetry_payload,
+)
+from kortex.engines.ai.telemetry_ports import (
+    CounterRecord,
+    HistogramRecord,
+    InMemoryTelemetryExporter,
+    ITelemetryExporter,
+    MetricRecord,
+)
 from kortex.engines.ai.tools import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
     MAX_BATCH_SIZE,
@@ -186,19 +207,29 @@ __all__ = [
     "AIDiagnostics",
     "AIEngineRuntimeConfig",
     "AIGenerationCompletedEvent",
+    "AIGenerationFailedEvent",
     "AIGenerationStartedEvent",
     "AIMemoryManager",
     "AIOrchestrationEngine",
     "AIOrchestrationError",
     "AIProviderError",
+    "AIProviderFailureEvent",
+    "AIProviderFallbackEvent",
     "AIProviderMetadata",
     "AIProviderTimeoutError",
+    "AIProviderTimeoutEvent",
+    "AISecurityDeniedEvent",
+    "AISecurityValidationFailedEvent",
+    "AITelemetryEmitter",
+    "AIToolDeniedEvent",
+    "AIToolFailedEvent",
     "AIToolInvokedEvent",
     "AIToolInvoker",
     "AgentCancelledError",
     "AgentExecutionResult",
     "AgentExecutionTimeoutError",
     "AgentLoopDetectedError",
+    "AgentLoopDetectedEvent",
     "AgentOrchestrationError",
     "AgentOrchestrator",
     "AgentStatus",
@@ -206,6 +237,7 @@ __all__ = [
     "AgentStepLimitExceededError",
     "AgentTask",
     "AgentTaskCompletedEvent",
+    "AgentTaskFailedEvent",
     "AgentValidationError",
     "AlwaysApprovePolicy",
     "AlwaysDenyPolicy",
@@ -219,9 +251,11 @@ __all__ = [
     "ContextCompositionError",
     "ConversationStoreError",
     "ConversationTurn",
+    "CounterRecord",
     "CredentialRequirement",
     "EndpointType",
     "EngineAgentContextPort",
+    "HistogramRecord",
     "IAIMemoryManager",
     "IAIOrchestrationEngine",
     "IAIToolInvoker",
@@ -234,12 +268,14 @@ __all__ = [
     "IKnowledgeQueryPort",
     "ILLMExecutionPort",
     "IModelRouter",
+    "ITelemetryExporter",
     "IToolExecutionPort",
     "IToolRegistry",
     "InMemoryAgentContextPort",
     "InMemoryConversationStore",
     "InMemoryKnowledgeQueryPort",
     "InMemoryLLMExecutionPort",
+    "InMemoryTelemetryExporter",
     "InMemoryToolExecutionPort",
     "KernelBridgeAdapter",
     "KernelProductionBootstrap",
@@ -251,6 +287,7 @@ __all__ = [
     "LLMResponse",
     "MemoryValidationError",
     "MetadataOnlyAIProvider",
+    "MetricRecord",
     "ModelRouter",
     "NoRoutableProviderError",
     "PermanentProviderError",
@@ -287,5 +324,6 @@ __all__ = [
     "normalize_classification",
     "require_identifier",
     "sanitize_context_content",
+    "sanitize_telemetry_payload",
     "validate_schema",
 ]

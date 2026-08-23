@@ -1,29 +1,21 @@
 """Immutable system event payload definitions for the KORTEX OS AI Orchestration Engine.
 
-No publishing logic lives here. Event emission (via `Kernel.publish_event`,
-the same mechanism Connector Engine uses in
-`kortex.engines.connector.engine.ConnectorEngine._publish_event`) is a later
-milestone's responsibility, once the engine facade exists.
+Governed by Milestone 9.5 architecture specification:
+docs/architecture/ai_engine_m9_production_runtime_spec.md
 
-Event type naming: these use the short `ai.<entity>.<action>` form already
-present in `ai_orchestration_engine_implementation_spec.md` section 16
-(e.g. `ai.generation.started`), matching the convention actually
-implemented by Connector Engine (`connector.action.started`,
-`connector.driver.registered` — see `kortex.engines.connector.events`),
-where `event.event_type` is passed directly as the Kernel publish topic
-with no additional prefix. `docs/architecture/event_bus.md` describes a
-longer `kortex.event.<domain>.<entity>.<action>` topic format, but no
-shipped engine follows it; the short form is the actual, working
-convention and is what this module follows. This is a documented
-discrepancy between the architecture doc and the real implementation, not
-a defect introduced here.
+Provides typed, frozen event payloads for all AI lifecycle events:
+- Generation: started, completed, failed
+- Provider: failure, timeout, fallback
+- Agent: completed, failed, loop_detected
+- Security: denied, validation_failed
+- Tool: invoked, failed, denied
 """
 
 from __future__ import annotations
 
 import datetime
-import uuid
 from typing import Literal
+import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,6 +32,11 @@ class AIBaseEvent(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Generation Lifecycle Events
+# ---------------------------------------------------------------------------
+
+
 class AIGenerationStartedEvent(AIBaseEvent):
     """Dispatched when an AI generation request is initiated."""
 
@@ -47,6 +44,7 @@ class AIGenerationStartedEvent(AIBaseEvent):
     request_id: str
     tenant_id: str
     conversation_id: str
+    user_id: str | None = None
 
 
 class AIGenerationCompletedEvent(AIBaseEvent):
@@ -57,15 +55,130 @@ class AIGenerationCompletedEvent(AIBaseEvent):
     tenant_id: str
     conversation_id: str
     execution_time_ms: float
+    user_id: str | None = None
+    token_usage: dict[str, int] = Field(default_factory=dict)
+
+
+class AIGenerationFailedEvent(AIBaseEvent):
+    """Dispatched when an AI generation request fails."""
+
+    event_type: Literal["ai.generation.failed"] = "ai.generation.failed"
+    request_id: str
+    tenant_id: str
+    conversation_id: str
+    execution_time_ms: float
+    error_category: str
+    user_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Provider Resilience Events
+# ---------------------------------------------------------------------------
+
+
+class AIProviderFailureEvent(AIBaseEvent):
+    """Dispatched when a provider request fails during execution."""
+
+    event_type: Literal["ai.provider.failure"] = "ai.provider.failure"
+    provider_id: str
+    error_category: str
+    is_transient: bool
+    model_id: str | None = None
+    tenant_id: str | None = None
+
+
+class AIProviderTimeoutEvent(AIBaseEvent):
+    """Dispatched when a provider execution exceeds its timeout deadline."""
+
+    event_type: Literal["ai.provider.timeout"] = "ai.provider.timeout"
+    provider_id: str
+    timeout_seconds: float
+    model_id: str | None = None
+    tenant_id: str | None = None
+
+
+class AIProviderFallbackEvent(AIBaseEvent):
+    """Dispatched when provider execution falls back to a secondary provider."""
+
+    event_type: Literal["ai.provider.fallback"] = "ai.provider.fallback"
+    primary_provider_id: str
+    fallback_provider_id: str
+    reason: str
+    tenant_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Agent Orchestration Events
+# ---------------------------------------------------------------------------
+
+
+class AgentTaskCompletedEvent(AIBaseEvent):
+    """Dispatched when an agent orchestration task completes."""
+
+    event_type: Literal["ai.agent.completed"] = "ai.agent.completed"
+    task_id: str
+    tenant_id: str
+    status: str
+    total_steps: int = 0
+    execution_time_ms: float = 0.0
+    user_id: str | None = None
+
+
+class AgentTaskFailedEvent(AIBaseEvent):
+    """Dispatched when an agent orchestration task fails or aborts."""
+
+    event_type: Literal["ai.agent.failed"] = "ai.agent.failed"
+    task_id: str
+    tenant_id: str
+    error_category: str
+    total_steps: int = 0
+    execution_time_ms: float = 0.0
+    user_id: str | None = None
+
+
+class AgentLoopDetectedEvent(AIBaseEvent):
+    """Dispatched when an infinite reasoning loop is detected in agent execution."""
+
+    event_type: Literal["ai.agent.loop_detected"] = "ai.agent.loop_detected"
+    task_id: str
+    tenant_id: str
+    tool_name: str
+    step_count: int
+    user_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Security & Enforcement Events
+# ---------------------------------------------------------------------------
+
+
+class AISecurityDeniedEvent(AIBaseEvent):
+    """Dispatched when a capability or action is denied by security boundary."""
+
+    event_type: Literal["ai.security.denied"] = "ai.security.denied"
+    tenant_id: str
+    action: str
+    reason: str
+    user_id: str | None = None
+
+
+class AISecurityValidationFailedEvent(AIBaseEvent):
+    """Dispatched when tenant, user, or payload boundary validation fails."""
+
+    event_type: Literal["ai.security.validation_failed"] = "ai.security.validation_failed"
+    tenant_id: str
+    validation_type: str
+    reason: str
+    user_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Tool Invocation Events
+# ---------------------------------------------------------------------------
 
 
 class AIToolInvokedEvent(AIBaseEvent):
-    """Dispatched when an AI-requested tool/capability invocation occurs.
-
-    Payload is intentionally minimal pending Milestone 5's `ToolDefinition`
-    contract — this only records that an invocation happened, not its full
-    shape.
-    """
+    """Dispatched when an AI-requested tool invocation occurs."""
 
     event_type: Literal["ai.tool.invoked"] = "ai.tool.invoked"
     request_id: str
@@ -73,23 +186,40 @@ class AIToolInvokedEvent(AIBaseEvent):
     tool_name: str
 
 
-class AgentTaskCompletedEvent(AIBaseEvent):
-    """Dispatched when an agent orchestration task completes.
+class AIToolFailedEvent(AIBaseEvent):
+    """Dispatched when a tool execution fails with an error."""
 
-    Payload is intentionally minimal pending Milestone 6's `AgentTask`
-    contract.
-    """
-
-    event_type: Literal["ai.agent.completed"] = "ai.agent.completed"
-    task_id: str
+    event_type: Literal["ai.tool.failed"] = "ai.tool.failed"
+    request_id: str
     tenant_id: str
-    status: str
+    tool_name: str
+    error_category: str
+
+
+class AIToolDeniedEvent(AIBaseEvent):
+    """Dispatched when a tool invocation is rejected by authorization policy."""
+
+    event_type: Literal["ai.tool.denied"] = "ai.tool.denied"
+    request_id: str
+    tenant_id: str
+    tool_name: str
+    reason: str
 
 
 __all__ = [
     "AIBaseEvent",
     "AIGenerationCompletedEvent",
+    "AIGenerationFailedEvent",
     "AIGenerationStartedEvent",
+    "AIProviderFallbackEvent",
+    "AIProviderFailureEvent",
+    "AIProviderTimeoutEvent",
+    "AISecurityDeniedEvent",
+    "AISecurityValidationFailedEvent",
+    "AIToolDeniedEvent",
+    "AIToolFailedEvent",
     "AIToolInvokedEvent",
+    "AgentLoopDetectedEvent",
     "AgentTaskCompletedEvent",
+    "AgentTaskFailedEvent",
 ]

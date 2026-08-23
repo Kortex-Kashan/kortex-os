@@ -251,6 +251,7 @@ class ResilientAIProvider(BaseAIProvider):
         circuit_breaker: CircuitBreaker | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         embedding_timeout_seconds: float = DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+        telemetry: object | None = None,
     ) -> None:
         if provider is None:
             raise ValueError("provider must not be None")
@@ -264,6 +265,7 @@ class ResilientAIProvider(BaseAIProvider):
         self._circuit_breaker = circuit_breaker or CircuitBreaker()
         self._timeout_seconds = timeout_seconds
         self._embedding_timeout_seconds = embedding_timeout_seconds
+        self._telemetry = telemetry
 
     @property
     def metadata(self) -> AIProviderMetadata:
@@ -323,6 +325,16 @@ class ResilientAIProvider(BaseAIProvider):
                 )
                 self._circuit_breaker.record_failure(timeout_err)
 
+                if self._telemetry and hasattr(self._telemetry, "emit_provider_timeout"):
+                    try:
+                        await self._telemetry.emit_provider_timeout(
+                            provider_id=self.provider_id,
+                            timeout_seconds=self._timeout_seconds,
+                            tenant_id=getattr(request, "tenant_id", None),
+                        )
+                    except Exception as te_exc:
+                        logger.debug("Failed to emit timeout telemetry: %s", te_exc)
+
                 if self._retry_policy.is_transient(timeout_err) and attempt < self._retry_policy.max_attempts:
                     delay = self._retry_policy.compute_delay(attempt)
                     logger.warning(
@@ -340,6 +352,17 @@ class ResilientAIProvider(BaseAIProvider):
             except Exception as exc:
                 self._circuit_breaker.record_failure(exc)
                 is_transient = self._retry_policy.is_transient(exc)
+
+                if self._telemetry and hasattr(self._telemetry, "emit_provider_failure"):
+                    try:
+                        await self._telemetry.emit_provider_failure(
+                            provider_id=self.provider_id,
+                            error_category=type(exc).__name__,
+                            is_transient=is_transient,
+                            tenant_id=getattr(request, "tenant_id", None),
+                        )
+                    except Exception as te_exc:
+                        logger.debug("Failed to emit failure telemetry: %s", te_exc)
 
                 if is_transient and attempt < self._retry_policy.max_attempts:
                     delay = self._retry_policy.compute_delay(attempt)
@@ -410,10 +433,12 @@ class ProviderFallbackChain:
         providers: list[BaseAIProvider],
         retry_policy: RetryPolicy | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        telemetry: object | None = None,
     ) -> None:
         if not providers:
             raise ValueError("ProviderFallbackChain requires at least one provider.")
 
+        self._telemetry = telemetry
         wrapped_providers: list[ResilientAIProvider] = []
         for p in providers:
             if isinstance(p, ResilientAIProvider):
@@ -424,6 +449,7 @@ class ProviderFallbackChain:
                         provider=p,
                         retry_policy=retry_policy,
                         timeout_seconds=timeout_seconds,
+                        telemetry=telemetry,
                     )
                 )
         self._providers = wrapped_providers
@@ -437,7 +463,7 @@ class ProviderFallbackChain:
         """Attempt text generation sequentially across providers until one succeeds."""
         attempted_errors: list[tuple[str, str]] = []
 
-        for provider in self._providers:
+        for idx, provider in enumerate(self._providers):
             try:
                 return await provider.generate_text(request)
             except (
@@ -448,12 +474,28 @@ class ProviderFallbackChain:
                 ConnectionError,
                 OSError,
             ) as exc:
-                attempted_errors.append((provider.provider_id, type(exc).__name__))
+                error_summary = f"{type(exc).__name__}: {exc}"
+                attempted_errors.append((provider.provider_id, error_summary))
                 logger.warning(
-                    "FallbackChain: Provider '%s' failed (%s), attempting next candidate...",
+                    "Fallback provider '%s' failed: %s. Attempting next provider...",
                     provider.provider_id,
-                    type(exc).__name__,
+                    error_summary,
                 )
+                if (
+                    idx + 1 < len(self._providers)
+                    and self._telemetry
+                    and hasattr(self._telemetry, "emit_provider_fallback")
+                ):
+                    try:
+                        next_provider = self._providers[idx + 1]
+                        await self._telemetry.emit_provider_fallback(
+                            primary_provider_id=provider.provider_id,
+                            fallback_provider_id=next_provider.provider_id,
+                            reason=type(exc).__name__,
+                            tenant_id=getattr(request, "tenant_id", None),
+                        )
+                    except Exception as te_exc:
+                        logger.debug("Failed to emit fallback telemetry: %s", te_exc)
                 continue
             except Exception as exc:
                 # Client/validation/programming errors are not provider failures -> fail fast

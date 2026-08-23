@@ -1,6 +1,6 @@
 """Production Runtime Bootstrap & Dependency Assembly for KORTEX AI Orchestration Engine.
 
-Governed by Milestone 9.4 architecture specification:
+Governed by Milestone 9.4 and 9.5 architecture specifications:
 docs/architecture/ai_engine_m9_production_runtime_spec.md
 
 Implements:
@@ -8,14 +8,15 @@ Implements:
 - Explicit port-adapter wiring (RouterLLMExecutionPort, EngineAgentContextPort,
   KernelToolExecutionPort, KernelSecurityApprovalPolicy)
 - Startup dependency order validation
+- Tri-tier telemetry and diagnostics integration
 - Support for development (SQLite/Local) and production (PostgreSQL/External) profiles
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Final, Literal
+import logging
+from typing import Any, Final, Literal
 
 from kortex.engines.ai.agent import AgentOrchestrator
 from kortex.engines.ai.base_provider import BaseAIProvider
@@ -43,6 +44,8 @@ from kortex.engines.ai.resilience import (
     RetryPolicy,
 )
 from kortex.engines.ai.router import ModelRouter, RoutingContext
+from kortex.engines.ai.telemetry import AITelemetryEmitter
+from kortex.engines.ai.telemetry_ports import ITelemetryExporter
 from kortex.engines.ai.tools import (
     AIToolInvoker,
     InMemoryToolExecutionPort,
@@ -103,9 +106,10 @@ class KernelProductionBootstrap:
     def create_ai_engine(
         self,
         kernel_bridge: IKernelBridge | None = None,
-        data_store: object | None = None,
+        data_store: Any | None = None,
         custom_providers: list[BaseAIProvider] | None = None,
         registered_engines: set[str] | list[str] | None = None,
+        exporter: ITelemetryExporter | None = None,
     ) -> AIOrchestrationEngine:
         """Construct all subsystems, wire production ports, and return a production-ready AIOrchestrationEngine.
 
@@ -114,6 +118,7 @@ class KernelProductionBootstrap:
             data_store: Optional relational DataStore for durable conversation turns.
             custom_providers: Optional pre-configured AI providers to register at boot.
             registered_engines: Optional list of available engine names for dependency order validation.
+            exporter: Optional external telemetry and metric exporter.
 
         Returns:
             Fully assembled, production-wired AIOrchestrationEngine instance.
@@ -129,21 +134,6 @@ class KernelProductionBootstrap:
 
         # 1. Provider Registry & Model Router
         provider_registry = ProviderRegistry()
-        if custom_providers:
-            for p in custom_providers:
-                if not isinstance(p, ResilientAIProvider):
-                    resilient_p = ResilientAIProvider(
-                        provider=p,
-                        retry_policy=RetryPolicy(max_attempts=self._config.retry_max_attempts),
-                        circuit_breaker=CircuitBreaker(
-                            failure_threshold=self._config.circuit_breaker_failure_threshold,
-                            recovery_timeout=self._config.circuit_breaker_recovery_timeout,
-                        ),
-                    )
-                    provider_registry.register(resilient_p)
-                else:
-                    provider_registry.register(p)
-
         model_router = ModelRouter(registry=provider_registry)
 
         # 2. Conversation Storage & Memory Manager
@@ -165,8 +155,40 @@ class KernelProductionBootstrap:
             pipeline=pipeline,
         )
 
-        # 4. Tool Registry & Tool Invoker
+        # 4. Diagnostics & Telemetry
+        diagnostics = AIDiagnostics(
+            provider_registry=provider_registry,
+            model_router=model_router,
+            memory_manager=memory_manager,
+            tool_registry=None,  # Will be wired after ToolRegistry creation
+        )
+        telemetry = AITelemetryEmitter(
+            kernel_bridge=kernel_bridge,
+            diagnostics=diagnostics,
+            exporter=exporter,
+        )
+
+        # Register custom providers with resilience and telemetry wrapping
+        if custom_providers:
+            for p in custom_providers:
+                if not isinstance(p, ResilientAIProvider):
+                    resilient_p = ResilientAIProvider(
+                        provider=p,
+                        retry_policy=RetryPolicy(max_attempts=self._config.retry_max_attempts),
+                        circuit_breaker=CircuitBreaker(
+                            failure_threshold=self._config.circuit_breaker_failure_threshold,
+                            recovery_timeout=self._config.circuit_breaker_recovery_timeout,
+                        ),
+                        telemetry=telemetry,
+                    )
+                    provider_registry.register(resilient_p)
+                else:
+                    provider_registry.register(p)
+
+        # 5. Tool Registry & Tool Invoker
         tool_registry = ToolRegistry()
+        diagnostics._tool_registry = tool_registry
+
         tool_execution_port: IToolExecutionPort
         if kernel_bridge is not None:
             tool_execution_port = KernelToolExecutionPort(kernel_bridge=kernel_bridge)
@@ -176,9 +198,10 @@ class KernelProductionBootstrap:
         tool_invoker = AIToolInvoker(
             registry=tool_registry,
             execution_port=tool_execution_port,
+            telemetry=telemetry,
         )
 
-        # 5. Agent Orchestrator with Production Ports
+        # 6. Agent Orchestrator with Production Ports
         llm_port = RouterLLMExecutionPort(
             router=model_router,
             registry=provider_registry,
@@ -196,14 +219,7 @@ class KernelProductionBootstrap:
             llm_port=llm_port,
             context_port=context_port,
             approval_policy=approval_policy,
-        )
-
-        # 6. Diagnostics Subsystem
-        diagnostics = AIDiagnostics(
-            provider_registry=provider_registry,
-            model_router=model_router,
-            memory_manager=memory_manager,
-            tool_registry=tool_registry,
+            telemetry=telemetry,
         )
 
         # 7. Core Facade Construction
@@ -216,6 +232,7 @@ class KernelProductionBootstrap:
             tool_registry=tool_registry,
             agent_orchestrator=agent_orchestrator,
             diagnostics=diagnostics,
+            telemetry=telemetry,
         )
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")
