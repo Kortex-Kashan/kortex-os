@@ -21,6 +21,7 @@ from kortex.engines.ai.agent import (
     ResumeToken,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.ai.diagnostics import (
     CANONICAL_CAPABILITIES,
     AIDiagnostics,
@@ -48,6 +49,8 @@ from kortex.engines.ai.exceptions import (
     AgentValidationError,
     AIOrchestrationError,
     AIProviderError,
+    BridgeExecutionError,
+    BridgeValidationError,
     ContextCompositionError,
     ConversationStoreError,
     KnowledgeRetrievalError,
@@ -185,6 +188,8 @@ __all__ = [
     "AlwaysApprovePolicy",
     "AlwaysDenyPolicy",
     "BaseAIProvider",
+    "BridgeExecutionError",
+    "BridgeValidationError",
     "ContextComposer",
     "ContextCompositionError",
     "ConversationStoreError",
@@ -211,6 +216,7 @@ __all__ = [
     "InMemoryKnowledgeQueryPort",
     "InMemoryLLMExecutionPort",
     "InMemoryToolExecutionPort",
+    "KernelBridgeAdapter",
     "KernelSecurityApprovalPolicy",
     "KernelToolExecutionPort",
     "KnowledgeRetrievalError",

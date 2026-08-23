@@ -211,6 +211,14 @@ class AgentCancelledError(AgentOrchestrationError):
     """
 
 
+class BridgeValidationError(AIOrchestrationError, ValueError):
+    """Raised when bridge invocation arguments fail identity or name validation."""
+
+
+class BridgeExecutionError(AIOrchestrationError):
+    """Raised when capability invocation through the Kernel bridge fails."""
+
+
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
@@ -220,6 +228,8 @@ __all__ = [
     "AgentOrchestrationError",
     "AgentStepLimitExceededError",
     "AgentValidationError",
+    "BridgeExecutionError",
+    "BridgeValidationError",
     "ContextCompositionError",
     "ConversationStoreError",
     "KnowledgeRetrievalError",
@@ -238,4 +248,5 @@ __all__ = [
     "ToolTimeoutError",
     "ToolValidationError",
 ]
+
 
