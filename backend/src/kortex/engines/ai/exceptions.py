@@ -31,6 +31,27 @@ class AIProviderError(AIOrchestrationError):
     """
 
 
+class AIProviderTimeoutError(AIProviderError, TimeoutError):
+    """Raised when an AI provider execution exceeds its configured timeout threshold."""
+
+
+class CircuitBreakerOpenError(AIProviderError):
+    """Raised when a request is rejected because the provider circuit breaker is OPEN."""
+
+
+class ProviderFallbackExhaustedError(AIProviderError):
+    """Raised when all candidate providers in a fallback chain fail."""
+
+
+class TransientProviderError(AIProviderError):
+    """Raised when an AI provider encounters a temporary, retryable error."""
+
+
+class PermanentProviderError(AIProviderError):
+    """Raised when an AI provider encounters a non-retryable error."""
+
+
+
 class ProviderAlreadyRegisteredError(AIOrchestrationError):
     """Raised by `ProviderRegistry.register` when `provider_id` is already registered.
 
@@ -222,6 +243,7 @@ class BridgeExecutionError(AIOrchestrationError):
 __all__ = [
     "AIOrchestrationError",
     "AIProviderError",
+    "AIProviderTimeoutError",
     "AgentCancelledError",
     "AgentExecutionTimeoutError",
     "AgentLoopDetectedError",
@@ -230,12 +252,15 @@ __all__ = [
     "AgentValidationError",
     "BridgeExecutionError",
     "BridgeValidationError",
+    "CircuitBreakerOpenError",
     "ContextCompositionError",
     "ConversationStoreError",
     "KnowledgeRetrievalError",
     "MemoryValidationError",
     "NoRoutableProviderError",
+    "PermanentProviderError",
     "ProviderAlreadyRegisteredError",
+    "ProviderFallbackExhaustedError",
     "ProviderNotFoundError",
     "ProviderNotRoutableError",
     "ProviderValidationError",
@@ -247,6 +272,7 @@ __all__ = [
     "ToolNotFoundError",
     "ToolTimeoutError",
     "ToolValidationError",
+    "TransientProviderError",
 ]
 
 
