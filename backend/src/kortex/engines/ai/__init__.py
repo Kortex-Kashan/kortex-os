@@ -21,6 +21,11 @@ from kortex.engines.ai.agent import (
     ResumeToken,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.bootstrap import (
+    REQUIRED_STARTUP_DEPENDENCIES,
+    AIEngineRuntimeConfig,
+    KernelProductionBootstrap,
+)
 from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.ai.diagnostics import (
     CANONICAL_CAPABILITIES,
@@ -47,6 +52,7 @@ from kortex.engines.ai.exceptions import (
     AgentOrchestrationError,
     AgentStepLimitExceededError,
     AgentValidationError,
+    AIBootstrapError,
     AIOrchestrationError,
     AIProviderError,
     AIProviderTimeoutError,
@@ -168,6 +174,7 @@ __all__ = [
     "MAX_TOOL_TIMEOUT_SECONDS",
     "MIN_TOOL_TIMEOUT_SECONDS",
     "PUBLIC",
+    "REQUIRED_STARTUP_DEPENDENCIES",
     "RESERVED_CONTEXT_MARKERS",
     "RESTRICTED",
     "RESUME_TOKEN_TTL_SECONDS",
@@ -175,7 +182,9 @@ __all__ = [
     "TRUNCATION_SUFFIX",
     "USER_MARKER",
     "AIBaseEvent",
+    "AIBootstrapError",
     "AIDiagnostics",
+    "AIEngineRuntimeConfig",
     "AIGenerationCompletedEvent",
     "AIGenerationStartedEvent",
     "AIMemoryManager",
@@ -233,6 +242,7 @@ __all__ = [
     "InMemoryLLMExecutionPort",
     "InMemoryToolExecutionPort",
     "KernelBridgeAdapter",
+    "KernelProductionBootstrap",
     "KernelSecurityApprovalPolicy",
     "KernelToolExecutionPort",
     "KnowledgeRetrievalError",

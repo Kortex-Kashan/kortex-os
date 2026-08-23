@@ -20,6 +20,11 @@ class AIOrchestrationError(KortexError):
     """Base exception for all AI Orchestration Engine errors."""
 
 
+class AIBootstrapError(AIOrchestrationError):
+    """Raised when runtime bootstrap, dependency assembly, or startup validation fails."""
+
+
+
 class AIProviderError(AIOrchestrationError):
     """Base exception for AI provider adapter errors.
 
@@ -241,6 +246,7 @@ class BridgeExecutionError(AIOrchestrationError):
 
 
 __all__ = [
+    "AIBootstrapError",
     "AIOrchestrationError",
     "AIProviderError",
     "AIProviderTimeoutError",
