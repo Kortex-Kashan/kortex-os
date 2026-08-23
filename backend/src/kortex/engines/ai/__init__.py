@@ -88,6 +88,7 @@ from kortex.engines.ai.exceptions import (
     ProviderValidationError,
     RoutingError,
     RoutingValidationError,
+    TenantQuotaExceededError,
     ToolAuthorizationError,
     ToolExecutionError,
     ToolInvocationError,
@@ -122,6 +123,7 @@ from kortex.engines.ai.models import (
     EndpointType,
     LLMRequest,
     LLMResponse,
+    TokenUsage,
 )
 from kortex.engines.ai.persistence import (
     AIAgentTaskRow,
@@ -170,6 +172,11 @@ from kortex.engines.ai.telemetry_ports import (
     ITelemetryExporter,
     MetricRecord,
 )
+from kortex.engines.ai.throttling import (
+    DEFAULT_MAX_CONCURRENT_AGENTS_PER_TENANT,
+    DEFAULT_MAX_CONCURRENT_GENERATIONS_PER_TENANT,
+    TenantConcurrencyThrottler,
+)
 from kortex.engines.ai.tools import (
     DEFAULT_MAX_TOOL_RESULT_BYTES,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
@@ -198,6 +205,8 @@ __all__ = [
     "CANONICAL_CAPABILITIES",
     "CONFIDENTIAL",
     "DEFAULT_ALLOWED_CLASSIFICATIONS",
+    "DEFAULT_MAX_CONCURRENT_AGENTS_PER_TENANT",
+    "DEFAULT_MAX_CONCURRENT_GENERATIONS_PER_TENANT",
     "DEFAULT_MAX_TOOL_RESULT_BYTES",
     "DEFAULT_TOOL_TIMEOUT_SECONDS",
     "INTERNAL",
@@ -333,6 +342,9 @@ __all__ = [
     "RoutingValidationError",
     "StorageAgentTaskStore",
     "StorageConversationStore",
+    "TenantConcurrencyThrottler",
+    "TenantQuotaExceededError",
+    "TokenUsage",
     "ToolAuthorizationError",
     "ToolAuthorizer",
     "ToolCall",

@@ -21,6 +21,7 @@ Invariants:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -36,6 +37,7 @@ from kortex.engines.ai.agent import (
     IAgentContextPort,
     IApprovalPolicy,
     ILLMExecutionPort,
+    PersistedAgentTaskRecord,
     ResumeToken,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
@@ -53,6 +55,7 @@ from kortex.engines.ai.memory import (
     AIMemoryManager,
     InMemoryConversationStore,
     require_identifier,
+    sanitize_context_content,
 )
 from kortex.engines.ai.models import (
     AIProviderMetadata,
@@ -63,6 +66,7 @@ from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
 from kortex.engines.ai.registry import ProviderRegistry
 from kortex.engines.ai.router import ModelRouter, RoutingContext
 from kortex.engines.ai.telemetry import AITelemetryEmitter
+from kortex.engines.ai.throttling import TenantConcurrencyThrottler
 from kortex.engines.ai.tools import (
     AIToolInvoker,
     InMemoryToolExecutionPort,
@@ -70,6 +74,7 @@ from kortex.engines.ai.tools import (
     ToolCall,
     ToolRegistry,
     ToolResult,
+    scrub_secrets_from_text,
 )
 
 logger = logging.getLogger("kortex.engines.ai")
@@ -110,9 +115,13 @@ class EngineAgentContextPort(IAgentContextPort):
         self,
         composer: ContextComposer,
         memory_manager: AIMemoryManager | None = None,
+        max_step_history_window: int = 10,
+        max_step_result_chars: int = 2000,
     ) -> None:
         self._composer = composer
         self._memory_manager = memory_manager
+        self._max_step_history_window = max(1, max_step_history_window)
+        self._max_step_result_chars = max(100, max_step_result_chars)
 
     async def build_step_context(
         self,
@@ -120,23 +129,51 @@ class EngineAgentContextPort(IAgentContextPort):
         steps: list[AgentStep],
     ) -> LLMRequest:
         """Assemble an `LLMRequest` for the next reasoning step with prompt, RAG, and history."""
-        # Render step history into prompt body for multi-step continuity
+        # 1. Slide window over the most recent steps
+        windowed_steps = (
+            steps[-self._max_step_history_window:]
+            if len(steps) > self._max_step_history_window
+            else steps
+        )
+
         history_lines: list[str] = []
-        if steps:
+        if windowed_steps:
             history_lines.append("\nExecution History:")
-            for s in steps:
+            for s in windowed_steps:
                 history_lines.append(f"Step {s.step_number}:")
                 if s.thought:
-                    history_lines.append(f"  Thought: {s.thought}")
+                    sanitized_thought = sanitize_context_content(
+                        scrub_secrets_from_text(s.thought)
+                    )
+                    history_lines.append(f"  Thought: {sanitized_thought}")
                 for tc in s.tool_calls:
-                    history_lines.append(f"  Tool Call: {tc.tool_name}({tc.arguments})")
+                    tc_args_str = json.dumps(tc.arguments, default=str)
+                    sanitized_args = sanitize_context_content(
+                        scrub_secrets_from_text(tc_args_str)
+                    )
+                    history_lines.append(f"  Tool Call: {tc.tool_name}({sanitized_args})")
                 for tr in s.tool_results:
-                    history_lines.append(f"  Tool Result: status={tr.status.value}, output={tr.output}")
+                    raw_out = str(tr.output) if tr.output is not None else "null"
+                    if len(raw_out) > self._max_step_result_chars:
+                        raw_out = (
+                            raw_out[: self._max_step_result_chars]
+                            + f" [TRUNCATED at {self._max_step_result_chars} chars]"
+                        )
+                    scrubbed_out = scrub_secrets_from_text(raw_out)
+                    sanitized_out = sanitize_context_content(scrubbed_out)
+                    history_lines.append(
+                        f"  Tool Result: status={tr.status.value}, output={sanitized_out}"
+                    )
                 if s.response_text:
-                    history_lines.append(f"  Response: {s.response_text}")
+                    sanitized_resp = sanitize_context_content(
+                        scrub_secrets_from_text(s.response_text)
+                    )
+                    history_lines.append(f"  Response: {sanitized_resp}")
 
         history_block = "\n".join(history_lines)
-        full_prompt = f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
+        full_prompt = (
+            f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
+        )
 
         raw_request = LLMRequest(
             request_id=f"req-{uuid.uuid4().hex}",
@@ -230,6 +267,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         agent_orchestrator: AgentOrchestrator | None = None,
         diagnostics: AIDiagnostics | None = None,
         telemetry: AITelemetryEmitter | None = None,
+        throttler: TenantConcurrencyThrottler | None = None,
         default_generation_timeout_seconds: float = DEFAULT_GENERATION_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
@@ -238,6 +276,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         """
         super().__init__()
         self._default_generation_timeout_seconds = default_generation_timeout_seconds
+        self._throttler = throttler if throttler is not None else TenantConcurrencyThrottler()
         self._provider_registry = (
             provider_registry if provider_registry is not None else ProviderRegistry()
         )
@@ -345,9 +384,24 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         return self._tool_invoker
 
     @property
+    def context_composer(self) -> ContextComposer:
+        """Access the context composer subsystem."""
+        return self._context_composer
+
+    @property
     def agent_orchestrator(self) -> AgentOrchestrator:
         """Access the agent orchestrator subsystem."""
         return self._agent_orchestrator
+
+    @property
+    def throttler(self) -> TenantConcurrencyThrottler:
+        """Access the tenant concurrency throttler subsystem."""
+        return self._throttler
+
+    @property
+    def diagnostics_collector(self) -> AIDiagnostics:
+        """Access the internal diagnostics collector."""
+        return self._diagnostics
 
     @property
     def telemetry(self) -> AITelemetryEmitter:
@@ -485,87 +539,88 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
 
-        # 1. Emit generation started event
-        await self._telemetry.emit_generation_started(
-            tenant_id=request.tenant_id,
-            user_id=request.user_id,
-            conversation_id=request.conversation_id,
-            request_id=request.request_id,
-        )
-
-        async def _execute_generation() -> LLMResponse:
-            # 2. Single-point Context Composition (RAG + Prompt Template)
-            enriched_request = await self._context_composer.compose(request)
-
-            # 3. Model Routing
-            effective_context = routing_context or RoutingContext(allow_cloud=False)
-            provider_meta = await self._model_router.select_model(
-                enriched_request, effective_context.model_dump()
-            )
-
-            # 4. Provider Resolution & Execution
-            provider = self._provider_registry.get(provider_meta.provider_id)
-            response = await provider.generate_text(enriched_request)
-
-            # 5. History Recording
-            await self._memory_manager.append_history(
+        async with self._throttler.acquire_generation_slot(request.tenant_id):
+            # 1. Emit generation started event
+            await self._telemetry.emit_generation_started(
                 tenant_id=request.tenant_id,
+                user_id=request.user_id,
                 conversation_id=request.conversation_id,
-                request=request,
-                response=response,
+                request_id=request.request_id,
             )
-            return response
 
-        try:
-            if effective_timeout is not None and effective_timeout > 0:
-                response = await asyncio.wait_for(
-                    _execute_generation(),
-                    timeout=effective_timeout,
+            async def _execute_generation() -> LLMResponse:
+                # 2. Single-point Context Composition (RAG + Prompt Template)
+                enriched_request = await self._context_composer.compose(request)
+
+                # 3. Model Routing
+                effective_context = routing_context or RoutingContext(allow_cloud=False)
+                provider_meta = await self._model_router.select_model(
+                    enriched_request, effective_context.model_dump()
                 )
-            else:
-                response = await _execute_generation()
 
-            # 6. Record Diagnostics & Emit completion event
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
-            await self._telemetry.emit_generation_completed(
-                tenant_id=request.tenant_id,
-                user_id=request.user_id,
-                conversation_id=request.conversation_id,
-                request_id=request.request_id,
-                latency_ms=latency_ms,
-                token_usage=response.token_usage,
-            )
+                # 4. Provider Resolution & Execution
+                provider = self._provider_registry.get(provider_meta.provider_id)
+                response = await provider.generate_text(enriched_request)
 
-            return response
+                # 5. History Recording
+                await self._memory_manager.append_history(
+                    tenant_id=request.tenant_id,
+                    conversation_id=request.conversation_id,
+                    request=request,
+                    response=response,
+                )
+                return response
 
-        except TimeoutError as exc:
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
-            timeout_err = AIProviderTimeoutError(
-                f"Global AI generation timeout exceeded ({effective_timeout}s)."
-            )
-            await self._telemetry.emit_generation_failed(
-                tenant_id=request.tenant_id,
-                user_id=request.user_id,
-                conversation_id=request.conversation_id,
-                request_id=request.request_id,
-                latency_ms=latency_ms,
-                error_category="AIProviderTimeoutError",
-            )
-            self.logger.warning("AI generation timed out after %.2fs", effective_timeout)
-            raise timeout_err from exc
+            try:
+                if effective_timeout is not None and effective_timeout > 0:
+                    response = await asyncio.wait_for(
+                        _execute_generation(),
+                        timeout=effective_timeout,
+                    )
+                else:
+                    response = await _execute_generation()
 
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
-            await self._telemetry.emit_generation_failed(
-                tenant_id=request.tenant_id,
-                user_id=request.user_id,
-                conversation_id=request.conversation_id,
-                request_id=request.request_id,
-                latency_ms=latency_ms,
-                error_category=type(exc).__name__,
-            )
-            self.logger.warning("AI generation failed: %s", exc)
-            raise
+                # 6. Record Diagnostics & Emit completion event
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                await self._telemetry.emit_generation_completed(
+                    tenant_id=request.tenant_id,
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    request_id=request.request_id,
+                    latency_ms=latency_ms,
+                    token_usage=response.token_usage,
+                )
+
+                return response
+
+            except TimeoutError as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                timeout_err = AIProviderTimeoutError(
+                    f"Global AI generation timeout exceeded ({effective_timeout}s)."
+                )
+                await self._telemetry.emit_generation_failed(
+                    tenant_id=request.tenant_id,
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    request_id=request.request_id,
+                    latency_ms=latency_ms,
+                    error_category="AIProviderTimeoutError",
+                )
+                self.logger.warning("AI generation timed out after %.2fs", effective_timeout)
+                raise timeout_err from exc
+
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                await self._telemetry.emit_generation_failed(
+                    tenant_id=request.tenant_id,
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    request_id=request.request_id,
+                    latency_ms=latency_ms,
+                    error_category=type(exc).__name__,
+                )
+                self.logger.warning("AI generation failed: %s", exc)
+                raise
 
     async def orchestrate_agent(
         self,
@@ -574,32 +629,36 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     ) -> AgentExecutionResult:
         """Orchestrate a bounded multi-step agent reasoning workflow."""
         start_time = time.perf_counter()
-        try:
-            result = await self._agent_orchestrator.run_task(task, authorizer=authorizer)
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
+        require_identifier(task.tenant_id, "tenant_id")
+        require_identifier(task.task_id, "task_id")
 
-            await self._telemetry.emit_agent_completed(
-                task_id=task.task_id,
-                tenant_id=task.tenant_id,
-                user_id=getattr(task, "user_id", "user-task"),
-                total_steps=result.total_steps,
-                latency_ms=latency_ms,
-                status=result.status.value,
-            )
-            return result
+        async with self._throttler.acquire_agent_slot(task.tenant_id):
+            try:
+                result = await self._agent_orchestrator.run_task(task, authorizer=authorizer)
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
-            await self._telemetry.emit_agent_failed(
-                task_id=task.task_id,
-                tenant_id=task.tenant_id,
-                user_id=getattr(task, "user_id", "user-task"),
-                total_steps=0,
-                latency_ms=latency_ms,
-                error_category=type(exc).__name__,
-            )
-            self.logger.warning("Agent orchestration failed: %s", exc)
-            raise
+                await self._telemetry.emit_agent_completed(
+                    task_id=task.task_id,
+                    tenant_id=task.tenant_id,
+                    user_id=getattr(task, "user_id", "user-task"),
+                    total_steps=result.total_steps,
+                    latency_ms=latency_ms,
+                    status=result.status.value,
+                )
+                return result
+
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                await self._telemetry.emit_agent_failed(
+                    task_id=task.task_id,
+                    tenant_id=task.tenant_id,
+                    user_id=getattr(task, "user_id", "user-task"),
+                    total_steps=0,
+                    latency_ms=latency_ms,
+                    error_category=type(exc).__name__,
+                )
+                self.logger.warning("Agent orchestration failed: %s", exc)
+                raise
 
     async def resume_agent(
         self,
@@ -610,37 +669,51 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     ) -> AgentExecutionResult:
         """Resume a paused agent workflow with a verified ResumeToken."""
         start_time = time.perf_counter()
-        try:
-            result = await self._agent_orchestrator.resume_task(
-                task=task,
-                resume_token=resume_token,
-                approved_tool_calls=approved_tool_calls,
-                authorizer=authorizer,
-            )
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
+        require_identifier(task.tenant_id, "tenant_id")
+        require_identifier(task.task_id, "task_id")
 
-            await self._telemetry.emit_agent_completed(
-                task_id=task.task_id,
-                tenant_id=task.tenant_id,
-                user_id=getattr(task, "user_id", "user-task"),
-                total_steps=result.total_steps,
-                latency_ms=latency_ms,
-                status=result.status.value,
-            )
-            return result
+        async with self._throttler.acquire_agent_slot(task.tenant_id):
+            try:
+                result = await self._agent_orchestrator.resume_task(
+                    task=task,
+                    resume_token=resume_token,
+                    approved_tool_calls=approved_tool_calls,
+                    authorizer=authorizer,
+                )
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - start_time) * 1000.0
-            await self._telemetry.emit_agent_failed(
-                task_id=task.task_id,
-                tenant_id=task.tenant_id,
-                user_id=getattr(task, "user_id", "user-task"),
-                total_steps=0,
-                latency_ms=latency_ms,
-                error_category=type(exc).__name__,
-            )
-            self.logger.warning("Agent resume failed: %s", exc)
-            raise
+                await self._telemetry.emit_agent_completed(
+                    task_id=task.task_id,
+                    tenant_id=task.tenant_id,
+                    user_id=getattr(task, "user_id", "user-task"),
+                    total_steps=result.total_steps,
+                    latency_ms=latency_ms,
+                    status=result.status.value,
+                )
+                return result
+
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                await self._telemetry.emit_agent_failed(
+                    task_id=task.task_id,
+                    tenant_id=task.tenant_id,
+                    user_id=getattr(task, "user_id", "user-task"),
+                    total_steps=0,
+                    latency_ms=latency_ms,
+                    error_category=type(exc).__name__,
+                )
+                self.logger.warning("Agent resume failed: %s", exc)
+                raise
+
+    async def cancel_agent_task(self, task_id: str, tenant_id: str) -> bool:
+        """Cancel an active or paused agent task across local and durable task stores."""
+        return await self._agent_orchestrator.cancel_task(task_id, tenant_id)
+
+    async def get_agent_task(
+        self, task_id: str, tenant_id: str
+    ) -> PersistedAgentTaskRecord | None:
+        """Retrieve a persisted agent task record by identity."""
+        return await self._agent_orchestrator.get_task(task_id, tenant_id)
 
     async def invoke_tool(
         self,

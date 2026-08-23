@@ -53,6 +53,7 @@ from kortex.engines.ai.resilience import (
 from kortex.engines.ai.router import ModelRouter, RoutingContext
 from kortex.engines.ai.telemetry import AITelemetryEmitter
 from kortex.engines.ai.telemetry_ports import ITelemetryExporter
+from kortex.engines.ai.throttling import TenantConcurrencyThrottler
 from kortex.engines.ai.tools import (
     DEFAULT_MAX_TOOL_RESULT_BYTES,
     AIToolInvoker,
@@ -82,6 +83,10 @@ class AIEngineRuntimeConfig:
     max_context_tokens: int = 8192
     max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES
     default_generation_timeout_seconds: float = 60.0
+    max_concurrent_generations_per_tenant: int = 10
+    max_concurrent_agents_per_tenant: int = 5
+    max_step_history_window: int = 10
+    max_step_result_chars: int = 2000
     retry_max_attempts: int = 3
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_recovery_timeout: float = 30.0
@@ -228,6 +233,8 @@ class KernelProductionBootstrap:
         context_port = EngineAgentContextPort(
             composer=context_composer,
             memory_manager=memory_manager,
+            max_step_history_window=self._config.max_step_history_window,
+            max_step_result_chars=self._config.max_step_result_chars,
         )
         approval_policy = KernelSecurityApprovalPolicy(
             tool_registry=tool_registry,
@@ -241,6 +248,11 @@ class KernelProductionBootstrap:
             task_store=agent_task_store,
         )
 
+        throttler = TenantConcurrencyThrottler(
+            max_concurrent_generations=self._config.max_concurrent_generations_per_tenant,
+            max_concurrent_agents=self._config.max_concurrent_agents_per_tenant,
+        )
+
         # 7. Core Facade Construction
         engine = AIOrchestrationEngine(
             provider_registry=provider_registry,
@@ -252,6 +264,7 @@ class KernelProductionBootstrap:
             agent_orchestrator=agent_orchestrator,
             diagnostics=diagnostics,
             telemetry=telemetry,
+            throttler=throttler,
             default_generation_timeout_seconds=self._config.default_generation_timeout_seconds,
         )
 

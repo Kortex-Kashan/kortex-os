@@ -128,10 +128,43 @@ class LLMResponse(BaseModel):
     execution_time_ms: float = 0.0
 
 
+class TokenUsage(BaseModel):
+    """Aggregate token usage counts for LLM generation or multi-step agent workflows."""
+
+    model_config = ConfigDict(frozen=True)
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, int] | None) -> TokenUsage:
+        """Construct a TokenUsage from an arbitrary mapping."""
+        if not data:
+            return cls()
+        p = int(data.get("prompt_tokens", 0) or 0)
+        c = int(data.get("completion_tokens", 0) or 0)
+        t = int(data.get("total_tokens", p + c) or (p + c))
+        return cls(prompt_tokens=p, completion_tokens=c, total_tokens=t)
+
+    def add(self, other: TokenUsage | dict[str, int] | None) -> TokenUsage:
+        """Return a new TokenUsage summing self and other."""
+        if other is None:
+            return self
+        if isinstance(other, dict):
+            other = TokenUsage.from_dict(other)
+        return TokenUsage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+        )
+
+
 __all__ = [
     "AIProviderMetadata",
     "CredentialRequirement",
     "EndpointType",
     "LLMRequest",
     "LLMResponse",
+    "TokenUsage",
 ]

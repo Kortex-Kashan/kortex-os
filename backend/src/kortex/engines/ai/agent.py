@@ -41,7 +41,7 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,7 +55,7 @@ from kortex.engines.ai.exceptions import (
     AgentValidationError,
     ToolValidationError,
 )
-from kortex.engines.ai.models import LLMRequest, LLMResponse
+from kortex.engines.ai.models import LLMRequest, LLMResponse, TokenUsage
 from kortex.engines.ai.tools import (
     MAX_TOOL_ARGUMENTS_BYTES,
     AIToolInvoker,
@@ -71,11 +71,13 @@ logger = logging.getLogger("kortex.engines.ai.agent")
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-RESUME_TOKEN_TTL_SECONDS: int = 3600
-"""Maximum age (seconds) of a ResumeToken before it is rejected. Default: 1 hour."""
+RESUME_TOKEN_TTL_SECONDS: Final[int] = 3600
+"""Maximum lifetime of an approval ResumeToken before it expires."""
 
-LOOP_DETECTION_WINDOW: int = 3
-"""Number of consecutive identical call hashes that triggers LOOP_DETECTED."""
+LOOP_DETECTION_WINDOW: Final[int] = 3
+"""Number of consecutive identical tool call batches required to trigger loop detection."""
+
+_SIGNING_SECRET_FALLBACK: Final[bytes] = secrets.token_bytes(32)
 
 
 # ---------------------------------------------------------------------------
@@ -84,32 +86,29 @@ LOOP_DETECTION_WINDOW: int = 3
 
 
 class AgentStatus(StrEnum):
-    """Lifecycle status values for an agent execution task."""
+    """Lifecycle states of an agent execution."""
 
-    PENDING = "PENDING"
     RUNNING = "RUNNING"
-    PAUSED_FOR_APPROVAL = "PAUSED_FOR_APPROVAL"
     RESUMING = "RESUMING"
+    PAUSED_FOR_APPROVAL = "PAUSED_FOR_APPROVAL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
-    STEP_LIMIT_EXCEEDED = "STEP_LIMIT_EXCEEDED"
-    TIMED_OUT = "TIMED_OUT"
-    LOOP_DETECTED = "LOOP_DETECTED"
     CANCELLED = "CANCELLED"
+    TIMED_OUT = "TIMED_OUT"
+    STEP_LIMIT_EXCEEDED = "STEP_LIMIT_EXCEEDED"
+    LOOP_DETECTED = "LOOP_DETECTED"
 
 
 # ---------------------------------------------------------------------------
-# Domain Models
+# Domain Models (Frozen)
 # ---------------------------------------------------------------------------
 
 
 class AgentTask(BaseModel):
-    """Immutable declaration of a multi-step agent workflow.
+    """Specification of an agent goal and its execution bounds.
 
-    `require_human_approval_for_mutations` is a **policy hint** consumed
-    exclusively by `IApprovalPolicy` implementations. `AgentOrchestrator`
-    itself never reads this field; it delegates to
-    `IApprovalPolicy.requires_approval()`.
+    Immutable once created. `require_human_approval_for_mutations` defaults to
+    True to ensure fail-safe defaults across the platform.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -121,6 +120,7 @@ class AgentTask(BaseModel):
     goal: str = Field(min_length=1)
     system_instruction: str | None = None
     agent_role: str = "general"
+    allowed_tools: list[str] | None = None
     parent_task_id: str | None = None
     max_steps: int = Field(default=10, ge=1, le=30)
     timeout_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
@@ -184,6 +184,7 @@ class AgentExecutionResult(BaseModel):
     final_response: str | None = None
     steps: list[AgentStep] = Field(default_factory=list)
     total_steps: int = 0
+    total_token_usage: TokenUsage = Field(default_factory=TokenUsage)
     execution_time_ms: float = 0.0
     error_message: str | None = None
     pending_tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -201,6 +202,7 @@ class PersistedAgentTaskRecord(BaseModel):
     steps: list[AgentStep] = Field(default_factory=list)
     pending_tool_calls: list[ToolCall] = Field(default_factory=list)
     resume_token: ResumeToken | None = None
+    total_token_usage: TokenUsage = Field(default_factory=TokenUsage)
     version: int = 1
     created_at: datetime.datetime = Field(
         default_factory=lambda: datetime.datetime.now(datetime.UTC)
@@ -235,6 +237,10 @@ class IAgentTaskStore(Protocol):
         self, task_id: str, tenant_id: str, expected_version: int
     ) -> PersistedAgentTaskRecord:
         """Atomically transition status from PAUSED_FOR_APPROVAL to RESUMING with version increment."""
+        ...
+
+    async def cancel_task(self, task_id: str, tenant_id: str) -> bool:
+        """Cancel an active or paused task record in storage. Return True if cancelled."""
         ...
 
     async def list_tasks(
@@ -436,6 +442,24 @@ class InMemoryAgentTaskStore(IAgentTaskStore):
             )
             self._tasks[key] = updated
             return updated
+
+    async def cancel_task(self, task_id: str, tenant_id: str) -> bool:
+        key = (tenant_id, task_id)
+        async with self._lock:
+            record = self._tasks.get(key)
+            if record is None:
+                return False
+            if record.status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.CANCELLED):
+                return False
+            updated = record.model_copy(
+                update={
+                    "status": AgentStatus.CANCELLED,
+                    "version": record.version + 1,
+                    "updated_at": datetime.datetime.now(datetime.UTC),
+                }
+            )
+            self._tasks[key] = updated
+            return True
 
     async def list_tasks(
         self, tenant_id: str, status: AgentStatus | None = None, limit: int = 50
@@ -870,6 +894,14 @@ class AgentOrchestrator:
             version=version,
         )
 
+    async def cancel_task(self, task_id: str, tenant_id: str) -> bool:
+        """Cancel an active or paused agent task in storage."""
+        return await self._task_store.cancel_task(task_id, tenant_id)
+
+    async def get_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
+        """Retrieve a persisted task record from storage."""
+        return await self._task_store.get_task(task_id, tenant_id)
+
     async def _run_loop(
         self,
         task: AgentTask,
@@ -886,6 +918,7 @@ class AgentOrchestrator:
 
         start = time.monotonic()
         steps: list[AgentStep] = list(initial_steps)
+        cumulative_tokens: TokenUsage = TokenUsage()
         # Sliding window for loop detection: tracks the last LOOP_DETECTION_WINDOW
         # consecutive call-set hashes.
         recent_hashes: deque[str] = deque(maxlen=LOOP_DETECTION_WINDOW)
@@ -916,6 +949,7 @@ class AgentOrchestrator:
                     start=start,
                     error_message="Task was cancelled.",
                     version=version,
+                    total_token_usage=cumulative_tokens,
                 )
 
             # --- Step budget check (pre-LLM call) ---
@@ -927,6 +961,7 @@ class AgentOrchestrator:
                     start=start,
                     error_message=f"Step limit of {task.max_steps} reached.",
                     version=version,
+                    total_token_usage=cumulative_tokens,
                 )
 
             # --- Timeout check ---
@@ -939,6 +974,7 @@ class AgentOrchestrator:
                     start=start,
                     error_message="Task execution timeout exceeded.",
                     version=version,
+                    total_token_usage=cumulative_tokens,
                 )
 
             # --- Context assembly via port (M4 + M5 hidden) ---
@@ -954,6 +990,7 @@ class AgentOrchestrator:
                         task.timeout_seconds - (time.monotonic() - start),
                     ),
                 )
+                cumulative_tokens = cumulative_tokens.add(getattr(response, "token_usage", None))
             except TimeoutError:
                 return await self._terminal(
                     task=task,
@@ -962,6 +999,7 @@ class AgentOrchestrator:
                     start=start,
                     error_message="LLM generation step exceeded remaining timeout.",
                     version=version,
+                    total_token_usage=cumulative_tokens,
                 )
 
             # --- Parse LLM output via dedicated boundary component ---
@@ -975,6 +1013,7 @@ class AgentOrchestrator:
                     start=start,
                     error_message=f"LLM output parsing failed: {exc}",
                     version=version,
+                    total_token_usage=cumulative_tokens,
                 )
 
             thought = self._parser.extract_thought(response)
@@ -1001,6 +1040,7 @@ class AgentOrchestrator:
                     steps=steps,
                     pending_tool_calls=[],
                     resume_token=None,
+                    total_token_usage=cumulative_tokens,
                     version=version + 1,
                     created_at=datetime.datetime.now(datetime.UTC),
                     updated_at=datetime.datetime.now(datetime.UTC),
@@ -1013,8 +1053,26 @@ class AgentOrchestrator:
                     final_response=final_text,
                     steps=steps,
                     total_steps=step_count,
+                    total_token_usage=cumulative_tokens,
                     execution_time_ms=(time.monotonic() - start) * 1000.0,
                 )
+
+            # --- Tool allowlist check ---
+            if task.allowed_tools is not None:
+                disallowed = [tc.tool_name for tc in tool_calls if tc.tool_name not in task.allowed_tools]
+                if disallowed:
+                    return await self._terminal(
+                        task=task,
+                        status=AgentStatus.FAILED,
+                        steps=steps,
+                        start=start,
+                        error_message=(
+                            f"Unauthorized tool requested: {disallowed} not permitted "
+                            f"by task allowed_tools."
+                        ),
+                        version=version,
+                        total_token_usage=cumulative_tokens,
+                    )
 
             # --- Loop detection ---
             call_hash = _hash_tool_calls(tool_calls)
@@ -1045,6 +1103,7 @@ class AgentOrchestrator:
                         f"{LOOP_DETECTION_WINDOW} consecutive times."
                     ),
                     version=version,
+                    total_token_usage=cumulative_tokens,
                 )
 
             # --- Approval policy check (policy decides; M7 responds) ---
@@ -1063,6 +1122,7 @@ class AgentOrchestrator:
                     steps=steps,
                     pending_tool_calls=tool_calls,
                     resume_token=token,
+                    total_token_usage=cumulative_tokens,
                     version=version + 1,
                     created_at=datetime.datetime.now(datetime.UTC),
                     updated_at=datetime.datetime.now(datetime.UTC),
@@ -1074,6 +1134,7 @@ class AgentOrchestrator:
                     status=AgentStatus.PAUSED_FOR_APPROVAL,
                     steps=steps,
                     total_steps=step_count,
+                    total_token_usage=cumulative_tokens,
                     execution_time_ms=(time.monotonic() - start) * 1000.0,
                     pending_tool_calls=tool_calls,
                     resume_token=token,
@@ -1122,10 +1183,12 @@ class AgentOrchestrator:
         start: float,
         error_message: str | None = None,
         version: int = 1,
+        total_token_usage: TokenUsage | None = None,
     ) -> AgentExecutionResult:
         """Build a terminal AgentExecutionResult for non-COMPLETED statuses and persist record."""
         import time
 
+        tokens = total_token_usage or TokenUsage()
         final_record = PersistedAgentTaskRecord(
             task=task,
             status=status,
@@ -1133,6 +1196,7 @@ class AgentOrchestrator:
             steps=steps,
             pending_tool_calls=[],
             resume_token=None,
+            total_token_usage=tokens,
             version=version + 1,
             created_at=datetime.datetime.now(datetime.UTC),
             updated_at=datetime.datetime.now(datetime.UTC),
@@ -1148,6 +1212,7 @@ class AgentOrchestrator:
             status=status,
             steps=steps,
             total_steps=len(steps),
+            total_token_usage=tokens,
             execution_time_ms=(time.monotonic() - start) * 1000.0,
             error_message=error_message,
         )

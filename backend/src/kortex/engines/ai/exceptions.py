@@ -257,6 +257,14 @@ class BridgeExecutionError(AIOrchestrationError):
     """Raised when capability invocation through the Kernel bridge fails."""
 
 
+class TenantQuotaExceededError(AIOrchestrationError):
+    """Raised when a tenant exceeds active concurrency or rate quota limits."""
+
+    def __init__(self, tenant_id: str, message: str) -> None:
+        super().__init__(f"Tenant '{tenant_id}' quota exceeded: {message}")
+        self.tenant_id = tenant_id
+
+
 __all__ = [
     "AIBootstrapError",
     "AIOrchestrationError",
@@ -287,6 +295,7 @@ __all__ = [
     "ProviderValidationError",
     "RoutingError",
     "RoutingValidationError",
+    "TenantQuotaExceededError",
     "ToolAuthorizationError",
     "ToolExecutionError",
     "ToolInvocationError",
