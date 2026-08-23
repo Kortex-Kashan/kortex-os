@@ -43,6 +43,9 @@ from kortex.engines.ai.pipeline import TOOL_MARKER
 MAX_TOOL_ARGUMENTS_BYTES: int = 65_536
 """Maximum allowed size for tool argument JSON payloads (64 KB)."""
 
+DEFAULT_MAX_TOOL_RESULT_BYTES: int = 65_536
+"""Hard byte ceiling for serialized tool output returned to model context (64 KiB)."""
+
 MAX_TOOL_OUTPUT_CHARS: int = 50_000
 """Maximum character length for tool output rendered into context (~10,000 tokens)."""
 
@@ -56,6 +59,64 @@ MAX_TOOL_TIMEOUT_SECONDS: float = 300.0
 TRUNCATION_SUFFIX: str = "\n[TRUNCATED: output exceeded 50000 chars]"
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+_SECRET_KEYS_PATTERN: re.Pattern[str] = re.compile(
+    r"(?i)\b(api[_-]?key|token|password|secret|bearer|credential|authorization)\b"
+)
+_SECRET_VALUE_PATTERN: re.Pattern[str] = re.compile(
+    r"(?i)\b(bearer\s+[a-zA-Z0-9_\-\.]{8,}|(?:sk|pk|key|secret)[_-][a-zA-Z0-9_\-]{12,})\b"
+)
+
+
+def scrub_secrets_from_text(text: str) -> str:
+    """Recursively scrub secrets, tokens, and authorization credentials from serialized text."""
+    if not text:
+        return text
+
+    try:
+        data = json.loads(text)
+
+        def _scrub_obj(obj: object) -> object:
+            if isinstance(obj, dict):
+                scrubbed: dict[str, object] = {}
+                for k, v in obj.items():
+                    if _SECRET_KEYS_PATTERN.search(str(k)):
+                        scrubbed[k] = "[REDACTED]"
+                    else:
+                        scrubbed[k] = _scrub_obj(v)
+                return scrubbed
+            if isinstance(obj, list):
+                return [_scrub_obj(item) for item in obj]
+            if isinstance(obj, str):
+                return _SECRET_VALUE_PATTERN.sub("[REDACTED_SECRET]", obj)
+            return obj
+
+        return json.dumps(_scrub_obj(data), default=str)
+    except Exception:
+        text = _SECRET_VALUE_PATTERN.sub("[REDACTED_SECRET]", text)
+        text = re.sub(
+            r'(?i)("?(?:api[_-]?key|token|password|secret|bearer|credential|authorization)"?\s*[:=]\s*)"[^"]+"',
+            r'\1"[REDACTED]"',
+            text,
+        )
+        return text
+
+
+def truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, bool, int, int]:
+    """Truncate text to at most max_bytes without splitting UTF-8 characters.
+
+    Returns:
+        tuple of (truncated_text, is_truncated, original_bytes, returned_bytes)
+    """
+    encoded = text.encode("utf-8")
+    original_bytes = len(encoded)
+    if original_bytes <= max_bytes:
+        return text, False, original_bytes, original_bytes
+
+    truncated_bytes = encoded[:max_bytes]
+    truncated_text = truncated_bytes.decode("utf-8", errors="ignore")
+    final_bytes = len(truncated_text.encode("utf-8"))
+    return truncated_text, True, original_bytes, final_bytes
 
 
 class ToolExecutionStatus(StrEnum):
@@ -240,8 +301,8 @@ class ToolResult(BaseModel):
     error_message: str | None = None
     execution_time_ms: float = 0.0
 
-    def to_context_entry(self) -> str:
-        """Render into a safe, bounded, and neutralized [[tool]] context document."""
+    def to_context_entry(self, max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES) -> str:
+        """Render into a safe, bounded, secret-scrubbed, and neutralized [[tool]] context document."""
         if self.error_message:
             serialized_payload = json.dumps({"error": self.error_message}, sort_keys=True)
         elif self.output is None:
@@ -258,7 +319,27 @@ class ToolResult(BaseModel):
             allowed_len = MAX_TOOL_OUTPUT_CHARS - len(TRUNCATION_SUFFIX)
             serialized_payload = serialized_payload[:allowed_len] + TRUNCATION_SUFFIX
 
-        sanitized_payload = sanitize_context_content(serialized_payload)
+        # 1. Secret scrubbing
+        scrubbed_payload = scrub_secrets_from_text(serialized_payload)
+
+        # 2. Hard UTF-8 byte boundary enforcement
+        truncated_content, is_truncated, orig_bytes, returned_bytes = truncate_utf8_bytes(
+            scrubbed_payload, max_tool_result_bytes
+        )
+
+        if is_truncated:
+            meta = {
+                "truncated": True,
+                "original_bytes": orig_bytes,
+                "returned_bytes": returned_bytes,
+                "content": truncated_content,
+            }
+            final_payload = scrub_secrets_from_text(json.dumps(meta, default=str))
+        else:
+            final_payload = scrubbed_payload
+
+        # 3. Delimiter neutralization
+        sanitized_payload = sanitize_context_content(final_payload)
 
         return (
             f"{TOOL_MARKER}\n"
@@ -380,6 +461,7 @@ class AIToolInvoker:
         execution_port: IToolExecutionPort,
         default_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
         telemetry: object | None = None,
+        max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES,
     ) -> None:
         self._registry = registry
         self._execution_port = execution_port
@@ -387,6 +469,12 @@ class AIToolInvoker:
             MIN_TOOL_TIMEOUT_SECONDS, min(default_timeout_seconds, MAX_TOOL_TIMEOUT_SECONDS)
         )
         self._telemetry = telemetry
+        self._max_tool_result_bytes = max(1, max_tool_result_bytes)
+
+    @property
+    def max_tool_result_bytes(self) -> int:
+        """Configured byte ceiling on tool execution outputs."""
+        return self._max_tool_result_bytes
 
     async def invoke(
         self,
@@ -533,6 +621,7 @@ class AIToolInvoker:
 
 
 __all__ = [
+    "DEFAULT_MAX_TOOL_RESULT_BYTES",
     "DEFAULT_TOOL_TIMEOUT_SECONDS",
     "MAX_BATCH_SIZE",
     "MAX_TOOL_ARGUMENTS_BYTES",
@@ -549,5 +638,7 @@ __all__ = [
     "ToolExecutionStatus",
     "ToolRegistry",
     "ToolResult",
+    "scrub_secrets_from_text",
+    "truncate_utf8_bytes",
     "validate_schema",
 ]

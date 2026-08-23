@@ -18,7 +18,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-from kortex.engines.ai.agent import AgentOrchestrator
+from kortex.engines.ai.agent import (
+    AgentOrchestrator,
+    IAgentTaskStore,
+    InMemoryAgentTaskStore,
+)
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.engine import (
@@ -35,7 +39,10 @@ from kortex.engines.ai.memory import (
     IConversationStore,
     InMemoryConversationStore,
 )
-from kortex.engines.ai.persistence import StorageConversationStore
+from kortex.engines.ai.persistence import (
+    StorageAgentTaskStore,
+    StorageConversationStore,
+)
 from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
 from kortex.engines.ai.registry import ProviderRegistry
 from kortex.engines.ai.resilience import (
@@ -47,6 +54,7 @@ from kortex.engines.ai.router import ModelRouter, RoutingContext
 from kortex.engines.ai.telemetry import AITelemetryEmitter
 from kortex.engines.ai.telemetry_ports import ITelemetryExporter
 from kortex.engines.ai.tools import (
+    DEFAULT_MAX_TOOL_RESULT_BYTES,
     AIToolInvoker,
     InMemoryToolExecutionPort,
     IToolExecutionPort,
@@ -72,6 +80,7 @@ class AIEngineRuntimeConfig:
     default_provider: str | None = None
     enable_cloud_models: bool = False
     max_context_tokens: int = 8192
+    max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES
     default_generation_timeout_seconds: float = 60.0
     retry_max_attempts: int = 3
     circuit_breaker_failure_threshold: int = 3
@@ -201,9 +210,16 @@ class KernelProductionBootstrap:
             registry=tool_registry,
             execution_port=tool_execution_port,
             telemetry=telemetry,
+            max_tool_result_bytes=self._config.max_tool_result_bytes,
         )
 
-        # 6. Agent Orchestrator with Production Ports
+        # 6. Agent Task Store & Orchestrator with Production Ports
+        agent_task_store: IAgentTaskStore
+        if data_store is not None:
+            agent_task_store = StorageAgentTaskStore(data_store=data_store)
+        else:
+            agent_task_store = InMemoryAgentTaskStore()
+
         llm_port = RouterLLMExecutionPort(
             router=model_router,
             registry=provider_registry,
@@ -222,6 +238,7 @@ class KernelProductionBootstrap:
             context_port=context_port,
             approval_policy=approval_policy,
             telemetry=telemetry,
+            task_store=agent_task_store,
         )
 
         # 7. Core Facade Construction

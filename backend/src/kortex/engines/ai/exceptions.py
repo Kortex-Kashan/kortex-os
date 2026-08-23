@@ -237,6 +237,18 @@ class AgentCancelledError(AgentOrchestrationError):
     """
 
 
+class AgentNotFoundError(AgentOrchestrationError):
+    """Raised when an agent task cannot be found in memory or persistent storage."""
+
+
+class AgentStateConflictError(AgentOrchestrationError):
+    """Raised when a concurrent worker conflicts on optimistic task resumption or illegal state transition."""
+
+
+class AgentTaskStoreError(AIOrchestrationError):
+    """Raised when underlying task storage operations fail."""
+
+
 class BridgeValidationError(AIOrchestrationError, ValueError):
     """Raised when bridge invocation arguments fail identity or name validation."""
 
@@ -253,8 +265,11 @@ __all__ = [
     "AgentCancelledError",
     "AgentExecutionTimeoutError",
     "AgentLoopDetectedError",
+    "AgentNotFoundError",
     "AgentOrchestrationError",
+    "AgentStateConflictError",
     "AgentStepLimitExceededError",
+    "AgentTaskStoreError",
     "AgentValidationError",
     "BridgeExecutionError",
     "BridgeValidationError",

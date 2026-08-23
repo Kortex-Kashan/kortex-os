@@ -48,7 +48,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from kortex.engines.ai.exceptions import (
     AgentCancelledError,
     AgentLoopDetectedError,
+    AgentNotFoundError,
     AgentOrchestrationError,
+    AgentStateConflictError,
     AgentStepLimitExceededError,
     AgentValidationError,
     ToolValidationError,
@@ -87,6 +89,7 @@ class AgentStatus(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     PAUSED_FOR_APPROVAL = "PAUSED_FOR_APPROVAL"
+    RESUMING = "RESUMING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     STEP_LIMIT_EXCEEDED = "STEP_LIMIT_EXCEEDED"
@@ -187,9 +190,58 @@ class AgentExecutionResult(BaseModel):
     resume_token: ResumeToken | None = None
 
 
+class PersistedAgentTaskRecord(BaseModel):
+    """Durable record representing the complete snapshot of an agent task."""
+
+    model_config = ConfigDict(frozen=True)
+
+    task: AgentTask
+    status: AgentStatus
+    current_step: int = 0
+    steps: list[AgentStep] = Field(default_factory=list)
+    pending_tool_calls: list[ToolCall] = Field(default_factory=list)
+    resume_token: ResumeToken | None = None
+    version: int = 1
+    created_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
+    updated_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Protocol Ports
 # ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class IAgentTaskStore(Protocol):
+    """Port interface for durable persistence and atomic resumption of agent tasks."""
+
+    async def save_task(self, record: PersistedAgentTaskRecord) -> None:
+        """Persist a newly initialized task record."""
+        ...
+
+    async def get_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
+        """Retrieve a task record by (task_id, tenant_id)."""
+        ...
+
+    async def update_task(self, record: PersistedAgentTaskRecord) -> None:
+        """Persist updated task execution state and step trace."""
+        ...
+
+    async def claim_task_for_resumption(
+        self, task_id: str, tenant_id: str, expected_version: int
+    ) -> PersistedAgentTaskRecord:
+        """Atomically transition status from PAUSED_FOR_APPROVAL to RESUMING with version increment."""
+        ...
+
+    async def list_tasks(
+        self, tenant_id: str, status: AgentStatus | None = None, limit: int = 50
+    ) -> list[PersistedAgentTaskRecord]:
+        """List tasks for a tenant, optionally filtered by status."""
+        ...
 
 
 @runtime_checkable
@@ -333,6 +385,68 @@ class AlwaysDenyPolicy:
     ) -> bool:
         """Always return True (approval required)."""
         return True
+
+
+class InMemoryAgentTaskStore(IAgentTaskStore):
+    """In-memory reference task store for testing and non-durable execution."""
+
+    def __init__(self) -> None:
+        self._tasks: dict[tuple[str, str], PersistedAgentTaskRecord] = {}
+        self._lock = asyncio.Lock()
+
+    async def save_task(self, record: PersistedAgentTaskRecord) -> None:
+        key = (record.task.tenant_id, record.task.task_id)
+        async with self._lock:
+            self._tasks[key] = record
+
+    async def get_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
+        async with self._lock:
+            return self._tasks.get((tenant_id, task_id))
+
+    async def update_task(self, record: PersistedAgentTaskRecord) -> None:
+        key = (record.task.tenant_id, record.task.task_id)
+        async with self._lock:
+            self._tasks[key] = record
+
+    async def claim_task_for_resumption(
+        self, task_id: str, tenant_id: str, expected_version: int
+    ) -> PersistedAgentTaskRecord:
+        key = (tenant_id, task_id)
+        async with self._lock:
+            record = self._tasks.get(key)
+            if record is None:
+                raise AgentNotFoundError(task_id, f"Agent task '{task_id}' not found.")
+            if record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+                raise AgentStateConflictError(
+                    task_id,
+                    f"Agent task '{task_id}' cannot be resumed: current status is '{record.status}'.",
+                )
+            if record.version != expected_version:
+                raise AgentStateConflictError(
+                    task_id,
+                    f"Agent task '{task_id}' concurrency conflict: "
+                    f"version {record.version} != expected {expected_version}.",
+                )
+            updated = record.model_copy(
+                update={
+                    "status": AgentStatus.RESUMING,
+                    "version": record.version + 1,
+                    "updated_at": datetime.datetime.now(datetime.UTC),
+                }
+            )
+            self._tasks[key] = updated
+            return updated
+
+    async def list_tasks(
+        self, tenant_id: str, status: AgentStatus | None = None, limit: int = 50
+    ) -> list[PersistedAgentTaskRecord]:
+        async with self._lock:
+            results = [
+                r
+                for (t_id, _), r in self._tasks.items()
+                if t_id == tenant_id and (status is None or r.status == status)
+            ]
+            return results[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +732,7 @@ class AgentOrchestrator:
         output_parser: LLMOutputParser | None = None,
         telemetry: object | None = None,
         signing_secret: bytes | None = None,
+        task_store: IAgentTaskStore | None = None,
     ) -> None:
         """Args:
         tool_invoker: M6 AIToolInvoker for tool schema validation and execution.
@@ -627,6 +742,7 @@ class AgentOrchestrator:
         output_parser: Parser for LLM output; defaults to LLMOutputParser().
         telemetry: Optional Tier 2 telemetry emitter for agent events.
         signing_secret: Optional platform secret key used to HMAC-authenticate ResumeTokens.
+        task_store: Optional IAgentTaskStore for durable persistence and crash recovery.
         """
         self._tool_invoker = tool_invoker
         self._llm_port = llm_port
@@ -635,6 +751,12 @@ class AgentOrchestrator:
         self._parser = output_parser if output_parser is not None else LLMOutputParser()
         self._telemetry = telemetry
         self._signing_secret = signing_secret or _DEFAULT_SIGNING_SECRET
+        self._task_store = task_store or InMemoryAgentTaskStore()
+
+    @property
+    def task_store(self) -> IAgentTaskStore:
+        """Configured task store."""
+        return self._task_store
 
     async def run_task(
         self,
@@ -655,6 +777,18 @@ class AgentOrchestrator:
             AgentExecutionResult with terminal status and full step trace.
         """
         _validate_task_identifiers(task)
+        initial_record = PersistedAgentTaskRecord(
+            task=task,
+            status=AgentStatus.RUNNING,
+            current_step=0,
+            steps=[],
+            pending_tool_calls=[],
+            resume_token=None,
+            version=1,
+            created_at=datetime.datetime.now(datetime.UTC),
+            updated_at=datetime.datetime.now(datetime.UTC),
+        )
+        await self._task_store.save_task(initial_record)
         return await self._run_loop(
             task=task,
             initial_steps=[],
@@ -662,6 +796,7 @@ class AgentOrchestrator:
             authorizer=authorizer,
             cancellation_token=cancellation_token,
             step_callback=step_callback,
+            version=1,
         )
 
     async def resume_task(
@@ -687,11 +822,13 @@ class AgentOrchestrator:
             step_callback: Optional async callback after each step.
 
         Raises:
+            AgentNotFoundError: Task is not found in store.
+            AgentStateConflictError: Task is not in PAUSED_FOR_APPROVAL or version race occurred.
             AgentValidationError: Token is expired, mismatched, or call hash mismatch.
         """
         _validate_task_identifiers(task)
-        # Step count embedded in the token represents steps already completed;
-        # we resume from that position.
+
+        # 1. Verify cryptographic ResumeToken unconditionally
         _verify_resume_token(
             token=resume_token,
             task=task,
@@ -699,15 +836,38 @@ class AgentOrchestrator:
             approved_calls=approved_tool_calls,
             secret=self._signing_secret,
         )
-        # Execute the approved calls as the first action of the resumed loop.
+
+        # 2. Check task store if record exists
+        record = await self._task_store.get_task(task.task_id, task.tenant_id)
+        if record is not None:
+            if record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+                raise AgentStateConflictError(
+                    task.task_id,
+                    f"Cannot resume task '{task.task_id}' in state '{record.status}'.",
+                )
+            claimed = await self._task_store.claim_task_for_resumption(
+                task_id=task.task_id,
+                tenant_id=task.tenant_id,
+                expected_version=record.version,
+            )
+            initial_steps = claimed.steps
+            step_count = claimed.current_step
+            version = claimed.version
+        else:
+            initial_steps = []
+            step_count = resume_token.step_count_at_pause
+            version = 1
+
+        # 3. Continue execution loop
         return await self._run_loop(
             task=task,
-            initial_steps=[],
-            step_count=resume_token.step_count_at_pause,
+            initial_steps=initial_steps,
+            step_count=step_count,
             authorizer=authorizer,
             cancellation_token=cancellation_token,
             step_callback=step_callback,
             preapproved_calls=approved_tool_calls,
+            version=version,
         )
 
     async def _run_loop(
@@ -719,6 +879,7 @@ class AgentOrchestrator:
         cancellation_token: asyncio.Event | None,
         step_callback: Callable[[AgentStep], Awaitable[None]] | None,
         preapproved_calls: list[ToolCall] | None = None,
+        version: int = 1,
     ) -> AgentExecutionResult:
         """Internal bounded execution loop."""
         import time
@@ -748,33 +909,36 @@ class AgentOrchestrator:
         while True:
             # --- Cancellation check ---
             if cancellation_token is not None and cancellation_token.is_set():
-                return self._terminal(
+                return await self._terminal(
                     task=task,
                     status=AgentStatus.CANCELLED,
                     steps=steps,
                     start=start,
                     error_message="Task was cancelled.",
+                    version=version,
                 )
 
             # --- Step budget check (pre-LLM call) ---
             if step_count >= task.max_steps:
-                return self._terminal(
+                return await self._terminal(
                     task=task,
                     status=AgentStatus.STEP_LIMIT_EXCEEDED,
                     steps=steps,
                     start=start,
                     error_message=f"Step limit of {task.max_steps} reached.",
+                    version=version,
                 )
 
             # --- Timeout check ---
             elapsed = (time.monotonic() - start) * 1000.0
             if elapsed >= task.timeout_seconds * 1000.0:
-                return self._terminal(
+                return await self._terminal(
                     task=task,
                     status=AgentStatus.TIMED_OUT,
                     steps=steps,
                     start=start,
                     error_message="Task execution timeout exceeded.",
+                    version=version,
                 )
 
             # --- Context assembly via port (M4 + M5 hidden) ---
@@ -791,24 +955,26 @@ class AgentOrchestrator:
                     ),
                 )
             except TimeoutError:
-                return self._terminal(
+                return await self._terminal(
                     task=task,
                     status=AgentStatus.TIMED_OUT,
                     steps=steps,
                     start=start,
                     error_message="LLM generation step exceeded remaining timeout.",
+                    version=version,
                 )
 
             # --- Parse LLM output via dedicated boundary component ---
             try:
                 tool_calls = self._parser.parse_tool_calls(response)
             except ToolValidationError as exc:
-                return self._terminal(
+                return await self._terminal(
                     task=task,
                     status=AgentStatus.FAILED,
                     steps=steps,
                     start=start,
                     error_message=f"LLM output parsing failed: {exc}",
+                    version=version,
                 )
 
             thought = self._parser.extract_thought(response)
@@ -828,6 +994,18 @@ class AgentOrchestrator:
                 steps.append(final_step)
                 if step_callback is not None:
                     await step_callback(final_step)
+                final_record = PersistedAgentTaskRecord(
+                    task=task,
+                    status=AgentStatus.COMPLETED,
+                    current_step=step_count,
+                    steps=steps,
+                    pending_tool_calls=[],
+                    resume_token=None,
+                    version=version + 1,
+                    created_at=datetime.datetime.now(datetime.UTC),
+                    updated_at=datetime.datetime.now(datetime.UTC),
+                )
+                await self._task_store.update_task(final_record)
                 return AgentExecutionResult(
                     task_id=task.task_id,
                     tenant_id=task.tenant_id,
@@ -857,7 +1035,7 @@ class AgentOrchestrator:
                         )
                     except Exception as te_exc:
                         logger.debug("Failed to emit agent loop telemetry: %s", te_exc)
-                return self._terminal(
+                return await self._terminal(
                     task=task,
                     status=AgentStatus.LOOP_DETECTED,
                     steps=steps,
@@ -866,6 +1044,7 @@ class AgentOrchestrator:
                         f"Agent loop detected: identical tool call batch repeated "
                         f"{LOOP_DETECTION_WINDOW} consecutive times."
                     ),
+                    version=version,
                 )
 
             # --- Approval policy check (policy decides; M7 responds) ---
@@ -877,6 +1056,18 @@ class AgentOrchestrator:
                     pending_calls=tool_calls,
                     secret=self._signing_secret,
                 )
+                paused_record = PersistedAgentTaskRecord(
+                    task=task,
+                    status=AgentStatus.PAUSED_FOR_APPROVAL,
+                    current_step=step_count,
+                    steps=steps,
+                    pending_tool_calls=tool_calls,
+                    resume_token=token,
+                    version=version + 1,
+                    created_at=datetime.datetime.now(datetime.UTC),
+                    updated_at=datetime.datetime.now(datetime.UTC),
+                )
+                await self._task_store.update_task(paused_record)
                 return AgentExecutionResult(
                     task_id=task.task_id,
                     tenant_id=task.tenant_id,
@@ -923,16 +1114,33 @@ class AgentOrchestrator:
         )
         return results
 
-    def _terminal(
+    async def _terminal(
         self,
         task: AgentTask,
         status: AgentStatus,
         steps: list[AgentStep],
         start: float,
         error_message: str | None = None,
+        version: int = 1,
     ) -> AgentExecutionResult:
-        """Build a terminal AgentExecutionResult for non-COMPLETED statuses."""
+        """Build a terminal AgentExecutionResult for non-COMPLETED statuses and persist record."""
         import time
+
+        final_record = PersistedAgentTaskRecord(
+            task=task,
+            status=status,
+            current_step=len(steps),
+            steps=steps,
+            pending_tool_calls=[],
+            resume_token=None,
+            version=version + 1,
+            created_at=datetime.datetime.now(datetime.UTC),
+            updated_at=datetime.datetime.now(datetime.UTC),
+        )
+        try:
+            await self._task_store.update_task(final_record)
+        except Exception as exc:
+            logger.warning("Failed to persist terminal task state: %s", exc)
 
         return AgentExecutionResult(
             task_id=task.task_id,
@@ -955,8 +1163,10 @@ __all__ = [
     "AgentCancelledError",
     "AgentExecutionResult",
     "AgentLoopDetectedError",
+    "AgentNotFoundError",
     "AgentOrchestrationError",
     "AgentOrchestrator",
+    "AgentStateConflictError",
     "AgentStatus",
     "AgentStep",
     "AgentStepLimitExceededError",
@@ -965,10 +1175,13 @@ __all__ = [
     "AlwaysApprovePolicy",
     "AlwaysDenyPolicy",
     "IAgentContextPort",
+    "IAgentTaskStore",
     "IApprovalPolicy",
     "ILLMExecutionPort",
     "InMemoryAgentContextPort",
+    "InMemoryAgentTaskStore",
     "InMemoryLLMExecutionPort",
     "LLMOutputParser",
+    "PersistedAgentTaskRecord",
     "ResumeToken",
 ]

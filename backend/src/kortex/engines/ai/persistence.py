@@ -20,20 +20,36 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 import random
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Final, TypeVar, cast
+from typing import Any, Final, TypeVar, cast
 
-from sqlalchemy import Index, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from kortex.core.db import BaseModel
-from kortex.engines.ai.exceptions import ConversationStoreError
-from kortex.engines.ai.memory import ConversationTurn
+from kortex.engines.ai.agent import (
+    AgentStatus,
+    AgentStep,
+    AgentTask,
+    IAgentTaskStore,
+    PersistedAgentTaskRecord,
+    ResumeToken,
+)
+from kortex.engines.ai.tools import ToolCall
+from kortex.engines.ai.exceptions import (
+    AgentNotFoundError,
+    AgentStateConflictError,
+    AgentTaskStoreError,
+    ConversationStoreError,
+)
+from kortex.engines.ai.memory import ConversationTurn, require_identifier
 from kortex.engines.storage.interfaces import IDataStore
 
 logger = logging.getLogger("kortex.engines.ai.persistence")
@@ -177,16 +193,15 @@ class StorageConversationStore:
         )
 
     async def recent_turns(
-        self, tenant_id: str, conversation_id: str, limit: int
+        self, tenant_id: str, conversation_id: str, limit: int, offset: int = 0
     ) -> list[ConversationTurn]:
-        """Return at most `limit` most-recent turns, oldest-first.
+        """Return at most `limit` most-recent turns, oldest-first, with optional `offset`.
 
-        Selects the newest `limit` rows by descending sequence, then
-        reverses — so truncation always keeps the *newest* turns while the
-        caller still receives them in chronological order. Ordering is by
-        `sequence` only; `created_at` is stored for audit and is never an
-        ordering key.
+        Selects rows by descending sequence with offset and limit, then
+        reverses — so pagination preserves oldest-first ordering for the caller.
         """
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(conversation_id, "conversation_id")
 
         async def _action(session: AsyncSession) -> list[AIConversationTurnRow]:
             result = await session.execute(
@@ -196,6 +211,7 @@ class StorageConversationStore:
                     AIConversationTurnRow.conversation_id == conversation_id,
                 )
                 .order_by(AIConversationTurnRow.sequence.desc())
+                .offset(offset)
                 .limit(limit)
             )
             return list(result.scalars().all())
@@ -216,12 +232,7 @@ class StorageConversationStore:
     async def _run(
         self, action: Callable[[AsyncSession], Awaitable[_T]], description: str
     ) -> _T:
-        """Execute `action` transactionally, normalizing failures.
-
-        The message names the operation and the underlying exception *type*
-        only — never conversation content or a stored value, which are
-        tenant-sensitive.
-        """
+        """Execute `action` transactionally, normalizing failures."""
         try:
             result = await self._data_store.execute_in_transaction(action)
         except ConversationStoreError:
@@ -233,8 +244,252 @@ class StorageConversationStore:
         return cast("_T", result)
 
 
+class AIAgentTaskRow(BaseModel):
+    """Durable relational row representing an agent task execution snapshot."""
+
+    __tablename__ = "ai_agent_tasks"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "task_id", name="uq_ai_agent_task_identity"),
+        Index("ix_ai_agent_task_lookup", "tenant_id", "task_id"),
+        Index("ix_ai_agent_task_tenant_status", "tenant_id", "status"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    task_json: Mapped[str] = mapped_column(Text, nullable=False)
+    steps_json: Mapped[str] = mapped_column(Text, nullable=False)
+    pending_calls_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    resume_token_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.datetime.now(datetime.UTC),
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.datetime.now(datetime.UTC),
+        onupdate=lambda: datetime.datetime.now(datetime.UTC),
+    )
+
+
+class StorageAgentTaskStore(IAgentTaskStore):
+    """Production durable IAgentTaskStore backed by Storage Engine's IDataStore."""
+
+    def __init__(self, data_store: IDataStore) -> None:
+        self._data_store = data_store
+
+    async def save_task(self, record: PersistedAgentTaskRecord) -> None:
+        async def _action(session: AsyncSession) -> None:
+            task_json = record.task.model_dump_json()
+            steps_json = json.dumps([s.model_dump(mode="json") for s in record.steps])
+            pending_calls_json = json.dumps(
+                [c.model_dump(mode="json") for c in record.pending_tool_calls]
+            )
+            resume_token_json = (
+                record.resume_token.model_dump_json() if record.resume_token else None
+            )
+
+            row = AIAgentTaskRow(
+                id=str(uuid.uuid4()),
+                tenant_id=record.task.tenant_id,
+                task_id=record.task.task_id,
+                status=record.status.value,
+                version=record.version,
+                task_json=task_json,
+                steps_json=steps_json,
+                pending_calls_json=pending_calls_json,
+                resume_token_json=resume_token_json,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+            )
+            session.add(row)
+
+        try:
+            await self._data_store.execute_in_transaction(_action)
+        except IntegrityError as exc:
+            raise AgentTaskStoreError(
+                f"Task '{record.task.task_id}' already exists in tenant '{record.task.tenant_id}'."
+            ) from exc
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to save agent task: {type(exc).__name__}") from exc
+
+    async def get_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(task_id, "task_id")
+
+        async def _action(session: AsyncSession) -> AIAgentTaskRow | None:
+            result = await session.execute(
+                select(AIAgentTaskRow).where(
+                    AIAgentTaskRow.tenant_id == tenant_id,
+                    AIAgentTaskRow.task_id == task_id,
+                )
+            )
+            return result.scalar_one_or_none()
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to get agent task: {type(exc).__name__}") from exc
+
+        if row is None:
+            return None
+
+        return self._row_to_record(row)
+
+    async def update_task(self, record: PersistedAgentTaskRecord) -> None:
+        async def _action(session: AsyncSession) -> None:
+            task_json = record.task.model_dump_json()
+            steps_json = json.dumps([s.model_dump(mode="json") for s in record.steps])
+            pending_calls_json = json.dumps(
+                [c.model_dump(mode="json") for c in record.pending_tool_calls]
+            )
+            resume_token_json = (
+                record.resume_token.model_dump_json() if record.resume_token else None
+            )
+
+            result = await session.execute(
+                update(AIAgentTaskRow)
+                .where(
+                    AIAgentTaskRow.tenant_id == record.task.tenant_id,
+                    AIAgentTaskRow.task_id == record.task.task_id,
+                )
+                .values(
+                    status=record.status.value,
+                    version=record.version,
+                    task_json=task_json,
+                    steps_json=steps_json,
+                    pending_calls_json=pending_calls_json,
+                    resume_token_json=resume_token_json,
+                    updated_at=record.updated_at,
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount == 0:
+                row = AIAgentTaskRow(
+                    id=str(uuid.uuid4()),
+                    tenant_id=record.task.tenant_id,
+                    task_id=record.task.task_id,
+                    status=record.status.value,
+                    version=record.version,
+                    task_json=task_json,
+                    steps_json=steps_json,
+                    pending_calls_json=pending_calls_json,
+                    resume_token_json=resume_token_json,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                )
+                session.add(row)
+
+        try:
+            await self._data_store.execute_in_transaction(_action)
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to update agent task: {type(exc).__name__}") from exc
+
+    async def claim_task_for_resumption(
+        self, task_id: str, tenant_id: str, expected_version: int
+    ) -> PersistedAgentTaskRecord:
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(task_id, "task_id")
+
+        async def _action(session: AsyncSession) -> AIAgentTaskRow | None:
+            now = datetime.datetime.now(datetime.UTC)
+            stmt = (
+                update(AIAgentTaskRow)
+                .where(
+                    AIAgentTaskRow.tenant_id == tenant_id,
+                    AIAgentTaskRow.task_id == task_id,
+                    AIAgentTaskRow.status == AgentStatus.PAUSED_FOR_APPROVAL.value,
+                    AIAgentTaskRow.version == expected_version,
+                )
+                .values(
+                    status=AgentStatus.RESUMING.value,
+                    version=expected_version + 1,
+                    updated_at=now,
+                )
+            )
+            res = await session.execute(stmt)
+            if cast(CursorResult[Any], res).rowcount == 0:
+                return None
+
+            fetch_stmt = select(AIAgentTaskRow).where(
+                AIAgentTaskRow.tenant_id == tenant_id,
+                AIAgentTaskRow.task_id == task_id,
+            )
+            fetch_res = await session.execute(fetch_stmt)
+            return fetch_res.scalar_one_or_none()
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to claim task: {type(exc).__name__}") from exc
+
+        if row is None:
+            existing = await self.get_task(task_id, tenant_id)
+            if existing is None:
+                raise AgentNotFoundError(task_id, f"Agent task '{task_id}' not found.")
+            if existing.status != AgentStatus.PAUSED_FOR_APPROVAL:
+                raise AgentStateConflictError(
+                    task_id,
+                    f"Agent task '{task_id}' cannot be resumed: current status is '{existing.status}'.",
+                )
+            raise AgentStateConflictError(
+                task_id,
+                f"Agent task '{task_id}' concurrency conflict: "
+                f"version {existing.version} != expected {expected_version}.",
+            )
+
+        return self._row_to_record(row)
+
+    async def list_tasks(
+        self, tenant_id: str, status: AgentStatus | None = None, limit: int = 50
+    ) -> list[PersistedAgentTaskRecord]:
+        require_identifier(tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> list[AIAgentTaskRow]:
+            query = select(AIAgentTaskRow).where(AIAgentTaskRow.tenant_id == tenant_id)
+            if status is not None:
+                query = query.where(AIAgentTaskRow.status == status.value)
+            query = query.order_by(AIAgentTaskRow.updated_at.desc()).limit(limit)
+            result = await session.execute(query)
+            return list(result.scalars().all())
+
+        try:
+            rows = await self._data_store.execute_in_transaction(_action)
+            return [self._row_to_record(r) for r in rows]
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to list agent tasks: {type(exc).__name__}") from exc
+
+    def _row_to_record(self, row: AIAgentTaskRow) -> PersistedAgentTaskRecord:
+        task_data = json.loads(row.task_json)
+        task = AgentTask.model_validate(task_data)
+        steps_data = json.loads(row.steps_json)
+        steps = [AgentStep.model_validate(s) for s in steps_data]
+        calls_data = json.loads(row.pending_calls_json)
+        pending_calls = [ToolCall.model_validate(c) for c in calls_data]
+        resume_token = (
+            ResumeToken.model_validate_json(row.resume_token_json)
+            if row.resume_token_json
+            else None
+        )
+        return PersistedAgentTaskRecord(
+            task=task,
+            status=AgentStatus(row.status),
+            current_step=len(steps),
+            steps=steps,
+            pending_tool_calls=pending_calls,
+            resume_token=resume_token,
+            version=row.version,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+
 __all__ = [
     "MAX_APPEND_RETRIES",
+    "AIAgentTaskRow",
     "AIConversationTurnRow",
+    "StorageAgentTaskStore",
     "StorageConversationStore",
 ]
