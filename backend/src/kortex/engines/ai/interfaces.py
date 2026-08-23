@@ -3,26 +3,34 @@
 Defines the five Protocol interfaces named in
 `ai_orchestration_engine_implementation_spec.md` section 4
 (`IAIOrchestrationEngine`, `IBaseAIProvider`, `IModelRouter`,
-`IAIMemoryManager`, `IAIToolInvoker`) and no others. Diagnostics
-(`IEngineDiagnostics`), capability registration, and Kernel wiring are
-explicitly out of scope for Milestone 1 (see `base_provider.py` and
-`ai_orchestration_engine_implementation_spec.md` section 1.7-1.8, which are
-Milestone 7 concerns).
+`IAIMemoryManager`, `IAIToolInvoker`), plus the two the production runtime
+added: `IEngineDiagnostics` (the platform-standard diagnostics surface) and
+`IKernelBridge` (the sole route from this package to the Kernel).
 
-Where a method's parameter or return type depends on a model deferred past
-Milestone 1 (`ToolDefinition`, Milestone 5; `AgentTask`, Milestone 6), the
-signature uses a generic `dict[str, Any]` placeholder rather than omitting
-the method — the approved specification names all four
-`IAIOrchestrationEngine` methods, and a placeholder type can be narrowed
-later without removing a method a caller may already depend on.
+Milestone 1 declared several `IAIOrchestrationEngine` parameters as
+`dict[str, Any]` placeholders because the models they referred to
+(`AgentTask`, `ToolCall`, `ToolResult`) did not exist yet. Those
+placeholders have since been narrowed to the concrete types, so every
+signature here now matches its implementation exactly. The concrete types
+are imported under `TYPE_CHECKING` because `tools.py` imports this module
+and a runtime import would be circular.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from kortex.engines.ai.models import AIProviderMetadata, LLMRequest, LLMResponse
+
+if TYPE_CHECKING:
+    # Type-only. `tools.py` imports this module, so importing these at
+    # runtime would be circular; `from __future__ import annotations` above
+    # keeps every annotation a string, so this guard is sufficient.
+    from kortex.engines.ai.agent import AgentExecutionResult, AgentTask
+    from kortex.engines.ai.base_provider import BaseAIProvider
+    from kortex.engines.ai.router import RoutingContext
+    from kortex.engines.ai.tools import ToolCall, ToolResult
 
 ToolAuthorizer = Callable[[str, dict[str, Any]], Awaitable[bool]]
 """Signature for the mandatory authorization check `IAIToolInvoker.invoke` requires.
@@ -131,36 +139,68 @@ class IAIToolInvoker(Protocol):
 class IAIOrchestrationEngine(Protocol):
     """Primary facade interface for the AI Orchestration Engine.
 
-    Assembled in Milestone 7; no implementation exists yet. Fixing this
-    shape now lets Workflow Engine's future integration
-    (`generate_response`) and the provider registry's future integration
-    (`register_provider`) plan against a stable contract.
+    Implemented by `engine.AIOrchestrationEngine`. The signatures below are
+    the real, current contract: Milestone 1 declared them with
+    `dict[str, Any]` placeholders because `AgentTask`, `ToolCall`, and
+    `ToolResult` did not exist yet, and they were narrowed to the concrete
+    models once those milestones landed.
+
+    The concrete types are imported under `TYPE_CHECKING` only. `tools.py`
+    imports this module, so a runtime import of `tools`/`agent` here would
+    be circular; `from __future__ import annotations` makes every
+    annotation below a string, so the guarded import is sufficient.
     """
 
-    async def generate_response(self, request: LLMRequest) -> LLMResponse:
+    async def generate_response(
+        self,
+        request: LLMRequest,
+        routing_context: RoutingContext | None = None,
+        timeout_seconds: float | None = None,
+    ) -> LLMResponse:
         """Generate an AI response for the given request."""
         ...
 
-    async def orchestrate_agent(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Orchestrate a multi-step agent task.
-
-        `task`/return type are generic placeholders pending Milestone 6's
-        `AgentTask` model.
-        """
+    async def orchestrate_agent(
+        self, task: AgentTask, authorizer: ToolAuthorizer | None = None
+    ) -> AgentExecutionResult:
+        """Orchestrate a bounded multi-step agent reasoning workflow."""
         ...
 
     async def invoke_tool(
-        self, tool_call: dict[str, Any], authorizer: ToolAuthorizer
-    ) -> dict[str, Any]:
+        self,
+        tenant_id: str,
+        tool_call: ToolCall,
+        authorizer: ToolAuthorizer | None = None,
+    ) -> ToolResult:
         """Invoke a tool/capability call on behalf of an AI request.
 
-        `tool_call`/return type are generic placeholders pending Milestone
-        5's `ToolDefinition` model.
+        Unlike `IAIToolInvoker.invoke`, whose `authorizer` is mandatory,
+        this facade-level parameter is an **optional defense-in-depth
+        pre-check**. It is not the authorization gate and must never be
+        mistaken for one: the production execution port
+        (`engine.KernelToolExecutionPort`) reaches capabilities only through
+        `IKernelBridge.invoke_capability`, so every call is authenticated
+        and authorized by `CapabilityDispatcher` -> Security Engine before a
+        handler runs. That is the mandatory gate, per
+        `ai_orchestration_engine_implementation_spec.md` section 18 ("Tool
+        invocation strictly checked by Kernel authorization middleware") and
+        the Constitution's rule that authority decisions live in Security
+        Engine, never in a calling engine.
+
+        Supplying an `authorizer` adds an earlier, engine-local rejection;
+        omitting it does not skip authorization. The bootstrap assembler
+        refuses to build a production engine without a kernel bridge, so
+        the Kernel-backed port cannot be silently absent in production.
         """
         ...
 
-    def register_provider(self, provider: AIProviderMetadata) -> None:
-        """Register an AI provider with the engine."""
+    def register_provider(self, provider: BaseAIProvider) -> None:
+        """Register an AI provider with the engine.
+
+        Takes the provider itself, not its metadata: the registry stores
+        executable providers, and a metadata-only registration produces a
+        deliberately non-executable `MetadataOnlyAIProvider`.
+        """
         ...
 
 

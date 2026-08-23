@@ -118,6 +118,52 @@ class KernelProductionBootstrap:
             )
         return True
 
+    def validate_production_wiring(
+        self, kernel_bridge: IKernelBridge | None, data_store: object | None
+    ) -> None:
+        """Refuse to assemble a production engine backed by non-durable test doubles.
+
+        Implements the M9 architecture spec's "Production Engine Wiring
+        Requirement" (§2, Attack 4): a production deployment must be wired to
+        `StorageConversationStore` over a real `IDataStore`, never allowed to
+        fall through to `InMemoryConversationStore`. The same reasoning
+        extends to `kernel_bridge`: without it the assembler substitutes
+        `InMemoryToolExecutionPort`, a reference fake that runs canned
+        handlers and never reaches `CapabilityDispatcher` — so every tool
+        call would bypass Security Engine authorization entirely.
+
+        These substitutions are correct and intended for `development`, where
+        they are what makes the engine runnable offline with no Kernel. They
+        are never correct for `production`, and a silent fallback there is
+        indistinguishable from a working system until data is already lost or
+        an unauthorized tool has already run. Failing at assembly time is the
+        only point where the mistake is still cheap.
+
+        Raises:
+            AIBootstrapError: In the production profile, if a required
+                production dependency is missing.
+        """
+        if self._config.environment != "production":
+            return
+
+        missing: list[str] = []
+        if data_store is None:
+            missing.append(
+                "data_store (required for StorageConversationStore and StorageAgentTaskStore; "
+                "without it conversation history and agent tasks are lost on restart)"
+            )
+        if kernel_bridge is None:
+            missing.append(
+                "kernel_bridge (required for KernelToolExecutionPort; without it tool calls "
+                "execute against an in-memory reference fake and bypass Kernel authorization)"
+            )
+
+        if missing:
+            raise AIBootstrapError(
+                "Production wiring violation: AI Engine cannot be assembled in the "
+                "'production' profile without " + "; and ".join(missing) + "."
+            )
+
     def create_ai_engine(
         self,
         kernel_bridge: IKernelBridge | None = None,
@@ -140,6 +186,7 @@ class KernelProductionBootstrap:
         """
         if registered_engines is not None:
             self.validate_startup_dependencies(registered_engines)
+        self.validate_production_wiring(kernel_bridge=kernel_bridge, data_store=data_store)
 
         logger.info(
             "Bootstrapping AI Orchestration Engine (environment=%s, storage_backend=%s)...",
@@ -159,6 +206,12 @@ class KernelProductionBootstrap:
                 max_retries=self._config.retry_max_attempts,
             )
         else:
+            # Unreachable in the production profile — validate_production_wiring
+            # rejects a missing data_store before assembly begins.
+            logger.warning(
+                "No data_store supplied: using non-durable InMemoryConversationStore. "
+                "Conversation history will be LOST on process exit."
+            )
             conversation_store = InMemoryConversationStore()
 
         memory_manager = AIMemoryManager(store=conversation_store)
@@ -209,6 +262,12 @@ class KernelProductionBootstrap:
         if kernel_bridge is not None:
             tool_execution_port = KernelToolExecutionPort(kernel_bridge=kernel_bridge)
         else:
+            # Unreachable in the production profile — validate_production_wiring
+            # rejects a missing kernel_bridge before assembly begins.
+            logger.warning(
+                "No kernel_bridge supplied: using InMemoryToolExecutionPort. Tool calls will "
+                "NOT reach CapabilityDispatcher and will NOT be authorized by Security Engine."
+            )
             tool_execution_port = InMemoryToolExecutionPort()
 
         tool_invoker = AIToolInvoker(
@@ -223,12 +282,18 @@ class KernelProductionBootstrap:
         if data_store is not None:
             agent_task_store = StorageAgentTaskStore(data_store=data_store)
         else:
+            # Unreachable in the production profile — see validate_production_wiring.
+            logger.warning(
+                "No data_store supplied: using non-durable InMemoryAgentTaskStore. Agent task "
+                "state and crash recovery will NOT survive process exit."
+            )
             agent_task_store = InMemoryAgentTaskStore()
 
         llm_port = RouterLLMExecutionPort(
             router=model_router,
             registry=provider_registry,
             default_routing_context=RoutingContext(allow_cloud=self._config.enable_cloud_models),
+            telemetry=telemetry,
         )
         context_port = EngineAgentContextPort(
             composer=context_composer,

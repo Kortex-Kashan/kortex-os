@@ -165,6 +165,30 @@ async def test_blank_conversation_rejected(blank: str) -> None:
         await manager.get_turns(TENANT, blank)
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+async def test_blank_identifiers_rejected_on_append_history(blank: str) -> None:
+    """M4 invariant M3 on the WRITE path, not just the read path.
+
+    The read-path tests above cover `get_turns`/`get_context`; without this,
+    removing either `require_identifier` guard in `append_history` would
+    fail no test, and a blank identifier could reach the store and write a
+    turn under an unusable key.
+    """
+    store = InMemoryConversationStore()
+    manager = AIMemoryManager(store)
+
+    with pytest.raises(MemoryValidationError):
+        await manager.append_history(blank, CONVERSATION, _request(tenant_id=blank), _response())
+
+    with pytest.raises(MemoryValidationError):
+        await manager.append_history(
+            TENANT, blank, _request(conversation_id=blank), _response()
+        )
+
+    # Nothing may have been persisted by either rejected call.
+    assert await store.recent_turns(TENANT, CONVERSATION, limit=10) == []
+
+
 async def test_append_rejects_tenant_mismatch() -> None:
     """A request must not be recorded under a different tenant's key."""
     manager = AIMemoryManager(InMemoryConversationStore())

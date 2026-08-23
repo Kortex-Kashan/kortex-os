@@ -26,6 +26,7 @@ import asyncio
 import datetime
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from kortex.engines.ai.agent import (
     IApprovalPolicy,
     ILLMExecutionPort,
     InMemoryAgentContextPort,
+    InMemoryAgentTaskStore,
     InMemoryLLMExecutionPort,
     LLMOutputParser,
     ResumeToken,
@@ -56,7 +58,9 @@ from kortex.engines.ai.exceptions import (
     AgentCancelledError,
     AgentExecutionTimeoutError,
     AgentLoopDetectedError,
+    AgentNotFoundError,
     AgentOrchestrationError,
+    AgentStateConflictError,
     AgentStepLimitExceededError,
     AgentValidationError,
 )
@@ -164,7 +168,15 @@ def _make_orchestrator(
     policy: object = None,
     tool_name: str = "get_data",
     handler: object = None,
+    task_store: object = None,
 ) -> AgentOrchestrator:
+    """Build an orchestrator.
+
+    `task_store` exists so a pause/resume round trip can share one store
+    across two orchestrator instances, which is how production behaves: both
+    processes read the same durable store. Omitting it gives each
+    orchestrator its own private `InMemoryAgentTaskStore`.
+    """
     invoker = _make_invoker(tool_name=tool_name, handler=handler)
     llm_port = InMemoryLLMExecutionPort(responses=responses)
     ctx_port = InMemoryAgentContextPort()
@@ -174,6 +186,7 @@ def _make_orchestrator(
         llm_port=llm_port,
         context_port=ctx_port,
         approval_policy=approval,
+        task_store=task_store,  # type: ignore[arg-type]
     )
 
 
@@ -250,11 +263,54 @@ def test_agent_validation_error_carries_task_id() -> None:
     assert "bad task" in str(exc)
 
 
-def test_agent_exception_message_never_contains_tenant_data() -> None:
-    """Sensitive content must not appear in exception messages."""
-    exc = AgentValidationError(task_id="t-1", message="token mismatch")
-    # Message must not contain token bodies, secrets, or prompt content.
-    assert "tenant" not in str(exc).lower() or "tenant" == "tenant"  # word "tenant" OK, values not
+@pytest.mark.asyncio
+async def test_agent_exception_messages_never_contain_task_goal_or_tenant_values() -> None:
+    """M7 section 8 exception hygiene, exercised against the real raising paths.
+
+    Distinctive sentinel values are planted in every caller-supplied field
+    that could carry tenant data, then genuine validation failures are
+    triggered. No sentinel VALUE may appear in the raised message — the word
+    "tenant" as a field name is fine, the tenant's actual identifier is not.
+
+    Replaces an earlier assertion of the form
+    `assert "tenant" not in msg or "tenant" == "tenant"`, whose right-hand
+    disjunct is a tautology: it passed unconditionally and therefore proved
+    nothing, while reading as though it enforced this invariant.
+    """
+    sentinel_goal = "GOAL-SENTINEL-exfiltrate-payroll"
+    sentinel_tenant = "TENANT-SENTINEL-acme-corp"
+    sentinel_user = "USER-SENTINEL-alice"
+    sentinel_conversation = "CONV-SENTINEL-9f3a"
+
+    orchestrator = _make_orchestrator(responses=[])
+
+    # Path 1: blank tenant_id rejected before the loop starts.
+    blank_tenant_task = _make_task(
+        tenant_id="   ",
+        goal=sentinel_goal,
+        user_id=sentinel_user,
+        conversation_id=sentinel_conversation,
+    )
+    with pytest.raises(AgentValidationError) as exc_info:
+        await orchestrator.run_task(blank_tenant_task)
+    message = str(exc_info.value)
+    assert sentinel_goal not in message
+    assert sentinel_user not in message
+    assert sentinel_conversation not in message
+
+    # Path 2: blank conversation_id, with a real tenant value present.
+    blank_conversation_task = _make_task(
+        tenant_id=sentinel_tenant,
+        conversation_id="   ",
+        goal=sentinel_goal,
+        user_id=sentinel_user,
+    )
+    with pytest.raises(AgentValidationError) as exc_info:
+        await orchestrator.run_task(blank_conversation_task)
+    message = str(exc_info.value)
+    assert sentinel_tenant not in message
+    assert sentinel_goal not in message
+    assert sentinel_user not in message
 
 
 # ---------------------------------------------------------------------------
@@ -808,22 +864,95 @@ def test_verify_resume_token_rejects_bad_expires_at_format() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_task_completes_after_approval() -> None:
-    """Full pause → approve → complete round trip."""
+    """Full pause → approve → complete round trip.
+
+    The two orchestrators share one task store, which is what production
+    does: the resuming process reads the same durable store the pausing
+    process wrote to. A resume against a store with no record is refused
+    outright — see `test_resume_task_refuses_when_no_persisted_record_exists`.
+    """
+    shared_store = InMemoryAgentTaskStore()
+
     # Step 1: run_task pauses
-    orch = _make_orchestrator([_tool_response("get_data")], policy=AlwaysDenyPolicy())
+    orch = _make_orchestrator(
+        [_tool_response("get_data")], policy=AlwaysDenyPolicy(), task_store=shared_store
+    )
     task = _make_task()
     paused = await orch.run_task(task)
     assert paused.status == AgentStatus.PAUSED_FOR_APPROVAL
     assert paused.resume_token is not None
 
     # Step 2: resume_task with same approved calls and valid token
-    orch2 = _make_orchestrator([_terminal_response()], policy=AlwaysApprovePolicy())
+    orch2 = _make_orchestrator(
+        [_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store
+    )
     resumed = await orch2.resume_task(
         task=task,
         resume_token=paused.resume_token,
         approved_tool_calls=paused.pending_tool_calls,
     )
     assert resumed.status == AgentStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_resume_task_refuses_when_no_persisted_record_exists() -> None:
+    """A cryptographically valid token is not, by itself, authority to resume.
+
+    The atomic PAUSED_FOR_APPROVAL -> RESUMING claim is the single-use
+    guarantee; without a stored record there is nothing to claim, so the
+    resume must fail rather than proceed on the token alone.
+    """
+    orch = _make_orchestrator([_tool_response("get_data")], policy=AlwaysDenyPolicy())
+    task = _make_task()
+    paused = await orch.run_task(task)
+    assert paused.resume_token is not None
+
+    # A different process whose store has no record of this task.
+    orch_without_record = _make_orchestrator([_terminal_response()])
+    with pytest.raises(AgentNotFoundError):
+        await orch_without_record.resume_task(
+            task=task,
+            resume_token=paused.resume_token,
+            approved_tool_calls=paused.pending_tool_calls,
+        )
+
+
+@pytest.mark.asyncio
+async def test_approval_token_cannot_be_replayed_after_a_successful_resume() -> None:
+    """One human approval authorizes exactly one execution of the approved calls.
+
+    Without this, an unexpired token could re-run already-approved mutating
+    tool calls repeatedly — precisely what the approval workflow exists to
+    prevent for critical operations.
+    """
+    shared_store = InMemoryAgentTaskStore()
+    orch = _make_orchestrator(
+        [_tool_response("get_data")], policy=AlwaysDenyPolicy(), task_store=shared_store
+    )
+    task = _make_task()
+    paused = await orch.run_task(task)
+    assert paused.resume_token is not None
+
+    first = _make_orchestrator(
+        [_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store
+    )
+    resumed = await first.resume_task(
+        task=task,
+        resume_token=paused.resume_token,
+        approved_tool_calls=paused.pending_tool_calls,
+    )
+    assert resumed.status == AgentStatus.COMPLETED
+
+    # Replaying the very same token against the same store must be refused.
+    second = _make_orchestrator(
+        [_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store
+    )
+    with pytest.raises(AgentStateConflictError):
+        await second.resume_task(
+            task=task,
+            resume_token=paused.resume_token,
+            approved_tool_calls=paused.pending_tool_calls,
+        )
 
 
 @pytest.mark.asyncio
@@ -1012,10 +1141,53 @@ def test_identifier_validation_exists_in_source() -> None:
 
 
 def test_no_persistence_calls_in_source() -> None:
-    """Mutation probe: M7 must have zero persistence write calls."""
+    """The agent module must never persist conversation history itself.
+
+    M7 shipped with no persistence at all. M11 then gave the orchestrator a
+    durable `IAgentTaskStore` for *task* state, so "zero writes" is no
+    longer the boundary — but conversation history remains M4's table,
+    written only via `AIMemoryManager.append_history` by the M8 facade.
+    This asserts the boundary that actually holds today.
+    """
     source = _AGENT_PY.read_text(encoding="utf-8")
     assert "append_history" not in source
     assert "save_steps" not in source
+
+
+def test_agent_writes_only_through_the_task_store_port() -> None:
+    """Every durable write in `agent.py` must go through `IAgentTaskStore`.
+
+    Guards the port boundary directly: a future edit that reaches for a
+    session, engine, or raw SQL — instead of the injected store — fails
+    here rather than silently bypassing the persistence adapter.
+    """
+    source = _AGENT_PY.read_text(encoding="utf-8")
+
+    forbidden_infrastructure = (
+        "sqlalchemy",
+        "AsyncSession",
+        "session.add",
+        "session.execute",
+        "execute_in_transaction",
+        "IDataStore",
+        "SELECT ",
+        "INSERT ",
+        "UPDATE ",
+    )
+    for marker in forbidden_infrastructure:
+        assert marker not in source, f"agent.py must not touch infrastructure directly: {marker}"
+
+    # The writes it does perform are all task-store port calls.
+    write_calls = re.findall(r"self\._task_store\.(\w+)\(", source)
+    assert set(write_calls) <= {
+        "save_task",
+        "update_task",
+        "get_task",
+        "claim_task_for_resumption",
+        "cancel_task",
+        "list_tasks",
+    }, f"unexpected task-store method used: {sorted(set(write_calls))}"
+    assert "update_task" in write_calls, "expected the orchestrator to persist task state"
 
 
 # ---------------------------------------------------------------------------

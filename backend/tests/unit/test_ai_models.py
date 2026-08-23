@@ -328,7 +328,33 @@ def test_tool_invoker_authorizer_parameter_is_mandatory() -> None:
     assert authorizer_param.default is inspect.Parameter.empty
 
 
-def test_orchestration_engine_invoke_tool_authorizer_is_mandatory() -> None:
-    sig = inspect.signature(IAIOrchestrationEngine.invoke_tool)
-    authorizer_param = sig.parameters["authorizer"]
-    assert authorizer_param.default is inspect.Parameter.empty
+def test_orchestration_engine_tool_path_cannot_execute_without_the_kernel() -> None:
+    """The facade's tool path is authorized by the Kernel, unconditionally.
+
+    Supersedes an earlier guard that asserted
+    `IAIOrchestrationEngine.invoke_tool`'s `authorizer` had no default. That
+    assertion described a contract the facade never implemented (it has
+    always been `ToolAuthorizer | None = None`), so it protected nothing
+    real while implying authorization was engine-local.
+
+    The property that actually holds — and the one worth guarding — is that
+    the production execution port reaches a capability *only* through
+    `IKernelBridge.invoke_capability`, so `CapabilityDispatcher` ->
+    Security Engine authorizes every call before a handler runs, whether or
+    not a caller supplied the optional pre-check. See
+    `ai_orchestration_engine_implementation_spec.md` section 18.
+
+    `IAIToolInvoker.invoke`'s mandatory authorizer is unaffected and is
+    still guarded by the test above.
+    """
+    from kortex.engines.ai.engine import KernelToolExecutionPort
+
+    source = inspect.getsource(KernelToolExecutionPort.execute_tool)
+
+    # Exactly one execution path, and it is the Kernel bridge.
+    assert source.count("return await") == 1, "execute_tool must have a single return path"
+    assert "self._kernel_bridge.invoke_capability(" in source
+
+    # No direct handler execution that would sidestep the dispatcher.
+    for bypass in ("handler(", "_registry.", "execute_handler", "call_handler"):
+        assert bypass not in source, f"execute_tool must not bypass the Kernel via {bypass!r}"

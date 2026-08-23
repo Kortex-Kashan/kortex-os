@@ -28,6 +28,7 @@ from kortex.engines.ai.agent import (
     AlwaysApprovePolicy,
     AlwaysDenyPolicy,
     InMemoryAgentContextPort,
+    InMemoryAgentTaskStore,
     InMemoryLLMExecutionPort,
     PersistedAgentTaskRecord,
 )
@@ -36,13 +37,17 @@ from kortex.engines.ai.diagnostics import CANONICAL_CAPABILITIES, AIDiagnostics
 from kortex.engines.ai.engine import (
     AIOrchestrationEngine,
     KernelToolExecutionPort,
+    RouterLLMExecutionPort,
 )
 from kortex.engines.ai.exceptions import (
+    ConversationStoreError,
     MemoryValidationError,
     NoRoutableProviderError,
+    ProviderFallbackExhaustedError,
+    TransientProviderError,
 )
 from kortex.engines.ai.interfaces import IKernelBridge
-from kortex.engines.ai.memory import AIMemoryManager, InMemoryConversationStore
+from kortex.engines.ai.memory import AIMemoryManager, ConversationTurn, InMemoryConversationStore
 from kortex.engines.ai.models import (
     AIProviderMetadata,
     LLMRequest,
@@ -384,6 +389,209 @@ async def test_generate_response_routing_failure_recorded() -> None:
     assert metrics["error_breakdown"]["NoRoutableProviderError"] == 1
 
 
+class _AlwaysFailingProvider(BaseAIProvider):
+    """Reference provider whose generation calls always raise a transient failure."""
+
+    def __init__(self, provider_id: str = "failing-provider") -> None:
+        self._provider_id = provider_id
+        self._metadata = AIProviderMetadata(
+            provider_id=provider_id,
+            display_name="Failing Provider",
+            vendor="TestVendor",
+            endpoint_type="local_host",
+            supported_models=["dummy-model"],
+        )
+
+    @property
+    def provider_id(self) -> str:
+        return self._provider_id
+
+    @property
+    def metadata(self) -> AIProviderMetadata:
+        return self._metadata
+
+    @property
+    def supported_models(self) -> list[str]:
+        return list(self._metadata.supported_models)
+
+    async def generate_text(self, request: LLMRequest) -> LLMResponse:
+        raise TransientProviderError("Primary provider is unreachable.")
+
+    async def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
+        raise TransientProviderError("Primary provider is unreachable.")
+
+    async def health_check(self) -> bool:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# §3.5 — Provider Fallback Routing (M9 Recovery Matrix row 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_response_falls_back_to_secondary_provider_on_primary_failure() -> None:
+    """M9 Attack 6: 'route to secondary local/cloud candidate' on primary failure."""
+    registry = ProviderRegistry()
+    registry.register(_AlwaysFailingProvider(provider_id="primary"))
+    registry.register(DummyExecutingProvider(provider_id="secondary"))
+    router = ModelRouter(registry=registry)
+    engine = AIOrchestrationEngine(provider_registry=registry, model_router=router)
+    kernel = InMemoryKernelBridge()
+    await engine.initialize(kernel)
+
+    request = LLMRequest(
+        request_id="r1",
+        tenant_id="t1",
+        user_id="u1",
+        conversation_id="c1",
+        prompt="p",
+    )
+
+    response = await engine.generate_response(request)
+    assert response.text_content == "Hello from AI"
+
+    metrics = engine.metrics()
+    assert metrics["generations"]["successful"] == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_response_raises_when_every_fallback_candidate_fails() -> None:
+    registry = ProviderRegistry()
+    registry.register(_AlwaysFailingProvider(provider_id="primary"))
+    registry.register(_AlwaysFailingProvider(provider_id="secondary"))
+    router = ModelRouter(registry=registry)
+    engine = AIOrchestrationEngine(provider_registry=registry, model_router=router)
+    kernel = InMemoryKernelBridge()
+    await engine.initialize(kernel)
+
+    request = LLMRequest(
+        request_id="r1",
+        tenant_id="t1",
+        user_id="u1",
+        conversation_id="c1",
+        prompt="p",
+    )
+
+    with pytest.raises(ProviderFallbackExhaustedError):
+        await engine.generate_response(request)
+
+    metrics = engine.metrics()
+    assert metrics["generations"]["failed"] == 1
+    assert metrics["error_breakdown"]["ProviderFallbackExhaustedError"] == 1
+
+
+@pytest.mark.asyncio
+async def test_router_llm_execution_port_falls_back_for_agent_steps() -> None:
+    """The same failover must protect agent reasoning steps, not only direct generation."""
+    registry = ProviderRegistry()
+    registry.register(_AlwaysFailingProvider(provider_id="primary"))
+    registry.register(DummyExecutingProvider(provider_id="secondary"))
+    router = ModelRouter(registry=registry)
+    port = RouterLLMExecutionPort(router=router, registry=registry)
+
+    request = LLMRequest(
+        request_id="r1",
+        tenant_id="t1",
+        user_id="u1",
+        conversation_id="c1",
+        prompt="p",
+    )
+
+    response = await port.generate_step(request)
+    assert response.text_content == "Hello from AI"
+
+
+class _WriteFailingConversationStore:
+    """Reference `IConversationStore` whose `append` always fails durably."""
+
+    async def append(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        user_content: str,
+        assistant_content: str,
+        request_id: str,
+        user_id: str,
+    ) -> ConversationTurn:
+        raise ConversationStoreError("Database connection lost.")
+
+    async def recent_turns(
+        self, tenant_id: str, conversation_id: str, limit: int, offset: int = 0
+    ) -> list[ConversationTurn]:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# §3.6 — Graceful Storage-Write Degradation (M9 Recovery Matrix row 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_response_degrades_gracefully_when_history_write_fails() -> None:
+    """M9 Attack 6: storage failure after a successful generation must return the
+    generation with a degraded flag rather than dropping the turn."""
+    engine, kernel = _make_engine()
+    engine._memory_manager = AIMemoryManager(store=_WriteFailingConversationStore())
+    await engine.initialize(kernel)
+
+    request = LLMRequest(
+        request_id="req-degraded",
+        tenant_id="tenant-alpha",
+        user_id="user-1",
+        conversation_id="conv-456",
+        prompt="Tell me a joke.",
+    )
+
+    response = await engine.generate_response(request)
+    assert response.degraded is True
+    assert response.text_content == "Hello from AI"
+
+    # The turn counts as a successful generation — the caller got an answer.
+    metrics = engine.metrics()
+    assert metrics["generations"]["successful"] == 1
+    assert metrics["generations"]["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_generate_response_emits_storage_write_failed_event_on_degradation() -> None:
+    engine, kernel = _make_engine()
+    engine._memory_manager = AIMemoryManager(store=_WriteFailingConversationStore())
+    await engine.initialize(kernel)
+
+    request = LLMRequest(
+        request_id="req-degraded-2",
+        tenant_id="tenant-alpha",
+        user_id="user-1",
+        conversation_id="conv-456",
+        prompt="Tell me a joke.",
+    )
+
+    await engine.generate_response(request)
+
+    topics = [evt[0] for evt in kernel.events_published]
+    assert "ai.storage.write_failed" in topics
+    assert "ai.generation.failed" not in topics
+    assert "ai.generation.completed" in topics
+
+
+@pytest.mark.asyncio
+async def test_generate_response_happy_path_is_never_degraded() -> None:
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    request = LLMRequest(
+        request_id="req-normal",
+        tenant_id="tenant-alpha",
+        user_id="user-1",
+        conversation_id="conv-456",
+        prompt="Tell me a joke.",
+    )
+
+    response = await engine.generate_response(request)
+    assert response.degraded is False
+
+
 # ---------------------------------------------------------------------------
 # §4 — orchestrate_agent & resume_agent
 # ---------------------------------------------------------------------------
@@ -479,12 +687,18 @@ async def test_orchestrate_agent_pause_and_resume() -> None:
     kernel = InMemoryKernelBridge()
     invoker = AIToolInvoker(registry=tools, execution_port=KernelToolExecutionPort(kernel))
 
+    # Both orchestrators share one task store, as production does: the
+    # resuming process reads the same durable store the pausing process
+    # wrote to. A resume finds no record without this and is refused.
+    shared_task_store = InMemoryAgentTaskStore()
+
     # Always deny triggers pause
     orchestrator = AgentOrchestrator(
         tool_invoker=invoker,
         llm_port=llm_port,
         context_port=ctx_port,
         approval_policy=AlwaysDenyPolicy(),
+        task_store=shared_task_store,
     )
 
     engine = AIOrchestrationEngine(agent_orchestrator=orchestrator, tool_registry=tools)
@@ -509,6 +723,7 @@ async def test_orchestrate_agent_pause_and_resume() -> None:
         llm_port=llm_port,
         context_port=ctx_port,
         approval_policy=AlwaysApprovePolicy(),
+        task_store=shared_task_store,
     )
     resuming_engine = AIOrchestrationEngine(
         agent_orchestrator=resuming_orchestrator, tool_registry=tools

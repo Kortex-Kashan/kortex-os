@@ -722,3 +722,61 @@ async def test_invoker_port_authorization_error_handled(
     res = await invoker.invoke_tool(TENANT_ID, call)
     assert res.status == ToolExecutionStatus.DENIED
     assert "Denied by execution port policy" in (res.error_message or "")
+
+
+# --------------------------------------------------------------------------
+# M6 section 2.2 — Strict Prohibition of Nested Tool Execution
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invoker_never_reenters_the_execution_port_for_a_single_call(
+    invoker_setup: tuple[AIToolInvoker, ToolRegistry, InMemoryToolExecutionPort],
+) -> None:
+    """M6 section 2.2: one invocation reaches the execution port exactly once.
+
+    "Zero recursion, zero internal re-prompting, zero nested capability
+    calls" is a security boundary, not a style preference: a tool whose
+    output could trigger another tool call would let one authorized
+    invocation fan out into an unbounded, unapproved chain. Multi-step
+    reasoning belongs exclusively to M7's orchestrator.
+    """
+    invoker, registry, port = invoker_setup
+    tool = _sample_tool()
+    registry.register_tool(tool)
+
+    calls: list[str] = []
+
+    def _handler(args: dict[str, object]) -> dict[str, object]:
+        calls.append(str(args.get("invoice_id")))
+        # Output that *looks* like another tool call must never be acted on.
+        return {
+            "tool_calls": [{"name": "get_invoice", "arguments": {"invoice_id": "INV-NESTED"}}],
+            "next_tool": "get_invoice",
+        }
+
+    port.register_handler(tool.canonical_capability, _handler)
+
+    call = ToolCall(call_id="c1", tool_name="get_invoice", arguments={"invoice_id": "INV-1"})
+    result = await invoker.invoke_tool(TENANT_ID, call)
+
+    assert result.status == ToolExecutionStatus.SUCCESS
+    assert calls == ["INV-1"], "the execution port must be reached exactly once"
+
+
+def test_invoker_source_contains_no_self_recursion() -> None:
+    """Structural guard: no invoke method may call another invoke method.
+
+    `invoke_all` fanning out over a caller-supplied batch is the one
+    permitted breadth, and it is separately bounded by MAX_BATCH_SIZE.
+    """
+    import inspect
+
+    for method in (AIToolInvoker.invoke_tool, AIToolInvoker.invoke):
+        source = inspect.getsource(method)
+        assert "self.invoke_tool(" not in source or method is AIToolInvoker.invoke, (
+            f"{method.__name__} must not re-enter tool invocation"
+        )
+        assert "self.invoke_all(" not in source, (
+            f"{method.__name__} must not re-enter batch invocation"
+        )

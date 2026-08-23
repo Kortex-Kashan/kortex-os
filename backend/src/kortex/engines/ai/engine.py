@@ -46,7 +46,11 @@ from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.events import (
     AIBaseEvent,
 )
-from kortex.engines.ai.exceptions import AIProviderTimeoutError
+from kortex.engines.ai.exceptions import (
+    AIProviderTimeoutError,
+    ConversationStoreError,
+    NoRoutableProviderError,
+)
 from kortex.engines.ai.interfaces import (
     IEngineDiagnostics,
     IKernelBridge,
@@ -65,6 +69,7 @@ from kortex.engines.ai.models import (
 )
 from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
 from kortex.engines.ai.registry import ProviderRegistry
+from kortex.engines.ai.resilience import ProviderFallbackChain, RetryPolicy
 from kortex.engines.ai.router import ModelRouter, RoutingContext
 from kortex.engines.ai.telemetry import AITelemetryEmitter
 from kortex.engines.ai.throttling import TenantConcurrencyThrottler
@@ -87,6 +92,44 @@ DEFAULT_GENERATION_TIMEOUT_SECONDS: Final[float] = 60.0
 # Production Port Adapters
 # ---------------------------------------------------------------------------
 
+# A single attempt per candidate: fallback breadth (trying the next eligible
+# provider) is this helper's own concern. Per-provider retry/backoff/circuit
+# state is owned by whatever `ResilientAIProvider` the registry already holds
+# for that provider (see bootstrap.py) — attempting more than once per
+# candidate here would double that policy for already-wrapped providers and
+# introduce unwanted retry latency for raw/unwrapped ones.
+_FALLBACK_ATTEMPT_POLICY: Final[RetryPolicy] = RetryPolicy(max_attempts=1)
+
+
+async def _generate_with_fallback(
+    router: ModelRouter,
+    registry: ProviderRegistry,
+    request: LLMRequest,
+    context: dict[str, Any],
+    telemetry: object | None = None,
+) -> LLMResponse:
+    """Enumerate every eligible provider and attempt generation with automatic failover.
+
+    Satisfies the M9 architecture spec's Systematic Failure Recovery Matrix
+    (Attack 6, row 1: "Primary LLM Unreachable/Crash... route to secondary
+    local/cloud candidate"), which `ModelRouter.select_model` alone cannot
+    provide since it returns only the single best-ranked candidate.
+
+    Shared by `RouterLLMExecutionPort.generate_step` (agent reasoning steps)
+    and `AIOrchestrationEngine.generate_response` (direct generation) so
+    fallback behavior is identical and defined in exactly one place.
+    """
+    candidates = await router.select_candidates(request, context)
+    if not candidates:
+        raise NoRoutableProviderError("No routable AI provider matched the routing constraints.")
+    providers = [registry.get(metadata.provider_id) for metadata in candidates]
+    chain = ProviderFallbackChain(
+        providers=providers,
+        retry_policy=_FALLBACK_ATTEMPT_POLICY,
+        telemetry=telemetry,
+    )
+    return await chain.generate_text(request)
+
 
 class RouterLLMExecutionPort(ILLMExecutionPort):
     """Production adapter for `ILLMExecutionPort` using `ModelRouter` and `ProviderRegistry`."""
@@ -96,17 +139,19 @@ class RouterLLMExecutionPort(ILLMExecutionPort):
         router: ModelRouter,
         registry: ProviderRegistry,
         default_routing_context: RoutingContext | None = None,
+        telemetry: object | None = None,
     ) -> None:
         self._router = router
         self._registry = registry
         self._default_context = default_routing_context or RoutingContext(allow_cloud=False)
+        self._telemetry = telemetry
 
     async def generate_step(self, request: LLMRequest) -> LLMResponse:
-        """Route to an eligible provider and execute a single reasoning step."""
+        """Route to eligible providers and execute a single reasoning step, with failover."""
         context_dict = self._default_context.model_dump()
-        provider_meta = await self._router.select_model(request, context_dict)
-        provider = self._registry.get(provider_meta.provider_id)
-        return await provider.generate_text(request)
+        return await _generate_with_fallback(
+            self._router, self._registry, request, context_dict, telemetry=self._telemetry
+        )
 
 
 class EngineAgentContextPort(IAgentContextPort):
@@ -331,6 +376,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             llm_port = RouterLLMExecutionPort(
                 router=self._model_router,
                 registry=self._provider_registry,
+                telemetry=self._telemetry,
             )
             ctx_port = EngineAgentContextPort(
                 composer=self._context_composer,
@@ -577,23 +623,44 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 # 2. Single-point Context Composition (RAG + Prompt Template)
                 enriched_request = await self._context_composer.compose(request)
 
-                # 3. Model Routing
+                # 3-4. Model Routing, Provider Resolution & Execution (with failover)
                 effective_context = routing_context or RoutingContext(allow_cloud=False)
-                provider_meta = await self._model_router.select_model(
-                    enriched_request, effective_context.model_dump()
+                response = await _generate_with_fallback(
+                    self._model_router,
+                    self._provider_registry,
+                    enriched_request,
+                    effective_context.model_dump(),
+                    telemetry=self._telemetry,
                 )
 
-                # 4. Provider Resolution & Execution
-                provider = self._provider_registry.get(provider_meta.provider_id)
-                response = await provider.generate_text(enriched_request)
+                # 5. History Recording. A failure here must not discard an
+                # already-successful generation: the M9 architecture spec's
+                # Systematic Failure Recovery Matrix requires returning the
+                # generation with a degraded flag and an emitted system
+                # alert, rather than dropping the turn.
+                try:
+                    await self._memory_manager.append_history(
+                        tenant_id=request.tenant_id,
+                        conversation_id=request.conversation_id,
+                        request=request,
+                        response=response,
+                    )
+                except ConversationStoreError as exc:
+                    self.logger.critical(
+                        "Conversation history write failed after successful generation "
+                        "for request '%s': %s",
+                        request.request_id,
+                        exc,
+                    )
+                    await self._telemetry.emit_storage_write_failed(
+                        tenant_id=request.tenant_id,
+                        conversation_id=request.conversation_id,
+                        request_id=request.request_id,
+                        error_category=type(exc).__name__,
+                        user_id=request.user_id,
+                    )
+                    return response.model_copy(update={"degraded": True})
 
-                # 5. History Recording
-                await self._memory_manager.append_history(
-                    tenant_id=request.tenant_id,
-                    conversation_id=request.conversation_id,
-                    request=request,
-                    response=response,
-                )
                 return response
 
             try:

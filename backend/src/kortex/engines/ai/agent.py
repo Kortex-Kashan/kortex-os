@@ -189,6 +189,17 @@ class AgentExecutionResult(BaseModel):
     error_message: str | None = None
     pending_tool_calls: list[ToolCall] = Field(default_factory=list)
     resume_token: ResumeToken | None = None
+    degraded: bool = False
+    """True when this terminal outcome could not be persisted durably.
+
+    The execution itself is authoritative and complete — only the durable
+    record is behind. A caller seeing `degraded=True` must assume the
+    persisted row still shows a non-terminal status, so `get_task` /
+    `list_tasks` will disagree with this result until an operator
+    reconciles it. Mirrors `LLMResponse.degraded` deliberately: the engine
+    signals a durability gap the same way everywhere rather than inventing
+    a second mechanism.
+    """
 
 
 class PersistedAgentTaskRecord(BaseModel):
@@ -861,26 +872,34 @@ class AgentOrchestrator:
             secret=self._signing_secret,
         )
 
-        # 2. Check task store if record exists
+        # 2. Claim the persisted record. A resume REQUIRES one: the atomic
+        # PAUSED_FOR_APPROVAL -> RESUMING transition below is the engine's
+        # single-use guarantee for an approval token, so a path that proceeds
+        # without it would let one approval be replayed for as long as the
+        # token remains unexpired — re-executing already-approved mutating
+        # tool calls. Failing closed also preserves the execution trace:
+        # continuing with an empty step list would silently discard every
+        # step taken before the pause.
         record = await self._task_store.get_task(task.task_id, task.tenant_id)
-        if record is not None:
-            if record.status != AgentStatus.PAUSED_FOR_APPROVAL:
-                raise AgentStateConflictError(
-                    task.task_id,
-                    f"Cannot resume task '{task.task_id}' in state '{record.status}'.",
-                )
-            claimed = await self._task_store.claim_task_for_resumption(
-                task_id=task.task_id,
-                tenant_id=task.tenant_id,
-                expected_version=record.version,
+        if record is None:
+            raise AgentNotFoundError(
+                task.task_id,
+                f"Cannot resume task '{task.task_id}': no persisted record exists. "
+                "An approval token is only valid against a stored paused task.",
             )
-            initial_steps = claimed.steps
-            step_count = claimed.current_step
-            version = claimed.version
-        else:
-            initial_steps = []
-            step_count = resume_token.step_count_at_pause
-            version = 1
+        if record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+            raise AgentStateConflictError(
+                task.task_id,
+                f"Cannot resume task '{task.task_id}' in state '{record.status}'.",
+            )
+        claimed = await self._task_store.claim_task_for_resumption(
+            task_id=task.task_id,
+            tenant_id=task.tenant_id,
+            expected_version=record.version,
+        )
+        initial_steps = claimed.steps
+        step_count = claimed.current_step
+        version = claimed.version
 
         # 3. Continue execution loop
         return await self._run_loop(
@@ -1207,10 +1226,34 @@ class AgentOrchestrator:
             created_at=datetime.datetime.now(datetime.UTC),
             updated_at=datetime.datetime.now(datetime.UTC),
         )
+        # A failed terminal write is a durability gap, never a silent one:
+        # the caller receives a terminal result while the stored row is still
+        # non-terminal, so `get_task`/`list_tasks` would report a zombie
+        # RUNNING/PAUSED task indefinitely. Surface it on the result and as a
+        # system alert instead of only a log line.
+        degraded = False
         try:
             await self._task_store.update_task(final_record)
         except Exception as exc:
-            logger.warning("Failed to persist terminal task state: %s", exc)
+            degraded = True
+            logger.critical(
+                "Failed to persist terminal state '%s' for task '%s'; the stored record "
+                "remains non-terminal and requires reconciliation: %s",
+                status,
+                task.task_id,
+                exc,
+            )
+            if self._telemetry and hasattr(self._telemetry, "emit_storage_write_failed"):
+                try:
+                    await self._telemetry.emit_storage_write_failed(
+                        tenant_id=task.tenant_id,
+                        conversation_id=task.conversation_id,
+                        request_id=task.task_id,
+                        error_category=type(exc).__name__,
+                        user_id=task.user_id,
+                    )
+                except Exception as te_exc:
+                    logger.debug("Failed to emit storage-write telemetry: %s", te_exc)
 
         return AgentExecutionResult(
             task_id=task.task_id,
@@ -1221,6 +1264,7 @@ class AgentOrchestrator:
             total_token_usage=tokens,
             execution_time_ms=(time.monotonic() - start) * 1000.0,
             error_message=error_message,
+            degraded=degraded,
         )
 
 

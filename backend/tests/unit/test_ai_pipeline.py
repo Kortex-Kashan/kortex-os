@@ -11,6 +11,7 @@ Local fakes only — no Knowledge Engine, no Kernel, no database, no network.
 from __future__ import annotations
 
 import pathlib
+import sys
 
 import pytest
 
@@ -249,6 +250,28 @@ def test_assemble_is_deterministic() -> None:
     first = pipeline.assemble(request, [f"{USER_MARKER}\nh"], [_doc("d")])
     second = pipeline.assemble(request, [f"{USER_MARKER}\nh"], [_doc("d")])
     assert first.context_documents == second.context_documents
+
+
+def test_assemble_performs_no_io() -> None:
+    """M5 invariant P3: assembly is pure and synchronous.
+
+    Purity is what makes the security-critical part — deciding what text
+    reaches the prompt — testable with no fakes and no I/O. `assemble` is a
+    plain `def`, so any await would have to happen inside a nested event
+    loop; this instead asserts the structural property directly, so adding
+    a socket, file, or subprocess call to the module fails here.
+    """
+    import inspect
+
+    source = inspect.getsource(PromptPipeline.assemble)
+
+    assert not inspect.iscoroutinefunction(PromptPipeline.assemble)
+    for io_marker in ("await ", "open(", "socket", "requests.", "subprocess", "asyncio."):
+        assert io_marker not in source, f"assemble must perform no I/O: found {io_marker!r}"
+
+    pipeline_source = inspect.getsource(sys.modules[PromptPipeline.__module__])
+    for io_import in ("import socket", "import subprocess", "import requests", "import httpx"):
+        assert io_import not in pipeline_source, f"pipeline module must not import {io_import!r}"
 
 
 # --------------------------------------------------------------------------

@@ -117,6 +117,15 @@ class LLMResponse(BaseModel):
 
     `tool_calls` mirrors `LLMRequest.tools` in being a generic mapping
     pending Milestone 5's richer tool-invocation contract.
+
+    `degraded` is `True` only for the one case where generation itself
+    succeeded but recording it durably did not (conversation-history
+    persistence failed after the model already produced a response). Per
+    the M9 architecture spec's Systematic Failure Recovery Matrix, that
+    turn must still be returned to the caller rather than discarded — an
+    `AIStorageWriteFailedEvent` is emitted separately so the durability gap
+    is observable without forcing the caller to lose an already-generated
+    answer.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -126,6 +135,7 @@ class LLMResponse(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     token_usage: dict[str, int] = Field(default_factory=dict)
     execution_time_ms: float = 0.0
+    degraded: bool = False
 
 
 class TokenUsage(BaseModel):

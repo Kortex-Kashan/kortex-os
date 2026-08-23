@@ -209,7 +209,12 @@ def test_development_profile_configuration() -> None:
 
 
 def test_production_profile_configuration() -> None:
-    """Verify production runtime profile with external cloud capability."""
+    """Verify production runtime profile with external cloud capability.
+
+    Supplies real production wiring (`data_store` + `kernel_bridge`) because
+    the production profile refuses to assemble without it — see
+    `test_production_profile_refuses_*` below.
+    """
     prod_config = AIEngineRuntimeConfig(
         environment="production",
         storage_backend="postgres",
@@ -217,12 +222,63 @@ def test_production_profile_configuration() -> None:
         max_context_tokens=16384,
     )
     bootstrap = KernelProductionBootstrap(config=prod_config)
-    engine = bootstrap.create_ai_engine()
+    engine = bootstrap.create_ai_engine(
+        kernel_bridge=DummyBridge(),  # type: ignore[arg-type]
+        data_store=object(),
+    )
 
     assert bootstrap.config.environment == "production"
     assert bootstrap.config.storage_backend == "postgres"
     assert bootstrap.config.enable_cloud_models is True
     assert bootstrap.config.max_context_tokens == 16384
+    assert engine is not None
+
+
+# ---------------------------------------------------------------------------
+# §4.5 — Production Wiring Fail-Closed Guard (M9 Attack 4)
+# ---------------------------------------------------------------------------
+
+
+def test_production_profile_refuses_to_assemble_without_data_store() -> None:
+    """M9 'Production Engine Wiring Requirement': a production engine must never
+    silently fall back to non-durable in-memory stores."""
+    bootstrap = KernelProductionBootstrap(
+        config=AIEngineRuntimeConfig(environment="production")
+    )
+    with pytest.raises(AIBootstrapError, match="data_store"):
+        bootstrap.create_ai_engine(kernel_bridge=DummyBridge())  # type: ignore[arg-type]
+
+
+def test_production_profile_refuses_to_assemble_without_kernel_bridge() -> None:
+    """Without a kernel bridge the assembler substitutes InMemoryToolExecutionPort,
+    so every tool call would bypass CapabilityDispatcher and Security Engine."""
+    bootstrap = KernelProductionBootstrap(
+        config=AIEngineRuntimeConfig(environment="production")
+    )
+    with pytest.raises(AIBootstrapError, match="kernel_bridge"):
+        bootstrap.create_ai_engine(data_store=object())
+
+
+def test_production_profile_reports_every_missing_dependency_at_once() -> None:
+    """An operator fixing production wiring should see the full list, not one at a time."""
+    bootstrap = KernelProductionBootstrap(
+        config=AIEngineRuntimeConfig(environment="production")
+    )
+    with pytest.raises(AIBootstrapError) as exc_info:
+        bootstrap.create_ai_engine()
+
+    message = str(exc_info.value)
+    assert "data_store" in message
+    assert "kernel_bridge" in message
+
+
+def test_development_profile_still_permits_in_memory_fallbacks() -> None:
+    """The guard must be production-only: development stays runnable with no
+    Kernel and no database, which is the entire point of that profile."""
+    bootstrap = KernelProductionBootstrap(
+        config=AIEngineRuntimeConfig(environment="development")
+    )
+    engine = bootstrap.create_ai_engine()
     assert engine is not None
 
 

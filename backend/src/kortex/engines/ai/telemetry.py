@@ -36,6 +36,7 @@ from kortex.engines.ai.events import (
     AIProviderTimeoutEvent,
     AISecurityDeniedEvent,
     AISecurityValidationFailedEvent,
+    AIStorageWriteFailedEvent,
     AIToolDeniedEvent,
     AIToolFailedEvent,
     AIToolInvokedEvent,
@@ -204,6 +205,34 @@ class AITelemetryEmitter:
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             execution_time_ms=latency_ms,
+            error_category=error_category,
+            user_id=user_id,
+        )
+        await self._safe_publish(event)
+
+    async def emit_storage_write_failed(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        request_id: str,
+        error_category: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Emit a storage-write-failed event for an otherwise-successful generation.
+
+        Distinct from `emit_generation_failed`: the generation itself
+        succeeded, so this is never recorded as a failed generation in
+        diagnostics — only the durability gap is signalled.
+        """
+        if self._exporter:
+            self._exporter.record_counter(
+                "ai.storage.write_failure", 1, {"tenant_id": tenant_id, "error": error_category}
+            )
+
+        event = AIStorageWriteFailedEvent(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
             error_category=error_category,
             user_id=user_id,
         )

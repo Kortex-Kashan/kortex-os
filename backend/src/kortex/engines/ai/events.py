@@ -6,6 +6,7 @@ docs/architecture/ai_engine_m9_production_runtime_spec.md
 Provides typed, frozen event payloads for all AI lifecycle events:
 - Generation: started, completed, failed
 - Provider: failure, timeout, fallback
+- Storage: write_failed
 - Agent: completed, failed, loop_detected
 - Security: denied, validation_failed
 - Tool: invoked, failed, denied
@@ -105,6 +106,29 @@ class AIProviderFallbackEvent(AIBaseEvent):
     fallback_provider_id: str
     reason: str
     tenant_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Storage Reliability Events
+# ---------------------------------------------------------------------------
+
+
+class AIStorageWriteFailedEvent(AIBaseEvent):
+    """Dispatched when conversation-history persistence fails after a
+    generation has already completed successfully.
+
+    Signals a system alert per the M9 architecture spec's Systematic Failure
+    Recovery Matrix ("Storage Engine Offline / DB Lock... return generation
+    with degraded flag and emit system alert"). Never carries prompt,
+    response, or history content — only identifiers and an error category.
+    """
+
+    event_type: Literal["ai.storage.write_failed"] = "ai.storage.write_failed"
+    request_id: str
+    tenant_id: str
+    conversation_id: str
+    error_category: str
+    user_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +240,7 @@ __all__ = [
     "AIProviderTimeoutEvent",
     "AISecurityDeniedEvent",
     "AISecurityValidationFailedEvent",
+    "AIStorageWriteFailedEvent",
     "AIToolDeniedEvent",
     "AIToolFailedEvent",
     "AIToolInvokedEvent",
