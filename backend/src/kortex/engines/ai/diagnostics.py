@@ -36,6 +36,9 @@ CANONICAL_CAPABILITIES: list[str] = [
     "kortex.ai.tool.invoke",
     "kortex.ai.provider.register",
     "kortex.ai.provider.list",
+    "kortex.ai.agent.cancel",
+    "kortex.ai.agent.status",
+    "kortex.ai.agent.list",
 ]
 
 

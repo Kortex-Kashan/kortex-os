@@ -29,6 +29,7 @@ from kortex.engines.ai.agent import (
     AlwaysDenyPolicy,
     InMemoryAgentContextPort,
     InMemoryLLMExecutionPort,
+    PersistedAgentTaskRecord,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.diagnostics import CANONICAL_CAPABILITIES, AIDiagnostics
@@ -274,7 +275,7 @@ async def test_kernel_capability_registration() -> None:
     engine, kernel = _make_engine()
     await engine.initialize(kernel)
 
-    assert len(kernel.capabilities) == 6
+    assert len(kernel.capabilities) == 9
     for cap_name in CANONICAL_CAPABILITIES:
         assert cap_name in kernel.capabilities
         assert kernel.capabilities[cap_name]["provider"] == "ai"
@@ -287,6 +288,9 @@ async def test_kernel_capability_registration() -> None:
     assert kernel.capabilities["kortex.ai.tool.invoke"]["required_permissions"] == ["ai:execute"]
     assert kernel.capabilities["kortex.ai.provider.register"]["required_permissions"] == ["ai:manage"]
     assert kernel.capabilities["kortex.ai.provider.list"]["required_permissions"] == ["ai:read"]
+    assert kernel.capabilities["kortex.ai.agent.cancel"]["required_permissions"] == ["ai:orchestrate"]
+    assert kernel.capabilities["kortex.ai.agent.status"]["required_permissions"] == ["ai:read"]
+    assert kernel.capabilities["kortex.ai.agent.list"]["required_permissions"] == ["ai:read"]
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +521,143 @@ async def test_orchestrate_agent_pause_and_resume() -> None:
         approved_tool_calls=paused_result.pending_tool_calls,
     )
     assert resumed_result.status == AgentStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# §4.5 — Agent Task Lifecycle Control & Observability (M13 Kernel Exposure)
+# ---------------------------------------------------------------------------
+
+
+def _make_task_record(
+    task_id: str, tenant_id: str, status: AgentStatus
+) -> PersistedAgentTaskRecord:
+    task = AgentTask(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        user_id="user-1",
+        conversation_id="conv-1",
+        goal="M13 lifecycle test",
+    )
+    return PersistedAgentTaskRecord(task=task, status=status, current_step=1)
+
+
+@pytest.mark.asyncio
+async def test_agent_lifecycle_capabilities_are_registered_and_reachable() -> None:
+    """Handlers registered for cancel/status/list must be the real facade methods,
+    invocable exactly as the Kernel dispatcher invokes them: `handler(**parameters)`.
+    """
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    record = _make_task_record("task-1", "tenant-1", AgentStatus.RUNNING)
+    await engine._agent_orchestrator._task_store.save_task(record)
+
+    status_handler = kernel.capabilities["kortex.ai.agent.status"]["handler"]
+    fetched = await status_handler(task_id="task-1", tenant_id="tenant-1")
+    assert fetched is not None
+    assert fetched.task.task_id == "task-1"
+
+    list_handler = kernel.capabilities["kortex.ai.agent.list"]["handler"]
+    listed = await list_handler(tenant_id="tenant-1")
+    assert [r.task.task_id for r in listed] == ["task-1"]
+
+    cancel_handler = kernel.capabilities["kortex.ai.agent.cancel"]["handler"]
+    cancelled = await cancel_handler(task_id="task-1", tenant_id="tenant-1")
+    assert cancelled is True
+
+    refetched = await status_handler(task_id="task-1", tenant_id="tenant-1")
+    assert refetched is not None
+    assert refetched.status == AgentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_agent_task_list_enforces_strict_tenant_isolation() -> None:
+    """Adversarial: a tenant must never observe another tenant's tasks through
+    the list capability, regardless of how many tasks the other tenant has."""
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-a1", "tenant-a", AgentStatus.RUNNING)
+    )
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-a2", "tenant-a", AgentStatus.COMPLETED)
+    )
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-b1", "tenant-b", AgentStatus.RUNNING)
+    )
+
+    tenant_a_tasks = await engine.list_agent_tasks("tenant-a")
+    assert {r.task.task_id for r in tenant_a_tasks} == {"task-a1", "task-a2"}
+
+    tenant_b_tasks = await engine.list_agent_tasks("tenant-b")
+    assert {r.task.task_id for r in tenant_b_tasks} == {"task-b1"}
+
+
+@pytest.mark.asyncio
+async def test_agent_task_cancel_cannot_reach_another_tenants_task() -> None:
+    """Adversarial: cancelling by task_id under the wrong tenant_id must fail
+    rather than cancelling (or even revealing the existence of) the real task."""
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-victim", "tenant-owner", AgentStatus.RUNNING)
+    )
+
+    cancelled = await engine.cancel_agent_task("task-victim", "tenant-attacker")
+    assert cancelled is False
+
+    still_running = await engine.get_agent_task("task-victim", "tenant-owner")
+    assert still_running is not None
+    assert still_running.status == AgentStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_agent_task_list_filters_by_status() -> None:
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-running", "tenant-1", AgentStatus.RUNNING)
+    )
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-cancelled", "tenant-1", AgentStatus.CANCELLED)
+    )
+
+    running_only = await engine.list_agent_tasks("tenant-1", status=AgentStatus.RUNNING)
+    assert [r.task.task_id for r in running_only] == ["task-running"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_list_accepts_raw_string_status_from_capability_boundary() -> None:
+    """A Kernel capability caller can only ever supply a JSON-shaped string, never
+    an `AgentStatus` enum member — this must behave identically to passing the enum."""
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-running", "tenant-1", AgentStatus.RUNNING)
+    )
+    await engine._agent_orchestrator._task_store.save_task(
+        _make_task_record("task-cancelled", "tenant-1", AgentStatus.CANCELLED)
+    )
+
+    list_handler = kernel.capabilities["kortex.ai.agent.list"]["handler"]
+    result = await list_handler(tenant_id="tenant-1", status="CANCELLED")
+    assert [r.task.task_id for r in result] == ["task-cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_list_rejects_invalid_status_string() -> None:
+    """An unrecognized status string must fail loudly and early, never reach the
+    store (where the two backends would otherwise fail differently — see
+    `list_agent_tasks`'s docstring)."""
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    with pytest.raises(ValueError):
+        await engine.list_agent_tasks("tenant-1", status="NOT_A_REAL_STATUS")
 
 
 # ---------------------------------------------------------------------------

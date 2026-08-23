@@ -902,6 +902,12 @@ class AgentOrchestrator:
         """Retrieve a persisted task record from storage."""
         return await self._task_store.get_task(task_id, tenant_id)
 
+    async def list_tasks(
+        self, tenant_id: str, status: AgentStatus | None = None, limit: int = 50
+    ) -> list[PersistedAgentTaskRecord]:
+        """List persisted task records for a tenant, optionally filtered by status."""
+        return await self._task_store.list_tasks(tenant_id, status, limit)
+
     async def _run_loop(
         self,
         task: AgentTask,

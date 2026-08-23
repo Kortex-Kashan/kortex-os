@@ -32,6 +32,7 @@ from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.ai.agent import (
     AgentExecutionResult,
     AgentOrchestrator,
+    AgentStatus,
     AgentStep,
     AgentTask,
     IAgentContextPort,
@@ -470,6 +471,30 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
+            kernel.register_capability(
+                name="kortex.ai.agent.cancel",
+                description="Cancel an active or paused agent reasoning task",
+                provider=self.name,
+                handler=self.cancel_agent_task,
+                required_permissions=["ai:orchestrate"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.agent.status",
+                description="Retrieve the persisted status of an agent reasoning task",
+                provider=self.name,
+                handler=self.get_agent_task,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.agent.list",
+                description="List agent reasoning tasks for a tenant, optionally filtered by status",
+                provider=self.name,
+                handler=self.list_agent_tasks,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
 
             self._set_state(EngineState.READY)
             self.logger.info("AI Orchestration Engine initialized successfully.")
@@ -714,6 +739,26 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     ) -> PersistedAgentTaskRecord | None:
         """Retrieve a persisted agent task record by identity."""
         return await self._agent_orchestrator.get_task(task_id, tenant_id)
+
+    async def list_agent_tasks(
+        self,
+        tenant_id: str,
+        status: AgentStatus | str | None = None,
+        limit: int = 50,
+    ) -> list[PersistedAgentTaskRecord]:
+        """List persisted agent task records for a tenant, optionally filtered by status.
+
+        `status` accepts a raw string in addition to `AgentStatus` so this
+        method is safe to invoke as a Kernel capability handler, where
+        parameters cross a JSON-shaped boundary and arrive as plain `str`.
+        An unrecognized value raises `ValueError` (from `AgentStatus`
+        itself) rather than reaching the store, where a raw string would
+        otherwise fail differently on each backend: the in-memory store's
+        `StrEnum` equality would silently "work" while the SQL-backed
+        store's `status.value` access would raise `AttributeError`.
+        """
+        normalized_status = AgentStatus(status) if isinstance(status, str) else status
+        return await self._agent_orchestrator.list_tasks(tenant_id, normalized_status, limit)
 
     async def invoke_tool(
         self,

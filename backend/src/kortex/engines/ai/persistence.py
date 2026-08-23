@@ -422,7 +422,7 @@ class StorageAgentTaskStore(IAgentTaskStore):
             return cast(CursorResult[Any], res).rowcount > 0
 
         try:
-            return await self._data_store.execute_in_transaction(_action)
+            return bool(await self._data_store.execute_in_transaction(_action))
         except Exception as exc:
             raise AgentTaskStoreError(f"Failed to cancel agent task: {type(exc).__name__}") from exc
 
