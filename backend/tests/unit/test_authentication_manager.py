@@ -56,11 +56,11 @@ _PRINCIPAL_TYPES_AND_FIELDS = [
 
 
 def _tenant_a(tmp_path: Path) -> str:
-    return f"tenant-a-{tmp_path.name}"
+    return f"tenant-a-{tmp_path.name}-{uuid.uuid4().hex[:8]}"
 
 
 def _tenant_b(tmp_path: Path) -> str:
-    return f"tenant-b-{tmp_path.name}"
+    return f"tenant-b-{tmp_path.name}-{uuid.uuid4().hex[:8]}"
 
 
 async def _make_manager(

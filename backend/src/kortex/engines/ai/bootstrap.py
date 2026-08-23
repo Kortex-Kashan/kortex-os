@@ -14,8 +14,8 @@ Implements:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 from kortex.engines.ai.agent import AgentOrchestrator
@@ -72,6 +72,7 @@ class AIEngineRuntimeConfig:
     default_provider: str | None = None
     enable_cloud_models: bool = False
     max_context_tokens: int = 8192
+    default_generation_timeout_seconds: float = 60.0
     retry_max_attempts: int = 3
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_recovery_timeout: float = 30.0
@@ -106,7 +107,7 @@ class KernelProductionBootstrap:
     def create_ai_engine(
         self,
         kernel_bridge: IKernelBridge | None = None,
-        data_store: Any | None = None,
+        data_store: Any | None = None,  # noqa: ANN401
         custom_providers: list[BaseAIProvider] | None = None,
         registered_engines: set[str] | list[str] | None = None,
         exporter: ITelemetryExporter | None = None,
@@ -149,10 +150,11 @@ class KernelProductionBootstrap:
         memory_manager = AIMemoryManager(store=conversation_store)
 
         # 3. Context Pipeline & Composer
-        pipeline = PromptPipeline()
+        pipeline = PromptPipeline(max_context_tokens=self._config.max_context_tokens)
         context_composer = ContextComposer(
             memory=memory_manager,
             pipeline=pipeline,
+            max_context_tokens=self._config.max_context_tokens,
         )
 
         # 4. Diagnostics & Telemetry
@@ -233,6 +235,7 @@ class KernelProductionBootstrap:
             agent_orchestrator=agent_orchestrator,
             diagnostics=diagnostics,
             telemetry=telemetry,
+            default_generation_timeout_seconds=self._config.default_generation_timeout_seconds,
         )
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")

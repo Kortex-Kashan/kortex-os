@@ -32,9 +32,11 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+import hmac
 import json
 import logging
 import re
+import secrets
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -143,6 +145,7 @@ class ResumeToken(BaseModel):
     pending_call_hash: str  # SHA-256 hex digest of canonical serialized pending calls
     issued_at: str  # ISO-8601 UTC
     expires_at: str  # ISO-8601 UTC (issued_at + RESUME_TOKEN_TTL_SECONDS)
+    signature: str = ""  # Cryptographic HMAC-SHA256 signature for tamper-resistance
 
 
 class AgentStep(BaseModel):
@@ -451,6 +454,22 @@ def _hash_tool_calls(calls: list[ToolCall]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_DEFAULT_SIGNING_SECRET: bytes = secrets.token_bytes(32)
+
+
+def _compute_resume_token_signature(
+    task_id: str,
+    step_count: int,
+    pending_call_hash: str,
+    issued_at: str,
+    expires_at: str,
+    secret: bytes,
+) -> str:
+    """Compute deterministic HMAC-SHA256 signature across canonical token payload."""
+    canonical = f"{task_id}:{step_count}:{pending_call_hash}:{issued_at}:{expires_at}"
+    return hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def _now_utc() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
@@ -459,16 +478,30 @@ def _issue_resume_token(
     task_id: str,
     step_count: int,
     pending_calls: list[ToolCall],
+    secret: bytes | None = None,
 ) -> ResumeToken:
     """Issue a cryptographically-bound ResumeToken for the current pause state."""
     now = _now_utc()
     expires = now + datetime.timedelta(seconds=RESUME_TOKEN_TTL_SECONDS)
+    sec = secret if secret is not None else _DEFAULT_SIGNING_SECRET
+    pending_hash = _hash_tool_calls(pending_calls)
+    issued_str = now.isoformat()
+    expires_str = expires.isoformat()
+    sig = _compute_resume_token_signature(
+        task_id=task_id,
+        step_count=step_count,
+        pending_call_hash=pending_hash,
+        issued_at=issued_str,
+        expires_at=expires_str,
+        secret=sec,
+    )
     return ResumeToken(
         task_id=task_id,
         step_count_at_pause=step_count,
-        pending_call_hash=_hash_tool_calls(pending_calls),
-        issued_at=now.isoformat(),
-        expires_at=expires.isoformat(),
+        pending_call_hash=pending_hash,
+        issued_at=issued_str,
+        expires_at=expires_str,
+        signature=sig,
     )
 
 
@@ -477,12 +510,14 @@ def _verify_resume_token(
     task: AgentTask,
     step_count: int,
     approved_calls: list[ToolCall],
+    secret: bytes | None = None,
 ) -> None:
     """Verify a ResumeToken unconditionally before allowing resume_task() to proceed.
 
     Raises:
         AgentValidationError: Token is expired, mismatched by task_id,
-                              mismatched by step_count, or mismatched by call hash.
+                              mismatched by step_count, mismatched by call hash,
+                              or has an invalid/forged signature.
     """
     now = _now_utc()
     try:
@@ -513,6 +548,21 @@ def _verify_resume_token(
         raise AgentValidationError(
             task_id=task.task_id,
             message="ResumeToken pending_call_hash does not match approved_tool_calls.",
+        )
+
+    sec = secret if secret is not None else _DEFAULT_SIGNING_SECRET
+    expected_sig = _compute_resume_token_signature(
+        task_id=token.task_id,
+        step_count=token.step_count_at_pause,
+        pending_call_hash=token.pending_call_hash,
+        issued_at=token.issued_at,
+        expires_at=token.expires_at,
+        secret=sec,
+    )
+    if not token.signature or not hmac.compare_digest(token.signature, expected_sig):
+        raise AgentValidationError(
+            task_id=task.task_id,
+            message="ResumeToken signature is invalid, tampered, or forged.",
         )
 
 
@@ -567,6 +617,7 @@ class AgentOrchestrator:
         approval_policy: IApprovalPolicy,
         output_parser: LLMOutputParser | None = None,
         telemetry: object | None = None,
+        signing_secret: bytes | None = None,
     ) -> None:
         """Args:
         tool_invoker: M6 AIToolInvoker for tool schema validation and execution.
@@ -575,6 +626,7 @@ class AgentOrchestrator:
         approval_policy: Injected policy; decides whether approval is required.
         output_parser: Parser for LLM output; defaults to LLMOutputParser().
         telemetry: Optional Tier 2 telemetry emitter for agent events.
+        signing_secret: Optional platform secret key used to HMAC-authenticate ResumeTokens.
         """
         self._tool_invoker = tool_invoker
         self._llm_port = llm_port
@@ -582,6 +634,7 @@ class AgentOrchestrator:
         self._approval_policy = approval_policy
         self._parser = output_parser if output_parser is not None else LLMOutputParser()
         self._telemetry = telemetry
+        self._signing_secret = signing_secret or _DEFAULT_SIGNING_SECRET
 
     async def run_task(
         self,
@@ -644,6 +697,7 @@ class AgentOrchestrator:
             task=task,
             step_count=resume_token.step_count_at_pause,
             approved_calls=approved_tool_calls,
+            secret=self._signing_secret,
         )
         # Execute the approved calls as the first action of the resumed loop.
         return await self._run_loop(
@@ -821,6 +875,7 @@ class AgentOrchestrator:
                     task_id=task.task_id,
                     step_count=step_count,
                     pending_calls=tool_calls,
+                    secret=self._signing_secret,
                 )
                 return AgentExecutionResult(
                     task_id=task.task_id,

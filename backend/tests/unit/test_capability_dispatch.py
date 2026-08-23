@@ -40,7 +40,7 @@ _TEST_ROLE = "dispatch-test-role"
 
 
 def _tenant(tmp_path: Path, suffix: str = "") -> str:
-    return f"tenant-dispatch-{tmp_path.name}{suffix}"
+    return f"tenant-dispatch-{tmp_path.name}{suffix}-{uuid.uuid4().hex[:8]}"
 
 
 def _build_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine]:
@@ -94,7 +94,15 @@ async def _seed_principal(
 
 async def _grant_role_permission(data_store: Any, role: str, permission: str) -> None:
     async def _action(session: AsyncSession) -> None:
-        session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=role, permission=permission))
+        from sqlalchemy import select
+        existing = await session.scalar(
+            select(RolePermissionRecord).where(
+                RolePermissionRecord.role == role,
+                RolePermissionRecord.permission == permission,
+            )
+        )
+        if existing is None:
+            session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=role, permission=permission))
 
     await data_store.execute_in_transaction(_action)
 

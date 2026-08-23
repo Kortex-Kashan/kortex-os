@@ -14,8 +14,8 @@ Provides typed, frozen event payloads for all AI lifecycle events:
 from __future__ import annotations
 
 import datetime
-from typing import Literal
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,7 +28,7 @@ class AIBaseEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex}")
     event_type: str
     timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
     )
 
 
@@ -211,8 +211,8 @@ __all__ = [
     "AIGenerationCompletedEvent",
     "AIGenerationFailedEvent",
     "AIGenerationStartedEvent",
-    "AIProviderFallbackEvent",
     "AIProviderFailureEvent",
+    "AIProviderFallbackEvent",
     "AIProviderTimeoutEvent",
     "AISecurityDeniedEvent",
     "AISecurityValidationFailedEvent",

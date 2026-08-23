@@ -139,7 +139,7 @@ def test_agent_task_metrics() -> None:
     assert agent["total"] == 3
     assert agent["completed"] == 1
     assert agent["loop_detected"] == 1
-    assert agent["failed"] == 2
+    assert agent["failed"] == 1
     assert agent["total_steps"] == 9
     assert metrics["error_breakdown"]["OrchestrationError"] == 1
 

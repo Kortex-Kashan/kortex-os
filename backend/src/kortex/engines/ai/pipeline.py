@@ -15,6 +15,8 @@ never makes an authority decision.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from kortex.engines.ai.exceptions import ContextCompositionError, KnowledgeRetrievalError
 from kortex.engines.ai.memory import (
     ASSISTANT_MARKER,
@@ -52,26 +54,17 @@ RESERVED_CONTEXT_MARKERS: dict[str, str] = {
     KNOWLEDGE_MARKER: "M5",
     TOOL_MARKER: "M6 (reserved)",
 }
-"""The single registry of context markers and their owning milestone.
 
-Imports M4's markers rather than restating them, so the two can never
-drift. Two properties make this load-bearing rather than documentation:
 
-1. **Every marker begins with `MARKER_SENTINEL`.** Sanitization neutralizes
-   exactly that prefix, so a future marker using a different delimiter
-   (say ``<<tool>>``) would silently fall outside the anti-forgery
-   guarantee. A test asserts this for every entry, including the reserved
-   one.
-2. **There is no `[[system]]` marker, and there must never be one.** The
-   trusted layer is carried solely by `LLMRequest.system_instruction`, a
-   separate field, so no in-band token exists for untrusted content to
-   forge. Adding a system marker would manufacture the very forgery target
-   the design avoids.
-"""
+def estimate_tokens(text: str) -> int:
+    """Deterministic token estimation heuristic (~4 characters per token, minimum 1 for non-empty strings)."""
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
 
 
 class PromptPipeline:
-    """Assembles context into a new `LLMRequest`. Pure and synchronous.
+    """Assembles context into a new `LLMRequest` with optional context token budgeting. Pure and synchronous.
 
     Trust model:
 
@@ -81,51 +74,101 @@ class PromptPipeline:
       rewritten.
     - Everything placed into `context_documents` is untrusted and is
       sanitized, **with no exemptions** — including the caller's own
-      entries. A guarantee with an exemption is not a guarantee: a caller
-      entry containing ``[[assistant]]`` would otherwise forge a role
-      boundary.
-    - History entries are the one thing *not* sanitized here, because they
-      arrive already sanitized and already marked from
-      `AIMemoryManager.get_context()`. Re-running sanitization over
-      ``[[user]]\\ntext`` would rewrite the marker itself into
-      ``[ [user]]`` and destroy it.
+      entries.
+    - History entries arrive already sanitized and marked from
+      `AIMemoryManager.get_context()`.
+    - When `max_context_tokens` is configured, a deterministic sliding-window
+      policy prioritizes recent conversation history and bounded knowledge docs
+      while ensuring the combined prompt never exceeds budget.
     """
+
+    def __init__(
+        self,
+        max_context_tokens: int | None = None,
+        token_estimator: Callable[[str], int] | None = None,
+    ) -> None:
+        self._max_context_tokens = max_context_tokens
+        self._token_estimator = token_estimator or estimate_tokens
+
+    @property
+    def max_context_tokens(self) -> int | None:
+        """Configured upper bound on total context tokens."""
+        return self._max_context_tokens
 
     def assemble(
         self,
         request: LLMRequest,
         history_entries: list[str],
         documents: list[RetrievedDocument],
+        max_context_tokens: int | None = None,
     ) -> LLMRequest:
         """Return a new request with context assembled into `context_documents`.
 
-        Order is caller entries, then knowledge, then history. History sits
-        adjacent to the current prompt for conversational recency;
-        knowledge is background framing; the caller's own entries lead
-        because they are the application's explicit framing and should not
-        be displaced. This ordering is tunable policy, not a correctness
-        invariant.
+        Order is caller entries, then knowledge, then history.
 
-        The input request is never mutated — `LLMRequest` is frozen and a
-        copy is returned.
+        When a token budget is active (via parameter or constructor default):
+        1. System instruction + current prompt tokens are reserved as highest priority.
+        2. Caller context documents are included up to available capacity.
+        3. Knowledge documents are included up to available capacity.
+        4. History entries use a sliding window: most recent turns are prioritized first.
         """
         caller_entries = [sanitize_context_content(entry) for entry in request.context_documents]
         knowledge_entries = [
             f"{KNOWLEDGE_MARKER}\n{sanitize_context_content(document.content)}"
             for document in documents
         ]
-        # History is inserted verbatim: already sanitized and marked by M4.
-        assembled = [*caller_entries, *knowledge_entries, *history_entries]
+        history = list(history_entries)
+
+        budget = max_context_tokens if max_context_tokens is not None else self._max_context_tokens
+        if budget is None:
+            assembled = [*caller_entries, *knowledge_entries, *history]
+            return request.model_copy(update={"context_documents": assembled})
+
+        base_tokens = self._token_estimator(request.prompt) + self._token_estimator(
+            request.system_instruction or ""
+        )
+        remaining_budget = max(0, budget - base_tokens)
+
+        # 1. Caller entries (application explicit framing)
+        selected_caller: list[str] = []
+        for entry in caller_entries:
+            cost = self._token_estimator(entry)
+            if cost <= remaining_budget:
+                selected_caller.append(entry)
+                remaining_budget -= cost
+            else:
+                break
+
+        # 2. Knowledge entries (background framing)
+        selected_knowledge: list[str] = []
+        for entry in knowledge_entries:
+            cost = self._token_estimator(entry)
+            if cost <= remaining_budget:
+                selected_knowledge.append(entry)
+                remaining_budget -= cost
+            else:
+                break
+
+        # 3. History entries (sliding window: newest turns preserved first)
+        selected_history_reversed: list[str] = []
+        for entry in reversed(history):
+            cost = self._token_estimator(entry)
+            if cost <= remaining_budget:
+                selected_history_reversed.append(entry)
+                remaining_budget -= cost
+            else:
+                break
+        selected_history = list(reversed(selected_history_reversed))
+
+        assembled = [*selected_caller, *selected_knowledge, *selected_history]
         return request.model_copy(update={"context_documents": assembled})
 
 
 class ContextComposer:
-    """Fetches history and knowledge, then assembles them into a request.
+    """Fetches history and knowledge, then assembles them into a request with token budget enforcement.
 
     Stateless apart from its injected collaborators and configuration, so
-    it is safe to construct per request — which Milestone 8 must do, since
-    the knowledge adapter has to be bound to the requesting principal's
-    authority rather than a long-lived service principal.
+    it is safe to construct per request.
     """
 
     def __init__(
@@ -135,21 +178,22 @@ class ContextComposer:
         knowledge: IKnowledgeQueryPort | None = None,
         max_documents: int = 5,
         allowed_classifications: frozenset[str] = DEFAULT_ALLOWED_CLASSIFICATIONS,
+        max_context_tokens: int | None = None,
     ) -> None:
         """Args:
         memory: Supplies conversation history via its public rendered form.
         pipeline: The pure assembler.
-        knowledge: Optional. When absent, requesting retrieval is an error
-            rather than a silent no-op — see `compose`.
+        knowledge: Optional. When absent, requesting retrieval is an error.
         max_documents: Bound on retrieved documents, clamped to [1, 50].
-        allowed_classifications: Fail-closed allowlist, normalized once here
-            so a lowercase allowlist behaves the same as an uppercase one.
+        allowed_classifications: Fail-closed allowlist, normalized once here.
+        max_context_tokens: Optional token budget bound enforced during prompt assembly.
         """
         self._memory = memory
         self._pipeline = pipeline
         self._knowledge = knowledge
         self._max_documents = max(1, min(max_documents, 50))
         self._allowed_classifications = normalize_allowed_classifications(allowed_classifications)
+        self._max_context_tokens = max_context_tokens
 
     @property
     def max_documents(self) -> int:
@@ -161,29 +205,15 @@ class ContextComposer:
         """Effective (normalized) classification allowlist."""
         return self._allowed_classifications
 
+    @property
+    def max_context_tokens(self) -> int | None:
+        """Configured maximum context token limit."""
+        return self._max_context_tokens
+
     async def compose(
         self, request: LLMRequest, *, knowledge_query: str | None = None
     ) -> LLMRequest:
-        """Compose a context-enriched request.
-
-        Retrieval is opt-in: without `knowledge_query` the port is never
-        called. This is deliberate — Knowledge Engine's search is a
-        substring match over a full tenant-corpus scan with no caching, so
-        retrieving on every request would be expensive and would usually
-        match nothing.
-
-        Raises:
-            MemoryValidationError: `request.tenant_id`/`conversation_id` is
-                blank or whitespace-only. Checked before anything else —
-                an unvalidated identifier must never cross the knowledge
-                port, not only the memory store's own boundary.
-            ContextCompositionError: Retrieval was requested but no port is
-                configured. Failing here prevents the failure mode where an
-                unwired port silently returns nothing and the capability
-                merely appears to work.
-            KnowledgeRetrievalError: Retrieval was requested and failed, or
-                the adapter returned more documents than it was asked for.
-        """
+        """Compose a context-enriched request with token budget enforcement."""
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
 
@@ -194,7 +224,12 @@ class ContextComposer:
         history_entries = await self._memory.get_context(
             request.tenant_id, request.conversation_id
         )
-        return self._pipeline.assemble(request, history_entries, documents)
+        return self._pipeline.assemble(
+            request=request,
+            history_entries=history_entries,
+            documents=documents,
+            max_context_tokens=self._max_context_tokens,
+        )
 
     async def _retrieve(self, tenant_id: str, query_text: str) -> list[RetrievedDocument]:
         """Retrieve, verify the port honoured its bound, then filter."""
@@ -267,4 +302,5 @@ __all__ = [
     "TOOL_MARKER",
     "ContextComposer",
     "PromptPipeline",
+    "estimate_tokens",
 ]

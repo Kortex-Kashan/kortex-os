@@ -57,7 +57,7 @@ _CLASSIFICATION_ORDER = [
 
 
 def _role(tmp_path: Path, suffix: str) -> str:
-    return f"role-{tmp_path.name}-{suffix}"
+    return f"role-{tmp_path.name}-{suffix}-{uuid.uuid4().hex[:8]}"
 
 
 async def _make_authorization_engine(tmp_path: Path) -> tuple[Kernel, StorageEngine, AuthorizationEngine]:

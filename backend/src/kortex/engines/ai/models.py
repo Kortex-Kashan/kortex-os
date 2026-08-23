@@ -62,7 +62,7 @@ class AIProviderMetadata(BaseModel):
     supported_models: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _validate_credential_consistency(self) -> "AIProviderMetadata":
+    def _validate_credential_consistency(self) -> AIProviderMetadata:
         """Enforce that any provider requiring credentials references a secret handle.
 
         This does not resolve or validate the handle itself (that is Security

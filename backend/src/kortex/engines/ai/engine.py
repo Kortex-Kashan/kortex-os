@@ -20,11 +20,12 @@ Invariants:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Final
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.ai.agent import (
@@ -42,6 +43,7 @@ from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.events import (
     AIBaseEvent,
 )
+from kortex.engines.ai.exceptions import AIProviderTimeoutError
 from kortex.engines.ai.interfaces import (
     IEngineDiagnostics,
     IKernelBridge,
@@ -71,6 +73,8 @@ from kortex.engines.ai.tools import (
 )
 
 logger = logging.getLogger("kortex.engines.ai")
+
+DEFAULT_GENERATION_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +230,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         agent_orchestrator: AgentOrchestrator | None = None,
         diagnostics: AIDiagnostics | None = None,
         telemetry: AITelemetryEmitter | None = None,
+        default_generation_timeout_seconds: float = DEFAULT_GENERATION_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
 
         If components are omitted, sensible default subsystem instances are created.
         """
         super().__init__()
+        self._default_generation_timeout_seconds = default_generation_timeout_seconds
         self._provider_registry = (
             provider_registry if provider_registry is not None else ProviderRegistry()
         )
@@ -467,8 +473,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         self,
         request: LLMRequest,
         routing_context: RoutingContext | None = None,
+        timeout_seconds: float | None = None,
     ) -> LLMResponse:
-        """Generate an AI text response with context composition, routing, and history tracking."""
+        """Generate an AI text response with context composition, routing, history tracking, and global timeout."""
+        effective_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._default_generation_timeout_seconds
+        )
         start_time = time.perf_counter()
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
@@ -481,7 +493,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             request_id=request.request_id,
         )
 
-        try:
+        async def _execute_generation() -> LLMResponse:
             # 2. Single-point Context Composition (RAG + Prompt Template)
             enriched_request = await self._context_composer.compose(request)
 
@@ -502,6 +514,16 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 request=request,
                 response=response,
             )
+            return response
+
+        try:
+            if effective_timeout is not None and effective_timeout > 0:
+                response = await asyncio.wait_for(
+                    _execute_generation(),
+                    timeout=effective_timeout,
+                )
+            else:
+                response = await _execute_generation()
 
             # 6. Record Diagnostics & Emit completion event
             latency_ms = (time.perf_counter() - start_time) * 1000.0
@@ -515,6 +537,22 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
 
             return response
+
+        except TimeoutError as exc:
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            timeout_err = AIProviderTimeoutError(
+                f"Global AI generation timeout exceeded ({effective_timeout}s)."
+            )
+            await self._telemetry.emit_generation_failed(
+                tenant_id=request.tenant_id,
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                request_id=request.request_id,
+                latency_ms=latency_ms,
+                error_category="AIProviderTimeoutError",
+            )
+            self.logger.warning("AI generation timed out after %.2fs", effective_timeout)
+            raise timeout_err from exc
 
         except Exception as exc:
             latency_ms = (time.perf_counter() - start_time) * 1000.0

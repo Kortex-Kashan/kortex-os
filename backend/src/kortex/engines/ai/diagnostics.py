@@ -229,13 +229,10 @@ class AIDiagnostics(IEngineDiagnostics):
                     self._paused_agent_tasks += 1
                 elif status == "TIMED_OUT":
                     self._timed_out_agent_tasks += 1
-                    self._agent_failed_total += 1
                 elif status == "LOOP_DETECTED":
                     self._loop_detected_agent_tasks += 1
-                    self._agent_failed_total += 1
                 elif status == "STEP_LIMIT_EXCEEDED":
                     self._step_limit_exceeded_tasks += 1
-                    self._agent_failed_total += 1
                 else:
                     self._agent_failed_total += 1
 

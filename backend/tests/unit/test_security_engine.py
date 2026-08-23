@@ -116,8 +116,16 @@ async def _grant_role_permission(storage_engine: StorageEngine, role: str, permi
     provisioning capability either."""
 
     async def _action(session: AsyncSession) -> None:
-        session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=role, permission=permission))
-        await session.flush()
+        from sqlalchemy import select
+        existing = await session.scalar(
+            select(RolePermissionRecord).where(
+                RolePermissionRecord.role == role,
+                RolePermissionRecord.permission == permission,
+            )
+        )
+        if existing is None:
+            session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=role, permission=permission))
+            await session.flush()
 
     await storage_engine.data.execute_in_transaction(_action)
 
@@ -297,7 +305,7 @@ async def test_secret_get_capability_fails_closed_for_missing_secret(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_auth_authenticate_capability_round_trip(tmp_path: Path) -> None:
-    tenant_id = f"tenant-{tmp_path.name}"
+    tenant_id = f"tenant-{tmp_path.name}-{uuid.uuid4().hex[:8]}"
     kernel, storage_engine, security_engine = await _boot_kernel_with_security(tmp_path)
     assert security_engine._authentication_manager is not None  # constructed during initialize()
 
@@ -314,7 +322,7 @@ async def test_auth_authenticate_capability_round_trip(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_auth_authenticate_capability_fails_closed_for_wrong_credential(tmp_path: Path) -> None:
-    tenant_id = f"tenant-{tmp_path.name}"
+    tenant_id = f"tenant-{tmp_path.name}-{uuid.uuid4().hex[:8]}"
     kernel, storage_engine, _security = await _boot_kernel_with_security(tmp_path)
     await _seed_principal(storage_engine, tenant_id, "principal-1", "correct-secret")
     raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.auth.authenticate")
@@ -330,7 +338,7 @@ async def test_auth_authenticate_capability_fails_closed_for_wrong_credential(tm
 
 @pytest.mark.asyncio
 async def test_access_authorize_capability_allows_when_role_grants_permission(tmp_path: Path) -> None:
-    role = f"role-{tmp_path.name}"
+    role = f"role-{tmp_path.name}-{uuid.uuid4().hex[:8]}"
     kernel, storage_engine, security_engine = await _boot_kernel_with_security(tmp_path)
     assert security_engine._authorization_engine is not None  # constructed during initialize()
     await _grant_role_permission(storage_engine, role, "document.write")

@@ -1426,7 +1426,10 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
         def_id = workflow_engine.register_definition(wf_def)
         instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
         # Find background task executing workflow instance steps
-        await asyncio.sleep(0.05)
+        for _ in range(100):
+            if created_streams:
+                break
+            await asyncio.sleep(0.02)
         # Cancel active workflow tasks
         for task in asyncio.all_tasks():
             if "_run_instance_steps" in repr(task):
