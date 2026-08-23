@@ -18,12 +18,16 @@ work happens inside `IDataStore.execute_in_transaction`.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import logging
+import random
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import TypeVar, cast
+from typing import Final, TypeVar, cast
 
 from sqlalchemy import Index, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,7 +36,11 @@ from kortex.engines.ai.exceptions import ConversationStoreError
 from kortex.engines.ai.memory import ConversationTurn
 from kortex.engines.storage.interfaces import IDataStore
 
+logger = logging.getLogger("kortex.engines.ai.persistence")
+
 _T = TypeVar("_T")
+
+MAX_APPEND_RETRIES: Final[int] = 3
 
 
 class AIConversationTurnRow(BaseModel):
@@ -78,8 +86,14 @@ class StorageConversationStore:
     process restarts. Durable conversation ordering must survive a restart.
     """
 
-    def __init__(self, data_store: IDataStore) -> None:
+    def __init__(self, data_store: IDataStore, max_retries: int = MAX_APPEND_RETRIES) -> None:
         self._data_store = data_store
+        self._max_retries = max(1, max_retries)
+
+    @property
+    def max_retries(self) -> int:
+        """Configured maximum retry attempts on sequence collision."""
+        return self._max_retries
 
     async def append(
         self,
@@ -92,11 +106,14 @@ class StorageConversationStore:
     ) -> ConversationTurn:
         """Insert one turn, assigning the next sequence within the same transaction.
 
+        Retries on sequence collision (unique constraint violation) up to
+        `max_retries` times, recalculating `max(sequence)` within a fresh
+        transaction on each attempt.
+
         Raises:
             ConversationStoreError: On any storage failure, including a lost
-                sequence race surfacing as a unique-constraint violation.
-                Never swallowed — a failed history write means the recorded
-                conversation is wrong.
+                sequence race that exhausts all retry attempts. Never swallowed
+                — a failed history write means the recorded conversation is wrong.
         """
         created_at = datetime.datetime.now(datetime.UTC)
 
@@ -123,14 +140,40 @@ class StorageConversationStore:
             )
             return next_sequence
 
-        sequence = await self._run(_action, "append conversation turn")
-        return ConversationTurn(
-            sequence=sequence,
-            user_content=user_content,
-            assistant_content=assistant_content,
-            request_id=request_id,
-            user_id=user_id,
-            created_at=created_at,
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                sequence = await self._run(_action, "append conversation turn")
+                return ConversationTurn(
+                    sequence=sequence,
+                    user_content=user_content,
+                    assistant_content=assistant_content,
+                    request_id=request_id,
+                    user_id=user_id,
+                    created_at=created_at,
+                )
+            except ConversationStoreError as exc:
+                is_collision = (
+                    "IntegrityError" in exc.message
+                    or "UniqueConstraint" in exc.message
+                    or "unique" in exc.message.lower()
+                    or "constraint" in exc.message.lower()
+                )
+                if is_collision and attempt < self._max_retries:
+                    jitter = random.uniform(0.005, 0.03 * attempt)  # noqa: S311
+                    logger.warning(
+                        "Conversation turn sequence collision on (%s, %s) (attempt %d/%d), retrying in %.3fs...",
+                        tenant_id,
+                        conversation_id,
+                        attempt,
+                        self._max_retries,
+                        jitter,
+                    )
+                    await asyncio.sleep(jitter)
+                    continue
+                raise
+
+        raise ConversationStoreError(  # pragma: no cover
+            f"Conversation store failed to append conversation turn after {self._max_retries} attempts."
         )
 
     async def recent_turns(
@@ -183,11 +226,15 @@ class StorageConversationStore:
             result = await self._data_store.execute_in_transaction(action)
         except ConversationStoreError:
             raise
-        except Exception as exc:
+        except (IntegrityError, Exception) as exc:
             raise ConversationStoreError(
                 f"Conversation store failed to {description}: {type(exc).__name__}"
             ) from exc
         return cast("_T", result)
 
 
-__all__ = ["AIConversationTurnRow", "StorageConversationStore"]
+__all__ = [
+    "MAX_APPEND_RETRIES",
+    "AIConversationTurnRow",
+    "StorageConversationStore",
+]
