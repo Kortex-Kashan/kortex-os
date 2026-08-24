@@ -9,8 +9,8 @@ Detailed technical documentation for the KORTEX OS system engines.
 | **Storage Engine** | `kortex.engines.storage` | **Completed** | 100% | `kortex.storage.data.session`, `kortex.storage.file.store`, `kortex.storage.object.put`, `kortex.storage.cache.set` |
 | **Workflow Engine** | `kortex.engines.workflow` | **Completed** | 100% | `kortex.workflow.instance.start`, `kortex.workflow.instance.approve`, `kortex.workflow.instance.cancel`, `kortex.workflow.state.get` |
 | **Recipe Engine** | `kortex.engines.recipe` | **Completed** | 97% | `kortex.recipe.load`, `kortex.recipe.validate`, `kortex.recipe.compile`, `kortex.recipe.install`, `kortex.recipe.remove`, `kortex.recipe.upgrade`, `kortex.recipe.package`, `kortex.recipe.search`, `kortex.recipe.list`, `kortex.recipe.info` |
-| **Document Engine** | `kortex.engines.document` | *Pending* | - | `kortex.document.render.execute`, `kortex.document.preview.generate` |
-| **Connector Engine** | `kortex.engines.connector` | *Pending* | - | `kortex.connector.driver.register`, `kortex.connector.action.execute` |
+| **Document Engine** | `kortex.engines.document` | **Completed** | 99% | `kortex.document.render.execute`, `kortex.document.preview.generate` |
+| **Connector Engine** | `kortex.engines.connector` | **Completed** | 99% | `kortex.connector.driver.register`, `kortex.connector.action.execute` |
 
 ---
 

@@ -9,8 +9,8 @@ Comprehensive documentation for the KORTEX OS platform.
   - [Storage Engine](engines/#3-storage-engine-kortexenginesstorage--completed-100-coverage) — **Completed** (100% Coverage)
   - [Workflow Engine](engines/#2-workflow-engine-kortexenginesworkflow--completed-100-coverage) — **Completed** (100% Coverage)
   - [Recipe Engine](engines/#1-recipe-engine-kortexenginesrecipe--completed-97-coverage) — **Completed** (97% Coverage)
-  - Document Engine — *Pending*
-  - Connector Engine — *Pending*
+  - Document Engine — **Completed** (99% Coverage)
+  - Connector Engine — **Completed** (99% Coverage)
 
 ## Documentation Index
 

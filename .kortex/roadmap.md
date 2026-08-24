@@ -20,8 +20,8 @@
 - [x] Storage Engine (`kortex.engines.storage` — `IDataStore`, `IFileStore`, `IObjectStore`, `ICacheStore`)
 - [x] Workflow Engine (`kortex.engines.workflow` — Sole runtime state machine and execution engine)
 - [x] Recipe Engine (`kortex.engines.recipe` — Declarative parser, validator, pure deterministic compiler, packager, installer, catalog registry)
-- [ ] Document Engine (`kortex.engines.document` — Renderer registry & document lifecycle manager — Pending)
-- [ ] Connector Engine (`kortex.engines.connector` — Driver registry & integration driver host — Pending)
+- [x] Document Engine (`kortex.engines.document` — Renderer registry & document lifecycle manager)
+- [x] Connector Engine (`kortex.engines.connector` — Driver registry & integration driver host)
 
 ## Phase 3: Desktop Container & UI System
 
