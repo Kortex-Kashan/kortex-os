@@ -2,6 +2,14 @@
 
 All major architectural decisions for KORTEX OS are logged in this document in chronological order.
 
+> **Note (ADR-0004, 2026-08-26): this file is retained as a historical record.**
+> As of ADR-0004, new Architecture Decision Records are created in
+> `docs/adr/` (which has its own lifecycle, template, and index —
+> see `docs/adr/README.md`), not appended here. The entry below predates
+> that process and is kept exactly as originally recorded — it is not
+> deleted, renumbered, or migrated. See `docs/adr/ADR-0004-canonical-decision-log-location.md`
+> for the full rationale.
+
 ---
 
 ## ADR #001: Local-First Architecture Foundation
