@@ -1,15 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearSession, loadSession, saveSession } from "./sessionStorage";
-import type { KortexSession } from "./sessionTypes";
+import { CURRENT_SESSION_VERSION, type KortexSession } from "./sessionTypes";
 
 const STORAGE_KEY = "kortex.session.v1";
 
 function makeSession(overrides: Partial<KortexSession> = {}): KortexSession {
   return {
-    version: 1,
+    version: CURRENT_SESSION_VERSION,
     activeApplication: null,
-    panelState: { openPanelIds: [], sizes: {} },
     theme: "light",
     preferences: { sidebarCollapsed: false },
     updatedAt: "2026-08-26T00:00:00.000Z",
@@ -58,15 +57,6 @@ describe("sessionStorage", () => {
   it("returns null when a required field is missing", () => {
     const malformed = makeSession() as unknown as Record<string, unknown>;
     delete malformed.theme;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(malformed));
-
-    expect(loadSession()).toBeNull();
-  });
-
-  it("returns null when panelState.sizes contains a non-numeric value", () => {
-    const malformed = makeSession({
-      panelState: { openPanelIds: [], sizes: { inspector: "not a number" as unknown as number } },
-    });
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(malformed));
 
     expect(loadSession()).toBeNull();

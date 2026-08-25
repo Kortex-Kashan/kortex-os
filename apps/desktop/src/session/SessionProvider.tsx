@@ -2,7 +2,6 @@ import * as React from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { resolveRouteForApplicationId, WORKSPACE_ROOT_ROUTE } from "@/navigation/applicationRouter";
-import { usePanels } from "@/panels/PanelProvider";
 import { useUiStore } from "@/stores/uiStore";
 import { useWorkspace } from "@/workspace/WorkspaceProvider";
 
@@ -41,10 +40,12 @@ export interface SessionProviderProps {
  * > PanelProvider > DesktopShell) so it can restore the session before any
  * of those providers render. It only handles theme restoration directly,
  * though — restoring the active application requires the workspace's
- * application registry, and mirroring live panel/workspace state back
- * into the session requires their contexts, neither of which exist at
- * this level. Both are handled by `SessionSync` below, mounted one layer
- * further in.
+ * application registry, and mirroring live workspace state back into the
+ * session requires its context, neither of which exist at this level.
+ * Both are handled by `SessionSync` below, mounted one layer further in.
+ * Panel layout is intentionally out of scope here — PanelProvider owns
+ * its own persistence independently (see sessionTypes.ts's KortexSession
+ * doc comment / ADR-0003).
  */
 export function SessionProvider({ children }: SessionProviderProps) {
   const managerRef = React.useRef<SessionManager | null>(null);
@@ -92,9 +93,9 @@ export function SessionProvider({ children }: SessionProviderProps) {
 /**
  * Mounted once, inside WorkspaceProvider + PanelProvider (routes/
  * index.tsx) — the same placement navigation/navigationBridge.tsx uses
- * for WorkspaceNavigationSync, since it needs useWorkspace()/usePanels()
- * context that doesn't exist at SessionProvider's own, higher position in
- * the tree. Two jobs:
+ * for WorkspaceNavigationSync, since it needs useWorkspace() context that
+ * doesn't exist at SessionProvider's own, higher position in the tree.
+ * Two jobs:
  *
  * 1. One-time restore: if the app launched at the workspace root and the
  *    restored session names an application, navigate to it. Only ever
@@ -102,13 +103,17 @@ export function SessionProvider({ children }: SessionProviderProps) {
  *    has already claimed the URL — WorkspaceNavigationSync's own "URL
  *    drives workspace state, never the reverse" invariant still holds;
  *    this is just the one-time seed for what the URL starts as.
- * 2. Ongoing sync: mirrors workspace/panel/theme state into the session
- *    as it changes, so the next restore has something to read.
+ * 2. Ongoing sync: mirrors workspace/theme state into the session as it
+ *    changes, so the next restore has something to read. Panel state is
+ *    deliberately excluded — PanelProvider persists and restores itself
+ *    independently via panels/panelPersistence.ts, and an earlier version
+ *    of this effect that also mirrored panel state into the session was
+ *    removed (ADR-0003): it was a second, independently-written copy of
+ *    the same data with no ordering guarantee against the first.
  */
 export function SessionSync(): null {
   const { session, updateSession } = useSession();
   const { activeApplicationId, applications } = useWorkspace();
-  const { panels, openPanelIds, getPanelSize } = usePanels();
   const theme = useUiStore((state) => state.theme);
   const navigate = useNavigate();
   const location = useLocation();
@@ -141,14 +146,6 @@ export function SessionSync(): null {
     }
     updateSession({ activeApplication: activeApplicationId });
   }, [activeApplicationId, applications, location.pathname, navigate, updateSession]);
-
-  React.useEffect(() => {
-    const sizes: Record<string, number> = {};
-    for (const panel of panels) {
-      sizes[panel.id] = getPanelSize(panel.id);
-    }
-    updateSession({ panelState: { openPanelIds, sizes } });
-  }, [panels, openPanelIds, getPanelSize, updateSession]);
 
   React.useEffect(() => {
     updateSession({ theme });

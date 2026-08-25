@@ -43,12 +43,15 @@ const devRoutes: RouteObject[] = import.meta.env.DEV
 // DesktopShell's Workspace route outlet) reads it via PanelLayout.
 //
 // SessionProvider (M2.5, session/SessionProvider.tsx) wraps everything,
-// outermost, so it can restore theme/application/panel state before the
+// outermost, so it can restore theme/application state before the
 // providers below it render. SessionSync — a second export from the same
 // module — is mounted one level in, alongside WorkspaceNavigationSync,
-// since restoring the active application and mirroring live panel state
-// both need context (useWorkspace/usePanels) that doesn't exist at
-// SessionProvider's own position in the tree.
+// since restoring the active application and mirroring live workspace
+// state both need context (useWorkspace) that doesn't exist at
+// SessionProvider's own position in the tree. Panel layout is
+// intentionally excluded from the session document — PanelProvider
+// persists/restores it independently via its own "kortex.panels.v1" key
+// (ADR-0003 removed an earlier session-level mirror of the same data).
 //
 // The index child is WorkspaceView, the runtime's own empty-state
 // mounting point; one sibling child per default application (M2.3,

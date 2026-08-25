@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SessionManager } from "./SessionManager";
 import { loadSession, saveSession } from "./sessionStorage";
-import type { KortexSession } from "./sessionTypes";
+import { CURRENT_SESSION_VERSION, type KortexSession } from "./sessionTypes";
 
 afterEach(() => {
   window.localStorage.clear();
@@ -23,9 +23,8 @@ describe("SessionManager", () => {
       const session = manager.createSession();
 
       expect(session).toEqual({
-        version: 1,
+        version: CURRENT_SESSION_VERSION,
         activeApplication: null,
-        panelState: { openPanelIds: [], sizes: {} },
         theme: "light",
         preferences: { sidebarCollapsed: false },
         updatedAt: expect.any(String),
@@ -60,7 +59,6 @@ describe("SessionManager", () => {
       saveSession({
         version: 999,
         activeApplication: "dashboard",
-        panelState: { openPanelIds: [], sizes: {} },
         theme: "dark",
         preferences: { sidebarCollapsed: false },
         updatedAt: new Date().toISOString(),
@@ -128,7 +126,7 @@ describe("SessionManager", () => {
 
       const updated = manager.updateSession({ theme: "dark" });
 
-      expect(updated.version).toBe(1);
+      expect(updated.version).toBe(CURRENT_SESSION_VERSION);
     });
   });
 

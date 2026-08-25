@@ -14,7 +14,7 @@ import type { WorkspaceApplication } from "@/workspace/workspaceTypes";
 
 import { SessionProvider, SessionSync, useSession } from "./SessionProvider";
 import { loadSession, saveSession } from "./sessionStorage";
-import type { KortexSession } from "./sessionTypes";
+import { CURRENT_SESSION_VERSION, type KortexSession } from "./sessionTypes";
 
 function makeApps(): WorkspaceApplication[] {
   return [
@@ -54,9 +54,8 @@ function makePanel(overrides: Partial<PanelDefinition> = {}): PanelDefinition {
 
 function makeSession(overrides: Partial<KortexSession> = {}): KortexSession {
   return {
-    version: 1,
+    version: CURRENT_SESSION_VERSION,
     activeApplication: null,
-    panelState: { openPanelIds: [], sizes: {} },
     theme: "light",
     preferences: { sidebarCollapsed: false },
     updatedAt: new Date(0).toISOString(),
@@ -178,17 +177,6 @@ describe("session restoration", () => {
     expect(screen.getByTestId("inspector-open")).toHaveTextContent("true");
   });
 
-  it("mirrors the restored panel state into the session document", () => {
-    savePanelState({ openPanelIds: ["inspector"], sizes: { inspector: 320 } });
-
-    render(<RouterProvider router={buildTestRouter(makeApps(), [makePanel()], ["/"])} />);
-
-    expect(loadSession()?.panelState).toEqual({
-      openPanelIds: ["inspector"],
-      sizes: { inspector: 320 },
-    });
-  });
-
   it("restores the theme from a previous session", () => {
     saveSession(makeSession({ theme: "dark" }));
 
@@ -199,13 +187,13 @@ describe("session restoration", () => {
 });
 
 describe("session persistence of live changes", () => {
-  it("updates the session when panel state changes after mount", () => {
+  it("does not mirror panel state into the session document (ADR-0003: PanelProvider's own kortex.panels.v1 key is the single source of truth)", () => {
     render(<RouterProvider router={buildTestRouter(makeApps(), [makePanel()], ["/"])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Toggle Inspector" }));
 
     expect(screen.getByTestId("inspector-open")).toHaveTextContent("true");
-    expect(loadSession()?.panelState.openPanelIds).toContain("inspector");
+    expect(loadSession()).not.toHaveProperty("panelState");
   });
 
   it("updates the session when the theme changes after mount", () => {

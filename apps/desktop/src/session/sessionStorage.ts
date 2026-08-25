@@ -1,20 +1,6 @@
-import type { KortexSession, SessionPanelState, SessionPreferences } from "./sessionTypes";
+import type { KortexSession, SessionPreferences } from "./sessionTypes";
 
 const STORAGE_KEY = "kortex.session.v1";
-
-function isSessionPanelState(value: unknown): value is SessionPanelState {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as Record<string, unknown>;
-  return (
-    Array.isArray(candidate.openPanelIds) &&
-    candidate.openPanelIds.every((id) => typeof id === "string") &&
-    typeof candidate.sizes === "object" &&
-    candidate.sizes !== null &&
-    Object.values(candidate.sizes as Record<string, unknown>).every((size) => typeof size === "number")
-  );
-}
 
 function isSessionPreferences(value: unknown): value is SessionPreferences {
   if (!value || typeof value !== "object") {
@@ -32,7 +18,6 @@ function isKortexSession(value: unknown): value is KortexSession {
   return (
     typeof candidate.version === "number" &&
     (candidate.activeApplication === null || typeof candidate.activeApplication === "string") &&
-    isSessionPanelState(candidate.panelState) &&
     (candidate.theme === "light" || candidate.theme === "dark") &&
     isSessionPreferences(candidate.preferences) &&
     typeof candidate.updatedAt === "string"

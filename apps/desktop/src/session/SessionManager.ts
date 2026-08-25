@@ -18,7 +18,6 @@ function defaultSession(): KortexSession {
   return {
     version: CURRENT_SESSION_VERSION,
     activeApplication: null,
-    panelState: { openPanelIds: [], sizes: {} },
     theme: "light",
     preferences: { ...DEFAULT_SESSION_PREFERENCES },
     updatedAt: new Date().toISOString(),
