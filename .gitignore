@@ -92,6 +92,11 @@ logs/
 **/.claude/settings.local.json
 .claude/settings.json.graphify-bak
 
+### AI tooling (repo root only — do not shadow product code)
+/.agents/
+/.claude/
+/CLAUDE.md
+
 ### graphify
 graphify-out/
 
