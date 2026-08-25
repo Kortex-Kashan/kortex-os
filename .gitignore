@@ -10,7 +10,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -87,6 +87,13 @@ data/
 logs/
 *.db
 *.sqlite3
+
+### Claude Code
+**/.claude/settings.local.json
+.claude/settings.json.graphify-bak
+
+### graphify
+graphify-out/
 
 ### Misc
 *.log
