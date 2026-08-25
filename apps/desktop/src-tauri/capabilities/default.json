@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window baseline — lifecycle only. No shell, filesystem, or network permissions. Sidecar-related grants are added when sidecar supervision is implemented.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
