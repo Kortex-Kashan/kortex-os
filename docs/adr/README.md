@@ -36,6 +36,7 @@ An ADR documents a significant technical or architectural decision, including th
 | :--- | :--- | :--- | :--- | :--- |
 | `ADR-0000` | Ratification of KORTEX OS Architecture Version 1.0.0 | 2026-08-08 | `ACCEPTED` | System-Wide Architecture |
 | `ADR-0001` | Knowledge Engine Redesigned Scope, and Pack Loader / Facade Closure | 2026-08-20 | `PROPOSED` | Knowledge Engine (`kortex.engines.knowledge`) |
+| `ADR-0002` | Approval of the Phase 3 Desktop Architecture Specification | 2026-08-25 | `ACCEPTED` | Desktop Shell, React UI, IPC Bridge, Design System |
 
 ---
 
