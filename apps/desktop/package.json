@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@kortex/design-system": "workspace:*",
+    "@tauri-apps/api": "2.11.1",
     "@tanstack/react-query": "^5.102.2",
     "motion": "^13.1.1",
     "react": "^19.2.8",

@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-invoke-capability"
+description = "Allows the webview to invoke the invoke_capability command — the sole capability-agnostic transport into the backend Kernel Capability Dispatcher (phase3_desktop_architecture.md §8.2)."
+commands.allow = ["invoke_capability"]
+
+[[permission]]
+identifier = "allow-connect-event-stream"
+description = "Allows the webview to start the backend event relay (phase3_desktop_architecture.md §13.1). Does not grant the webview any network capability itself — the relay runs entirely in Rust."
+commands.allow = ["connect_event_stream"]

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window baseline — lifecycle only. No shell, filesystem, or network permissions. Sidecar-related grants are added when sidecar supervision is implemented.",
+  "description": "Main window baseline plus the M3 IPC bridge commands. No shell or filesystem permissions. All network egress to the backend is Rust-mediated through these two commands only — the webview itself is granted no http/websocket capability (phase3_desktop_architecture.md §11.1).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "allow-invoke-capability", "allow-connect-event-stream"]
 }

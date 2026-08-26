@@ -1,8 +1,13 @@
 // Typed IPC contract, mirroring ADR-0002 §8.2–§8.3 (CapabilityRequest /
-// UniversalResult transported unchanged across the Tauri boundary). The
-// actual Tauri `invoke("invoke_capability", ...)` transport is wired in
-// Milestones M1/M3 — this module only establishes the contract shape so
-// feature code can be written against a stable type today.
+// UniversalResult transported unchanged across the Tauri boundary).
+// M3 wires this to the real Rust `invoke_capability` command
+// (`apps/desktop/src-tauri/src/ipc.rs`), which forwards verbatim to the
+// backend's `POST /capabilities/invoke` — this module never talks to the
+// backend directly, and the session token that command captures never
+// crosses back into this file's return value (see `ipc.rs`'s own
+// `RawBackendResponse` / `IpcResultEnvelope` split).
+
+import { invoke } from "@tauri-apps/api/core";
 
 export interface IpcCapabilityRequest {
   requestId: string;
@@ -39,7 +44,7 @@ export interface IpcResultEnvelope {
 }
 
 export async function invokeCapability(
-  _request: IpcCapabilityRequest,
+  request: IpcCapabilityRequest,
 ): Promise<IpcResultEnvelope> {
-  throw new Error("IPC transport not yet wired — see ADR-0002 Milestones M1/M3.");
+  return invoke<IpcResultEnvelope>("invoke_capability", { request });
 }

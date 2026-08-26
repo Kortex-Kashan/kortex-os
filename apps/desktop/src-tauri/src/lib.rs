@@ -10,16 +10,33 @@
 // public visibility either.
 mod sidecar;
 
-use std::sync::Mutex;
+// M3 IPC bridge (`invoke_capability`) and event relay
+// (`connect_event_stream`) — see each module's own docs for the exact
+// transport contract and scope boundary (notably: talks to an
+// already-running backend at a configured loopback URL; does not itself
+// spawn that backend — see `ipc.rs`'s module doc for why that remains
+// out of scope here).
+mod events;
+mod ipc;
 
+use std::sync::{Arc, Mutex};
+
+use events::EventRelayState;
+use ipc::{IpcClientState, KeyringTokenStore};
 use sidecar::SidecarSupervision;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            ipc::invoke_capability,
+            events::connect_event_stream,
+        ])
         .setup(|app| {
             app.manage(Mutex::new(SidecarSupervision::Disabled));
+            app.manage(Arc::new(IpcClientState::new(Arc::new(KeyringTokenStore))));
+            app.manage(Arc::new(EventRelayState::default()));
             Ok(())
         })
         .on_window_event(|window, event| {
