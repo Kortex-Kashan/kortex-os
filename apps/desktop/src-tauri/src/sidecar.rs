@@ -22,13 +22,22 @@ use std::time::{Duration, Instant};
 /// applied when the supervised child exits unexpectedly.
 #[derive(Debug, Clone, Copy)]
 pub struct RestartPolicy {
+    // M1.2 intentionally exposes these fields for M3 sidecar wiring; no
+    // real backend binary exists yet, so they are only read by the
+    // (currently unreachable) restart bookkeeping below.
+    #[allow(dead_code)]
     pub max_attempts: u32,
+    #[allow(dead_code)]
     pub initial_backoff: Duration,
+    #[allow(dead_code)]
     pub backoff_multiplier: u32,
 }
 
 impl RestartPolicy {
     /// The ratified policy: max 3 attempts, 100ms/200ms/400ms backoff.
+    // M1.2 intentionally exposes this constructor for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     fn ratified() -> Self {
         Self {
             max_attempts: 3,
@@ -38,6 +47,9 @@ impl RestartPolicy {
     }
 
     /// Backoff delay before restart attempt `attempt` (1-based).
+    // M1.2 intentionally exposes this calculation for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     fn backoff_for_attempt(&self, attempt: u32) -> Duration {
         let exponent = attempt.saturating_sub(1);
         let multiplier = self.backoff_multiplier.saturating_pow(exponent);
@@ -45,6 +57,9 @@ impl RestartPolicy {
     }
 
     /// Whether restart attempt `attempt` (1-based) is still permitted.
+    // M1.2 intentionally exposes this predicate for M3 sidecar wiring; no
+    // real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     fn should_retry(&self, attempt: u32) -> bool {
         attempt <= self.max_attempts
     }
@@ -56,8 +71,14 @@ impl RestartPolicy {
 /// makes no assumption about which backend it is supervising.
 #[derive(Debug, Clone)]
 pub struct SidecarConfig {
+    // M1.2 intentionally exposes these fields for M3 sidecar wiring; no
+    // real backend binary exists yet, so they are only read by the
+    // (currently unreachable) spawn/restart path below.
+    #[allow(dead_code)]
     pub program: String,
+    #[allow(dead_code)]
     pub args: Vec<String>,
+    #[allow(dead_code)]
     pub restart_policy: RestartPolicy,
     pub graceful_shutdown_timeout: Duration,
 }
@@ -72,6 +93,9 @@ impl SidecarConfig {
     /// not resolve or assume a backend binary path; that resolution is
     /// deferred to whichever later milestone supplies a real sidecar
     /// (packaging tool choice is still an open ADR item).
+    // M1.2 intentionally exposes this constructor for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             program: program.into(),
@@ -90,15 +114,25 @@ impl SidecarConfig {
 /// abstraction with a single internal consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidecarState {
+    // M1.2 intentionally exposes these lifecycle variants for M3 sidecar
+    // wiring; no real backend binary exists yet, so they are only
+    // constructed by the (currently unreachable) spawn/restart path below.
+    #[allow(dead_code)]
     NotStarted,
+    #[allow(dead_code)]
     Running,
+    #[allow(dead_code)]
     Restarting,
     ShuttingDown,
     Terminated,
+    #[allow(dead_code)]
     Failed,
 }
 
 impl SidecarState {
+    // M1.2 intentionally exposes this transition for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     fn after_spawn_succeeded(self) -> Self {
         match self {
             SidecarState::NotStarted | SidecarState::Restarting => SidecarState::Running,
@@ -106,6 +140,9 @@ impl SidecarState {
         }
     }
 
+    // M1.2 intentionally exposes this transition for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     fn after_unexpected_exit(self) -> Self {
         match self {
             SidecarState::Running | SidecarState::Restarting => SidecarState::Restarting,
@@ -113,6 +150,9 @@ impl SidecarState {
         }
     }
 
+    // M1.2 intentionally exposes this transition for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     fn after_restarts_exhausted(self) -> Self {
         match self {
             SidecarState::Restarting => SidecarState::Failed,
@@ -137,6 +177,10 @@ impl SidecarState {
 }
 
 /// Outcome of handling an unexpected sidecar exit.
+// M1.2 intentionally exposes this type for M3 sidecar wiring; no real
+// backend binary exists yet, so it is only produced by the (currently
+// unreachable) restart path below.
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum SidecarOutcome {
     /// Caller should wait `backoff` and then call [`SidecarManager::restart`].
@@ -155,10 +199,17 @@ pub struct SidecarManager {
     config: SidecarConfig,
     child: Option<Child>,
     state: SidecarState,
+    // M1.2 intentionally exposes this counter for M3 sidecar wiring; no
+    // real backend binary exists yet, so it is only read by the
+    // (currently unreachable) restart path below.
+    #[allow(dead_code)]
     restart_count: u32,
 }
 
 impl SidecarManager {
+    // M1.2 intentionally exposes this constructor for M3 sidecar wiring;
+    // no real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     pub fn new(config: SidecarConfig) -> Self {
         Self {
             config,
@@ -170,6 +221,9 @@ impl SidecarManager {
 
     /// Spawns the configured child process. Stdin is piped so a graceful
     /// shutdown can signal the child by closing it (EOF).
+    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
+    // real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     pub fn spawn(&mut self) -> std::io::Result<()> {
         let child = Command::new(&self.config.program)
             .args(&self.config.args)
@@ -185,6 +239,9 @@ impl SidecarManager {
 
     /// Returns true if the child is still running. Reaps the child handle
     /// if it has exited.
+    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
+    // real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     pub fn is_running(&mut self) -> std::io::Result<bool> {
         match self.child.as_mut() {
             None => Ok(false),
@@ -202,6 +259,9 @@ impl SidecarManager {
     /// the restart counter and reports whether/how long to wait before the
     /// caller should invoke [`SidecarManager::restart`]. Does not sleep or
     /// spawn itself, keeping this logic synchronous and side-effect-free.
+    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
+    // real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     pub fn handle_unexpected_exit(&mut self) -> SidecarOutcome {
         self.state = self.state.after_unexpected_exit();
         self.restart_count += 1;
@@ -222,6 +282,9 @@ impl SidecarManager {
 
     /// Re-spawns the child after a restart decision from
     /// [`SidecarManager::handle_unexpected_exit`].
+    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
+    // real backend binary exists yet, so it is unused until M3.
+    #[allow(dead_code)]
     pub fn restart(&mut self) -> std::io::Result<()> {
         self.spawn()
     }
@@ -304,6 +367,10 @@ impl Drop for SidecarManager {
 /// deferred (see module docs) until a real backend binary/path exists.
 pub enum SidecarSupervision {
     Disabled,
+    // M1.2 intentionally exposes this variant for M3 sidecar wiring; no
+    // real backend binary exists yet, so app state is always `Disabled`
+    // and this variant is never constructed until M3.
+    #[allow(dead_code)]
     Active(SidecarManager),
 }
 
