@@ -7,3 +7,13 @@ commands.allow = ["invoke_capability"]
 identifier = "allow-connect-event-stream"
 description = "Allows the webview to start the backend event relay (phase3_desktop_architecture.md §13.1). Does not grant the webview any network capability itself — the relay runs entirely in Rust."
 commands.allow = ["connect_event_stream"]
+
+[[permission]]
+identifier = "allow-has-session"
+description = "Allows the webview to ask whether a session token is currently held (M4.1). Returns a boolean only — never the token value."
+commands.allow = ["has_session"]
+
+[[permission]]
+identifier = "allow-logout"
+description = "Allows the webview to request logout (M4.1) — discards the held session token in Rust. The webview never handles the token itself."
+commands.allow = ["logout"]

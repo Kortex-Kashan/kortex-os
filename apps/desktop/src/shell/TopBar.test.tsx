@@ -1,16 +1,37 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@kortex/design-system";
 
+import { AuthProvider } from "@/auth/AuthProvider";
+
 import { TopBar } from "./TopBar";
+
+// TopBar now reads `useAuth()` (M4.1) for the identity label/sign-out
+// action, which requires an AuthProvider ancestor. AuthProvider's startup
+// check calls the real `@tauri-apps/api/core` `invoke` (`has_session`),
+// which reaches into `window.__TAURI_INTERNALS__` — absent outside a real
+// Tauri webview — so it is mocked here the same way `app/App.test.tsx`
+// mocks it for `useKortexEventStream`.
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(false) }));
 
 // TopBar's search trigger uses Tooltip, which requires a TooltipProvider
 // ancestor — in the real app DesktopShell provides one once for the whole
 // shell; standalone tests need to supply the same context.
 function renderTopBar() {
   const router = createMemoryRouter(
-    [{ path: "/", element: <TooltipProvider><TopBar /></TooltipProvider> }],
+    [
+      {
+        path: "/",
+        element: (
+          <AuthProvider>
+            <TooltipProvider>
+              <TopBar />
+            </TooltipProvider>
+          </AuthProvider>
+        ),
+      },
+    ],
     { initialEntries: ["/"] },
   );
   return render(<RouterProvider router={router} />);
@@ -56,9 +77,17 @@ describe("TopBar", () => {
       pointerId: 1,
     });
 
-    expect(await screen.findByText("Guest")).toBeInTheDocument();
+    // Not authenticated in this standalone render (no login flow was run),
+    // so the identity label falls back to a generic placeholder — see
+    // `TopBar.tsx`'s `identityLabel`. `AuthGate.test.tsx`/
+    // `AuthProvider.test.tsx` cover the real principal_id being shown once
+    // AUTHENTICATED.
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.getByText("Switch to dark theme")).toBeInTheDocument();
     expect(screen.getByText("Profile").closest("[role=menuitem]")).toHaveAttribute(
+      "data-disabled",
+    );
+    expect(screen.getByText("Sign out").closest("[role=menuitem]")).not.toHaveAttribute(
       "data-disabled",
     );
   });

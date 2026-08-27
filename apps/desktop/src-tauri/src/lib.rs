@@ -31,6 +31,8 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             ipc::invoke_capability,
+            ipc::has_session,
+            ipc::logout,
             events::connect_event_stream,
         ])
         .setup(|app| {
