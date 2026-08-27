@@ -1,3 +1,5 @@
+import { Dashboard } from "@/features/dashboard/components/Dashboard";
+
 import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
 import { createPlaceholderApplication } from "./PlaceholderApplication";
 import type { WorkspaceApplication } from "./workspaceTypes";
@@ -9,10 +11,7 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     description: "Cross-engine overview and system health at a glance.",
     icon: DashboardIcon,
     route: "/dashboard",
-    component: createPlaceholderApplication(
-      "Dashboard",
-      "Cross-engine overview and system health at a glance.",
-    ),
+    component: Dashboard,
     permissions: ["kortex.dashboard.view"],
   },
   {

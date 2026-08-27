@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { invokeCapability, type IpcCapabilityRequest, type IpcResultEnvelope } from "@/ipc/client";
+import {
+  fetchSystemHealth,
+  invokeCapability,
+  type IpcCapabilityRequest,
+  type IpcResultEnvelope,
+} from "@/ipc/client";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
@@ -85,5 +90,30 @@ describe("invokeCapability", () => {
 
     expect(result.status).toBe("FAILURE");
     expect(result.errors[0].category).toBe("PERMISSION_DENIED");
+  });
+});
+
+describe("fetchSystemHealth", () => {
+  it("forwards to the get_system_health Tauri command and returns its outcome verbatim", async () => {
+    const outcome = {
+      ok: true,
+      statusCode: 200,
+      body: { kernel_state: "RUNNING", system_health: { status: "healthy", engines: {} } },
+    };
+    invokeMock.mockResolvedValueOnce(outcome);
+
+    const result = await fetchSystemHealth();
+
+    expect(invokeMock).toHaveBeenCalledWith("get_system_health");
+    expect(result).toBe(outcome);
+  });
+
+  it("surfaces a transport failure as ok: false rather than throwing", async () => {
+    invokeMock.mockResolvedValueOnce({ ok: false, error: "Backend unreachable: connection refused" });
+
+    const result = await fetchSystemHealth();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("unreachable");
   });
 });

@@ -17,6 +17,28 @@ if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
 
 
+def _report_is_healthy(report: Dict[str, Any]) -> bool:
+    """Interpret one engine's `health_check()` report leniently.
+
+    Engines report health two different ways across the codebase: some set
+    `status` to the literal string "healthy"/"unhealthy" (BootEngine, Event,
+    Registry, Configuration engines); others set `status` to their raw
+    `EngineState` value (e.g. "RUNNING") and carry a separate `healthy`
+    boolean instead (Storage, Security, Workflow, Recipe engines — notably
+    the two engines `kernel_bootstrap.py` actually registers in production).
+    Comparing `status` against the literal string "healthy" alone silently
+    misclassifies every engine using the second convention as unhealthy,
+    making system-wide health report "degraded" permanently regardless of
+    real engine state. Preferring the explicit `healthy` flag when present,
+    and falling back to a case-insensitive `status` comparison otherwise,
+    handles both conventions correctly without requiring every engine's
+    `health()` implementation to agree on one shape.
+    """
+    if "healthy" in report:
+        return bool(report["healthy"])
+    return str(report.get("status", "")).lower() == "healthy"
+
+
 class BootEngine(BaseEngine):
     """Boot Engine implementation."""
 
@@ -162,7 +184,7 @@ class BootEngine(BaseEngine):
             try:
                 report = await engine.health_check()
                 reports[name] = report
-                if report.get("status") != "healthy":
+                if not _report_is_healthy(report):
                     all_healthy = False
             except Exception as e:
                 reports[name] = {"engine": name, "status": "unhealthy", "error": str(e)}

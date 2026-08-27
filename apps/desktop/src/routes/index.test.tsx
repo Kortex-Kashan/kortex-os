@@ -77,15 +77,27 @@ describe("routes/index provider composition", () => {
 
   it("routes a default application through the real singleton router and renders its content", async () => {
     render(<RouterProvider router={router} />);
+    // AuthGate (M4.1) gates the shell behind the mocked session check above
+    // resolving — "KORTEX OS" (TopBar) does not render until then, so this
+    // must be awaited before touching the router/shell below.
     await screen.findByText("KORTEX OS");
-    const [firstApp] = DEFAULT_APPLICATIONS;
+    // AI Studio, not DEFAULT_APPLICATIONS[0] — Dashboard is now a real
+    // feature (workspace/defaultApps.ts) and no longer renders its
+    // `description` verbatim the way a placeholder application does. AI
+    // Studio is still a placeholder, so it still exercises exactly what
+    // this test checks: that the real singleton router renders whichever
+    // application's content is current.
+    const testApp = DEFAULT_APPLICATIONS.find((app) => app.id === "ai-studio");
+    if (!testApp) {
+      throw new Error("Expected the ai-studio placeholder application to exist.");
+    }
 
     await act(async () => {
-      await router.navigate(firstApp.route);
+      await router.navigate(testApp.route);
     });
 
-    expect(screen.getByText(firstApp.description)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: firstApp.name })).toHaveAttribute(
+    expect(screen.getByText(testApp.description)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: testApp.name })).toHaveAttribute(
       "aria-current",
       "page",
     );

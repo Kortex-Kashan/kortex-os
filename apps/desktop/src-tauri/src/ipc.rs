@@ -312,6 +312,92 @@ pub fn logout(state: tauri::State<'_, Arc<IpcClientState>>) {
     state.clear_token();
 }
 
+/// Outcome of a `GET {base_url}/health` call, returned verbatim to the
+/// webview. `body` carries the backend's JSON response unmodified — no
+/// wire-shape translation is needed here (unlike `IpcResultEnvelope`)
+/// because `/health` is not a capability call, it is Kernel diagnostic
+/// data with its own already-stable snake_case shape
+/// (`backend/src/kortex/core/kernel.py::health_check`). `ok` distinguishes
+/// "the backend answered" (regardless of whether it reports itself
+/// healthy or degraded — that verdict lives inside `body`) from a genuine
+/// transport failure (backend unreachable, or a response this command
+/// could not parse as JSON).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemHealthOutcome {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Fetches `GET {base_url}/health` and returns it verbatim.
+///
+/// Deliberately attaches **no** `Authorization` header: per
+/// `backend/src/kortex/api/main.py`'s `/health` route, this endpoint is
+/// intentionally unauthenticated (a liveness/diagnostic surface, not a
+/// capability), and preserving that exact backend contract — rather than
+/// attaching a token "for consistency" — is the whole point of routing it
+/// through its own command instead of reusing `invoke_capability`. No
+/// session token is read or required for this call.
+pub async fn fetch_system_health(state: &IpcClientState) -> SystemHealthOutcome {
+    let url = format!("{}/health", state.base_url);
+    let response = match state.http.get(&url).timeout(HEALTH_REQUEST_TIMEOUT).send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            return SystemHealthOutcome {
+                ok: false,
+                status_code: None,
+                body: None,
+                error: Some(format!("Backend unreachable: {err}")),
+            }
+        }
+    };
+    let status_code = response.status().as_u16();
+
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return SystemHealthOutcome {
+                ok: false,
+                status_code: Some(status_code),
+                body: None,
+                error: Some(format!("Failed to read backend response: {err}")),
+            }
+        }
+    };
+
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(body) => SystemHealthOutcome {
+            ok: true,
+            status_code: Some(status_code),
+            body: Some(body),
+            error: None,
+        },
+        Err(err) => SystemHealthOutcome {
+            ok: false,
+            status_code: Some(status_code),
+            body: None,
+            error: Some(format!("Backend returned an unparseable response: {err}")),
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn get_system_health(
+    state: tauri::State<'_, Arc<IpcClientState>>,
+) -> Result<SystemHealthOutcome, ()> {
+    // Same `Result` wrapper note as `invoke_capability` above: every
+    // failure mode is already represented inside `SystemHealthOutcome`,
+    // `Err` is unreachable in practice.
+    Ok(fetch_system_health(&state).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +704,58 @@ mod tests {
         state.clear_token();
         assert!(!state.has_token());
         assert_eq!(state.current_token(), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_system_health_returns_backend_body_verbatim_without_auth_header() {
+        let server = start_recording_server(
+            r#"{"kernelState":"RUNNING","systemHealthPlaceholder":true}"#,
+        )
+        .await;
+        // A token IS stored, proving the omission of the Authorization
+        // header below is deliberate (health is unauthenticated by
+        // contract), not just "no token was available to attach".
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        store.store("some-stored-token");
+        let state = state_with(server.base_url, store);
+
+        let outcome = fetch_system_health(&state).await;
+
+        assert!(outcome.ok);
+        assert_eq!(outcome.status_code, Some(200));
+        assert_eq!(outcome.body.unwrap()["kernelState"], "RUNNING");
+        assert!(outcome.error.is_none());
+
+        let (headers, _) = server.last_request.lock().unwrap().clone().unwrap();
+        assert!(
+            !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            "GET /health must never carry an Authorization header"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_system_health_unreachable_backend_reports_ok_false() {
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with("http://127.0.0.1:1".to_string(), store);
+
+        let outcome = fetch_system_health(&state).await;
+
+        assert!(!outcome.ok);
+        assert!(outcome.body.is_none());
+        assert!(outcome.error.unwrap().contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn fetch_system_health_unparseable_response_reports_ok_false() {
+        let server = start_recording_server("not json").await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let outcome = fetch_system_health(&state).await;
+
+        assert!(!outcome.ok);
+        assert_eq!(outcome.status_code, Some(200));
+        assert!(outcome.body.is_none());
+        assert!(outcome.error.is_some());
     }
 }

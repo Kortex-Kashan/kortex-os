@@ -115,6 +115,92 @@ class _RaisingInitializeEngine(BaseEngine):
         self._set_state(EngineState.STOPPED)
 
 
+class _StateValueHealthEngine(BaseEngine):
+    """Mirrors the health-report shape StorageEngine/SecurityEngine actually
+    use in production: `status` is the raw `EngineState` value (e.g.
+    "RUNNING"), and a separate `healthy` boolean carries the real verdict.
+    """
+
+    def __init__(self, name: str, healthy: bool = True) -> None:
+        self._name = name
+        self._healthy = healthy
+        super().__init__()
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def initialize(self, kernel: Kernel) -> None:
+        self._set_state(EngineState.READY)
+
+    async def start(self) -> None:
+        self._set_state(EngineState.RUNNING)
+
+    async def health_check(self) -> Dict[str, Any]:
+        return {"engine": self._name, "status": self._state.value, "healthy": self._healthy}
+
+    async def stop(self) -> None:
+        self._set_state(EngineState.STOPPED)
+
+
+@pytest.mark.asyncio
+async def test_run_system_health_checks_treats_state_value_engines_as_healthy() -> None:
+    """Regression test for the health-aggregation defect found during the
+    Dashboard milestone audit: `run_system_health_checks` used to compare
+    every engine's `status` field against the literal string "healthy",
+    which StorageEngine/SecurityEngine (the only two engines
+    `kernel_bootstrap.py` registers in production) never set — their
+    `status` is the raw `EngineState` value (e.g. "RUNNING") with a separate
+    `healthy` boolean instead. That made `system_health.status` report
+    "degraded" for a fully healthy running system. This proves the fix:
+    engines using the `healthy`-boolean convention are now read correctly.
+    """
+    kernel = Kernel()
+    kernel.register_engine(_StateValueHealthEngine("storage_like", healthy=True))
+    kernel.register_engine(_StateValueHealthEngine("security_like", healthy=True))
+    await kernel.boot()
+
+    health = await kernel.health_check()
+
+    assert health["system_health"]["status"] == "healthy"
+    assert health["system_health"]["engines"]["storage_like"]["status"] == "RUNNING"
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_run_system_health_checks_reports_degraded_when_a_state_value_engine_is_unhealthy() -> None:
+    """Same convention as above, but `healthy=False` — must still degrade
+    the system (proves the fix doesn't just always report healthy)."""
+    kernel = Kernel()
+    kernel.register_engine(_StateValueHealthEngine("storage_like", healthy=False))
+    await kernel.boot()
+
+    health = await kernel.health_check()
+
+    assert health["system_health"]["status"] == "degraded"
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_run_system_health_checks_still_honors_literal_status_convention() -> None:
+    """Backward-compatibility check: engines with no `healthy` key (Boot,
+    Event, Registry, Configuration engines' own convention) must keep being
+    read from their literal `status` string exactly as before."""
+    kernel = Kernel()
+    engine = MockEngine("literal_status_like")
+    kernel.register_engine(engine)
+    await kernel.boot()
+
+    health = await kernel.health_check()
+
+    assert health["system_health"]["status"] == "healthy"
+    assert health["system_health"]["engines"]["literal_status_like"]["status"] == "healthy"
+
+    await kernel.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_boot_system_preserves_master_key_error_as_boot_error_cause() -> None:
     """Regression test for the fixed `%e`/`%s` logging format-string defect.
