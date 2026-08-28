@@ -1,3 +1,4 @@
+import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
 import { createPlaceholderApplication } from "./PlaceholderApplication";
 import type { WorkspaceApplication } from "./workspaceTypes";
@@ -45,10 +46,7 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     description: "Manage integrations with external systems.",
     icon: ConnectorIcon,
     route: "/connectors",
-    component: createPlaceholderApplication(
-      "Connector Engine",
-      "Manage integrations with external systems.",
-    ),
+    component: ConnectorsApp,
     permissions: ["kortex.connector.view"],
   },
   {

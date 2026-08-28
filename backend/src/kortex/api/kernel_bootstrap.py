@@ -22,6 +22,7 @@ import logging
 import os
 
 from kortex.core.kernel import Kernel
+from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
 
@@ -67,6 +68,12 @@ async def build_and_boot_kernel() -> Kernel:
         signing_private_key=_resolve_key(_SIGNING_KEY_ENV, 32),
     )
     kernel.register_engine(security_engine)
+
+    # M5: Connector/Driver Registry. No constructor arguments — it resolves
+    # its Storage Engine data/cache stores from the Kernel IoC container
+    # during `initialize()` (see `ConnectorEngine.initialize`), the same
+    # deferred-wiring pattern Security/Storage already establish here.
+    kernel.register_engine(ConnectorEngine())
 
     await kernel.boot()
     return kernel
