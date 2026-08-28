@@ -69,3 +69,15 @@ export function MarketplaceIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+export function DocumentKnowledgeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...baseProps(props)}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 2v6h6" />
+      <circle cx="9" cy="16" r="1.5" />
+      <circle cx="15" cy="13" r="1.5" />
+      <path d="M10.3 15.3 13.7 13.7" />
+    </svg>
+  );
+}

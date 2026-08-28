@@ -81,7 +81,7 @@ async def test_document_diagnostics_standalone() -> None:
 
     assert diag.status() == "READY"
     assert diag.version() == "1.0.0"
-    assert len(diag.capabilities()) == 8
+    assert len(diag.capabilities()) == 9
     assert "kortex.document.operation.execute" in diag.capabilities()
 
 
@@ -101,7 +101,7 @@ async def test_document_engine_base_engine_lifecycle_and_diagnostics() -> None:
     kernel = MockKernel()
     await engine.initialize(kernel)
     assert engine.state == EngineState.READY
-    assert len(kernel.registered_capabilities) == 8
+    assert len(kernel.registered_capabilities) == 9
     assert "kortex.document.operation.execute" in kernel.registered_capabilities
 
     # Start engine
@@ -114,7 +114,7 @@ async def test_document_engine_base_engine_lifecycle_and_diagnostics() -> None:
 
     assert engine.status() == "RUNNING"
     assert engine.version() == "1.0.0"
-    assert len(engine.capabilities()) == 8
+    assert len(engine.capabilities()) == 9
     assert engine.metrics()["total_operations_executed"] >= 0
     assert engine.diagnostics()["engine"] == "document"
 
@@ -263,7 +263,7 @@ async def test_document_engine_facade_additional_methods() -> None:
     assert engine.metrics()["total_operations_executed"] >= 0
     assert engine.diagnostics()["engine"] == "document"
     assert engine.version() == "1.0.0"
-    assert len(engine.capabilities()) == 8
+    assert len(engine.capabilities()) == 9
 
     # transition_lifecycle invalid document_id
     with pytest.raises(Exception):
@@ -293,7 +293,7 @@ async def test_all_capabilities_have_working_handlers_via_real_kernel() -> None:
     await engine.initialize(kernel)
 
     declared = engine.capabilities()
-    assert len(declared) == 8
+    assert len(declared) == 9
 
     for cap_name in declared:
         assert kernel._registry_engine.get_raw_handler_for_testing(cap_name) is not None, (

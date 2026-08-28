@@ -56,6 +56,7 @@ from kortex.engines.document.models import (
     OperationResult,
     PreviewOptions,
     PreviewResult,
+    TemplateSchema,
     ValidationReport,
 )
 from kortex.engines.document.operation_profile import DocumentOperationProfileManager
@@ -77,6 +78,7 @@ _DOCUMENT_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
     "kortex.document.intelligence.analyze": ["document:read"],
     "kortex.document.recommendation.get": ["document:read"],
     "kortex.document.adapter.register": ["document:write"],
+    "kortex.document.template.list": ["document:read"],
 }
 
 
@@ -361,6 +363,8 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     handler = self.get_recommendation
                 elif cap == "kortex.document.adapter.register":
                     handler = self.register_adapter
+                elif cap == "kortex.document.template.list":
+                    handler = self.list_templates
 
                 if handler is None:
                     # Never register a capability with no working handler — a resolvable but
@@ -666,6 +670,19 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
     def list_adapters(self) -> list[AdapterMetadata]:
         """Return list of metadata objects for all registered document adapters (IDocumentEngine protocol)."""
         return self._adapter_registry.list_adapters()
+
+    async def list_templates(self) -> list[TemplateSchema]:
+        """List the latest version of every registered template.
+
+        Backs capability `kortex.document.template.list` (Slice 4.7).
+        `TemplateLibrary.list_templates()` already existed, fully
+        implemented and pre-seeded with real standard templates
+        (`TemplateLibrary._load_standard_templates`) — this is a thin
+        passthrough exposing it, not new business logic. No filters are
+        passed (no capability path exists yet to register a tenant-specific
+        template, so every tenant sees the same standard set; revisit once
+        `register_template`/`install_template` are ever exposed)."""
+        return await self._template_library.list_templates()
 
     async def register_adapter(
         self, adapter: BaseDocumentAdapter | AdapterMetadata

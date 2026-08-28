@@ -114,6 +114,7 @@ class DocumentDiagnostics(IEngineDiagnostics):
             "kortex.document.recommendation.get",
             "kortex.document.adapter.register",
             "kortex.document.adapter.list",
+            "kortex.document.template.list",
         ]
 
 

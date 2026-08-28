@@ -1,9 +1,17 @@
 import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { Dashboard } from "@/features/dashboard/components/Dashboard";
+import { DocumentKnowledgeApp } from "@/features/document-knowledge/components/DocumentKnowledgeApp";
 import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
 import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
-import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
+import {
+  AiStudioIcon,
+  ConnectorIcon,
+  DashboardIcon,
+  DocumentKnowledgeIcon,
+  MarketplaceIcon,
+  WorkflowIcon,
+} from "./icons";
 import type { WorkspaceApplication } from "./workspaceTypes";
 
 export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
@@ -51,5 +59,14 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     route: "/marketplace",
     component: MarketplaceApp,
     permissions: ["kortex.marketplace.view"],
+  },
+  {
+    id: "document-knowledge",
+    name: "Document & Knowledge",
+    description: "Browse the document adapter/template and knowledge graph registries.",
+    icon: DocumentKnowledgeIcon,
+    route: "/document-knowledge",
+    component: DocumentKnowledgeApp,
+    permissions: ["kortex.document.view", "kortex.knowledge.view"],
   },
 ];

@@ -2,19 +2,21 @@ import { describe, expect, it } from "vitest";
 
 import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
+import { DocumentKnowledgeApp } from "@/features/document-knowledge/components/DocumentKnowledgeApp";
 import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
 import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { DEFAULT_APPLICATIONS } from "./defaultApps";
 import { WorkspaceRegistry } from "./WorkspaceRegistry";
 
 describe("DEFAULT_APPLICATIONS", () => {
-  it("registers exactly the five required placeholder applications", () => {
+  it("registers exactly the six required applications", () => {
     expect(DEFAULT_APPLICATIONS.map((app) => app.name)).toEqual([
       "Dashboard",
       "AI Studio",
       "Workflow Engine",
       "Connector Engine",
       "Marketplace",
+      "Document & Knowledge",
     ]);
   });
 
@@ -53,11 +55,16 @@ describe("DEFAULT_APPLICATIONS", () => {
     expect(aiStudioApp?.component).toBe(AiStudioApp);
   });
 
+  it("wires the Document & Knowledge application to the real DocumentKnowledgeApp, not a placeholder", () => {
+    const documentKnowledgeApp = DEFAULT_APPLICATIONS.find((app) => app.id === "document-knowledge");
+    expect(documentKnowledgeApp?.component).toBe(DocumentKnowledgeApp);
+  });
+
   it("registers cleanly into a WorkspaceRegistry with no duplicate-ID conflicts", () => {
     const registry = new WorkspaceRegistry();
     for (const app of DEFAULT_APPLICATIONS) {
       expect(() => registry.register(app)).not.toThrow();
     }
-    expect(registry.list()).toHaveLength(5);
+    expect(registry.list()).toHaveLength(6);
   });
 });

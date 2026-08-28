@@ -25,6 +25,8 @@ from kortex.core.kernel import Kernel
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.document.engine import DocumentEngine
+from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
@@ -118,6 +120,18 @@ async def build_and_boot_kernel() -> Kernel:
         registered_engines=list(kernel.get_all_engines().keys()),
     )
     kernel.register_engine(ai_engine)
+
+    # Slice 4.7: Document Engine. No constructor arguments — it self-resolves
+    # its Storage Engine data/file/object/cache stores from the Kernel IoC
+    # container during `initialize()` (see `DocumentEngine.initialize`), the
+    # same deferred-wiring pattern Connector/Workflow already establish here.
+    kernel.register_engine(DocumentEngine())
+
+    # Slice 4.7: Knowledge Engine. No constructor arguments — it resolves
+    # Storage Engine's IDataStore/IObjectStore via `kernel.get_engine("storage")`
+    # during `initialize()` (see `KnowledgeEngine.initialize`), requiring
+    # Storage to already be registered, which it is, above.
+    kernel.register_engine(KnowledgeEngine())
 
     await kernel.boot()
     return kernel

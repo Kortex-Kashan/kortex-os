@@ -221,6 +221,13 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
                 required_permissions=["knowledge:read"],
             )
             kernel.register_capability(
+                name="kortex.knowledge.graph.list",
+                description="List every knowledge graph node registered for a tenant",
+                provider=self.name,
+                handler=self.list_nodes,
+                required_permissions=["knowledge:read"],
+            )
+            kernel.register_capability(
                 name="kortex.knowledge.pack.load",
                 description="Load and verify a .kortex-knowledge pack",
                 provider=self.name,
@@ -350,6 +357,23 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         (`graph.py::list_nodes`, `lineage.py::list_current_records`)."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
         return self._graph.traverse(node_id, tenant_id, max_hops)
+
+    def list_nodes(self, tenant_id: str) -> List[KnowledgeNode]:
+        """Backs the `kortex.knowledge.graph.list` capability (Slice 4.7).
+
+        `kortex.knowledge.query.search`'s handler (`self.search`) expects a
+        live `KnowledgeQuery` object but the Kernel dispatcher only ever
+        delivers plain, JSON-deserialized dicts as capability parameters —
+        confirmed to raise `AttributeError` over the real IPC path. Rather
+        than modify that existing, already-registered capability, this
+        exposes `KnowledgeGraph.list_nodes` (primitive `str` parameter,
+        already immune to that gap — see `traverse_graph` above, which has
+        the same property) as the desktop's entity-discovery entry point.
+        Purely additive, matching `traverse_graph`'s own established
+        pattern of additive methods beyond `IKnowledgeEngine`'s frozen
+        Protocol surface."""
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        return self._graph.list_nodes(tenant_id)
 
     # -- Common Diagnostics Interface (IEngineDiagnostics) -----------------------
 
