@@ -23,6 +23,7 @@ import os
 
 from kortex.core.kernel import Kernel
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
@@ -80,6 +81,10 @@ async def build_and_boot_kernel() -> Kernel:
     # dependency is resolved from the Kernel IoC container during
     # `initialize()` (see `WorkflowEngine.initialize`), not passed here.
     kernel.register_engine(WorkflowEngine())
+
+    # M7: Marketplace Engine — read-only catalog visibility slice. No
+    # constructor arguments and no engine dependencies (in-memory only).
+    kernel.register_engine(MarketplaceEngine())
 
     await kernel.boot()
     return kernel

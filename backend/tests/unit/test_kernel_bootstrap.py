@@ -2,10 +2,12 @@
 
 M3 shipped this module with only Storage + Security registered (confirmed
 during the M5 preflight audit — no test previously exercised it directly).
-M5 adds the Connector Engine; M6 adds the Workflow Engine. These tests prove
-that wiring lands on the real production boot path, not only on the
-hand-built test kernels `test_capability_dispatch.py` / `test_connector_engine.py`
-/ `test_workflow_engine.py` construct for themselves.
+M5 adds the Connector Engine; M6 adds the Workflow Engine; M7 adds the
+Marketplace Engine. These tests prove that wiring lands on the real
+production boot path, not only on the hand-built test kernels
+`test_capability_dispatch.py` / `test_connector_engine.py` /
+`test_workflow_engine.py` / `test_marketplace_engine.py` construct for
+themselves.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import pytest
 from kortex.api.kernel_bootstrap import build_and_boot_kernel
 from kortex.core.kernel import KernelState
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 
 
@@ -91,5 +94,40 @@ async def test_workflow_registry_starts_empty_on_production_boot_path() -> None:
         workflow_engine = kernel.get_engine("workflow")
         assert isinstance(workflow_engine, WorkflowEngine)
         assert workflow_engine.list_definitions() == []
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_marketplace_engine_registers_on_production_boot_path() -> None:
+    kernel = await build_and_boot_kernel()
+    try:
+        assert kernel.state == KernelState.RUNNING
+        marketplace_engine = kernel.get_engine("marketplace")
+        assert isinstance(marketplace_engine, MarketplaceEngine)
+        assert marketplace_engine.status() == "RUNNING"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_marketplace_listing_list_capability_registers_on_production_boot_path() -> None:
+    kernel = await build_and_boot_kernel()
+    try:
+        descriptor = kernel.get_capability("kortex.marketplace.listing.list")
+        assert descriptor.provider == "marketplace"
+        assert descriptor.required_permissions == ["marketplace:read"]
+        assert descriptor.requires_authentication is True
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_marketplace_registry_starts_empty_on_production_boot_path() -> None:
+    kernel = await build_and_boot_kernel()
+    try:
+        marketplace_engine = kernel.get_engine("marketplace")
+        assert isinstance(marketplace_engine, MarketplaceEngine)
+        assert marketplace_engine.list_listings() == []
     finally:
         await kernel.shutdown()

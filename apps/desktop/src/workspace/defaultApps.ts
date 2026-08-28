@@ -1,4 +1,5 @@
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
+import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
 import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
 import { createPlaceholderApplication } from "./PlaceholderApplication";
@@ -50,13 +51,10 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
   {
     id: "marketplace",
     name: "Marketplace",
-    description: "Discover and install KORTEX modules and templates.",
+    description: "Discover KORTEX modules and templates.",
     icon: MarketplaceIcon,
     route: "/marketplace",
-    component: createPlaceholderApplication(
-      "Marketplace",
-      "Discover and install KORTEX modules and templates.",
-    ),
+    component: MarketplaceApp,
     permissions: ["kortex.marketplace.view"],
   },
 ];
