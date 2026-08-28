@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
+import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { DEFAULT_APPLICATIONS } from "./defaultApps";
 import { WorkspaceRegistry } from "./WorkspaceRegistry";
 
@@ -33,6 +34,11 @@ describe("DEFAULT_APPLICATIONS", () => {
   it("wires the Connector Engine application to the real ConnectorsApp, not a placeholder", () => {
     const connectorApp = DEFAULT_APPLICATIONS.find((app) => app.id === "connector-engine");
     expect(connectorApp?.component).toBe(ConnectorsApp);
+  });
+
+  it("wires the Workflow Engine application to the real WorkflowApp, not a placeholder", () => {
+    const workflowApp = DEFAULT_APPLICATIONS.find((app) => app.id === "workflow-engine");
+    expect(workflowApp?.component).toBe(WorkflowApp);
   });
 
   it("registers cleanly into a WorkspaceRegistry with no duplicate-ID conflicts", () => {

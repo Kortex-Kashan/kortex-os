@@ -25,6 +25,7 @@ from kortex.core.kernel import Kernel
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
+from kortex.engines.workflow.engine import WorkflowEngine
 
 logger = logging.getLogger("kortex.api.kernel_bootstrap")
 
@@ -74,6 +75,11 @@ async def build_and_boot_kernel() -> Kernel:
     # during `initialize()` (see `ConnectorEngine.initialize`), the same
     # deferred-wiring pattern Security/Storage already establish here.
     kernel.register_engine(ConnectorEngine())
+
+    # M6: Workflow Engine. Same deferred-wiring pattern — its Storage Engine
+    # dependency is resolved from the Kernel IoC container during
+    # `initialize()` (see `WorkflowEngine.initialize`), not passed here.
+    kernel.register_engine(WorkflowEngine())
 
     await kernel.boot()
     return kernel

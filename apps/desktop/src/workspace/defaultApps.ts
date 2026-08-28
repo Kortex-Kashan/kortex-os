@@ -1,4 +1,5 @@
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
+import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
 import { createPlaceholderApplication } from "./PlaceholderApplication";
 import type { WorkspaceApplication } from "./workspaceTypes";
@@ -34,10 +35,7 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     description: "Design and monitor automated business workflows.",
     icon: WorkflowIcon,
     route: "/workflows",
-    component: createPlaceholderApplication(
-      "Workflow Engine",
-      "Design and monitor automated business workflows.",
-    ),
+    component: WorkflowApp,
     permissions: ["kortex.workflow.view"],
   },
   {
