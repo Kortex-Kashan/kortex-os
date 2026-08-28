@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
 import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
@@ -45,6 +46,11 @@ describe("DEFAULT_APPLICATIONS", () => {
   it("wires the Marketplace application to the real MarketplaceApp, not a placeholder", () => {
     const marketplaceApp = DEFAULT_APPLICATIONS.find((app) => app.id === "marketplace");
     expect(marketplaceApp?.component).toBe(MarketplaceApp);
+  });
+
+  it("wires the AI Studio application to the real AiStudioApp, not a placeholder", () => {
+    const aiStudioApp = DEFAULT_APPLICATIONS.find((app) => app.id === "ai-studio");
+    expect(aiStudioApp?.component).toBe(AiStudioApp);
   });
 
   it("registers cleanly into a WorkspaceRegistry with no duplicate-ID conflicts", () => {

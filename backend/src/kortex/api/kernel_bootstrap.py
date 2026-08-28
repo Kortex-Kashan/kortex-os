@@ -22,10 +22,13 @@ import logging
 import os
 
 from kortex.core.kernel import Kernel
+from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
+from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
+from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.engine import WorkflowEngine
 
 logger = logging.getLogger("kortex.api.kernel_bootstrap")
@@ -85,6 +88,36 @@ async def build_and_boot_kernel() -> Kernel:
     # M7: Marketplace Engine — read-only catalog visibility slice. No
     # constructor arguments and no engine dependencies (in-memory only).
     kernel.register_engine(MarketplaceEngine())
+
+    # Slice 4.6: AI Orchestration Engine. Wired exactly as this engine's own
+    # certified integration test assembles it
+    # (tests/integration/test_ai_production_runtime.py): a
+    # `KernelBridgeAdapter` over this exact Kernel instance, and a
+    # `RelationalDataStore` over `kernel.db` — safe to construct before
+    # `kernel.boot()` connects it, since `RelationalDataStore.__init__` only
+    # holds a reference and performs no I/O until a session is actually
+    # requested. `environment="production"` is deliberate, not a default:
+    # `KernelProductionBootstrap.validate_production_wiring` refuses to
+    # assemble a production engine that would fall back to a non-durable
+    # in-memory conversation store or a tool-execution port that bypasses
+    # Kernel/Security authorization — the same production-wiring guarantee
+    # already relied on for every other engine registered above. No AI
+    # provider is registered here: none exists yet anywhere in `backend/src`
+    # outside test fixtures, so `kortex.ai.provider.list`/
+    # `kortex.ai.model.list` honestly report empty rather than fabricating one.
+    ai_bootstrap = KernelProductionBootstrap(AIEngineRuntimeConfig(environment="production"))
+    ai_engine = ai_bootstrap.create_ai_engine(
+        # `KernelBridgeAdapter.__init__` structurally requires
+        # `invoke_capability(request: object)`, which `Kernel.invoke_capability`
+        # narrows to `request: CapabilityRequest` — mypy correctly flags this
+        # as unsound in general, but `KernelBridgeAdapter` only ever calls it
+        # with a `CapabilityRequest` it just built itself
+        # (`bridge.py::invoke_capability`), so this is safe in practice.
+        kernel_bridge=KernelBridgeAdapter(kernel),  # type: ignore[arg-type]
+        data_store=RelationalDataStore(kernel.db),
+        registered_engines=list(kernel.get_all_engines().keys()),
+    )
+    kernel.register_engine(ai_engine)
 
     await kernel.boot()
     return kernel

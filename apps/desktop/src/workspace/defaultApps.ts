@@ -1,9 +1,9 @@
+import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { Dashboard } from "@/features/dashboard/components/Dashboard";
 import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
 import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
-import { createPlaceholderApplication } from "./PlaceholderApplication";
 import type { WorkspaceApplication } from "./workspaceTypes";
 
 export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
@@ -19,13 +19,10 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
   {
     id: "ai-studio",
     name: "AI Studio",
-    description: "Build and supervise AI-orchestrated workflows.",
+    description: "Browse the AI provider and model registry.",
     icon: AiStudioIcon,
     route: "/ai-studio",
-    component: createPlaceholderApplication(
-      "AI Studio",
-      "Build and supervise AI-orchestrated workflows.",
-    ),
+    component: AiStudioApp,
     permissions: ["kortex.ai.studio.view"],
   },
   {

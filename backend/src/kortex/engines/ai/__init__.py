@@ -118,6 +118,7 @@ from kortex.engines.ai.memory import (
     sanitize_context_content,
 )
 from kortex.engines.ai.models import (
+    AIModelSummary,
     AIProviderMetadata,
     CredentialRequirement,
     EndpointType,
@@ -237,6 +238,7 @@ __all__ = [
     "AIGenerationFailedEvent",
     "AIGenerationStartedEvent",
     "AIMemoryManager",
+    "AIModelSummary",
     "AIOrchestrationEngine",
     "AIOrchestrationError",
     "AIProviderError",

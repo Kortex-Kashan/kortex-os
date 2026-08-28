@@ -76,6 +76,25 @@ class AIProviderMetadata(BaseModel):
         return self
 
 
+class AIModelSummary(BaseModel):
+    """Read-only, derived view of one model declared by a registered provider.
+
+    Not a first-class Model domain entity — `AIProviderMetadata`'s own
+    docstring defers that to a future milestone. This is a flattening
+    projection over `AIProviderMetadata.supported_models` (Slice 4.6's
+    `kortex.ai.model.list` capability), carrying no field
+    `AIProviderMetadata` doesn't already expose — in particular, no
+    `secret_handle`/`credential_requirement`, since a model listing has no
+    reason to carry its provider's credential material.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model_id: str
+    provider_id: str
+    provider_display_name: str
+
+
 class LLMRequest(BaseModel):
     """Request payload for a single AI generation call.
 

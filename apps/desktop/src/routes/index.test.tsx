@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
 import { RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,6 +6,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_APPLICATIONS } from "@/workspace/defaultApps";
 
 import { router } from "./index";
+
+// The real singleton `router` has no QueryClientProvider of its own — that
+// wrapping lives one level up, in `app/App.tsx` (App -> QueryClientProvider
+// -> RouterProvider -> router), which this file deliberately does not
+// render (see the module doc above: it exercises the router's own provider
+// composition, not App.tsx's). Every default application is now a real,
+// `useQuery`-backed feature (Slice 4.6 made AI Studio the last one), so
+// mounting the router here needs its own local QueryClientProvider — a
+// fresh, `retry: false` client per render, matching every other feature
+// test's own convention, not the shared production `queryClient` singleton.
+function renderRouter() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+}
 
 // Exercises the real, singleton `router` exported by routes/index.tsx —
 // not a hand-built test router — so this file is the one place that
@@ -60,7 +79,7 @@ afterEach(() => {
 
 describe("routes/index provider composition", () => {
   it("mounts the desktop shell through the full provider stack at the workspace root", async () => {
-    render(<RouterProvider router={router} />);
+    renderRouter();
 
     expect(await screen.findByText("KORTEX OS")).toBeInTheDocument();
     expect(screen.getByText("No application mounted")).toBeInTheDocument();
@@ -69,34 +88,38 @@ describe("routes/index provider composition", () => {
   it("renders the login screen, never the shell, through the real singleton router when no session is stored", async () => {
     invokeMock.mockImplementationOnce(() => Promise.resolve(false));
 
-    render(<RouterProvider router={router} />);
+    renderRouter();
 
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.queryByText("KORTEX OS")).not.toBeInTheDocument();
   });
 
   it("routes a default application through the real singleton router and renders its content", async () => {
-    render(<RouterProvider router={router} />);
+    renderRouter();
     // AuthGate (M4.1) gates the shell behind the mocked session check above
     // resolving — "KORTEX OS" (TopBar) does not render until then, so this
     // must be awaited before touching the router/shell below.
     await screen.findByText("KORTEX OS");
-    // AI Studio, not DEFAULT_APPLICATIONS[0] — Dashboard is now a real
-    // feature (workspace/defaultApps.ts) and no longer renders its
-    // `description` verbatim the way a placeholder application does. AI
-    // Studio is still a placeholder, so it still exercises exactly what
-    // this test checks: that the real singleton router renders whichever
-    // application's content is current.
+    // AI Studio (Slice 4.6) was the last default application to become a
+    // real feature (workspace/defaultApps.ts) — all five now render their
+    // own real content instead of their `description` field verbatim the
+    // way a placeholder application does. Asserting on AiStudioApp's own
+    // static description text (not the generic `defaultApps.ts` entry)
+    // still exercises exactly what this test checks: that the real
+    // singleton router renders whichever application's content is
+    // current. `findByText` (not `getByText`) because AiStudioApp's
+    // provider/model sections resolve their TanStack Query state
+    // asynchronously off the mocked `invoke_capability` above.
     const testApp = DEFAULT_APPLICATIONS.find((app) => app.id === "ai-studio");
     if (!testApp) {
-      throw new Error("Expected the ai-studio placeholder application to exist.");
+      throw new Error("Expected the ai-studio application to exist.");
     }
 
     await act(async () => {
       await router.navigate(testApp.route);
     });
 
-    expect(screen.getByText(testApp.description)).toBeInTheDocument();
+    expect(await screen.findByText(/Provider and model registry — browse only\./)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: testApp.name })).toHaveAttribute(
       "aria-current",
       "page",
@@ -104,7 +127,7 @@ describe("routes/index provider composition", () => {
   });
 
   it("falls back to the not-found route for an unregistered path", async () => {
-    render(<RouterProvider router={router} />);
+    renderRouter();
 
     await act(async () => {
       await router.navigate("/this-route-does-not-exist");

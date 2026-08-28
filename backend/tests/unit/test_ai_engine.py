@@ -280,7 +280,7 @@ async def test_kernel_capability_registration() -> None:
     engine, kernel = _make_engine()
     await engine.initialize(kernel)
 
-    assert len(kernel.capabilities) == 9
+    assert len(kernel.capabilities) == 10
     for cap_name in CANONICAL_CAPABILITIES:
         assert cap_name in kernel.capabilities
         assert kernel.capabilities[cap_name]["provider"] == "ai"
@@ -293,6 +293,7 @@ async def test_kernel_capability_registration() -> None:
     assert kernel.capabilities["kortex.ai.tool.invoke"]["required_permissions"] == ["ai:execute"]
     assert kernel.capabilities["kortex.ai.provider.register"]["required_permissions"] == ["ai:manage"]
     assert kernel.capabilities["kortex.ai.provider.list"]["required_permissions"] == ["ai:read"]
+    assert kernel.capabilities["kortex.ai.model.list"]["required_permissions"] == ["ai:read"]
     assert kernel.capabilities["kortex.ai.agent.cancel"]["required_permissions"] == ["ai:orchestrate"]
     assert kernel.capabilities["kortex.ai.agent.status"]["required_permissions"] == ["ai:read"]
     assert kernel.capabilities["kortex.ai.agent.list"]["required_permissions"] == ["ai:read"]
@@ -914,6 +915,27 @@ def test_provider_registration_delegation() -> None:
     providers = engine.list_providers()
     provider_ids = [p.provider_id for p in providers]
     assert "custom-provider" in provider_ids
+
+
+def test_list_models_flattens_every_provider_and_carries_no_secret_field() -> None:
+    """`list_models()` is a pure flatten (Slice 4.6) -- no routing, no
+    selection, no field beyond `AIModelSummary`'s own three (in particular,
+    no `secret_handle`/`credential_requirement`, unlike `AIProviderMetadata`)."""
+    engine, _ = _make_engine()  # default provider: "dummy-provider" / ["dummy-model"]
+    second = DummyExecutingProvider(provider_id="second-provider")
+    second._metadata = second._metadata.model_copy(update={"supported_models": ["model-a", "model-b"]})
+    engine.register_provider(second)
+
+    models = engine.list_models()
+
+    assert {(m.model_id, m.provider_id) for m in models} == {
+        ("dummy-model", "dummy-provider"),
+        ("model-a", "second-provider"),
+        ("model-b", "second-provider"),
+    }
+    for model in models:
+        assert not hasattr(model, "secret_handle")
+        assert not hasattr(model, "credential_requirement")
 
 
 # ---------------------------------------------------------------------------

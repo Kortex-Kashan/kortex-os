@@ -63,6 +63,7 @@ from kortex.engines.ai.memory import (
     sanitize_context_content,
 )
 from kortex.engines.ai.models import (
+    AIModelSummary,
     AIProviderMetadata,
     LLMRequest,
     LLMResponse,
@@ -518,6 +519,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 security_classification="INTERNAL",
             )
             kernel.register_capability(
+                name="kortex.ai.model.list",
+                description="List models declared across all registered AI providers",
+                provider=self.name,
+                handler=self.list_models,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
                 name="kortex.ai.agent.cancel",
                 description="Cancel an active or paused agent reasoning task",
                 provider=self.name,
@@ -892,6 +901,22 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     def list_providers(self) -> list[AIProviderMetadata]:
         """List metadata of all registered AI providers."""
         return self._provider_registry.list_providers()
+
+    def list_models(self) -> list[AIModelSummary]:
+        """List every model declared across all registered providers.
+
+        A pure flatten of `list_providers()`'s own `supported_models` field
+        (see `AIModelSummary`'s docstring) — zero routing/selection logic,
+        unlike `ModelRouter`, which this does not call or duplicate."""
+        return [
+            AIModelSummary(
+                model_id=model_id,
+                provider_id=provider.provider_id,
+                provider_display_name=provider.display_name,
+            )
+            for provider in self._provider_registry.list_providers()
+            for model_id in provider.supported_models
+        ]
 
     # -- Internal Event Helper -----------------------------------------------
 
