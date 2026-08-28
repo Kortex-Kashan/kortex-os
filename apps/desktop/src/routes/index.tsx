@@ -1,4 +1,6 @@
 import { createHashRouter, type RouteObject } from "react-router-dom";
+import { AuthGate } from "@/auth/AuthGate";
+import { AuthProvider } from "@/auth/AuthProvider";
 import { DesktopShell } from "@/shell/DesktopShell";
 import { buildApplicationRoutes } from "@/navigation/applicationRoutes";
 import { WorkspaceNavigationSync } from "@/navigation/navigationBridge";
@@ -44,33 +46,50 @@ const devRoutes: RouteObject[] = import.meta.env.DEV
 //
 // SessionProvider (M2.5, session/SessionProvider.tsx) wraps everything,
 // outermost, so it can restore theme/application state before the
-// providers below it render. SessionSync — a second export from the same
-// module — is mounted one level in, alongside WorkspaceNavigationSync,
-// since restoring the active application and mirroring live workspace
-// state both need context (useWorkspace) that doesn't exist at
-// SessionProvider's own position in the tree. Panel layout is
-// intentionally excluded from the session document — PanelProvider
-// persists/restores it independently via its own "kortex.panels.v1" key
-// (ADR-0003 removed an earlier session-level mirror of the same data).
+// providers below it render — including before authentication resolves
+// (M4.1 §13: the login screen must render in the correct theme, so theme
+// restoration is never gated behind sign-in). AuthProvider + AuthGate
+// (M4.1, auth/AuthProvider.tsx + auth/AuthGate.tsx) sit one level in, just
+// inside SessionProvider: AuthGate renders the login screen or a checking
+// state in place of everything below it, so WorkspaceProvider/
+// PanelProvider/DesktopShell — the authenticated shell — never mount until
+// authentication actually succeeds. SessionSync — a second export from
+// SessionProvider's own module — is mounted one level further in, inside
+// AuthGate's children alongside WorkspaceNavigationSync, since restoring
+// the active application and mirroring live workspace state both need
+// context (useWorkspace) that doesn't exist at SessionProvider's own
+// position in the tree, and both are themselves part of the authenticated
+// shell. Panel layout is intentionally excluded from the session document
+// — PanelProvider persists/restores it independently via its own
+// "kortex.panels.v1" key (ADR-0003 removed an earlier session-level mirror
+// of the same data).
 //
 // The index child is WorkspaceView, the runtime's own empty-state
 // mounting point; one sibling child per default application (M2.3,
 // navigation/applicationRoutes.ts) gives each a real, bookmarkable/
 // refreshable URL (e.g. "#/dashboard") that resolves to the same
 // WorkspaceView — WorkspaceNavigationSync is what activates the matching
-// application once that route is current.
+// application once that route is current. These child routes are only
+// ever reachable through DesktopShell's own `<Outlet/>`, which — per the
+// above — does not exist in the render tree at all until AuthGate resolves
+// to AUTHENTICATED, so a deep link to e.g. "#/dashboard" while signed out
+// renders the login screen, never the workspace route underneath it.
 export const router = createHashRouter([
   {
     path: "/",
     element: (
       <SessionProvider>
-        <WorkspaceProvider initialApplications={DEFAULT_APPLICATIONS}>
-          <PanelProvider initialPanels={DEFAULT_PANELS}>
-            <WorkspaceNavigationSync />
-            <SessionSync />
-            <DesktopShell />
-          </PanelProvider>
-        </WorkspaceProvider>
+        <AuthProvider>
+          <AuthGate>
+            <WorkspaceProvider initialApplications={DEFAULT_APPLICATIONS}>
+              <PanelProvider initialPanels={DEFAULT_PANELS}>
+                <WorkspaceNavigationSync />
+                <SessionSync />
+                <DesktopShell />
+              </PanelProvider>
+            </WorkspaceProvider>
+          </AuthGate>
+        </AuthProvider>
       </SessionProvider>
     ),
     children: [

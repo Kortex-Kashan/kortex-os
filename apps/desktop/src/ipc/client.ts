@@ -6,6 +6,16 @@
 // backend directly, and the session token that command captures never
 // crosses back into this file's return value (see `ipc.rs`'s own
 // `RawBackendResponse` / `IpcResultEnvelope` split).
+//
+// M4.1 adds `IpcResultEnvelope.httpStatus`: the real HTTP status the
+// backend's response line carried, threaded through by Rust's
+// `forward_capability_request`. It exists so callers can distinguish 401
+// (invalid/expired session — force re-authentication) from 403
+// (authenticated but forbidden — stay signed in), a distinction the
+// `errors[].category` field alone cannot carry since both collapse to the
+// identical `PERMISSION_DENIED` value (see `backend/src/kortex/api/
+// errors.py`'s documented taxonomy). See `@/auth/authCapability.ts`'s
+// `classifyIpcFailure`.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -41,6 +51,9 @@ export interface IpcResultEnvelope {
   errors: IpcError[];
   warnings: IpcError[];
   executionDurationMs: number;
+  /** Undefined only when no real HTTP response was ever received (backend
+   * unreachable) — see this file's module doc. */
+  httpStatus?: number;
 }
 
 export async function invokeCapability(
