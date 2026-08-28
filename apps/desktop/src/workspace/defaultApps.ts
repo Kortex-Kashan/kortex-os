@@ -1,5 +1,7 @@
+import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { Dashboard } from "@/features/dashboard/components/Dashboard";
-
+import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
+import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { AiStudioIcon, ConnectorIcon, DashboardIcon, MarketplaceIcon, WorkflowIcon } from "./icons";
 import { createPlaceholderApplication } from "./PlaceholderApplication";
 import type { WorkspaceApplication } from "./workspaceTypes";
@@ -32,10 +34,7 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     description: "Design and monitor automated business workflows.",
     icon: WorkflowIcon,
     route: "/workflows",
-    component: createPlaceholderApplication(
-      "Workflow Engine",
-      "Design and monitor automated business workflows.",
-    ),
+    component: WorkflowApp,
     permissions: ["kortex.workflow.view"],
   },
   {
@@ -44,22 +43,16 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     description: "Manage integrations with external systems.",
     icon: ConnectorIcon,
     route: "/connectors",
-    component: createPlaceholderApplication(
-      "Connector Engine",
-      "Manage integrations with external systems.",
-    ),
+    component: ConnectorsApp,
     permissions: ["kortex.connector.view"],
   },
   {
     id: "marketplace",
     name: "Marketplace",
-    description: "Discover and install KORTEX modules and templates.",
+    description: "Discover KORTEX modules and templates.",
     icon: MarketplaceIcon,
     route: "/marketplace",
-    component: createPlaceholderApplication(
-      "Marketplace",
-      "Discover and install KORTEX modules and templates.",
-    ),
+    component: MarketplaceApp,
     permissions: ["kortex.marketplace.view"],
   },
 ];

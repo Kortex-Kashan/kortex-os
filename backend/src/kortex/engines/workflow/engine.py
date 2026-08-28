@@ -84,6 +84,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "kortex.workflow.instance.approve",
             "kortex.workflow.instance.cancel",
             "kortex.workflow.state.get",
+            "kortex.workflow.definition.list",
         ]
 
     @property
@@ -145,6 +146,16 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 description="Get current state of a workflow instance",
                 provider=self.name,
                 handler=self.get_instance,
+                required_permissions=["workflow:read"],
+            )
+            # M6: smallest read-only registry-visibility capability — calls
+            # the existing, already-implemented list_definitions() verbatim
+            # (no new domain model, no new business logic).
+            kernel.register_capability(
+                name="kortex.workflow.definition.list",
+                description="List registered workflow definitions",
+                provider=self.name,
+                handler=self.list_definitions,
                 required_permissions=["workflow:read"],
             )
 

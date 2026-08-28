@@ -22,8 +22,11 @@ import logging
 import os
 
 from kortex.core.kernel import Kernel
+from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
+from kortex.engines.workflow.engine import WorkflowEngine
 
 logger = logging.getLogger("kortex.api.kernel_bootstrap")
 
@@ -67,6 +70,21 @@ async def build_and_boot_kernel() -> Kernel:
         signing_private_key=_resolve_key(_SIGNING_KEY_ENV, 32),
     )
     kernel.register_engine(security_engine)
+
+    # M5: Connector/Driver Registry. No constructor arguments — it resolves
+    # its Storage Engine data/cache stores from the Kernel IoC container
+    # during `initialize()` (see `ConnectorEngine.initialize`), the same
+    # deferred-wiring pattern Security/Storage already establish here.
+    kernel.register_engine(ConnectorEngine())
+
+    # M6: Workflow Engine. Same deferred-wiring pattern — its Storage Engine
+    # dependency is resolved from the Kernel IoC container during
+    # `initialize()` (see `WorkflowEngine.initialize`), not passed here.
+    kernel.register_engine(WorkflowEngine())
+
+    # M7: Marketplace Engine — read-only catalog visibility slice. No
+    # constructor arguments and no engine dependencies (in-memory only).
+    kernel.register_engine(MarketplaceEngine())
 
     await kernel.boot()
     return kernel

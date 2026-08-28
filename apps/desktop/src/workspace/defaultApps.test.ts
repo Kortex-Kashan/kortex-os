@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
+import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
+import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import { DEFAULT_APPLICATIONS } from "./defaultApps";
 import { WorkspaceRegistry } from "./WorkspaceRegistry";
 
@@ -27,6 +30,21 @@ describe("DEFAULT_APPLICATIONS", () => {
       expect(typeof app.component).toBe("function");
       expect(app.permissions.length).toBeGreaterThan(0);
     }
+  });
+
+  it("wires the Connector Engine application to the real ConnectorsApp, not a placeholder", () => {
+    const connectorApp = DEFAULT_APPLICATIONS.find((app) => app.id === "connector-engine");
+    expect(connectorApp?.component).toBe(ConnectorsApp);
+  });
+
+  it("wires the Workflow Engine application to the real WorkflowApp, not a placeholder", () => {
+    const workflowApp = DEFAULT_APPLICATIONS.find((app) => app.id === "workflow-engine");
+    expect(workflowApp?.component).toBe(WorkflowApp);
+  });
+
+  it("wires the Marketplace application to the real MarketplaceApp, not a placeholder", () => {
+    const marketplaceApp = DEFAULT_APPLICATIONS.find((app) => app.id === "marketplace");
+    expect(marketplaceApp?.component).toBe(MarketplaceApp);
   });
 
   it("registers cleanly into a WorkspaceRegistry with no duplicate-ID conflicts", () => {
