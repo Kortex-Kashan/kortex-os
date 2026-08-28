@@ -61,3 +61,22 @@ export async function invokeCapability(
 ): Promise<IpcResultEnvelope> {
   return invoke<IpcResultEnvelope>("invoke_capability", { request });
 }
+
+// GET /health is a separate, intentionally unauthenticated backend route —
+// not a capability, so it does not go through `invokeCapability`/
+// `invoke_capability` (see `ipc.rs`'s `get_system_health` module docs). Its
+// body is the Kernel's own snake_case diagnostic shape
+// (`backend/src/kortex/core/kernel.py::health_check`), not the camelCase
+// `IpcResultEnvelope` wire contract, so it is intentionally typed as
+// `unknown` here — `features/dashboard/api.ts` is what validates and
+// narrows it into a typed shape before any component reads it.
+export interface SystemHealthOutcome {
+  ok: boolean;
+  statusCode?: number;
+  body?: unknown;
+  error?: string;
+}
+
+export async function fetchSystemHealth(): Promise<SystemHealthOutcome> {
+  return invoke<SystemHealthOutcome>("get_system_health");
+}

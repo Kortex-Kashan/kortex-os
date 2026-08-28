@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window baseline plus the M3 IPC bridge commands and M4.1 session commands. No shell or filesystem permissions. All network egress to the backend is Rust-mediated through these commands only — the webview itself is granted no http/websocket capability (phase3_desktop_architecture.md §11.1). `has-session`/`logout` never return or accept a token value — see `ipc.rs`.",
+  "description": "Main window baseline plus the M3 IPC bridge commands, M4.1 session commands, and the Dashboard's health command. No shell or filesystem permissions. All network egress to the backend is Rust-mediated through these commands only — the webview itself is granted no http/websocket capability (phase3_desktop_architecture.md §11.1). `has-session`/`logout` never return or accept a token value — see `ipc.rs`.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "allow-invoke-capability",
     "allow-connect-event-stream",
     "allow-has-session",
-    "allow-logout"
+    "allow-logout",
+    "allow-get-system-health"
   ]
 }

@@ -17,3 +17,8 @@ commands.allow = ["has_session"]
 identifier = "allow-logout"
 description = "Allows the webview to request logout (M4.1) — discards the held session token in Rust. The webview never handles the token itself."
 commands.allow = ["logout"]
+
+[[permission]]
+identifier = "allow-get-system-health"
+description = "Allows the webview to fetch GET /health — intentionally unauthenticated backend/Kernel diagnostic data (phase3_desktop_architecture.md §11.1). Does not grant the webview any network capability itself — the request runs entirely in Rust, with no Authorization header attached and no session token read."
+commands.allow = ["get_system_health"]
