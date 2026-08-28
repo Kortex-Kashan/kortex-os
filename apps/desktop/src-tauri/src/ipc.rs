@@ -78,6 +78,21 @@ pub struct IpcResultEnvelope {
     #[serde(default)]
     pub warnings: Vec<IpcError>,
     pub execution_duration_ms: f64,
+    /// The real HTTP status code the backend's `/capabilities/invoke`
+    /// response line carried (e.g. 401 vs 403 for two exceptions that both
+    /// map to the identical `PERMISSION_DENIED` category —
+    /// `backend/src/kortex/api/errors.py`'s own documented taxonomy
+    /// collapse). Never present in the backend's JSON body itself (it's a
+    /// transport-level fact, not a payload field) — populated here, in
+    /// `forward_capability_request`, from the real `reqwest::Response`
+    /// before the body is parsed. `None` only when no real HTTP response
+    /// was ever received (backend unreachable / unparseable response) —
+    /// see `transport_error`. Added for M4.1: without this field, the
+    /// 401-vs-403 distinction the backend already computes and sends never
+    /// reached the frontend, since the pre-M4.1 code path only ever read
+    /// the response body, never `response.status()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
 }
 
 /// The raw HTTP response body carries one extra field beyond
@@ -102,6 +117,9 @@ struct RawBackendResponse {
 pub trait TokenStore: Send + Sync {
     fn load(&self) -> Option<String>;
     fn store(&self, token: &str);
+    /// Discards the held session token (logout). A store with nothing held
+    /// is a no-op, never an error.
+    fn clear(&self);
 }
 
 /// Production implementation: the OS-native credential store (Windows
@@ -125,6 +143,15 @@ impl TokenStore for KeyringTokenStore {
             // remembered across restarts — never a reason to fail the
             // login response the caller is already holding.
             let _ = entry.set_password(token);
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            // "Nothing was ever stored" and "the OS keychain entry is
+            // already gone" are both acceptable logout outcomes, never a
+            // reason to fail the logout the caller is already committed to.
+            let _ = entry.delete_credential();
         }
     }
 }
@@ -154,6 +181,14 @@ impl IpcClientState {
     pub fn current_token(&self) -> Option<String> {
         self.token_store.load()
     }
+
+    pub fn has_token(&self) -> bool {
+        self.token_store.load().is_some()
+    }
+
+    pub fn clear_token(&self) {
+        self.token_store.clear();
+    }
 }
 
 fn correlation_id_for(request: &IpcCapabilityRequest) -> String {
@@ -178,6 +213,9 @@ fn transport_error(request: &IpcCapabilityRequest, message: String) -> IpcResult
         }],
         warnings: vec![],
         execution_duration_ms: 0.0,
+        // No real HTTP response was ever received — never fabricate a
+        // status code for a request that never reached the backend.
+        http_status: None,
     }
 }
 
@@ -207,6 +245,14 @@ pub async fn forward_capability_request(
         Err(err) => return transport_error(&request, format!("Backend unreachable: {err}")),
     };
 
+    // Captured before `response` is consumed by `.bytes()` below — this is
+    // the real status line FastAPI sent (e.g. 401 for an invalid/expired
+    // token vs 403 for an authenticated-but-forbidden request; see
+    // `backend/src/kortex/api/errors.py::map_exception`), which the
+    // pre-M4.1 version of this function discarded entirely by only ever
+    // reading the JSON body.
+    let http_status = response.status().as_u16();
+
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -228,7 +274,9 @@ pub async fn forward_capability_request(
         state.token_store.store(token);
     }
 
-    raw.envelope
+    let mut envelope = raw.envelope;
+    envelope.http_status = Some(http_status);
+    envelope
 }
 
 #[tauri::command]
@@ -244,6 +292,24 @@ pub async fn invoke_capability(
     // borrowed `State` argument (a `'static`-lifetime requirement on the
     // underlying future); `Err` is unreachable in practice.
     Ok(forward_capability_request(&state, request).await)
+}
+
+/// M4.1: reports only whether a session token is currently held — never
+/// the token's value. Lets the frontend decide, on startup, whether a
+/// backend validation round trip is worth attempting at all (no stored
+/// token means there is nothing to validate, so the CHECKING state can
+/// resolve straight to UNAUTHENTICATED without ever calling the backend).
+#[tauri::command]
+pub fn has_session(state: tauri::State<'_, Arc<IpcClientState>>) -> bool {
+    state.has_token()
+}
+
+/// M4.1: discards the held session token (logout). Rust remains the sole
+/// custodian of the token for its entire lifecycle, including its end —
+/// the webview asks for logout, it never handles the token itself.
+#[tauri::command]
+pub fn logout(state: tauri::State<'_, Arc<IpcClientState>>) {
+    state.clear_token();
 }
 
 #[cfg(test)]
@@ -277,6 +343,10 @@ mod tests {
         fn store(&self, token: &str) {
             *self.token.lock().unwrap() = Some(token.to_string());
         }
+
+        fn clear(&self) {
+            *self.token.lock().unwrap() = None;
+        }
     }
 
     /// Spawns a real local HTTP server (matching `sidecar.rs`'s own
@@ -291,6 +361,17 @@ mod tests {
     }
 
     async fn start_recording_server(response_body: &'static str) -> RecordingServer {
+        start_recording_server_with_status(response_body, 200).await
+    }
+
+    /// Same as `start_recording_server`, but with a caller-chosen HTTP
+    /// status line — needed to prove `http_status` is threaded from the
+    /// real response onto the returned envelope (M4.1's 401-vs-403 fix),
+    /// which a hardcoded-200 server can never exercise.
+    async fn start_recording_server_with_status(
+        response_body: &'static str,
+        status: u16,
+    ) -> RecordingServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let last_request: CapturedRequest = Arc::new(Mutex::new(None));
@@ -318,9 +399,11 @@ mod tests {
                         let body_json: Value =
                             serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
                         *captured.lock().unwrap() = Some((headers, body_json));
-                        Ok::<_, Infallible>(HyperResponse::new(Full::new(Bytes::from(
-                            response_body,
-                        ))))
+                        let mut response =
+                            HyperResponse::new(Full::new(Bytes::from(response_body)));
+                        *response.status_mut() =
+                            hyper::StatusCode::from_u16(status).unwrap();
+                        Ok::<_, Infallible>(response)
                     }
                 });
                 tokio::spawn(async move {
@@ -450,5 +533,90 @@ mod tests {
         assert_eq!(store.load(), None);
         store.store("abc");
         assert_eq!(store.load(), Some("abc".to_string()));
+    }
+
+    #[test]
+    fn memory_token_store_clear_discards_the_token() {
+        let store = MemoryTokenStore::default();
+        store.store("abc");
+        store.clear();
+        assert_eq!(store.load(), None);
+        // Clearing an already-empty store is a no-op, never a panic.
+        store.clear();
+        assert_eq!(store.load(), None);
+    }
+
+    #[tokio::test]
+    async fn a_401_response_threads_its_real_status_onto_the_envelope() {
+        let server = start_recording_server_with_status(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"FAILURE","payload":null,"errors":[{"category":"PERMISSION_DENIED","message":"invalid token","correlationId":"c-1"}],"warnings":[],"executionDurationMs":1.0}"#,
+            401,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let envelope = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(envelope.errors[0].category, "PERMISSION_DENIED");
+        assert_eq!(envelope.http_status, Some(401));
+    }
+
+    #[tokio::test]
+    async fn a_403_response_threads_its_real_status_onto_the_envelope() {
+        // Same body/category as the 401 case above — proving the
+        // distinction lives in `http_status`, not in anything the body
+        // itself carries (per `errors.py`, both collapse to the identical
+        // PERMISSION_DENIED category).
+        let server = start_recording_server_with_status(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"FAILURE","payload":null,"errors":[{"category":"PERMISSION_DENIED","message":"forbidden","correlationId":"c-1"}],"warnings":[],"executionDurationMs":1.0}"#,
+            403,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let envelope = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(envelope.errors[0].category, "PERMISSION_DENIED");
+        assert_eq!(envelope.http_status, Some(403));
+    }
+
+    #[tokio::test]
+    async fn a_successful_response_also_carries_its_real_200_status() {
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":null,"errors":[],"warnings":[],"executionDurationMs":1.0}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let envelope = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(envelope.http_status, Some(200));
+    }
+
+    #[tokio::test]
+    async fn unreachable_backend_carries_no_fabricated_http_status() {
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with("http://127.0.0.1:1".to_string(), store);
+
+        let envelope = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(envelope.http_status, None);
+    }
+
+    #[test]
+    fn ipc_client_state_has_token_and_clear_token_reflect_the_underlying_store() {
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with("http://127.0.0.1:1".to_string(), store);
+
+        assert!(!state.has_token());
+        state.token_store.store("a-token");
+        assert!(state.has_token());
+
+        state.clear_token();
+        assert!(!state.has_token());
+        assert_eq!(state.current_token(), None);
     }
 }

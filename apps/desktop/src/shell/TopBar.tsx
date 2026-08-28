@@ -20,6 +20,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@kortex/design-system";
+import { useAuth } from "@/auth/AuthProvider";
 import { useUiStore } from "@/stores/uiStore";
 
 import { SearchIcon, UserIcon } from "./icons";
@@ -28,7 +29,12 @@ import { NAV_GROUPS } from "./navigation/navConfig";
 export function TopBar() {
   const [commandOpen, setCommandOpen] = React.useState(false);
   const { theme, toggleTheme } = useUiStore();
+  const auth = useAuth();
   const navigate = useNavigate();
+  const identityLabel =
+    auth.state.status === "AUTHENTICATED" && auth.state.identity
+      ? auth.state.identity.principalId
+      : "Signed in";
 
   React.useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -75,13 +81,13 @@ export function TopBar() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Guest</DropdownMenuLabel>
+            <DropdownMenuLabel>{identityLabel}</DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={toggleTheme}>
               {theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
             </DropdownMenuItem>
             <DropdownMenuItem disabled>Profile</DropdownMenuItem>
-            <DropdownMenuItem disabled>Sign out</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void auth.logout()}>Sign out</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
