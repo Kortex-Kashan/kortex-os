@@ -1,3 +1,17 @@
+/**
+ * Workflow workspace shell (M5.6) — tabbed navigation across:
+ *  - Definitions: read-only workflow definition catalog (existing, preserved)
+ *  - Instances: execution timeline with step detail
+ *  - Approvals: human governance decision queue
+ *  - Schedules: durable cron schedule manager
+ *  - Governed Executions: external subprocess audit view
+ *
+ * The existing DefinitionsTab behavior (including its test surface) is fully
+ * preserved — PopulatedState/EmptyState/AccessDeniedState/ErrorState are
+ * kept as-is inside the Definitions tab. The shell only adds navigation.
+ */
+
+import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   Badge,
@@ -12,14 +26,81 @@ import {
 import { WorkflowAccessDeniedError } from "../api";
 import { useWorkflows } from "../hooks/useWorkflows";
 import type { WorkflowDefinition } from "../types";
+import { InstanceTimeline } from "./InstanceTimeline";
+import { ApprovalQueue } from "./ApprovalQueue";
+import { ScheduleManager } from "./ScheduleManager";
+import { ExternalExecutionInspector } from "./ExternalExecutionInspector";
 
-/** The Workflow workspace: a read-only registry/overview of workflow
- * definitions, and nothing else — no designer, no creation/editing, no
- * execution UI, no scheduling. See `WorkflowAccessDeniedError`'s own
- * docstring (in `../api.ts`) for why a `PERMISSION_DENIED` failure renders
- * one unified "access denied" state here rather than branching on
- * session-expired vs. forbidden. */
+// ---------------------------------------------------------------------------
+// Tab definition
+// ---------------------------------------------------------------------------
+
+type TabId = "definitions" | "instances" | "approvals" | "schedules" | "executions";
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: "definitions", label: "Definitions" },
+  { id: "instances", label: "Instances" },
+  { id: "approvals", label: "Approvals" },
+  { id: "schedules", label: "Schedules" },
+  { id: "executions", label: "Governed Executions" },
+];
+
+// ---------------------------------------------------------------------------
+// Main shell
+// ---------------------------------------------------------------------------
+
 export function WorkflowApp() {
+  const [activeTab, setActiveTab] = useState<TabId>("definitions");
+
+  return (
+    <div className="space-y-4">
+      {/* Tab bar */}
+      <nav
+        role="tablist"
+        aria-label="Workflow workspace tabs"
+        className="flex gap-1 flex-wrap border-b border-border pb-1"
+      >
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            role="tab"
+            id={`workflow-tab-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`workflow-panel-${tab.id}`}
+            onClick={() => setActiveTab(tab.id)}
+            className={[
+              "px-3 py-1.5 text-sm rounded-md transition-colors",
+              activeTab === tab.id
+                ? "bg-primary text-primary-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted",
+            ].join(" ")}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* Tab panels */}
+      <div
+        role="tabpanel"
+        id={`workflow-panel-${activeTab}`}
+        aria-labelledby={`workflow-tab-${activeTab}`}
+      >
+        {activeTab === "definitions" && <DefinitionsTab />}
+        {activeTab === "instances" && <InstanceTimeline />}
+        {activeTab === "approvals" && <ApprovalQueue />}
+        {activeTab === "schedules" && <ScheduleManager />}
+        {activeTab === "executions" && <ExternalExecutionInspector />}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Definitions Tab (existing behavior fully preserved, all tests continue to pass)
+// ---------------------------------------------------------------------------
+
+function DefinitionsTab() {
   const { data, isPending, isError, error, refetch, isFetching } = useWorkflows();
 
   if (isPending) {
@@ -41,6 +122,10 @@ export function WorkflowApp() {
 
   return <PopulatedState definitions={definitions} onRefresh={() => void refetch()} isRefreshing={isFetching} />;
 }
+
+// ---------------------------------------------------------------------------
+// Definition sub-components (unchanged from pre-M5.6)
+// ---------------------------------------------------------------------------
 
 function WorkspaceCard({
   title,

@@ -12,6 +12,16 @@ vi.mock("../api", async () => {
   return { ...actual, listAiProviders: listAiProvidersMock, listAiModels: listAiModelsMock };
 });
 
+// Stub useAuth so AiStudioApp (which reads tenantId for the Governance tab) works
+// without a real AuthProvider in these registry-focused tests.
+vi.mock("@/auth/AuthProvider", () => ({
+  useAuth: () => ({
+    state: { status: "AUTHENTICATED", identity: { tenantId: "acme", principalId: "alice", principalType: "USER", roles: [] } },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+}));
+
 import { AiStudioAccessDeniedError, AiStudioRequestError } from "../api";
 import type { AiModel, AiProvider } from "../types";
 import { AiStudioApp } from "./AiStudioApp";

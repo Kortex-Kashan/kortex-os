@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   Badge,
@@ -13,29 +14,70 @@ import { AiStudioAccessDeniedError } from "../api";
 import { useAiModels } from "../hooks/useAiModels";
 import { useAiProviders } from "../hooks/useAiProviders";
 import type { AiModel, AiProvider } from "../types";
+import { AiGovernanceTab } from "./AiGovernanceTab";
+import { useAuth } from "@/auth/AuthProvider";
 
-/** The AI Studio workspace: read-only visibility into the provider and
- * model registries, and nothing else — no generation, no agent
- * orchestration, no provider/credential configuration. Providers and
- * models are two independent registries (two capabilities), so each
- * renders its own loading/populated/empty/access-denied/error/retry
- * state via `RegistrySection` rather than one combined state hiding
- * a partial failure. */
+type AiTab = "registry" | "governance";
+
+/** The AI Studio workspace: tabbed between the provider/model registry
+ * (read-only) and the AI Governance dashboard (M5.6).
+ * Each tab independently manages its own loading/error states. */
 export function AiStudioApp() {
+  const [activeTab, setActiveTab] = useState<AiTab>("registry");
+  const { state } = useAuth();
+  const tenantId =
+    state.status === "AUTHENTICATED" && state.identity ? state.identity.tenantId : "";
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>AI Studio</CardTitle>
-        <CardDescription>
-          Provider and model registry — browse only. Generation, agent orchestration, and provider
-          configuration are not available yet.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        <ProvidersSection />
-        <ModelsSection />
-      </CardContent>
-    </Card>
+    <div className="space-y-4">
+      <nav
+        role="tablist"
+        aria-label="AI Studio tabs"
+        className="flex gap-1 border-b border-border pb-1"
+      >
+        {(["registry", "governance"] as AiTab[]).map((tab) => (
+          <button
+            key={tab}
+            role="tab"
+            id={`ai-tab-${tab}`}
+            aria-selected={activeTab === tab}
+            aria-controls={`ai-panel-${tab}`}
+            onClick={() => setActiveTab(tab)}
+            className={[
+              "px-3 py-1.5 text-sm rounded-md transition-colors capitalize",
+              activeTab === tab
+                ? "bg-primary text-primary-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted",
+            ].join(" ")}
+          >
+            {tab === "registry" ? "Providers & Models" : "Governance"}
+          </button>
+        ))}
+      </nav>
+
+      <div
+        role="tabpanel"
+        id={`ai-panel-${activeTab}`}
+        aria-labelledby={`ai-tab-${activeTab}`}
+      >
+        {activeTab === "registry" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>AI Studio</CardTitle>
+              <CardDescription>
+                Provider and model registry — browse only. Generation, agent orchestration, and
+                provider configuration are not available yet.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <ProvidersSection />
+              <ModelsSection />
+            </CardContent>
+          </Card>
+        )}
+        {activeTab === "governance" && <AiGovernanceTab tenantId={tenantId} />}
+      </div>
+    </div>
   );
 }
 
