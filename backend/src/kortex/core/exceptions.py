@@ -101,3 +101,18 @@ class KernelBootError(KernelError):
 
 class KernelStateError(KernelError):
     """Raised when an operation is executed in an invalid Kernel state."""
+
+
+# -- Dispatcher & Idempotency Exceptions ------------------------------------
+
+
+class DispatchError(KortexError):
+    """Base class for Capability Dispatcher errors."""
+
+
+class ConcurrentExecutionError(DispatchError):
+    """Raised when a mutation with the same idempotency key is currently processing."""
+
+
+class IdempotencyError(DispatchError):
+    """Raised when an idempotency violation or conflict occurs."""

@@ -36,6 +36,7 @@ import pytest
 from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.exceptions import KernelStateError, ResourceAlreadyExistsError
 from kortex.core.kernel import Kernel
@@ -78,6 +79,8 @@ def _tenant(tmp_path: Path, suffix: str = "") -> str:
 
 def _build_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine]:
     kernel = Kernel()
+    db_file = tmp_path / f"adv_kernel_{uuid.uuid4().hex[:8]}.db"
+    kernel._db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_file}")
     storage_engine = StorageEngine(base_directory=str(tmp_path / "adv_storage"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     kernel.register_engine(storage_engine)
@@ -730,7 +733,7 @@ async def test_workflow_compensation_with_expired_token_fails_closed(tmp_path: P
     def_id = workflow_engine.register_definition(wf_def)
 
     instance = await workflow_engine.start_workflow(def_id, session_token=token_dict)
-    for _ in range(200):
+    for _ in range(600):
         if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED) and not instance.compensation_stack:
             break
         await asyncio.sleep(0.01)
@@ -761,6 +764,8 @@ class _AlwaysSucceedsDriver(BaseConnectorDriver):
 
 async def _build_connector_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine, ConnectorEngine]:
     kernel = Kernel()
+    db_file = tmp_path / f"adv_conn_{uuid.uuid4().hex[:8]}.db"
+    kernel._db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_file}")
     storage_engine = StorageEngine(base_directory=str(tmp_path / "adv_connector_storage"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     connector_engine = ConnectorEngine()

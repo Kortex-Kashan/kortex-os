@@ -29,7 +29,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from kortex.api.schemas import IpcErrorCategory
-from kortex.core.exceptions import CapabilityNotFoundError
+from kortex.core.exceptions import (
+    CapabilityNotFoundError,
+    ConcurrentExecutionError,
+    IdempotencyError,
+)
 from kortex.engines.security.exceptions import (
     AuthenticationError,
     AuthorizationDeniedError,
@@ -56,6 +60,10 @@ def map_exception(exc: BaseException) -> ErrorMapping:
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
     if isinstance(exc, AuthenticationError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.UNAUTHORIZED)
+    if isinstance(exc, ConcurrentExecutionError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
+    if isinstance(exc, IdempotencyError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
     if isinstance(exc, TimeoutError):
         return ErrorMapping("TIMEOUT_EXCEEDED", http.HTTPStatus.REQUEST_TIMEOUT)
     if isinstance(exc, SecurityEngineError):

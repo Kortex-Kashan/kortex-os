@@ -70,10 +70,14 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional, cast
+import time
+import uuid
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, Field
 
+from kortex.core.exceptions import ConcurrentExecutionError
+from kortex.core.idempotency import ClaimResult, IdempotencyStore, sanitize_for_persistence
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.events import SecurityAuthFailureEvent, SecurityAuthSuccessEvent
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError
@@ -92,7 +96,7 @@ logger = logging.getLogger("kortex.core.dispatch")
 # across that privacy boundary. Both copies must stay in sync with
 # `UniversalAuditEntry.actor_type`'s frozen vocabulary (`shared_domain_models.md`
 # §11: HUMAN/AI_AGENT/SYSTEM_ENGINE/CONNECTOR) if it ever changes.
-_PRINCIPAL_TYPE_TO_ACTOR_TYPE: Dict[str, str] = {
+_PRINCIPAL_TYPE_TO_ACTOR_TYPE: dict[str, str] = {
     "USER": "HUMAN",
     "AGENT": "AI_AGENT",
     "SERVICE_PRINCIPAL": "CONNECTOR",
@@ -106,22 +110,20 @@ def _actor_type_for_principal_type(principal_type: str) -> str:
 
 
 class CapabilityRequest(BaseModel):
-    """Untrusted, caller-constructed request to invoke a capability through
-    the Kernel's sanctioned dispatch path.
+    """Canonical execution envelope to invoke a capability through
+    the Kernel's sanctioned dispatch path (Milestone M5.2).
 
-    Nothing in this model is trusted as authoritative security state —
-    `session_token` is verified (never assumed genuine), and
-    `parameters`/`context` can never supply or override `required_permissions`,
-    `requires_authentication`, `security_classification`, an authentication
-    result, or an authorization decision. Those always come from the
-    resolved `CapabilityDescriptor` and from calling Security Engine's own
-    `AuthenticationManager`/`AuthorizationEngine`.
+    Contains request_id, correlation_id, and optional idempotency_key for
+    cross-system correlation, duplicate suppression, and audit lineage.
     """
 
+    request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    idempotency_key: str | None = None
     capability_name: str
-    session_token: Optional[TokenPayload] = None
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-    context: Dict[str, Any] = Field(default_factory=dict)
+    session_token: TokenPayload | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 def _safe_classification(value: str) -> ClassificationLevel:
@@ -152,55 +154,190 @@ class CapabilityDispatcher:
     calls cannot leak identity or decision state into one another.
     """
 
-    def __init__(self, kernel: "Kernel") -> None:
+    def __init__(
+        self,
+        kernel: Kernel,
+        idempotency_store: IdempotencyStore | None = None,
+    ) -> None:
         self._kernel = kernel
+        self._idempotency_store = idempotency_store
 
-    async def dispatch(self, request: CapabilityRequest) -> Any:
-        """Resolve, authenticate, authorize, then invoke — in that exact order.
+    def _resolve_idempotency_store(self) -> IdempotencyStore | None:
+        """Lazily resolve the IdempotencyStore from Kernel StorageEngine or db."""
+        if self._idempotency_store is not None:
+            return self._idempotency_store
+        try:
+            storage_engine = self._kernel.get_engine("storage")
+            if (
+                storage_engine is not None
+                and storage_engine.state.value in ("READY", "RUNNING")
+                and hasattr(storage_engine, "data")
+            ):
+                cache_store = getattr(storage_engine, "cache", None)
+                self._idempotency_store = IdempotencyStore(
+                    data_store=storage_engine.data,
+                    cache_store=cache_store,
+                )
+                return self._idempotency_store
+        except Exception as exc:
+            logger.debug("Storage engine unavailable for idempotency store: %s", exc)
 
-        Raises `CapabilityNotFoundError` if the capability is unregistered,
-        `AuthenticationError` (or a subtype) if authentication is required
-        and fails, `AuthorizationDeniedError` if authorization denies, and
-        `SecurityEngineError` if Security Engine itself is unreachable or an
-        underlying operation fails. The handler is invoked only after every
-        applicable check succeeds. Authentication and authorization outcomes
-        are recorded to Security Engine's Milestone M6 audit trail (see
-        module docstring) before the handler is ever reached.
+        # Fallback to direct Kernel DB manager if storage engine is not booted
+        try:
+            if hasattr(self._kernel, "db") and self._kernel.db.is_connected:
+                from kortex.engines.storage.stores.data_store import RelationalDataStore
+
+                self._idempotency_store = IdempotencyStore(
+                    data_store=RelationalDataStore(self._kernel.db),
+                )
+                return self._idempotency_store
+        except Exception as exc:
+            logger.debug("Database manager unavailable for idempotency store: %s", exc)
+
+        return None
+
+    async def dispatch(self, request: CapabilityRequest) -> Any:  # noqa: ANN401
+        """Resolve, authenticate, authorize, enforce idempotency, then invoke.
+
+        Execution ordering (Milestone M5.2):
+        1. Authentication verification
+        2. Authorization & RBAC/ABAC verification
+        3. Tenant determination from authoritative principal
+        4. Idempotency gate (duplicate suppression & concurrent lock)
+        5. Engine handler invocation
+        6. Idempotency completion / failure persistence
+        7. Execution audit lineage recording
         """
-        descriptor: "CapabilityDescriptor" = self._kernel.get_capability(request.capability_name)
+        descriptor: CapabilityDescriptor = self._kernel.get_capability(request.capability_name)
+        security_engine: SecurityEngine | None = None
 
-        if not descriptor.requires_authentication:
-            return await self._invoke_handler(request)
+        # 1. Authentication Check
+        if descriptor.requires_authentication:
+            if request.session_token is None:
+                raise AuthenticationError(
+                    f"A session token is required to invoke capability '{request.capability_name}'."
+                )
 
-        security_engine = cast(SecurityEngine, self._kernel.get_engine("security"))
+            security_engine = cast(SecurityEngine, self._kernel.get_engine("security"))
 
-        if request.session_token is None:
-            raise AuthenticationError(
-                f"A session token is required to invoke capability '{request.capability_name}'."
+            try:
+                principal = await security_engine.authentication_manager.verify_token(request.session_token)
+            except Exception as exc:
+                await self._audit_authentication_failure(security_engine, request.session_token, exc)
+                raise
+            await self._audit_authentication_success(security_engine, principal)
+        else:
+            principal = None
+            try:
+                sec_eng = self._kernel.get_engine("security")
+                if sec_eng is not None and sec_eng.state.value in ("READY", "RUNNING"):
+                    security_engine = cast(SecurityEngine, sec_eng)
+            except Exception as exc:
+                logger.debug("Security engine unavailable for unauthenticated dispatch: %s", exc)
+
+        # 2. Authorization Check
+        if principal is not None and security_engine is not None:
+            requirement = PermissionRequirement(
+                capability_name=descriptor.name,
+                required_permissions=list(descriptor.required_permissions or []),
+                security_classification=_safe_classification(descriptor.security_classification),
             )
 
-        try:
-            principal = await security_engine.authentication_manager.verify_token(request.session_token)
-        except Exception as exc:
-            await self._audit_authentication_failure(security_engine, request.session_token, exc)
-            raise
-        await self._audit_authentication_success(security_engine, principal)
+            # `SecurityEngine.authorize()` (not the lower `AuthorizationEngine.authorize_strict()`)
+            # so this decision is recorded to the audit trail.
+            decision = await security_engine.authorize(principal, requirement, dict(request.context))
+            if not decision.is_allowed:
+                raise AuthorizationDeniedError(decision.reason)
 
-        requirement = PermissionRequirement(
-            capability_name=descriptor.name,
-            required_permissions=list(descriptor.required_permissions or []),
-            security_classification=_safe_classification(descriptor.security_classification),
+        # 3. Tenant Determination
+        tenant_id = (
+            principal.tenant_id
+            if principal is not None
+            else str(request.context.get("resource_tenant_id", "default"))
         )
 
-        # `SecurityEngine.authorize()` (not the lower `AuthorizationEngine.authorize_strict()`)
-        # so this decision is recorded to the audit trail — see module docstring.
-        decision = await security_engine.authorize(principal, requirement, dict(request.context))
-        if not decision.is_allowed:
-            raise AuthorizationDeniedError(decision.reason)
+        # 4. Idempotency Gate (ONLY for requests carrying an idempotency_key)
+        idempotency_store = self._resolve_idempotency_store()
+        idempotency_key = request.idempotency_key
 
-        return await self._invoke_handler(request)
+        if idempotency_key and idempotency_store is not None:
+            claim_status, cached_response, _ = await idempotency_store.claim_or_get_execution(
+                tenant_id=tenant_id,
+                idempotency_key=idempotency_key,
+                capability_name=request.capability_name,
+                request_id=request.request_id,
+                correlation_id=request.correlation_id,
+            )
+            if claim_status == ClaimResult.COMPLETED:
+                logger.info(
+                    "Idempotency hit for capability '%s', key '%s' under tenant '%s'. Returning cached result.",
+                    request.capability_name,
+                    idempotency_key,
+                    tenant_id,
+                )
+                # Replay is NOT a second execution: do not falsely record a fresh execution audit entry.
+                return cached_response
+            elif claim_status == ClaimResult.PROCESSING:
+                raise ConcurrentExecutionError(
+                    f"A request with idempotency key '{idempotency_key}' is currently being processed."
+                )
 
-    async def _audit_authentication_success(self, security_engine: SecurityEngine, principal: Any) -> None:
+        # 5. Handler Invocation with Timing
+        start_time = time.monotonic()
+        try:
+            result = await self._invoke_handler(request)
+            duration_ms = (time.monotonic() - start_time) * 1000
+
+            # 6. Idempotency Completion Persistence
+            if idempotency_key and idempotency_store is not None:
+                await idempotency_store.record_completed(
+                    tenant_id=tenant_id,
+                    idempotency_key=idempotency_key,
+                    response_payload=result,
+                )
+
+            # 7. Execution Audit Lineage (SUCCESS)
+            if security_engine is not None:
+                await self._audit_execution(
+                    security_engine=security_engine,
+                    principal=principal,
+                    request=request,
+                    tenant_id=tenant_id,
+                    status="SUCCESS",
+                    duration_ms=duration_ms,
+                    result=result,
+                )
+
+            return result
+
+        except Exception as exc:
+            duration_ms = (time.monotonic() - start_time) * 1000
+
+            # 6. Idempotency Failure Persistence
+            if idempotency_key and idempotency_store is not None:
+                await idempotency_store.record_failed(
+                    tenant_id=tenant_id,
+                    idempotency_key=idempotency_key,
+                    error_message=str(exc),
+                )
+
+            # 7. Execution Audit Lineage (FAILURE)
+            if security_engine is not None:
+                await self._audit_execution(
+                    security_engine=security_engine,
+                    principal=principal,
+                    request=request,
+                    tenant_id=tenant_id,
+                    status="FAILURE",
+                    duration_ms=duration_ms,
+                    error=exc,
+                )
+
+            raise
+
+    async def _audit_authentication_success(
+        self, security_engine: SecurityEngine, principal: Any  # noqa: ANN401
+    ) -> None:
         """Best-effort audit recording for a successful token verification.
         Never raises — an audit-store outage must not block a security
         decision that has already been correctly made (see module docstring)."""
@@ -256,7 +393,7 @@ class CapabilityDispatcher:
         except Exception as audit_exc:
             logger.warning("Failed to record dispatch authentication-failure audit entry: %s", audit_exc)
 
-    async def _invoke_handler(self, request: CapabilityRequest) -> Any:
+    async def _invoke_handler(self, request: CapabilityRequest) -> Any:  # noqa: ANN401
         """Resolve and invoke the real handler, awaiting the result only if
         it is actually awaitable.
 
@@ -283,3 +420,57 @@ class CapabilityDispatcher:
         if inspect.isawaitable(result):
             return await result
         return result
+
+    async def _audit_execution(
+        self,
+        security_engine: SecurityEngine,
+        principal: Any | None,  # noqa: ANN401
+        request: CapabilityRequest,
+        tenant_id: str,
+        status: str,
+        duration_ms: float,
+        result: Any | None = None,  # noqa: ANN401
+        error: Exception | None = None,
+    ) -> None:
+        """Best-effort audit recording of capability execution outcome (Milestone M5.2).
+        Captures request_id, correlation_id, duration, status, and scrubbed payload hash."""
+        try:
+            new_state_hash = None
+            if result is not None:
+                try:
+                    scrubbed = sanitize_for_persistence(result)
+                    new_state_hash = security_engine.audit_manager.compute_state_hash(scrubbed)
+                except Exception as exc:
+                    logger.debug("Failed to compute state hash for audit: %s", exc)
+
+            audit_context: dict[str, Any] = {
+                "request_id": request.request_id,
+                "correlation_id": request.correlation_id,
+                "idempotency_key": request.idempotency_key,
+                "capability_name": request.capability_name,
+                "status": status,
+                "duration_ms": duration_ms,
+                "parameters": sanitize_for_persistence(request.parameters),
+            }
+            if error is not None:
+                audit_context["error_type"] = type(error).__name__
+                audit_context["error_message"] = str(error)[:500]
+
+            actor_id = principal.principal_id if principal is not None else "ANONYMOUS"
+            actor_type = (
+                _actor_type_for_principal_type(principal.principal_type.value)
+                if principal is not None
+                else "SYSTEM_ENGINE"
+            )
+
+            await security_engine.audit_manager.record_event(
+                action="kortex.kernel.dispatch.execute",
+                actor_id=actor_id,
+                actor_type=actor_type,
+                tenant_id=tenant_id,
+                resource_id=request.capability_name,
+                new_state_hash=new_state_hash,
+                context=audit_context,
+            )
+        except Exception as exc:
+            logger.warning("Failed to record dispatch execution audit entry: %s", exc)

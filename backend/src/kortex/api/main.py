@@ -171,6 +171,9 @@ async def _invoke(
         context["resource_tenant_id"] = session_token.tenant_id
 
     dispatch_request = CapabilityRequest(
+        request_id=ipc_request.request_id,
+        correlation_id=correlation_id,
+        idempotency_key=ipc_request.idempotency_key,
         capability_name=ipc_request.capability_name,
         session_token=session_token,
         parameters=ipc_request.parameters,
@@ -188,9 +191,13 @@ async def _invoke(
                 request_id=ipc_request.request_id,
                 correlation_id=correlation_id,
                 status="FAILURE",
-                payload=None,
-                errors=[IpcError(category=mapping.category, message="Capability invocation timed out.", correlation_id=correlation_id)],
-                warnings=[],
+                errors=[
+                    IpcError(
+                        category=mapping.category,
+                        message="Capability invocation timed out.",
+                        correlation_id=correlation_id,
+                    )
+                ],
                 execution_duration_ms=duration_ms,
             ),
             None,

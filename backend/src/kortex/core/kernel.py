@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import enum
 import logging
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
-from kortex.core.base_engine import BaseEngine, EngineState
+if TYPE_CHECKING:
+    from kortex.core.outbox import OutboxStore
+
+from kortex.core.base_engine import BaseEngine
 from kortex.core.container import Container
 from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityDispatcher, CapabilityRequest
@@ -21,7 +25,7 @@ from kortex.core.exceptions import KernelStateError, ResourceAlreadyExistsError,
 from kortex.engines.boot.engine import BootEngine
 from kortex.engines.configuration.engine import ConfigurationEngine
 from kortex.engines.event.engine import EventDeliveryResult, EventEngine, EventPriority
-from kortex.engines.registry.engine import CapabilityDescriptor, RegistryCategory, RegistryEngine, ResourceMetadata
+from kortex.engines.registry.engine import CapabilityDescriptor, RegistryEngine, ResourceMetadata
 
 T = TypeVar("T")
 
@@ -55,7 +59,7 @@ class Kernel:
         self._db_manager = DatabaseEngineManager()
 
         # Register core engines into internal engine dictionary
-        self._engines: Dict[str, BaseEngine] = {}
+        self._engines: dict[str, BaseEngine] = {}
 
         # Register the 4 foundational engines
         self._register_core_engine(self._config_engine)
@@ -72,6 +76,7 @@ class Kernel:
         # Capability enforcement boundary — a plain coordinating object, not
         # a BaseEngine, not lifecycle-managed. See `kortex.core.dispatch`.
         self._dispatcher = CapabilityDispatcher(self)
+        self._outbox_store: OutboxStore | None = None
 
     @property
     def state(self) -> KernelState:
@@ -87,6 +92,16 @@ class Kernel:
     def db(self) -> DatabaseEngineManager:
         """Access the database persistence manager."""
         return self._db_manager
+
+    @property
+    def outbox(self) -> OutboxStore:
+        """Access the Transactional Outbox store (Milestone M5.2)."""
+        if self._outbox_store is None:
+            from kortex.core.outbox import OutboxStore
+            from kortex.engines.storage.stores.data_store import RelationalDataStore
+
+            self._outbox_store = OutboxStore(RelationalDataStore(self._db_manager))
+        return self._outbox_store
 
     # -- Internal Engine Helper ---------------------------------------------
 
@@ -120,7 +135,7 @@ class Kernel:
             raise ResourceNotFoundError(f"Engine '{engine_name}' is not registered in Kernel.")
         return self._engines[engine_name]
 
-    def get_all_engines(self) -> Dict[str, BaseEngine]:
+    def get_all_engines(self) -> dict[str, BaseEngine]:
         """Return dictionary of all registered engines."""
         return dict(self._engines)
 
@@ -179,7 +194,7 @@ class Kernel:
         self._state = KernelState.STOPPED
         self._logger.info("KORTEX Kernel Runtime stopped cleanly.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Perform system-wide health checks."""
         reports = await self._boot_engine.run_system_health_checks(self)
         return {
@@ -194,7 +209,7 @@ class Kernel:
     async def publish_event(
         self,
         topic: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         sender: str = "system",
         priority: EventPriority = EventPriority.NORMAL,
     ) -> EventDeliveryResult:
@@ -232,10 +247,10 @@ class Kernel:
         name: str,
         description: str,
         provider: str,
-        handler: Optional[Callable[..., Any]] = None,
-        parameters_schema: Optional[Dict[str, Any]] = None,
-        returns_schema: Optional[Dict[str, Any]] = None,
-        required_permissions: Optional[List[str]] = None,
+        handler: Callable[..., Any] | None = None,
+        parameters_schema: dict[str, Any] | None = None,
+        returns_schema: dict[str, Any] | None = None,
+        required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
     ) -> CapabilityDescriptor:
@@ -283,7 +298,7 @@ class Kernel:
         """
         return await self._dispatcher.dispatch(request)
 
-    def list_capabilities(self) -> List[CapabilityDescriptor]:
+    def list_capabilities(self) -> list[CapabilityDescriptor]:
         """List all registered capabilities."""
         return self._registry_engine.list_capabilities()
 
