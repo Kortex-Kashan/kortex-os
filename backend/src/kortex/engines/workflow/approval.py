@@ -1,25 +1,46 @@
 """
-KORTEX Workflow Approval System Abstraction.
+KORTEX Workflow Approval System & Human Governance Layer (Milestone M5.3).
 
-Defines the ApprovalRepository and ApprovalProvider interfaces, as well as the
-in-memory MemoryApprovalManager for approval ticket tracking, decision processing,
-and event generation (Zero UI / notifications / email / WhatsApp).
+Defines the ApprovalRepository and ApprovalProvider interfaces, the backward-compatible
+in-memory MemoryApprovalManager, and the production SQLite-backed DurableApprovalManager.
+Provides durable human governance, role delegations, expiration sweeps, and cryptographic
+Ed25519 decision verification.
 """
 
 from __future__ import annotations
 
+import datetime
 import logging
-from typing import Protocol, runtime_checkable
-from uuid import UUID
+from datetime import UTC, timedelta
+from typing import Any, Protocol, runtime_checkable
+from uuid import UUID, uuid4
 
-from kortex.engines.workflow.exceptions import WorkflowApprovalError
+from kortex.core.idempotency import sanitize_for_persistence
+from kortex.core.outbox import OutboxStore
+from kortex.engines.security.exceptions import (
+    AuthorizationDeniedError,
+    InvalidSignatureError,
+)
+from kortex.engines.security.models import CryptographicSignature, SecurityPrincipal, UniversalAuditEntry
+from kortex.engines.storage.interfaces import IDataStore
+from kortex.engines.workflow.exceptions import (
+    ApprovalConflictError,
+    WorkflowApprovalError,
+)
 from kortex.engines.workflow.models import (
     ApprovalDecision,
+    ApprovalDelegation,
     ApprovalRequest,
     ApprovalState,
 )
+from kortex.engines.workflow.persistence import ApprovalStore
 
 logger = logging.getLogger("kortex.engines.workflow.approval")
+
+
+# ============================================================================
+# 1. Protocols / Interfaces
+# ============================================================================
 
 
 @runtime_checkable
@@ -30,12 +51,12 @@ class ApprovalRepository(Protocol):
         """Save or update an approval request ticket."""
         ...
 
-    async def get_request(self, request_id: UUID) -> ApprovalRequest | None:
+    async def get_request(self, request_id: UUID | str) -> ApprovalRequest | None:
         """Retrieve an approval request ticket by UUID."""
         ...
 
     async def list_pending_requests(self, role_filter: str | None = None) -> list[ApprovalRequest]:
-        """List pending approval requests optioned filtered by required role."""
+        """List pending approval requests optionally filtered by required role."""
         ...
 
 
@@ -43,13 +64,24 @@ class ApprovalRepository(Protocol):
 class ApprovalProvider(Protocol):
     """Protocol interface for approval request lifecycle management."""
 
-    async def create_request(self, instance_id: UUID, step_id: str, required_role: str) -> ApprovalRequest:
+    async def create_request(
+        self,
+        instance_id: UUID | str | None = None,
+        step_id: str | None = None,
+        required_role: str = "",
+        **kwargs: Any,  # noqa: ANN401
+    ) -> ApprovalRequest:
         """Create a new approval request ticket."""
         ...
 
-    async def submit_decision(self, decision: ApprovalDecision) -> ApprovalRequest:
+    async def submit_decision(self, decision: ApprovalDecision, **kwargs: Any) -> ApprovalRequest:  # noqa: ANN401
         """Submit an approval decision for a pending ticket."""
         ...
+
+
+# ============================================================================
+# 2. In-Memory Implementation (Testing / Development)
+# ============================================================================
 
 
 class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
@@ -61,12 +93,14 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
 
     async def save_request(self, request: ApprovalRequest) -> None:
         """Save or update an approval request ticket."""
-        self._requests[request.id] = request
+        req_id = UUID(str(request.id)) if not isinstance(request.id, UUID) else request.id
+        self._requests[req_id] = request
         logger.debug("Saved approval request '%s' for instance '%s'", request.id, request.instance_id)
 
-    async def get_request(self, request_id: UUID) -> ApprovalRequest | None:
+    async def get_request(self, request_id: UUID | str) -> ApprovalRequest | None:
         """Retrieve an approval request ticket by UUID."""
-        return self._requests.get(request_id)
+        req_id = UUID(str(request_id)) if not isinstance(request_id, UUID) else request_id
+        return self._requests.get(req_id)
 
     async def list_pending_requests(self, role_filter: str | None = None) -> list[ApprovalRequest]:
         """List pending approval requests."""
@@ -76,24 +110,47 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
                 results.append(req)
         return results
 
-    async def get_request_by_instance(self, instance_id: UUID) -> ApprovalRequest | None:
+    async def get_request_by_instance(self, instance_id: UUID | str) -> ApprovalRequest | None:
         """Retrieve the pending approval request for a workflow instance if one exists."""
+        inst_id = UUID(str(instance_id)) if not isinstance(instance_id, UUID) else instance_id
         for req in self._requests.values():
-            if req.instance_id == instance_id and req.state == ApprovalState.PENDING:
+            req_inst_id = (
+                UUID(str(req.instance_id))
+                if req.instance_id and not isinstance(req.instance_id, UUID)
+                else req.instance_id
+            )
+            if req_inst_id == inst_id and req.state == ApprovalState.PENDING:
                 return req
         return None
 
-    async def get_request_by_step(self, instance_id: UUID, step_id: str) -> ApprovalRequest | None:
+    async def get_request_by_step(self, instance_id: UUID | str, step_id: str) -> ApprovalRequest | None:
         """Retrieve the approval request for a specific instance and step."""
+        inst_id = UUID(str(instance_id)) if not isinstance(instance_id, UUID) else instance_id
         for req in self._requests.values():
-            if req.instance_id == instance_id and req.step_id == step_id and req.state == ApprovalState.PENDING:
+            req_inst_id = (
+                UUID(str(req.instance_id))
+                if req.instance_id and not isinstance(req.instance_id, UUID)
+                else req.instance_id
+            )
+            if req_inst_id == inst_id and req.step_id == step_id and req.state == ApprovalState.PENDING:
                 return req
         return None
 
-    async def create_request(self, instance_id: UUID, step_id: str, required_role: str) -> ApprovalRequest:
+    async def create_request(
+        self,
+        instance_id: UUID | str | None = None,
+        step_id: str | None = None,
+        required_role: str = "",
+        **kwargs: Any,  # noqa: ANN401
+    ) -> ApprovalRequest:
         """Create and register a new pending approval ticket."""
+        inst_id: UUID | None = (
+            UUID(str(instance_id))
+            if instance_id is not None and str(instance_id).strip()
+            else None
+        )
         request = ApprovalRequest(
-            instance_id=instance_id,
+            instance_id=inst_id,
             step_id=step_id,
             required_role=required_role,
             state=ApprovalState.PENDING,
@@ -107,13 +164,14 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
         )
         return request
 
-    async def submit_decision(self, decision: ApprovalDecision) -> ApprovalRequest:
+    async def submit_decision(self, decision: ApprovalDecision, **kwargs: Any) -> ApprovalRequest:  # noqa: ANN401
         """Submit an approval decision (APPROVED or REJECTED) for a pending ticket.
 
         Raises:
             WorkflowApprovalError: If request is missing or already decided.
         """
-        request = await self.get_request(decision.request_id)
+        req_id = UUID(str(decision.request_id)) if not isinstance(decision.request_id, UUID) else decision.request_id
+        request = await self.get_request(req_id)
         if not request:
             raise WorkflowApprovalError(f"Approval request ticket '{decision.request_id}' not found.")
 
@@ -126,7 +184,7 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
             raise WorkflowApprovalError(f"Invalid decision state '{decision.decision}'. Must be APPROVED or REJECTED.")
 
         request.state = decision.decision
-        self._decisions[decision.request_id] = decision
+        self._decisions[req_id] = decision
         await self.save_request(request)
 
         logger.info(
@@ -136,3 +194,468 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
             decision.approver_id,
         )
         return request
+
+
+# ============================================================================
+# 3. Durable Relational Implementation (M5.3 Production Authority)
+# ============================================================================
+
+
+class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
+    """Production SQLite-backed approval manager implementing ApprovalRepository and ApprovalProvider.
+
+    Guarantees:
+    - ACID transaction boundaries on ticket mutations and decision insertions.
+    - Strict multi-tenant data partitioning.
+    - Role authorization and time-bounded delegation enforcement.
+    - Cryptographic Ed25519 signature verification on decision evidence.
+    - Expiration sweeps and domain event staging via transactional outbox.
+    - Immutable audit trails recorded via SecurityEngine.audit_manager.
+    """
+
+    def __init__(
+        self,
+        data_store: IDataStore,
+        security_engine: Any = None,  # noqa: ANN401
+        outbox_store: OutboxStore | None = None,
+        event_engine: Any = None,  # noqa: ANN401
+    ) -> None:
+        self._data_store = data_store
+        self._security_engine = security_engine
+        self._outbox_store = outbox_store
+        self._event_engine = event_engine
+        self._store = ApprovalStore(data_store)
+        logger.debug("DurableApprovalManager initialized with IDataStore.")
+
+    # -- Internal Audit & Crypto Helpers --------------------------------------
+
+    async def _record_audit(
+        self,
+        action: str,
+        actor_id: str,
+        tenant_id: str,
+        resource_id: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Record an immutable UniversalAuditEntry via SecurityEngine."""
+        if self._security_engine is not None:
+            audit_mgr = getattr(self._security_engine, "_audit_manager", None)
+            if audit_mgr is None:
+                try:
+                    audit_mgr = getattr(self._security_engine, "audit_manager", None)
+                except Exception:
+                    audit_mgr = None
+            if audit_mgr is not None:
+                try:
+                    entry = UniversalAuditEntry(
+                        action=action,
+                        actor_id=actor_id,
+                        actor_type="HUMAN" if actor_id != "SYSTEM" else "SYSTEM_ENGINE",
+                        tenant_id=tenant_id,
+                        resource_id=resource_id,
+                        context=sanitize_for_persistence(context or {}),
+                    )
+                    await audit_mgr.record_audit_entry(entry)
+                except Exception as exc:
+                    logger.error("Failed to record audit entry for '%s': %s", action, exc)
+
+    def _get_verification_service(self) -> Any:  # noqa: ANN401
+        """Resolve VerificationService from SecurityEngine if wired."""
+        if self._security_engine is not None:
+            vs = getattr(self._security_engine, "_verification_service", None)
+            if vs is not None:
+                return vs
+            try:
+                return getattr(self._security_engine, "verification_service", None)
+            except Exception:
+                return None
+        return None
+
+    # -- Ticket Repository Methods -------------------------------------------
+
+    async def save_request(self, request: ApprovalRequest, tenant_id: str = "default") -> None:
+        """Persist or update an ApprovalRequest ticket in the database."""
+        await self._store.save_request(request, tenant_id=tenant_id)
+
+    async def get_request(self, request_id: UUID | str, tenant_id: str | None = None) -> ApprovalRequest | None:
+        """Retrieve an approval request ticket by UUID/ID with optional tenant isolation."""
+        return await self._store.get_request(request_id, tenant_id=tenant_id)
+
+    async def list_pending_requests(
+        self, role_filter: str | None = None, tenant_id: str = "default"
+    ) -> list[ApprovalRequest]:
+        """List pending approval requests within a tenant boundary."""
+        return await self._store.list_requests(
+            tenant_id=tenant_id, role_filter=role_filter, state_filter="PENDING"
+        )
+
+    async def list_requests(
+        self,
+        tenant_id: str = "default",
+        role_filter: str | None = None,
+        state_filter: str | None = None,
+    ) -> list[ApprovalRequest]:
+        """List approval requests matching criteria within a tenant boundary."""
+        return await self._store.list_requests(
+            tenant_id=tenant_id, role_filter=role_filter, state_filter=state_filter
+        )
+
+    async def get_request_by_instance(
+        self, instance_id: UUID | str, tenant_id: str | None = None
+    ) -> ApprovalRequest | None:
+        """Retrieve the pending approval request for a workflow instance."""
+        return await self._store.get_request_by_instance(instance_id, tenant_id=tenant_id)
+
+    async def get_request_by_step(
+        self, instance_id: UUID | str, step_id: str, tenant_id: str | None = None
+    ) -> ApprovalRequest | None:
+        """Retrieve the pending approval request for a specific instance and step."""
+        return await self._store.get_request_by_step(instance_id, step_id, tenant_id=tenant_id)
+
+    # -- Ticket Lifecycle & Decision Methods ----------------------------------
+
+    async def create_request(
+        self,
+        instance_id: UUID | str | None = None,
+        step_id: str | None = None,
+        required_role: str = "",
+        tenant_id: str = "default",
+        timeout_seconds: int | None = None,
+        context_snapshot: dict[str, Any] | None = None,
+        signature_required: bool = False,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> ApprovalRequest:
+        """Create and persist a new pending approval ticket."""
+        inst_id: UUID | None = (
+            UUID(str(instance_id))
+            if instance_id is not None and str(instance_id).strip()
+            else None
+        )
+        timeout_at = (
+            datetime.datetime.now(UTC) + timedelta(seconds=timeout_seconds)
+            if timeout_seconds is not None
+            else None
+        )
+        sanitized_context = sanitize_for_persistence(context_snapshot or {})
+
+        request = ApprovalRequest(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            instance_id=inst_id,
+            step_id=step_id,
+            required_role=required_role,
+            state=ApprovalState.PENDING,
+            timeout_at=timeout_at,
+            context_snapshot=sanitized_context,
+            signature_required=signature_required,
+        )
+        # Atomically save ticket and stage outbox event in same transaction
+        await self._store.save_request(
+            request,
+            tenant_id=tenant_id,
+            outbox_store=self._outbox_store,
+        )
+
+        # Record universal audit entry
+        await self._record_audit(
+            action="kortex.workflow.approval.create",
+            actor_id="SYSTEM",
+            tenant_id=tenant_id,
+            resource_id=str(request.id),
+            context={
+                "required_role": required_role,
+                "instance_id": str(instance_id) if instance_id else None,
+                "step_id": step_id,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
+        logger.info(
+            "Created durable approval ticket '%s' for step '%s' (Required Role: '%s', Tenant: '%s')",
+            request.id,
+            step_id,
+            required_role,
+            tenant_id,
+        )
+        return request
+
+    async def create_delegation(
+        self,
+        delegator_id: str,
+        delegatee_id: str,
+        role: str,
+        valid_from: datetime.datetime,
+        valid_until: datetime.datetime,
+        tenant_id: str = "default",
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> ApprovalDelegation:
+        """Create and persist a new approver role delegation."""
+        dt_from = valid_from.replace(tzinfo=UTC) if valid_from.tzinfo is None else valid_from
+        dt_until = valid_until.replace(tzinfo=UTC) if valid_until.tzinfo is None else valid_until
+
+        if dt_from >= dt_until:
+            raise WorkflowApprovalError("Delegation valid_from timestamp must precede valid_until timestamp.")
+
+        if principal is not None:
+            if principal.tenant_id != tenant_id:
+                raise AuthorizationDeniedError(
+                    f"Principal tenant '{principal.tenant_id}' does not match delegation tenant '{tenant_id}'."
+                )
+            if (
+                principal.principal_id != delegator_id
+                and "admin" not in principal.roles
+                and "SECURITY_ADMIN" not in principal.roles
+            ):
+                raise AuthorizationDeniedError(
+                    f"Principal '{principal.principal_id}' cannot delegate on behalf of delegator '{delegator_id}'."
+                )
+            has_role = (
+                role in principal.roles or "admin" in principal.roles or "SECURITY_ADMIN" in principal.roles
+            )
+            if not has_role:
+                raise AuthorizationDeniedError(
+                    f"Delegator '{delegator_id}' does not possess role '{role}' to delegate."
+                )
+
+        delegation = ApprovalDelegation(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            delegator_id=delegator_id,
+            delegatee_id=delegatee_id,
+            role=role,
+            valid_from=dt_from,
+            valid_until=dt_until,
+            is_active=True,
+        )
+        await self._store.save_delegation(delegation, tenant_id=tenant_id)
+
+        # Record universal audit entry
+        await self._record_audit(
+            action="kortex.workflow.approval.delegate",
+            actor_id=delegator_id,
+            tenant_id=tenant_id,
+            resource_id=str(delegation.id),
+            context={
+                "delegatee_id": delegatee_id,
+                "role": role,
+                "valid_from": dt_from.isoformat(),
+                "valid_until": dt_until.isoformat(),
+            },
+        )
+
+        logger.info(
+            "Created approval delegation '%s' from '%s' to '%s' for role '%s' (Tenant: '%s')",
+            delegation.id,
+            delegator_id,
+            delegatee_id,
+            role,
+            tenant_id,
+        )
+        return delegation
+
+    async def submit_decision(
+        self,
+        decision: ApprovalDecision,
+        principal: SecurityPrincipal | None = None,
+        tenant_id: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> ApprovalRequest:
+        """Submit an approval decision (APPROVED or REJECTED) with cryptographic verification.
+
+        Raises:
+            WorkflowApprovalError: If request is missing, invalid state, or authorization fails.
+            ApprovalConflictError: If request is already decided or concurrent decision collision.
+            InvalidSignatureError: If cryptographic signature is invalid, tampered, or missing when required.
+            AuthorizationDeniedError: If principal lacks role and valid active delegation.
+        """
+        tid = tenant_id or decision.tenant_id or "default"
+
+        # 1. Fetch ticket under authoritative tenant boundary
+        ticket = await self._store.get_request(decision.request_id, tenant_id=tid)
+        if ticket is None:
+            raise WorkflowApprovalError(f"Approval request ticket '{decision.request_id}' not found.")
+
+        if ticket.state != ApprovalState.PENDING:
+            raise ApprovalConflictError(
+                f"Approval request ticket '{decision.request_id}' is already in state '{ticket.state.value}'."
+            )
+
+        if decision.decision not in (ApprovalState.APPROVED, ApprovalState.REJECTED):
+            raise WorkflowApprovalError(
+                f"Invalid decision state '{decision.decision}'. Must be APPROVED or REJECTED."
+            )
+
+        # 2. Resolve & Verify Principal Authorization & Delegation
+        if principal is None and self._security_engine is not None:
+            auth_mgr = getattr(self._security_engine, "_authentication_manager", None) or getattr(
+                self._security_engine, "authentication_manager", None
+            )
+            if auth_mgr is not None and hasattr(auth_mgr, "_load_principal"):
+                try:
+                    snap = await auth_mgr._load_principal(tid, decision.approver_id, "USER")
+                    if snap is not None:
+                        principal = SecurityPrincipal(
+                            principal_id=snap.principal_id,
+                            principal_type=snap.principal_type,
+                            tenant_id=snap.tenant_id,
+                            roles=list(snap.roles),
+                            attributes=dict(snap.attributes),
+                            enabled=snap.enabled,
+                        )
+                except Exception as err:
+                    logger.debug("Could not resolve principal for approver '%s': %s", decision.approver_id, err)
+
+        if principal is not None:
+            if principal.tenant_id != ticket.tenant_id:
+                raise AuthorizationDeniedError(
+                    f"Principal tenant '{principal.tenant_id}' does not match ticket tenant '{ticket.tenant_id}'."
+                )
+            if principal.principal_id != decision.approver_id:
+                raise AuthorizationDeniedError(
+                    f"Approver ID '{decision.approver_id}' does not match "
+                    f"authenticated principal ID '{principal.principal_id}'."
+                )
+
+            # Check direct role
+            has_role = ticket.required_role in principal.roles
+            if not has_role and ticket.required_role:
+                # Check active delegation
+                delegation = await self._store.get_active_delegation(
+                    tenant_id=ticket.tenant_id,
+                    delegatee_id=principal.principal_id,
+                    role=ticket.required_role,
+                    at_time=datetime.datetime.now(UTC),
+                )
+                if delegation is None:
+                    raise AuthorizationDeniedError(
+                        f"Principal '{principal.principal_id}' lacks required role '{ticket.required_role}' "
+                        f"and possesses no active delegation."
+                    )
+        elif ticket.required_role:
+            raise AuthorizationDeniedError(
+                f"Authentication required: principal must be authenticated to satisfy "
+                f"required role '{ticket.required_role}'."
+            )
+
+        if decision.decided_at.tzinfo is None:
+            decision.decided_at = decision.decided_at.replace(tzinfo=UTC)
+
+        # 3. Cryptographic Signature Verification
+        if ticket.signature_required and not decision.signature_hex:
+            raise InvalidSignatureError("Cryptographic Ed25519 signature is mandatory for this approval ticket.")
+
+        if decision.signature_hex:
+            verifier = self._get_verification_service()
+            if verifier is None:
+                raise InvalidSignatureError(
+                    "No cryptographic verification service available to verify decision signature."
+                )
+
+            # Authoritative identity-to-key binding:
+            if principal is None or "public_key" not in principal.attributes:
+                raise InvalidSignatureError(
+                    "Cannot verify signature: approver identity has no authoritative public key bound "
+                    "in principal attributes."
+                )
+
+            auth_pk_raw = principal.attributes["public_key"]
+            auth_pk_hex = auth_pk_raw if isinstance(auth_pk_raw, str) else bytes(auth_pk_raw).hex()
+
+            if decision.public_key_hex and decision.public_key_hex.lower() != auth_pk_hex.lower():
+                raise InvalidSignatureError(
+                    "Provided public key does not match authoritative public key registered for approver identity."
+                )
+
+            try:
+                pk_bytes = bytes.fromhex(auth_pk_hex)
+            except ValueError as err:
+                raise InvalidSignatureError("Authoritative principal public key attribute is malformed.") from err
+
+            try:
+                sig_bytes = bytes.fromhex(decision.signature_hex)
+            except ValueError as err:
+                raise InvalidSignatureError("Malformed signature hex string.") from err
+
+            # Canonical representation: f"{request_id}:{decision}:{approver_id}:{decided_at_iso}"
+            dec_val = decision.decision.value if hasattr(decision.decision, "value") else str(decision.decision)
+            canonical_payload = (
+                f"{ticket.id}:{dec_val}:{decision.approver_id}:{decision.decided_at.isoformat()}".encode()
+            )
+
+            sig_obj = CryptographicSignature(
+                algorithm="ed25519",
+                signature=sig_bytes,
+                public_key=pk_bytes,
+            )
+
+            is_valid = verifier.verify_signature(canonical_payload, sig_obj)
+            if not is_valid:
+                raise InvalidSignatureError("Signature verification failed: payload, key, or algorithm mismatch.")
+
+        # 4. Atomic Transactional Decision Commit (updates ticket, saves decision, stages outbox event)
+        updated_ticket = await self._store.atomic_submit_decision(
+            decision=decision,
+            tenant_id=tid,
+            outbox_store=self._outbox_store,
+        )
+
+        # 5. Record Universal Audit Entry
+        dec_val = decision.decision.value if hasattr(decision.decision, "value") else str(decision.decision)
+        await self._record_audit(
+            action="kortex.workflow.approval.decide",
+            actor_id=decision.approver_id,
+            tenant_id=tid,
+            resource_id=str(decision.request_id),
+            context={
+                "decision": dec_val,
+                "reason": decision.reason,
+                "signed": bool(decision.signature_hex),
+                "instance_id": str(ticket.instance_id) if ticket.instance_id else None,
+                "step_id": ticket.step_id,
+            },
+        )
+
+        logger.info(
+            "Processed decision '%s' for approval ticket '%s' by approver '%s' (Tenant: '%s')",
+            dec_val,
+            updated_ticket.id,
+            decision.approver_id,
+            tid,
+        )
+        return updated_ticket
+
+    async def sweep_expired_requests(self, tenant_id: str | None = None) -> list[ApprovalRequest]:
+        """Sweep and transition all timed-out PENDING tickets to EXPIRED."""
+        now_utc = datetime.datetime.now(UTC)
+        expired_pending = await self._store.get_expired_pending_requests(before_time=now_utc, tenant_id=tenant_id)
+        expired_results: list[ApprovalRequest] = []
+
+        for req in expired_pending:
+            tid = req.tenant_id
+            expired_ticket = await self._store.atomic_expire_request(
+                request_id=req.id,
+                tenant_id=tid,
+                outbox_store=self._outbox_store,
+            )
+            if expired_ticket:
+                expired_results.append(expired_ticket)
+                await self._record_audit(
+                    action="kortex.workflow.approval.expire",
+                    actor_id="SYSTEM",
+                    tenant_id=tid,
+                    resource_id=str(req.id),
+                    context={
+                        "instance_id": str(req.instance_id) if req.instance_id else None,
+                        "step_id": req.step_id,
+                        "timeout_at": req.timeout_at.isoformat() if req.timeout_at else None,
+                    },
+                )
+                logger.info(
+                    "Expired approval ticket '%s' for instance '%s' (Tenant: '%s')",
+                    req.id,
+                    req.instance_id,
+                    tid,
+                )
+
+        return expired_results

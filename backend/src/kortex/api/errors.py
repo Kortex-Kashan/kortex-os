@@ -33,11 +33,17 @@ from kortex.core.exceptions import (
     CapabilityNotFoundError,
     ConcurrentExecutionError,
     IdempotencyError,
+    ResourceNotFoundError,
 )
 from kortex.engines.security.exceptions import (
     AuthenticationError,
     AuthorizationDeniedError,
+    InvalidSignatureError,
     SecurityEngineError,
+)
+from kortex.engines.workflow.exceptions import (
+    ApprovalConflictError,
+    WorkflowApprovalError,
 )
 
 
@@ -56,14 +62,22 @@ def map_exception(exc: BaseException) -> ErrorMapping:
     """
     if isinstance(exc, CapabilityNotFoundError):
         return ErrorMapping("CAPABILITY_NOT_FOUND", http.HTTPStatus.NOT_FOUND)
+    if isinstance(exc, ResourceNotFoundError):
+        return ErrorMapping("CAPABILITY_NOT_FOUND", http.HTTPStatus.NOT_FOUND)
+    if isinstance(exc, InvalidSignatureError):
+        return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
     if isinstance(exc, AuthorizationDeniedError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
     if isinstance(exc, AuthenticationError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.UNAUTHORIZED)
+    if isinstance(exc, ApprovalConflictError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
     if isinstance(exc, ConcurrentExecutionError):
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
     if isinstance(exc, IdempotencyError):
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
+    if isinstance(exc, WorkflowApprovalError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.BAD_REQUEST)
     if isinstance(exc, TimeoutError):
         return ErrorMapping("TIMEOUT_EXCEEDED", http.HTTPStatus.REQUEST_TIMEOUT)
     if isinstance(exc, SecurityEngineError):

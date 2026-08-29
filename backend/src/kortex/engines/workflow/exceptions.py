@@ -30,6 +30,10 @@ class WorkflowApprovalError(WorkflowError):
     """Raised when an invalid approval decision or state transition occurs."""
 
 
+class ApprovalConflictError(WorkflowApprovalError):
+    """Raised when an approval ticket has already been decided or is in a conflicting state."""
+
+
 class WorkflowStateConflictError(WorkflowError):
     """Raised when an optimistic concurrency version conflict occurs during instance mutation."""
 

@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 
-class WorkflowState(str, enum.Enum):
+class WorkflowState(enum.StrEnum):
     """Deterministic lifecycle state of a workflow instance."""
 
     CREATED = "CREATED"
@@ -29,7 +29,7 @@ class WorkflowState(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
-class WorkflowStatus(str, enum.Enum):
+class WorkflowStatus(enum.StrEnum):
     """Operational status indicator for runtime monitoring."""
 
     PENDING = "PENDING"
@@ -41,7 +41,7 @@ class WorkflowStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
-class WorkflowPriority(str, enum.Enum):
+class WorkflowPriority(enum.StrEnum):
     """Execution priority levels for workflow scheduling."""
 
     LOW = "LOW"
@@ -50,7 +50,7 @@ class WorkflowPriority(str, enum.Enum):
     CRITICAL = "CRITICAL"
 
 
-class WorkflowTrigger(str, enum.Enum):
+class WorkflowTrigger(enum.StrEnum):
     """Trigger sources for workflow instantiation."""
 
     MANUAL = "MANUAL"
@@ -60,7 +60,7 @@ class WorkflowTrigger(str, enum.Enum):
     RECIPE = "RECIPE"
 
 
-class ApprovalState(str, enum.Enum):
+class ApprovalState(enum.StrEnum):
     """State descriptor for approval checkpoints."""
 
     PENDING = "PENDING"
@@ -189,22 +189,47 @@ class ApprovalRequest(BaseModel):
     """Ticket representing an approval checkpoint requirement."""
 
     id: UUID = Field(default_factory=uuid4, description="Approval request UUID")
-    instance_id: UUID = Field(..., description="Associated workflow instance UUID")
-    step_id: str = Field(..., description="Step ID requiring approval")
+    tenant_id: str = Field(default="default", description="Multi-tenant organization identifier")
+    instance_id: UUID | None = Field(default=None, description="Associated workflow instance UUID")
+    step_id: str | None = Field(default=None, description="Step ID requiring approval")
     required_role: str = Field(..., description="Role authorized to approve")
     requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Request timestamp")
     state: ApprovalState = Field(default=ApprovalState.PENDING, description="Current approval state")
+    timeout_at: datetime | None = Field(default=None, description="Timeout expiration timestamp")
+    context_snapshot: dict[str, Any] = Field(default_factory=dict, description="Execution context snapshot")
+    signature_required: bool = Field(default=False, description="Whether Ed25519 signature is strictly mandatory")
+    created_at: datetime | None = Field(default=None, description="Creation timestamp")
+    updated_at: datetime | None = Field(default=None, description="Update timestamp")
 
 
 class ApprovalDecision(BaseModel):
     """Decision payload submitted by an authorized approver."""
 
+    id: UUID = Field(default_factory=uuid4, description="Decision UUID")
     request_id: UUID = Field(..., description="ID of approval request")
+    tenant_id: str = Field(default="default", description="Multi-tenant organization identifier")
     approver_id: str = Field(..., description="ID or username of approver")
     decision: ApprovalState = Field(..., description="APPROVED or REJECTED decision")
     reason: str | None = Field(default=None, description="Optional decision notes or reason")
+    signature_hex: str | None = Field(default=None, description="Cryptographic Ed25519 signature in hex format")
+    public_key_hex: str | None = Field(default=None, description="Optional public key in hex format for verification")
     decision_data: dict[str, Any] = Field(default_factory=dict, description="Additional context data")
     decided_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Timestamp of decision")
+
+
+class ApprovalDelegation(BaseModel):
+    """Delegation granting an approver role to a deputy user for a bounded time window."""
+
+    id: UUID = Field(default_factory=uuid4, description="Delegation UUID")
+    tenant_id: str = Field(default="default", description="Multi-tenant organization identifier")
+    delegator_id: str = Field(..., description="Principal ID delegating the role")
+    delegatee_id: str = Field(..., description="Principal ID receiving the delegated role")
+    role: str = Field(..., description="Role name being delegated")
+    valid_from: datetime = Field(..., description="UTC start time of delegation validity")
+    valid_until: datetime = Field(..., description="UTC end time of delegation validity")
+    is_active: bool = Field(default=True, description="Whether the delegation is active")
+    created_at: datetime | None = Field(default=None, description="Creation timestamp")
+    updated_at: datetime | None = Field(default=None, description="Update timestamp")
 
 
 class ApprovalEvent(BaseModel):

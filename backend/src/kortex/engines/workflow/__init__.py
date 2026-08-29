@@ -10,10 +10,12 @@ from __future__ import annotations
 from kortex.engines.workflow.approval import (
     ApprovalProvider,
     ApprovalRepository,
+    DurableApprovalManager,
     MemoryApprovalManager,
 )
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.exceptions import (
+    ApprovalConflictError,
     WorkflowApprovalError,
     WorkflowError,
     WorkflowExecutionError,
@@ -25,6 +27,7 @@ from kortex.engines.workflow.exceptions import (
 from kortex.engines.workflow.interfaces import ISchedulerProvider, IWorkflowExecutor
 from kortex.engines.workflow.models import (
     ApprovalDecision,
+    ApprovalDelegation,
     ApprovalEvent,
     ApprovalRequest,
     ApprovalState,
@@ -43,6 +46,10 @@ from kortex.engines.workflow.models import (
     WorkflowTrigger,
 )
 from kortex.engines.workflow.persistence import (
+    ApprovalDecisionModel,
+    ApprovalDelegationModel,
+    ApprovalRequestModel,
+    ApprovalStore,
     WorkflowDefinitionModel,
     WorkflowInstanceModel,
     WorkflowStepRunModel,
@@ -51,13 +58,20 @@ from kortex.engines.workflow.persistence import (
 from kortex.engines.workflow.state_machine import WorkflowStateMachine
 
 __all__ = [
+    "ApprovalConflictError",
     "ApprovalDecision",
+    "ApprovalDecisionModel",
+    "ApprovalDelegation",
+    "ApprovalDelegationModel",
     "ApprovalEvent",
     "ApprovalProvider",
     "ApprovalRepository",
     "ApprovalRequest",
+    "ApprovalRequestModel",
     "ApprovalState",
+    "ApprovalStore",
     "CompensationAction",
+    "DurableApprovalManager",
     "ExecutionResult",
     "ISchedulerProvider",
     "IWorkflowExecutor",

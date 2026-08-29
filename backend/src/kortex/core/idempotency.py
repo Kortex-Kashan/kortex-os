@@ -35,10 +35,13 @@ SENSITIVE_KEY_NAMES: set[str] = {
     "secret",
     "secret_key",
     "credentials",
+    "credential",
     "bearer_token",
     "api_key",
     "authorization",
     "private_key",
+    "access_token",
+    "refresh_token",
 }
 
 

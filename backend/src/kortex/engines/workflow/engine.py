@@ -10,19 +10,25 @@ Guiding Principle: Zero Business Logic.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.exceptions import ResourceNotFoundError
-from kortex.engines.security.models import TokenPayload
+from kortex.engines.security.models import SecurityPrincipal, TokenPayload
 from kortex.engines.storage.engine import StorageEngine
-from kortex.engines.workflow.approval import MemoryApprovalManager
+from kortex.engines.workflow.approval import (
+    ApprovalProvider,
+    DurableApprovalManager,
+    MemoryApprovalManager,
+)
 from kortex.engines.workflow.evaluator import StepEvaluator
 from kortex.engines.workflow.exceptions import (
+    WorkflowApprovalError,
     WorkflowExecutionError,
     WorkflowStateError,
     WorkflowValidationError,
@@ -30,6 +36,7 @@ from kortex.engines.workflow.exceptions import (
 from kortex.engines.workflow.interfaces import IWorkflowExecutor
 from kortex.engines.workflow.models import (
     ApprovalDecision,
+    ApprovalRequest,
     ApprovalState,
     ExecutionResult,
     WorkflowContext,
@@ -64,7 +71,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self._settings = settings or WorkflowSettings()
         self._definitions: dict[str, WorkflowDefinition] = {}
         self._instances: dict[UUID, WorkflowInstance] = {}
-        self._approval_manager = MemoryApprovalManager()
+        self._approval_manager: ApprovalProvider | MemoryApprovalManager = MemoryApprovalManager()
         self._evaluator = StepEvaluator(self._approval_manager)
         self._kernel: Kernel | None = None
         self._storage_engine: StorageEngine | None = None
@@ -90,6 +97,11 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "kortex.workflow.state.get",
             "kortex.workflow.instance.approve",
             "kortex.workflow.definition.list",
+            "kortex.workflow.approval.create",
+            "kortex.workflow.approval.list",
+            "kortex.workflow.approval.get",
+            "kortex.workflow.approval.decide",
+            "kortex.workflow.approval.delegate",
         ]
 
     @property
@@ -108,9 +120,14 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         return self._settings
 
     @property
-    def approval_manager(self) -> MemoryApprovalManager:
+    def approval_manager(self) -> ApprovalProvider | MemoryApprovalManager:
         """Access the approval manager subsystem."""
         return self._approval_manager
+
+    def set_approval_manager(self, manager: ApprovalProvider | MemoryApprovalManager) -> None:
+        """Explicitly inject or configure the approval manager (e.g. for testing)."""
+        self._approval_manager = manager
+        self._evaluator = StepEvaluator(self._approval_manager)
 
     @property
     def workflow_store(self) -> WorkflowStore | None:
@@ -135,6 +152,29 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             if self._storage_engine and hasattr(self._storage_engine, "data"):
                 self._workflow_store = WorkflowStore(self._storage_engine.data)
                 self.logger.info("WorkflowEngine wired to StorageEngine.data relational store.")
+
+                sec_engine = None
+                try:
+                    sec_engine = kernel.get_engine("security")
+                except Exception as err:
+                    self.logger.debug("Security engine lookup in initialize: %s", err)
+
+                event_engine = None
+                try:
+                    event_engine = kernel.get_engine("event")
+                except Exception as err:
+                    self.logger.debug("Event engine lookup in initialize: %s", err)
+
+                outbox_store = getattr(kernel, "outbox", None)
+
+                self._approval_manager = DurableApprovalManager(
+                    data_store=self._storage_engine.data,
+                    security_engine=sec_engine,
+                    outbox_store=outbox_store,
+                    event_engine=event_engine,
+                )
+                self._evaluator = StepEvaluator(self._approval_manager)
+                self.logger.info("WorkflowEngine wired to DurableApprovalManager backed by StorageEngine.data.")
 
             # Register Kernel capabilities
             kernel.register_capability(
@@ -178,6 +218,41 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 provider=self.name,
                 handler=self.submit_approval_decision,
                 required_permissions=["workflow:approve"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.approval.create",
+                description="Create an approval request ticket",
+                provider=self.name,
+                handler=self.create_approval_request,
+                required_permissions=["approval:write"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.approval.list",
+                description="List approval request tickets for tenant",
+                provider=self.name,
+                handler=self.list_approval_requests,
+                required_permissions=["approval:read"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.approval.get",
+                description="Get approval request ticket by ID",
+                provider=self.name,
+                handler=self.get_approval_request,
+                required_permissions=["approval:read"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.approval.decide",
+                description="Submit a decision for an approval ticket",
+                provider=self.name,
+                handler=self.decide_approval_request,
+                required_permissions=["approval:write"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.approval.delegate",
+                description="Delegate an approval role to another principal",
+                provider=self.name,
+                handler=self.delegate_approval_role,
+                required_permissions=["approval:write"],
             )
             kernel.register_capability(
                 name="kortex.workflow.state.get",
@@ -284,17 +359,68 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
 
                 if instance.state == WorkflowState.WAITING:
                     # Workflow is waiting for human approval or external decision.
-                    # Preserve waiting state; recreate pending approval request in approval manager if needed.
                     if instance.current_step_id:
                         step = next((s for s in definition.steps if s.id == instance.current_step_id), None)
                         if step and step.is_approval_step:
                             role = step.required_approval_role or "APPROVAL_ROLE"
-                            existing_req = await self._approval_manager.get_request_by_step(instance.id, step.id)
-                            if existing_req is None:
+                            existing_req: ApprovalRequest | None = None
+                            if hasattr(self._approval_manager, "get_request_by_step"):
+                                try:
+                                    existing_req = await self._approval_manager.get_request_by_step(
+                                        instance.id, step.id, tenant_id=instance.tenant_id
+                                    )
+                                except TypeError:
+                                    existing_req = await self._approval_manager.get_request_by_step(
+                                        instance.id, step.id
+                                    )
+
+                            if existing_req is not None:
+                                if existing_req.state == ApprovalState.APPROVED:
+                                    self.logger.info(
+                                        "Recovered workflow '%s' with already-APPROVED ticket '%s'. Resuming.",
+                                        instance.id,
+                                        existing_req.id,
+                                    )
+                                    instance.current_step_index += 1
+                                    if self._workflow_store:
+                                        await self._workflow_store.update_instance(instance)
+                                    task = asyncio.create_task(self._run_instance_steps(instance, definition))
+                                    self._running_tasks[instance.id] = task
+                                    recovered.append(instance)
+                                    continue
+                                elif existing_req.state in (ApprovalState.REJECTED, ApprovalState.EXPIRED):
+                                    self.logger.info(
+                                        "Recovered workflow '%s' with %s ticket '%s'. Transitioning to FAILED.",
+                                        instance.id,
+                                        existing_req.state.value,
+                                        existing_req.id,
+                                    )
+                                    WorkflowStateMachine.transition(instance, WorkflowState.FAILED)
+                                    instance.status = WorkflowStatus.FAILED
+                                    if self._workflow_store:
+                                        await self._workflow_store.update_instance(instance)
+                                    if instance.compensation_stack:
+                                        await self._evaluator.execute_compensation_stack(
+                                            instance=instance,
+                                            capability_dispatcher=self._dispatch_capability,
+                                        )
+                                    recovered.append(instance)
+                                    continue
+                                elif existing_req.state == ApprovalState.PENDING:
+                                    self.logger.info(
+                                        "Hydrated workflow '%s' in WAITING state with pending approval ticket '%s'.",
+                                        instance.id,
+                                        existing_req.id,
+                                    )
+                                    recovered.append(instance)
+                                    continue
+                            else:
+                                # Create missing ticket
                                 await self._approval_manager.create_request(
                                     instance_id=instance.id,
                                     step_id=step.id,
                                     required_role=role,
+                                    tenant_id=instance.tenant_id,
                                 )
                     self.logger.info(
                         "Hydrated workflow '%s' in WAITING state at step '%s'.",
@@ -743,12 +869,38 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         )
         return instance
 
-    async def submit_approval_decision(
-        self, decision: ApprovalDecision, tenant_id: str | None = None
+    async def _dispatch_capability(
+        self,
+        capability_name: str,
+        parameters: dict[str, Any],
+        context: dict[str, Any],
+    ) -> Any:  # noqa: ANN401
+        """Helper to invoke a capability through the Kernel capability dispatch boundary."""
+        if not self._kernel:
+            return None
+        session_token: TokenPayload | None = None
+        if "session_token" in context and isinstance(context["session_token"], dict):
+            token_fields = dict(context["session_token"])
+            raw_signature = token_fields.get("signature")
+            if isinstance(raw_signature, str):
+                token_fields["signature"] = bytes.fromhex(raw_signature)
+            session_token = TokenPayload(**token_fields)
+        request = CapabilityRequest(
+            capability_name=capability_name,
+            session_token=session_token,
+            parameters=parameters,
+            context=context,
+        )
+        return await self._kernel.invoke_capability(request)
+
+    async def _advance_workflow_after_approval(
+        self, ticket: ApprovalRequest, decision: ApprovalDecision, tenant_id: str | None = None
     ) -> WorkflowInstance:
-        """Submit an approval decision and resume workflow if approved."""
-        request = await self._approval_manager.submit_decision(decision)
-        instance = await self.get_instance_durable(request.instance_id, tenant_id=tenant_id)
+        """Advance or fail a workflow instance following an approval decision (Article 8 authority)."""
+        if not ticket.instance_id:
+            raise WorkflowApprovalError(f"Approval ticket '{ticket.id}' is not linked to a workflow instance.")
+
+        instance = await self.get_instance_durable(ticket.instance_id, tenant_id=tenant_id)
 
         if decision.decision == ApprovalState.APPROVED:
             await self._publish_event(
@@ -775,7 +927,293 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "workflow.failed",
             {"instance_id": str(instance.id), "reason": "Approval rejected", "tenant_id": instance.tenant_id},
         )
+        if instance.compensation_stack:
+            await self._evaluator.execute_compensation_stack(
+                instance=instance,
+                capability_dispatcher=self._dispatch_capability,
+            )
         return instance
+
+    async def submit_approval_decision(
+        self, decision: ApprovalDecision, tenant_id: str | None = None
+    ) -> WorkflowInstance:
+        """Submit an approval decision and resume workflow if approved (legacy capability handler)."""
+        tid = tenant_id or decision.tenant_id or "default"
+        ticket = await self._approval_manager.submit_decision(decision, tenant_id=tid)
+        return await self._advance_workflow_after_approval(ticket, decision, tenant_id=tid)
+
+    async def create_approval_request(
+        self,
+        required_role: str,
+        instance_id: str | UUID | None = None,
+        step_id: str | None = None,
+        timeout_seconds: int | None = None,
+        context_snapshot: dict[str, Any] | None = None,
+        signature_required: bool = False,
+        tenant_id: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Create an approval request ticket (kortex.workflow.approval.create capability)."""
+        tid = tenant_id or "default"
+        req = await self._approval_manager.create_request(
+            instance_id=instance_id,
+            step_id=step_id,
+            required_role=required_role,
+            tenant_id=tid,
+            timeout_seconds=timeout_seconds,
+            context_snapshot=context_snapshot,
+            signature_required=signature_required,
+        )
+        return {
+            "id": str(req.id),
+            "tenant_id": req.tenant_id,
+            "instance_id": str(req.instance_id) if req.instance_id else None,
+            "step_id": req.step_id,
+            "required_role": req.required_role,
+            "state": req.state.value if hasattr(req.state, "value") else str(req.state),
+            "timeout_at": req.timeout_at.isoformat() if req.timeout_at else None,
+            "signature_required": req.signature_required,
+        }
+
+    async def list_approval_requests(
+        self,
+        tenant_id: str | None = None,
+        role_filter: str | None = None,
+        state_filter: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> list[dict[str, Any]]:
+        """List approval request tickets for tenant (kortex.workflow.approval.list capability)."""
+        tid = tenant_id or "default"
+        requests: list[ApprovalRequest]
+        if hasattr(self._approval_manager, "list_requests"):
+            requests = await self._approval_manager.list_requests(
+                tenant_id=tid, role_filter=role_filter, state_filter=state_filter
+            )
+        elif hasattr(self._approval_manager, "list_pending_requests"):
+            mgr = cast(Any, self._approval_manager)
+            requests = await mgr.list_pending_requests(role_filter=role_filter)
+        else:
+            requests = []
+        return [
+            {
+                "id": str(r.id),
+                "tenant_id": r.tenant_id,
+                "instance_id": str(r.instance_id) if r.instance_id else None,
+                "step_id": r.step_id,
+                "required_role": r.required_role,
+                "state": r.state.value if hasattr(r.state, "value") else str(r.state),
+                "timeout_at": r.timeout_at.isoformat() if r.timeout_at else None,
+                "signature_required": r.signature_required,
+            }
+            for r in requests
+        ]
+
+    async def get_approval_request(
+        self,
+        request_id: str | UUID,
+        tenant_id: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Get approval request ticket by ID (kortex.workflow.approval.get capability)."""
+        tid = tenant_id or "default"
+        if hasattr(self._approval_manager, "get_request"):
+            req = await self._approval_manager.get_request(request_id, tenant_id=tid)
+        else:
+            req = None
+        if req is None:
+            raise ResourceNotFoundError(f"Approval request '{request_id}' not found for tenant '{tid}'.")
+        return {
+            "id": str(req.id),
+            "tenant_id": req.tenant_id,
+            "instance_id": str(req.instance_id) if req.instance_id else None,
+            "step_id": req.step_id,
+            "required_role": req.required_role,
+            "state": req.state.value if hasattr(req.state, "value") else str(req.state),
+            "timeout_at": req.timeout_at.isoformat() if req.timeout_at else None,
+            "context_snapshot": req.context_snapshot,
+            "signature_required": req.signature_required,
+        }
+
+    async def decide_approval_request(
+        self,
+        request_id: str | UUID,
+        decision: str | ApprovalState,
+        approver_id: str,
+        reason: str | None = None,
+        signature_hex: str | None = None,
+        public_key_hex: str | None = None,
+        decision_data: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Submit a decision for an approval ticket (kortex.workflow.approval.decide capability)."""
+        tid = tenant_id or "default"
+        dec_state: ApprovalState
+        if isinstance(decision, ApprovalState):
+            dec_state = decision
+        elif isinstance(decision, str) and decision in ApprovalState._value2member_map_:
+            dec_state = ApprovalState(decision)
+        else:
+            raise WorkflowValidationError(f"Invalid approval decision state: '{decision}'.")
+
+        # Resolve principal from session_token if not directly provided
+        if principal is None and "session_token" in kwargs:
+            raw_token = kwargs["session_token"]
+            sec_eng = None
+            if self._kernel:
+                try:
+                    sec_eng = self._kernel.get_engine("security")
+                except Exception as err:
+                    self.logger.debug("Security engine lookup in decide_approval_request: %s", err)
+            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
+                try:
+                    from kortex.engines.security.models import TokenPayload
+
+                    if isinstance(raw_token, TokenPayload):
+                        principal = await sec_eng.authentication_manager.verify_token(raw_token)
+                    elif isinstance(raw_token, dict):
+                        tok_dict = dict(raw_token)
+                        raw_sig = tok_dict.get("signature")
+                        if isinstance(raw_sig, str):
+                            tok_dict["signature"] = bytes.fromhex(raw_sig)
+                        tok = TokenPayload(**tok_dict)
+                        principal = await sec_eng.authentication_manager.verify_token(tok)
+                except Exception as err:
+                    self.logger.debug("Could not verify session token in decide_approval_request: %s", err)
+
+        decision_obj = ApprovalDecision(
+            request_id=UUID(str(request_id)),
+            tenant_id=tid,
+            approver_id=approver_id,
+            decision=dec_state,
+            reason=reason,
+            signature_hex=signature_hex,
+            public_key_hex=public_key_hex,
+            decision_data=decision_data or {},
+        )
+        updated_ticket = await self._approval_manager.submit_decision(
+            decision=decision_obj,
+            principal=principal,
+            tenant_id=tid,
+        )
+
+        if updated_ticket.instance_id:
+            await self._advance_workflow_after_approval(updated_ticket, decision_obj, tenant_id=tid)
+
+        ticket_state_val = (
+            updated_ticket.state.value
+            if hasattr(updated_ticket.state, "value")
+            else str(updated_ticket.state)
+        )
+        return {
+            "id": str(updated_ticket.id),
+            "state": ticket_state_val,
+            "decision": dec_state.value if hasattr(dec_state, "value") else str(dec_state),
+            "approver_id": approver_id,
+            "tenant_id": tid,
+        }
+
+    async def delegate_approval_role(
+        self,
+        delegator_id: str,
+        delegatee_id: str,
+        role: str,
+        valid_from: str | datetime.datetime,
+        valid_until: str | datetime.datetime,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Delegate an approval role to another principal (kortex.workflow.approval.delegate capability)."""
+        tid = tenant_id or "default"
+        dt_from = (
+            datetime.datetime.fromisoformat(valid_from) if isinstance(valid_from, str) else valid_from
+        )
+        dt_until = (
+            datetime.datetime.fromisoformat(valid_until) if isinstance(valid_until, str) else valid_until
+        )
+
+        # Resolve principal from session_token if not directly provided
+        if principal is None and "session_token" in kwargs:
+            raw_token = kwargs["session_token"]
+            sec_eng = None
+            if self._kernel:
+                try:
+                    sec_eng = self._kernel.get_engine("security")
+                except Exception as err:
+                    self.logger.debug("Security engine lookup in delegate_approval_role: %s", err)
+            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
+                try:
+                    from kortex.engines.security.models import TokenPayload
+
+                    if isinstance(raw_token, TokenPayload):
+                        principal = await sec_eng.authentication_manager.verify_token(raw_token)
+                    elif isinstance(raw_token, dict):
+                        tok_dict = dict(raw_token)
+                        raw_sig = tok_dict.get("signature")
+                        if isinstance(raw_sig, str):
+                            tok_dict["signature"] = bytes.fromhex(raw_sig)
+                        tok = TokenPayload(**tok_dict)
+                        principal = await sec_eng.authentication_manager.verify_token(tok)
+                except Exception as err:
+                    self.logger.debug("Could not verify session token in delegate_approval_role: %s", err)
+
+        if hasattr(self._approval_manager, "create_delegation"):
+            delegation = await self._approval_manager.create_delegation(
+                delegator_id=delegator_id,
+                delegatee_id=delegatee_id,
+                role=role,
+                valid_from=dt_from,
+                valid_until=dt_until,
+                tenant_id=tid,
+                principal=principal,
+            )
+            return {
+                "id": str(delegation.id),
+                "tenant_id": delegation.tenant_id,
+                "delegator_id": delegation.delegator_id,
+                "delegatee_id": delegation.delegatee_id,
+                "role": delegation.role,
+                "valid_from": delegation.valid_from.isoformat(),
+                "valid_until": delegation.valid_until.isoformat(),
+                "is_active": delegation.is_active,
+            }
+        raise WorkflowApprovalError("Active approval manager does not support role delegations.")
+
+    async def sweep_expired_approvals(self, tenant_id: str | None = None) -> list[ApprovalRequest]:
+        """Sweep expired pending approval requests and fail associated workflows with compensation."""
+        if not hasattr(self._approval_manager, "sweep_expired_requests"):
+            return []
+        mgr = cast(Any, self._approval_manager)
+        expired_tickets: list[ApprovalRequest] = await mgr.sweep_expired_requests(tenant_id=tenant_id)
+        for ticket in expired_tickets:
+            if ticket.instance_id:
+                try:
+                    instance = await self.get_instance_durable(ticket.instance_id, tenant_id=ticket.tenant_id)
+                    if instance.state == WorkflowState.WAITING:
+                        WorkflowStateMachine.transition(instance, WorkflowState.FAILED)
+                        instance.status = WorkflowStatus.FAILED
+                        self._metrics["workflows_failed"] += 1
+                        if self._workflow_store:
+                            await self._workflow_store.update_instance(instance)
+                        await self._persist_instance_snapshot(instance)
+                        await self._publish_event(
+                            "workflow.failed",
+                            {
+                                "instance_id": str(instance.id),
+                                "reason": "Approval timed out",
+                                "tenant_id": instance.tenant_id,
+                            },
+                        )
+                        if instance.compensation_stack:
+                            await self._evaluator.execute_compensation_stack(
+                                instance=instance,
+                                capability_dispatcher=self._dispatch_capability,
+                            )
+                except Exception as e:
+                    self.logger.error("Failed to fail expired workflow '%s': %s", ticket.instance_id, e)
+        return expired_tickets
 
     async def execute_workflow(
         self,

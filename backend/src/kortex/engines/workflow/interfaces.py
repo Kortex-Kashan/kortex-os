@@ -6,12 +6,10 @@ Defines protocol interfaces for scheduler providers (ISchedulerProvider) and ste
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from kortex.engines.workflow.models import (
-    ApprovalDecision,
-    ApprovalRequest,
     WorkflowDefinition,
     WorkflowInstance,
     WorkflowResult,
@@ -28,8 +26,8 @@ class ISchedulerProvider(Protocol):
     async def schedule_workflow(
         self,
         definition_name: str,
-        cron_expression_or_delay_seconds: Any,
-        initial_context: Optional[Dict[str, Any]] = None,
+        cron_expression_or_delay_seconds: Any,  # noqa: ANN401
+        initial_context: dict[str, Any] | None = None,
     ) -> str:
         """Schedule a workflow for execution."""
         ...
@@ -38,7 +36,7 @@ class ISchedulerProvider(Protocol):
         """Cancel a scheduled workflow job."""
         ...
 
-    async def list_scheduled_workflows(self) -> List[Dict[str, Any]]:
+    async def list_scheduled_workflows(self) -> list[dict[str, Any]]:
         """List active scheduled workflow jobs."""
         ...
 
@@ -50,7 +48,7 @@ class IWorkflowExecutor(Protocol):
     async def execute_workflow(
         self,
         definition: WorkflowDefinition,
-        initial_context: Optional[Dict[str, Any]] = None,
+        initial_context: dict[str, Any] | None = None,
     ) -> WorkflowResult:
         """Execute a workflow definition to completion."""
         ...

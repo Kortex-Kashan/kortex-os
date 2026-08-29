@@ -9,7 +9,6 @@ CREATED -> VALIDATED -> READY -> RUNNING -> WAITING -> APPROVED -> RUNNING -> CO
 from __future__ import annotations
 
 import logging
-from typing import Dict, Set
 
 from kortex.engines.workflow.exceptions import WorkflowStateError
 from kortex.engines.workflow.models import WorkflowInstance, WorkflowState, WorkflowStatus
@@ -17,11 +16,16 @@ from kortex.engines.workflow.models import WorkflowInstance, WorkflowState, Work
 logger = logging.getLogger("kortex.engines.workflow.state_machine")
 
 # Map of allowed transitions for each WorkflowState
-ALLOWED_TRANSITIONS: Dict[WorkflowState, Set[WorkflowState]] = {
+ALLOWED_TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
     WorkflowState.CREATED: {WorkflowState.VALIDATED, WorkflowState.FAILED, WorkflowState.CANCELLED},
     WorkflowState.VALIDATED: {WorkflowState.READY, WorkflowState.FAILED, WorkflowState.CANCELLED},
     WorkflowState.READY: {WorkflowState.RUNNING, WorkflowState.FAILED, WorkflowState.CANCELLED},
-    WorkflowState.RUNNING: {WorkflowState.WAITING, WorkflowState.COMPLETED, WorkflowState.FAILED, WorkflowState.CANCELLED},
+    WorkflowState.RUNNING: {
+        WorkflowState.WAITING,
+        WorkflowState.COMPLETED,
+        WorkflowState.FAILED,
+        WorkflowState.CANCELLED,
+    },
     WorkflowState.WAITING: {WorkflowState.APPROVED, WorkflowState.FAILED, WorkflowState.CANCELLED},
     WorkflowState.APPROVED: {WorkflowState.RUNNING, WorkflowState.FAILED, WorkflowState.CANCELLED},
     WorkflowState.COMPLETED: set(),
@@ -30,7 +34,7 @@ ALLOWED_TRANSITIONS: Dict[WorkflowState, Set[WorkflowState]] = {
 }
 
 # Map of WorkflowState to corresponding operational WorkflowStatus
-STATE_TO_STATUS_MAP: Dict[WorkflowState, WorkflowStatus] = {
+STATE_TO_STATUS_MAP: dict[WorkflowState, WorkflowStatus] = {
     WorkflowState.CREATED: WorkflowStatus.PENDING,
     WorkflowState.VALIDATED: WorkflowStatus.PENDING,
     WorkflowState.READY: WorkflowStatus.PENDING,
@@ -86,7 +90,8 @@ class WorkflowStateMachine:
                 target_state.value,
             )
             raise WorkflowStateError(
-                f"Illegal workflow state transition: '{current_state.value}' -> '{target_state.value}' for instance '{instance.id}'"
+                f"Illegal workflow state transition: '{current_state.value}' -> '{target_state.value}' "
+                f"for instance '{instance.id}'"
             )
 
         logger.info(

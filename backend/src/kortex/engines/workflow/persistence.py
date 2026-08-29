@@ -34,12 +34,20 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from kortex.core.db import BaseModel
 from kortex.core.exceptions import ResourceNotFoundError
+from kortex.core.idempotency import sanitize_for_persistence
+from kortex.core.outbox import OutboxStore
 from kortex.engines.storage.interfaces import IDataStore
 from kortex.engines.workflow.exceptions import (
+    ApprovalConflictError,
+    WorkflowApprovalError,
     WorkflowPersistenceError,
     WorkflowStateConflictError,
 )
 from kortex.engines.workflow.models import (
+    ApprovalDecision,
+    ApprovalDelegation,
+    ApprovalRequest,
+    ApprovalState,
     CompensationAction,
     WorkflowContext,
     WorkflowDefinition,
@@ -129,6 +137,65 @@ class WorkflowStepRunModel(BaseModel):
     completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ApprovalRequestModel(BaseModel):
+    """SQLAlchemy ORM model for persisting Human Approval Requests."""
+
+    __tablename__ = "approval_requests"
+    __table_args__ = (
+        Index("ix_approval_requests_tenant_state", "tenant_id", "state"),
+        Index("ix_approval_requests_instance", "instance_id"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    instance_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    step_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    required_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    timeout_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    context_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    signature_required: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+
+class ApprovalDecisionModel(BaseModel):
+    """SQLAlchemy ORM model for persisting Human Approval Decisions."""
+
+    __tablename__ = "approval_decisions"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_approval_decisions_request_id"),
+    )
+
+    request_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("approval_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    approver_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signature_hex: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    decided_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ApprovalDelegationModel(BaseModel):
+    """SQLAlchemy ORM model for persisting Human Approver Role Delegations."""
+
+    __tablename__ = "approval_delegations"
+    __table_args__ = (
+        Index("ix_approval_delegations_lookup", "tenant_id", "delegatee_id", "role", "is_active"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    delegator_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    delegatee_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False)
+    valid_from: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
 
 
 # ============================================================================
@@ -271,6 +338,139 @@ def _model_to_instance(row: WorkflowInstanceModel) -> WorkflowInstance:
         compensation_stack=compensation_stack,
         trace_id=row.trace_id,
         version=row.version,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _request_to_model(req: ApprovalRequest, tenant_id: str = "default") -> ApprovalRequestModel:
+    """Convert ApprovalRequest domain model to ApprovalRequestModel ORM row."""
+    tid = req.tenant_id or tenant_id
+    sanitized_ctx = sanitize_for_persistence(req.context_snapshot)
+    ctx_json = json.dumps(sanitized_ctx)
+    state_val = req.state.value if isinstance(req.state, ApprovalState) else str(req.state)
+    return ApprovalRequestModel(
+        id=str(req.id),
+        tenant_id=tid,
+        instance_id=str(req.instance_id) if req.instance_id else None,
+        step_id=req.step_id,
+        required_role=req.required_role,
+        state=state_val,
+        timeout_at=req.timeout_at,
+        context_snapshot_json=ctx_json,
+        signature_required=req.signature_required,
+    )
+
+
+def _model_to_request(row: ApprovalRequestModel) -> ApprovalRequest:
+    """Convert ApprovalRequestModel ORM row to ApprovalRequest domain model."""
+    try:
+        ctx = json.loads(row.context_snapshot_json) if row.context_snapshot_json else {}
+    except Exception:
+        ctx = {}
+    state = ApprovalState(row.state) if row.state in ApprovalState._value2member_map_ else ApprovalState.PENDING
+    timeout_at = (
+        row.timeout_at.replace(tzinfo=datetime.UTC)
+        if row.timeout_at is not None and row.timeout_at.tzinfo is None
+        else row.timeout_at
+    )
+    created_at = (
+        row.created_at.replace(tzinfo=datetime.UTC)
+        if row.created_at is not None and row.created_at.tzinfo is None
+        else row.created_at
+    )
+    updated_at = (
+        row.updated_at.replace(tzinfo=datetime.UTC)
+        if row.updated_at is not None and row.updated_at.tzinfo is None
+        else row.updated_at
+    )
+    return ApprovalRequest(
+        id=UUID(row.id),
+        tenant_id=row.tenant_id,
+        instance_id=UUID(row.instance_id) if row.instance_id else None,
+        step_id=row.step_id,
+        required_role=row.required_role,
+        state=state,
+        timeout_at=timeout_at,
+        context_snapshot=ctx,
+        signature_required=row.signature_required,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
+def _decision_to_model(decision: ApprovalDecision, tenant_id: str = "default") -> ApprovalDecisionModel:
+    """Convert ApprovalDecision domain model to ApprovalDecisionModel ORM row."""
+    tid = decision.tenant_id or tenant_id
+    dec_val = decision.decision.value if isinstance(decision.decision, ApprovalState) else str(decision.decision)
+    return ApprovalDecisionModel(
+        id=str(decision.id),
+        request_id=str(decision.request_id),
+        tenant_id=tid,
+        approver_id=decision.approver_id,
+        decision=dec_val,
+        reason=decision.reason,
+        signature_hex=decision.signature_hex,
+        decided_at=decision.decided_at,
+    )
+
+
+def _model_to_decision(row: ApprovalDecisionModel) -> ApprovalDecision:
+    """Convert ApprovalDecisionModel ORM row to ApprovalDecision domain model."""
+    dec = ApprovalState(row.decision) if row.decision in ApprovalState._value2member_map_ else ApprovalState.APPROVED
+    decided_at = (
+        row.decided_at.replace(tzinfo=datetime.UTC)
+        if row.decided_at is not None and row.decided_at.tzinfo is None
+        else row.decided_at
+    )
+    return ApprovalDecision(
+        id=UUID(row.id),
+        request_id=UUID(row.request_id),
+        tenant_id=row.tenant_id,
+        approver_id=row.approver_id,
+        decision=dec,
+        reason=row.reason,
+        signature_hex=row.signature_hex,
+        decided_at=decided_at,
+    )
+
+
+def _delegation_to_model(delegation: ApprovalDelegation, tenant_id: str = "default") -> ApprovalDelegationModel:
+    """Convert ApprovalDelegation domain model to ApprovalDelegationModel ORM row."""
+    tid = delegation.tenant_id or tenant_id
+    return ApprovalDelegationModel(
+        id=str(delegation.id),
+        tenant_id=tid,
+        delegator_id=delegation.delegator_id,
+        delegatee_id=delegation.delegatee_id,
+        role=delegation.role,
+        valid_from=delegation.valid_from,
+        valid_until=delegation.valid_until,
+        is_active=delegation.is_active,
+    )
+
+
+def _model_to_delegation(row: ApprovalDelegationModel) -> ApprovalDelegation:
+    """Convert ApprovalDelegationModel ORM row to ApprovalDelegation domain model."""
+    valid_from = (
+        row.valid_from.replace(tzinfo=datetime.UTC)
+        if row.valid_from is not None and row.valid_from.tzinfo is None
+        else row.valid_from
+    )
+    valid_until = (
+        row.valid_until.replace(tzinfo=datetime.UTC)
+        if row.valid_until is not None and row.valid_until.tzinfo is None
+        else row.valid_until
+    )
+    return ApprovalDelegation(
+        id=UUID(row.id),
+        tenant_id=row.tenant_id,
+        delegator_id=row.delegator_id,
+        delegatee_id=row.delegatee_id,
+        role=row.role,
+        valid_from=valid_from,
+        valid_until=valid_until,
+        is_active=row.is_active,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -735,3 +935,342 @@ class WorkflowStore:
         except Exception as e:
             logger.error("Failed to list step runs for instance '%s': %s", instance_id, e)
             return []
+
+
+# ============================================================================
+# 4. Approval Relational Store (IDataStore Interface)
+# ============================================================================
+
+
+class ApprovalStore:
+    """Encapsulates all relational database operations for human approvals via IDataStore."""
+
+    def __init__(self, data_store: IDataStore) -> None:
+        self._data_store = data_store
+        logger.debug("ApprovalStore initialized with IDataStore.")
+
+    async def save_request(
+        self,
+        request: ApprovalRequest,
+        tenant_id: str = "default",
+        outbox_store: OutboxStore | None = None,
+    ) -> None:
+        """Persist or update an ApprovalRequest ticket in the database with optional atomic outbox staging."""
+        tid = request.tenant_id or tenant_id
+
+        async def _action(session: AsyncSession) -> None:
+            existing = await session.scalar(
+                select(ApprovalRequestModel).where(
+                    ApprovalRequestModel.id == str(request.id),
+                    ApprovalRequestModel.tenant_id == tid,
+                )
+            )
+            model = _request_to_model(request, tenant_id=tid)
+            if existing is None:
+                session.add(model)
+                if outbox_store is not None:
+                    outbox_store.stage_event_in_session(
+                        session=session,
+                        tenant_id=tid,
+                        topic="workflow.approval.created",
+                        payload={
+                            "request_id": str(request.id),
+                            "instance_id": str(request.instance_id) if request.instance_id else None,
+                            "step_id": request.step_id,
+                            "required_role": request.required_role,
+                            "tenant_id": tid,
+                        },
+                    )
+            else:
+                existing.state = model.state
+                existing.timeout_at = model.timeout_at
+                existing.context_snapshot_json = model.context_snapshot_json
+                existing.signature_required = model.signature_required
+                existing.updated_at = datetime.datetime.now(datetime.UTC)
+
+        await self._data_store.execute_in_transaction(_action)
+
+    async def get_request(self, request_id: UUID | str, tenant_id: str | None = None) -> ApprovalRequest | None:
+        """Retrieve an approval request ticket by ID with optional tenant isolation."""
+        r_id = str(request_id)
+
+        async def _action(session: AsyncSession) -> ApprovalRequestModel | None:
+            stmt = select(ApprovalRequestModel).where(ApprovalRequestModel.id == r_id)
+            if tenant_id is not None:
+                stmt = stmt.where(ApprovalRequestModel.tenant_id == tenant_id)
+            return cast(ApprovalRequestModel | None, await session.scalar(stmt))
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_request(row) if row else None
+
+    async def get_request_by_step(
+        self, instance_id: UUID | str, step_id: str, tenant_id: str | None = None
+    ) -> ApprovalRequest | None:
+        """Retrieve the pending approval request for a workflow instance and step."""
+        inst_id = str(instance_id)
+
+        async def _action(session: AsyncSession) -> ApprovalRequestModel | None:
+            stmt = (
+                select(ApprovalRequestModel)
+                .where(
+                    ApprovalRequestModel.instance_id == inst_id,
+                    ApprovalRequestModel.step_id == step_id,
+                )
+                .order_by(ApprovalRequestModel.created_at.desc())
+            )
+            if tenant_id is not None:
+                stmt = stmt.where(ApprovalRequestModel.tenant_id == tenant_id)
+            return cast(ApprovalRequestModel | None, await session.scalar(stmt))
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_request(row) if row else None
+
+    async def get_request_by_instance(
+        self, instance_id: UUID | str, tenant_id: str | None = None
+    ) -> ApprovalRequest | None:
+        """Retrieve the latest approval request for a workflow instance."""
+        inst_id = str(instance_id)
+
+        async def _action(session: AsyncSession) -> ApprovalRequestModel | None:
+            stmt = (
+                select(ApprovalRequestModel)
+                .where(
+                    ApprovalRequestModel.instance_id == inst_id,
+                )
+                .order_by(ApprovalRequestModel.created_at.desc())
+            )
+            if tenant_id is not None:
+                stmt = stmt.where(ApprovalRequestModel.tenant_id == tenant_id)
+            return cast(ApprovalRequestModel | None, await session.scalar(stmt))
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_request(row) if row else None
+
+    async def list_requests(
+        self,
+        tenant_id: str = "default",
+        role_filter: str | None = None,
+        state_filter: str | None = None,
+    ) -> list[ApprovalRequest]:
+        """List approval requests matching criteria within a tenant boundary."""
+        async def _action(session: AsyncSession) -> list[ApprovalRequestModel]:
+            stmt = select(ApprovalRequestModel).where(ApprovalRequestModel.tenant_id == tenant_id)
+            if role_filter is not None:
+                stmt = stmt.where(ApprovalRequestModel.required_role == role_filter)
+            if state_filter is not None:
+                stmt = stmt.where(ApprovalRequestModel.state == state_filter)
+            stmt = stmt.order_by(ApprovalRequestModel.created_at.desc())
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [_model_to_request(row) for row in rows]
+
+    async def save_decision(self, decision: ApprovalDecision, tenant_id: str = "default") -> None:
+        """Persist an ApprovalDecision record."""
+        tid = decision.tenant_id or tenant_id
+        model = _decision_to_model(decision, tenant_id=tid)
+
+        async def _action(session: AsyncSession) -> None:
+            session.add(model)
+
+        await self._data_store.execute_in_transaction(_action)
+
+    async def get_decision(self, request_id: UUID | str, tenant_id: str | None = None) -> ApprovalDecision | None:
+        """Retrieve an approval decision by request ID."""
+        r_id = str(request_id)
+
+        async def _action(session: AsyncSession) -> ApprovalDecisionModel | None:
+            stmt = select(ApprovalDecisionModel).where(ApprovalDecisionModel.request_id == r_id)
+            if tenant_id is not None:
+                stmt = stmt.where(ApprovalDecisionModel.tenant_id == tenant_id)
+            return cast(ApprovalDecisionModel | None, await session.scalar(stmt))
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_decision(row) if row else None
+
+    async def save_delegation(self, delegation: ApprovalDelegation, tenant_id: str = "default") -> None:
+        """Persist a new role delegation."""
+        tid = delegation.tenant_id or tenant_id
+        model = _delegation_to_model(delegation, tenant_id=tid)
+
+        async def _action(session: AsyncSession) -> None:
+            session.add(model)
+
+        await self._data_store.execute_in_transaction(_action)
+
+    async def get_active_delegation(
+        self,
+        tenant_id: str,
+        delegatee_id: str,
+        role: str,
+        at_time: datetime.datetime | None = None,
+    ) -> ApprovalDelegation | None:
+        """Query for an active role delegation valid at the given timestamp."""
+        now_dt = at_time or datetime.datetime.now(datetime.UTC)
+
+        async def _action(session: AsyncSession) -> ApprovalDelegationModel | None:
+            stmt = (
+                select(ApprovalDelegationModel)
+                .where(
+                    ApprovalDelegationModel.tenant_id == tenant_id,
+                    ApprovalDelegationModel.delegatee_id == delegatee_id,
+                    ApprovalDelegationModel.role == role,
+                    ApprovalDelegationModel.is_active.is_(True),
+                    ApprovalDelegationModel.valid_from <= now_dt,
+                    ApprovalDelegationModel.valid_until >= now_dt,
+                )
+                .order_by(ApprovalDelegationModel.created_at.desc())
+                .limit(1)
+            )
+            return cast(ApprovalDelegationModel | None, await session.scalar(stmt))
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_delegation(row) if row else None
+
+    async def list_delegations(
+        self,
+        tenant_id: str = "default",
+        delegator_id: str | None = None,
+        delegatee_id: str | None = None,
+        is_active: bool | None = None,
+    ) -> list[ApprovalDelegation]:
+        """List delegations matching criteria within a tenant boundary."""
+        async def _action(session: AsyncSession) -> list[ApprovalDelegationModel]:
+            stmt = select(ApprovalDelegationModel).where(ApprovalDelegationModel.tenant_id == tenant_id)
+            if delegator_id is not None:
+                stmt = stmt.where(ApprovalDelegationModel.delegator_id == delegator_id)
+            if delegatee_id is not None:
+                stmt = stmt.where(ApprovalDelegationModel.delegatee_id == delegatee_id)
+            if is_active is not None:
+                stmt = stmt.where(ApprovalDelegationModel.is_active == is_active)
+            stmt = stmt.order_by(ApprovalDelegationModel.created_at.desc())
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [_model_to_delegation(row) for row in rows]
+
+    async def get_expired_pending_requests(
+        self,
+        before_time: datetime.datetime | None = None,
+        tenant_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ApprovalRequest]:
+        """Query pending approval requests whose timeout_at has passed."""
+        now_dt = before_time or datetime.datetime.now(datetime.UTC)
+
+        async def _action(session: AsyncSession) -> list[ApprovalRequestModel]:
+            stmt = select(ApprovalRequestModel).where(
+                ApprovalRequestModel.state == "PENDING",
+                ApprovalRequestModel.timeout_at.is_not(None),
+                ApprovalRequestModel.timeout_at < now_dt,
+            )
+            if tenant_id is not None:
+                stmt = stmt.where(ApprovalRequestModel.tenant_id == tenant_id)
+            stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [_model_to_request(row) for row in rows]
+
+    async def atomic_submit_decision(
+        self,
+        decision: ApprovalDecision,
+        tenant_id: str,
+        outbox_store: OutboxStore | None = None,
+    ) -> ApprovalRequest:
+        """Atomically transition ticket state, insert decision record, and stage outbox event."""
+        r_id = str(decision.request_id)
+        dec_val = decision.decision.value if isinstance(decision.decision, ApprovalState) else str(decision.decision)
+
+        async def _action(session: AsyncSession) -> ApprovalRequestModel:
+            # 1. Fetch ticket under tenant
+            ticket = await session.scalar(
+                select(ApprovalRequestModel).where(
+                    ApprovalRequestModel.id == r_id,
+                    ApprovalRequestModel.tenant_id == tenant_id,
+                )
+            )
+            if ticket is None:
+                raise WorkflowApprovalError(f"Approval request ticket '{r_id}' not found.")
+
+            if ticket.state != "PENDING":
+                raise ApprovalConflictError(
+                    f"Approval request ticket '{r_id}' is already in state '{ticket.state}'."
+                )
+
+            # 2. Update state to decision
+            ticket.state = dec_val
+            ticket.updated_at = datetime.datetime.now(datetime.UTC)
+
+            # 3. Insert decision record
+            dec_model = _decision_to_model(decision, tenant_id=tenant_id)
+            session.add(dec_model)
+
+            # 4. Stage event in outbox if store provided
+            if outbox_store is not None:
+                outbox_store.stage_event_in_session(
+                    session=session,
+                    tenant_id=tenant_id,
+                    topic="workflow.approval.decided",
+                    payload={
+                        "request_id": r_id,
+                        "instance_id": ticket.instance_id,
+                        "step_id": ticket.step_id,
+                        "decision": dec_val,
+                        "approver_id": decision.approver_id,
+                        "tenant_id": tenant_id,
+                    },
+                )
+            await session.flush()
+            return ticket
+
+        try:
+            updated_row = await self._data_store.execute_in_transaction(_action)
+            return _model_to_request(updated_row)
+        except IntegrityError as e:
+            raise ApprovalConflictError(
+                f"Concurrent or duplicate decision submitted for approval request '{r_id}'."
+            ) from e
+
+    async def atomic_expire_request(
+        self,
+        request_id: UUID | str,
+        tenant_id: str,
+        outbox_store: OutboxStore | None = None,
+    ) -> ApprovalRequest | None:
+        """Atomically transition a pending ticket to EXPIRED and stage outbox event."""
+        r_id = str(request_id)
+
+        async def _action(session: AsyncSession) -> ApprovalRequestModel | None:
+            ticket = await session.scalar(
+                select(ApprovalRequestModel).where(
+                    ApprovalRequestModel.id == r_id,
+                    ApprovalRequestModel.tenant_id == tenant_id,
+                    ApprovalRequestModel.state == "PENDING",
+                )
+            )
+            if ticket is None:
+                return None
+            ticket.state = "EXPIRED"
+            ticket.updated_at = datetime.datetime.now(datetime.UTC)
+
+            if outbox_store is not None:
+                outbox_store.stage_event_in_session(
+                    session=session,
+                    tenant_id=tenant_id,
+                    topic="workflow.approval.expired",
+                    payload={
+                        "request_id": r_id,
+                        "instance_id": ticket.instance_id,
+                        "step_id": ticket.step_id,
+                        "tenant_id": tenant_id,
+                    },
+                )
+            await session.flush()
+            return ticket
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_request(row) if row else None

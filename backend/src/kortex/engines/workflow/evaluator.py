@@ -10,21 +10,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
-from uuid import UUID
+from collections.abc import Callable
+from typing import Any
 
-from kortex.engines.workflow.approval import MemoryApprovalManager
-from kortex.engines.workflow.exceptions import WorkflowExecutionError, WorkflowValidationError
+from kortex.engines.workflow.approval import ApprovalProvider, MemoryApprovalManager
 from kortex.engines.workflow.models import (
-    ApprovalDecision,
-    ApprovalState,
     CompensationAction,
     ExecutionResult,
     RetryPolicy,
-    WorkflowContext,
-    WorkflowDefinition,
     WorkflowInstance,
-    WorkflowResult,
     WorkflowState,
     WorkflowStep,
 )
@@ -36,11 +30,11 @@ logger = logging.getLogger("kortex.engines.workflow.evaluator")
 class StepEvaluator:
     """Evaluates and executes individual workflow steps, retries, and compensation flows."""
 
-    def __init__(self, approval_manager: MemoryApprovalManager) -> None:
+    def __init__(self, approval_manager: ApprovalProvider | MemoryApprovalManager) -> None:
         self._approval_manager = approval_manager
 
     @property
-    def approval_manager(self) -> MemoryApprovalManager:
+    def approval_manager(self) -> ApprovalProvider | MemoryApprovalManager:
         """Return the approval manager instance."""
         return self._approval_manager
 
@@ -48,7 +42,7 @@ class StepEvaluator:
         self,
         instance: WorkflowInstance,
         step: WorkflowStep,
-        capability_dispatcher: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], Any]] = None,
+        capability_dispatcher: Callable[[str, dict[str, Any], dict[str, Any]], Any] | None = None,
     ) -> ExecutionResult:
         """Execute a single workflow step with retry policies and compensation registration.
 
@@ -71,7 +65,7 @@ class StepEvaluator:
         start_time = time.time()
         policy = step.retry_policy or RetryPolicy()
         attempts = 0
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         # Check if approval step
         if step.is_approval_step:
@@ -96,7 +90,7 @@ class StepEvaluator:
             attempts += 1
             try:
                 logger.debug("Executing step '%s' (Attempt %d/%d)", step.id, attempts, policy.max_attempts)
-                
+
                 output = None
                 if step.capability_name and capability_dispatcher:
                     call_parameters = dict(step.parameters)
@@ -111,7 +105,11 @@ class StepEvaluator:
                 # Register compensation action if specified
                 if step.compensation_action:
                     instance.compensation_stack.append(step.compensation_action)
-                    logger.debug("Registered compensation action '%s' for step '%s'", step.compensation_action.name, step.id)
+                    logger.debug(
+                        "Registered compensation action '%s' for step '%s'",
+                        step.compensation_action.name,
+                        step.id,
+                    )
 
                 elapsed_ms = (time.time() - start_time) * 1000
                 return ExecutionResult(
@@ -152,8 +150,8 @@ class StepEvaluator:
     async def execute_compensation_stack(
         self,
         instance: WorkflowInstance,
-        capability_dispatcher: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        capability_dispatcher: Callable[[str, dict[str, Any], dict[str, Any]], Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Execute registered compensation actions in LIFO (reverse) order upon workflow failure.
 
         Args:
@@ -170,7 +168,7 @@ class StepEvaluator:
         Returns:
             List of compensation execution result records.
         """
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         logger.info("Executing LIFO compensation stack for workflow instance '%s'", instance.id)
 
         while instance.compensation_stack:
