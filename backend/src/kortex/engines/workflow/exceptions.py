@@ -28,3 +28,11 @@ class WorkflowExecutionError(WorkflowError):
 
 class WorkflowApprovalError(WorkflowError):
     """Raised when an invalid approval decision or state transition occurs."""
+
+
+class WorkflowStateConflictError(WorkflowError):
+    """Raised when an optimistic concurrency version conflict occurs during instance mutation."""
+
+
+class WorkflowPersistenceError(WorkflowError):
+    """Raised when a durable state persistence operation fails."""

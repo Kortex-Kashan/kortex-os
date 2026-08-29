@@ -8,8 +8,8 @@ retry policies, compensation actions, and approval models for the Workflow Engin
 from __future__ import annotations
 
 import enum
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -73,10 +73,10 @@ class ApprovalState(str, enum.Enum):
 class RetryPolicy(BaseModel):
     """Policy governing automatic step retries with backoff."""
 
-    max_attempts: int = Field(3, ge=1, description="Maximum execution attempts")
-    backoff_factor: float = Field(2.0, ge=1.0, description="Exponential backoff multiplier")
-    initial_delay_seconds: float = Field(1.0, ge=0.0, description="Initial delay before first retry")
-    jitter: bool = Field(True, description="Add random jitter to backoff delay")
+    max_attempts: int = Field(default=3, ge=1, description="Maximum execution attempts")
+    backoff_factor: float = Field(default=2.0, ge=1.0, description="Exponential backoff multiplier")
+    initial_delay_seconds: float = Field(default=1.0, ge=0.0, description="Initial delay before first retry")
+    jitter: bool = Field(default=True, description="Add random jitter to backoff delay")
 
 
 class CompensationAction(BaseModel):
@@ -84,8 +84,8 @@ class CompensationAction(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid4()), description="Compensation action ID")
     name: str = Field(..., description="Action name or title")
-    capability_name: Optional[str] = Field(None, description="Kernel capability to execute for rollback")
-    parameters: Dict[str, Any] = Field(default_factory=dict, description="Rollback parameter context")
+    capability_name: str | None = Field(default=None, description="Kernel capability to execute for rollback")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Rollback parameter context")
 
 
 class WorkflowStep(BaseModel):
@@ -93,22 +93,22 @@ class WorkflowStep(BaseModel):
 
     id: str = Field(..., description="Unique step identifier within the workflow definition")
     name: str = Field(..., description="Human-readable step title")
-    capability_name: Optional[str] = Field(None, description="Kernel capability name to invoke")
-    parameters: Dict[str, Any] = Field(default_factory=dict, description="Step invocation parameters")
-    is_approval_step: bool = Field(False, description="True if step requires human approval")
-    required_approval_role: Optional[str] = Field(None, description="Role authorized to approve this step")
-    retry_policy: Optional[RetryPolicy] = Field(None, description="Custom retry policy for this step")
-    compensation_action: Optional[CompensationAction] = Field(None, description="Rollback compensation action")
-    on_failure_continue: bool = Field(False, description="If True, step failure does not abort workflow")
+    capability_name: str | None = Field(default=None, description="Kernel capability name to invoke")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Step invocation parameters")
+    is_approval_step: bool = Field(default=False, description="True if step requires human approval")
+    required_approval_role: str | None = Field(default=None, description="Role authorized to approve this step")
+    retry_policy: RetryPolicy | None = Field(default=None, description="Custom retry policy for this step")
+    compensation_action: CompensationAction | None = Field(default=None, description="Rollback compensation action")
+    on_failure_continue: bool = Field(default=False, description="If True, step failure does not abort workflow")
 
 
 class WorkflowContext(BaseModel):
     """Execution state context payload passed between workflow steps."""
 
-    variables: Dict[str, Any] = Field(default_factory=dict, description="Input and runtime context variables")
-    step_outputs: Dict[str, Any] = Field(default_factory=dict, description="Outputs collected from executed steps")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata and system tags")
-    session_token: Optional[Dict[str, Any]] = Field(
+    variables: dict[str, Any] = Field(default_factory=dict, description="Input and runtime context variables")
+    step_outputs: dict[str, Any] = Field(default_factory=dict, description="Outputs collected from executed steps")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Execution metadata and system tags")
+    session_token: dict[str, Any] | None = Field(
         default=None,
         description=(
             "Opaque caller-supplied session token blob, stored verbatim as a plain, JSON-safe dict — "
@@ -130,12 +130,13 @@ class WorkflowDefinition(BaseModel):
 
     id: str = Field(..., description="Unique workflow definition ID")
     name: str = Field(..., description="Workflow definition title")
-    version: str = Field("1.0.0", description="Semantic version string")
-    description: str = Field("", description="Detailed workflow description")
-    steps: List[WorkflowStep] = Field(default_factory=list, description="Ordered execution steps")
-    trigger: WorkflowTrigger = Field(WorkflowTrigger.MANUAL, description="Default trigger source")
-    priority: WorkflowPriority = Field(WorkflowPriority.NORMAL, description="Workflow execution priority")
-    timeout_seconds: int = Field(3600, ge=1, description="Execution timeout in seconds")
+    version: str = Field(default="1.0.0", description="Semantic version string")
+    description: str = Field(default="", description="Detailed workflow description")
+    tenant_id: str = Field(default="default", description="Tenant ID owning this definition")
+    steps: list[WorkflowStep] = Field(default_factory=list, description="Ordered execution steps")
+    trigger: WorkflowTrigger = Field(default=WorkflowTrigger.MANUAL, description="Default trigger source")
+    priority: WorkflowPriority = Field(default=WorkflowPriority.NORMAL, description="Workflow execution priority")
+    timeout_seconds: int = Field(default=3600, ge=1, description="Execution timeout in seconds")
 
 
 class WorkflowInstance(BaseModel):
@@ -143,19 +144,21 @@ class WorkflowInstance(BaseModel):
 
     id: UUID = Field(default_factory=uuid4, description="Unique workflow instance UUID")
     definition_id: str = Field(..., description="Reference definition ID")
-    definition_version: str = Field("1.0.0", description="Definition version string")
-    current_step_index: int = Field(0, ge=0, description="Index of the currently executing step")
-    current_step_id: Optional[str] = Field(None, description="ID of current step")
-    state: WorkflowState = Field(WorkflowState.CREATED, description="Current lifecycle state")
-    status: WorkflowStatus = Field(WorkflowStatus.PENDING, description="Current status indicator")
+    definition_version: str = Field(default="1.0.0", description="Definition version string")
+    tenant_id: str = Field(default="default", description="Tenant ID owning this instance")
+    current_step_index: int = Field(default=0, ge=0, description="Index of the currently executing step")
+    current_step_id: str | None = Field(default=None, description="ID of current step")
+    state: WorkflowState = Field(default=WorkflowState.CREATED, description="Current lifecycle state")
+    status: WorkflowStatus = Field(default=WorkflowStatus.PENDING, description="Current status indicator")
     context: WorkflowContext = Field(default_factory=WorkflowContext, description="Execution context")
-    compensation_stack: List[CompensationAction] = Field(
+    compensation_stack: list[CompensationAction] = Field(
         default_factory=list,
         description="LIFO stack of compensation actions registered for rollback",
     )
     trace_id: str = Field(default_factory=lambda: str(uuid4()), description="Traceability ID")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Creation timestamp")
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp")
+    version: int = Field(default=1, ge=1, description="Optimistic locking version counter")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Creation timestamp")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Last update timestamp")
 
 
 class ExecutionResult(BaseModel):
@@ -163,10 +166,10 @@ class ExecutionResult(BaseModel):
 
     step_id: str = Field(..., description="Executed step ID")
     success: bool = Field(..., description="True if step executed successfully")
-    output: Optional[Any] = Field(None, description="Step output payload")
-    error: Optional[str] = Field(None, description="Error message if step failed")
-    execution_time_ms: float = Field(0.0, ge=0.0, description="Step duration in milliseconds")
-    attempts: int = Field(1, ge=1, description="Total execution attempts made")
+    output: Any | None = Field(default=None, description="Step output payload")
+    error: str | None = Field(default=None, description="Error message if step failed")
+    execution_time_ms: float = Field(default=0.0, ge=0.0, description="Step duration in milliseconds")
+    attempts: int = Field(default=1, ge=1, description="Total execution attempts made")
 
 
 class WorkflowResult(BaseModel):
@@ -177,9 +180,9 @@ class WorkflowResult(BaseModel):
     state: WorkflowState = Field(..., description="Final workflow lifecycle state")
     status: WorkflowStatus = Field(..., description="Final status indicator")
     context: WorkflowContext = Field(..., description="Final execution context")
-    step_results: List[ExecutionResult] = Field(default_factory=list, description="List of step execution results")
-    duration_ms: float = Field(0.0, ge=0.0, description="Total workflow duration in milliseconds")
-    error: Optional[str] = Field(None, description="Terminal error message if workflow failed")
+    step_results: list[ExecutionResult] = Field(default_factory=list, description="List of step execution results")
+    duration_ms: float = Field(default=0.0, ge=0.0, description="Total workflow duration in milliseconds")
+    error: str | None = Field(default=None, description="Terminal error message if workflow failed")
 
 
 class ApprovalRequest(BaseModel):
@@ -189,8 +192,8 @@ class ApprovalRequest(BaseModel):
     instance_id: UUID = Field(..., description="Associated workflow instance UUID")
     step_id: str = Field(..., description="Step ID requiring approval")
     required_role: str = Field(..., description="Role authorized to approve")
-    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Request timestamp")
-    state: ApprovalState = Field(ApprovalState.PENDING, description="Current approval state")
+    requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Request timestamp")
+    state: ApprovalState = Field(default=ApprovalState.PENDING, description="Current approval state")
 
 
 class ApprovalDecision(BaseModel):
@@ -199,9 +202,9 @@ class ApprovalDecision(BaseModel):
     request_id: UUID = Field(..., description="ID of approval request")
     approver_id: str = Field(..., description="ID or username of approver")
     decision: ApprovalState = Field(..., description="APPROVED or REJECTED decision")
-    reason: Optional[str] = Field(None, description="Optional decision notes or reason")
-    decision_data: Dict[str, Any] = Field(default_factory=dict, description="Additional context data")
-    decided_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of decision")
+    reason: str | None = Field(default=None, description="Optional decision notes or reason")
+    decision_data: dict[str, Any] = Field(default_factory=dict, description="Additional context data")
+    decided_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Timestamp of decision")
 
 
 class ApprovalEvent(BaseModel):
@@ -211,18 +214,18 @@ class ApprovalEvent(BaseModel):
     request_id: UUID = Field(..., description="ID of approval request")
     instance_id: UUID = Field(..., description="Associated workflow instance UUID")
     step_id: str = Field(..., description="Step ID")
-    approver_id: Optional[str] = Field(None, description="ID of decision submitter if applicable")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Event timestamp")
+    approver_id: str | None = Field(default=None, description="ID of decision submitter if applicable")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Event timestamp")
 
 
 class WorkflowSettings(BaseModel):
     """Configuration settings for the Workflow Engine."""
 
-    execution_timeout_seconds: int = Field(3600, ge=1, description="Global execution timeout")
-    retry_default_attempts: int = Field(3, ge=1, description="Default max retry attempts")
-    retry_backoff_factor: float = Field(2.0, ge=1.0, description="Default retry backoff factor")
-    approval_timeout_seconds: int = Field(86400, ge=1, description="Default approval timeout")
-    worker_count: int = Field(4, ge=1, description="Worker thread pool count")
-    concurrency_limit: int = Field(100, ge=1, description="Maximum concurrent running workflows")
-    logging_level: str = Field("INFO", description="Logging level string")
-    metrics_enabled: bool = Field(True, description="Enable metrics collection")
+    execution_timeout_seconds: int = Field(default=3600, ge=1, description="Global execution timeout")
+    retry_default_attempts: int = Field(default=3, ge=1, description="Default max retry attempts")
+    retry_backoff_factor: float = Field(default=2.0, ge=1.0, description="Default retry backoff factor")
+    approval_timeout_seconds: int = Field(default=86400, ge=1, description="Default approval timeout")
+    worker_count: int = Field(default=4, ge=1, description="Worker thread pool count")
+    concurrency_limit: int = Field(default=100, ge=1, description="Maximum concurrent running workflows")
+    logging_level: str = Field(default="INFO", description="Logging level string")
+    metrics_enabled: bool = Field(default=True, description="Enable metrics collection")

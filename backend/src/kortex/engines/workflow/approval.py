@@ -9,13 +9,12 @@ and event generation (Zero UI / notifications / email / WhatsApp).
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from kortex.engines.workflow.exceptions import WorkflowApprovalError
 from kortex.engines.workflow.models import (
     ApprovalDecision,
-    ApprovalEvent,
     ApprovalRequest,
     ApprovalState,
 )
@@ -31,11 +30,11 @@ class ApprovalRepository(Protocol):
         """Save or update an approval request ticket."""
         ...
 
-    async def get_request(self, request_id: UUID) -> Optional[ApprovalRequest]:
+    async def get_request(self, request_id: UUID) -> ApprovalRequest | None:
         """Retrieve an approval request ticket by UUID."""
         ...
 
-    async def list_pending_requests(self, role_filter: Optional[str] = None) -> List[ApprovalRequest]:
+    async def list_pending_requests(self, role_filter: str | None = None) -> list[ApprovalRequest]:
         """List pending approval requests optioned filtered by required role."""
         ...
 
@@ -57,26 +56,39 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
     """In-memory approval manager implementing ApprovalRepository and ApprovalProvider."""
 
     def __init__(self) -> None:
-        self._requests: Dict[UUID, ApprovalRequest] = {}
-        self._decisions: Dict[UUID, ApprovalDecision] = {}
+        self._requests: dict[UUID, ApprovalRequest] = {}
+        self._decisions: dict[UUID, ApprovalDecision] = {}
 
     async def save_request(self, request: ApprovalRequest) -> None:
         """Save or update an approval request ticket."""
         self._requests[request.id] = request
         logger.debug("Saved approval request '%s' for instance '%s'", request.id, request.instance_id)
 
-    async def get_request(self, request_id: UUID) -> Optional[ApprovalRequest]:
+    async def get_request(self, request_id: UUID) -> ApprovalRequest | None:
         """Retrieve an approval request ticket by UUID."""
         return self._requests.get(request_id)
 
-    async def list_pending_requests(self, role_filter: Optional[str] = None) -> List[ApprovalRequest]:
+    async def list_pending_requests(self, role_filter: str | None = None) -> list[ApprovalRequest]:
         """List pending approval requests."""
-        results: List[ApprovalRequest] = []
+        results: list[ApprovalRequest] = []
         for req in self._requests.values():
-            if req.state == ApprovalState.PENDING:
-                if role_filter is None or req.required_role == role_filter:
-                    results.append(req)
+            if req.state == ApprovalState.PENDING and (role_filter is None or req.required_role == role_filter):
+                results.append(req)
         return results
+
+    async def get_request_by_instance(self, instance_id: UUID) -> ApprovalRequest | None:
+        """Retrieve the pending approval request for a workflow instance if one exists."""
+        for req in self._requests.values():
+            if req.instance_id == instance_id and req.state == ApprovalState.PENDING:
+                return req
+        return None
+
+    async def get_request_by_step(self, instance_id: UUID, step_id: str) -> ApprovalRequest | None:
+        """Retrieve the approval request for a specific instance and step."""
+        for req in self._requests.values():
+            if req.instance_id == instance_id and req.step_id == step_id and req.state == ApprovalState.PENDING:
+                return req
+        return None
 
     async def create_request(self, instance_id: UUID, step_id: str, required_role: str) -> ApprovalRequest:
         """Create and register a new pending approval ticket."""

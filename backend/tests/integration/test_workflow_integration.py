@@ -8,10 +8,13 @@ snapshot integration, Event Engine pub/sub events, and capability dispatching.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+
 import pytest
 
 from kortex.core.base_engine import EngineState
 from kortex.core.kernel import Kernel
+from kortex.engines.event.engine import Event
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.models import (
@@ -25,7 +28,7 @@ from kortex.engines.workflow.models import (
 
 
 @pytest.mark.asyncio
-async def test_workflow_engine_kernel_integration(tmp_path) -> None:
+async def test_workflow_engine_kernel_integration(tmp_path: Path) -> None:
     """Integration test: Kernel boot with StorageEngine + WorkflowEngine, event tracking, and capability execution."""
     kernel = Kernel()
 
@@ -47,9 +50,9 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
     assert resolved_wf is workflow_engine
 
     # Track published events
-    received_events = []
+    received_events: list[Event] = []
 
-    def event_handler(event):
+    def event_handler(event: Event) -> None:
         if event.topic.startswith("workflow."):
             received_events.append(event)
 
@@ -68,12 +71,15 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
     assert start_cap.provider == "workflow"
 
     # Execute capability to start workflow instance (M8 test-only accessor)
-    instance = await kernel._registry_engine.get_raw_handler_for_testing(
-        "kortex.workflow.instance.start"
-    )("wf_integ", {"project": "kortex_os"})
+    start_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.workflow.instance.start")
+    assert start_handler is not None
+    instance = await start_handler("wf_integ", {"project": "kortex_os"})
     assert instance.definition_id == "wf_integ"
 
-    await asyncio.sleep(0.05)
+    for _ in range(20):
+        if workflow_engine.get_instance(instance.id).state == WorkflowState.WAITING:
+            break
+        await asyncio.sleep(0.05)
 
     # Workflow should pause at step_b waiting for SUPERVISOR approval
     instance_state = workflow_engine.get_instance(instance.id)
@@ -93,8 +99,16 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
         decision=ApprovalState.APPROVED,
     )
 
-    await kernel._registry_engine.get_raw_handler_for_testing("kortex.workflow.instance.approve")(decision)
-    await asyncio.sleep(0.05)
+    approve_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.workflow.instance.approve")
+    assert approve_handler is not None
+    await approve_handler(decision)
+    for _ in range(20):
+        if (
+            workflow_engine.get_instance(instance.id).state == WorkflowState.COMPLETED
+            and "workflow.completed" in [e.topic for e in received_events]
+        ):
+            break
+        await asyncio.sleep(0.05)
 
     # Verify workflow completed cleanly
     final_instance = workflow_engine.get_instance(instance.id)
@@ -111,4 +125,4 @@ async def test_workflow_engine_kernel_integration(tmp_path) -> None:
 
     await kernel.shutdown()
     assert kernel.state.value == "STOPPED"
-    assert workflow_engine.state == EngineState.STOPPED
+    assert workflow_engine.state.value == EngineState.STOPPED.value
