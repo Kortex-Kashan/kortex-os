@@ -2,7 +2,7 @@
 KORTEX Workflow Engine Package.
 
 Provides state machine runtime execution, human approval abstractions, LIFO compensation stack,
-and capability dispatching for stateful multi-step business workflows.
+durable scheduling, governed external execution, and capability dispatching for stateful multi-step business workflows.
 """
 
 from __future__ import annotations
@@ -13,17 +13,27 @@ from kortex.engines.workflow.approval import (
     DurableApprovalManager,
     MemoryApprovalManager,
 )
+from kortex.engines.workflow.cron import (
+    compute_next_cron_run,
+    validate_cron_expression,
+)
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.exceptions import (
     ApprovalConflictError,
+    ExternalExecutionError,
+    ExternalExecutionTimeoutError,
+    ScheduleConflictError,
+    ScheduleNotFoundError,
     WorkflowApprovalError,
     WorkflowError,
     WorkflowExecutionError,
     WorkflowPersistenceError,
+    WorkflowScheduleError,
     WorkflowStateConflictError,
     WorkflowStateError,
     WorkflowValidationError,
 )
+from kortex.engines.workflow.executor import ExternalExecutionManager
 from kortex.engines.workflow.interfaces import ISchedulerProvider, IWorkflowExecutor
 from kortex.engines.workflow.models import (
     ApprovalDecision,
@@ -33,12 +43,19 @@ from kortex.engines.workflow.models import (
     ApprovalState,
     CompensationAction,
     ExecutionResult,
+    ExternalExecutionRecord,
+    ExternalExecutionRequest,
+    ExternalExecutionStatus,
     RetryPolicy,
+    ScheduleEvent,
+    ScheduleStatus,
+    ScheduleType,
     WorkflowContext,
     WorkflowDefinition,
     WorkflowInstance,
     WorkflowPriority,
     WorkflowResult,
+    WorkflowSchedule,
     WorkflowSettings,
     WorkflowState,
     WorkflowStatus,
@@ -50,11 +67,16 @@ from kortex.engines.workflow.persistence import (
     ApprovalDelegationModel,
     ApprovalRequestModel,
     ApprovalStore,
+    ExternalExecutionModel,
+    ExternalExecutionStore,
+    SchedulerStore,
     WorkflowDefinitionModel,
     WorkflowInstanceModel,
+    WorkflowScheduleModel,
     WorkflowStepRunModel,
     WorkflowStore,
 )
+from kortex.engines.workflow.scheduler import DurableWorkflowScheduler
 from kortex.engines.workflow.state_machine import WorkflowStateMachine
 
 __all__ = [
@@ -72,11 +94,26 @@ __all__ = [
     "ApprovalStore",
     "CompensationAction",
     "DurableApprovalManager",
+    "DurableWorkflowScheduler",
     "ExecutionResult",
+    "ExternalExecutionError",
+    "ExternalExecutionManager",
+    "ExternalExecutionModel",
+    "ExternalExecutionRecord",
+    "ExternalExecutionRequest",
+    "ExternalExecutionStatus",
+    "ExternalExecutionStore",
+    "ExternalExecutionTimeoutError",
     "ISchedulerProvider",
     "IWorkflowExecutor",
     "MemoryApprovalManager",
     "RetryPolicy",
+    "ScheduleConflictError",
+    "ScheduleEvent",
+    "ScheduleNotFoundError",
+    "ScheduleStatus",
+    "ScheduleType",
+    "SchedulerStore",
     "WorkflowApprovalError",
     "WorkflowContext",
     "WorkflowDefinition",
@@ -89,6 +126,9 @@ __all__ = [
     "WorkflowPersistenceError",
     "WorkflowPriority",
     "WorkflowResult",
+    "WorkflowSchedule",
+    "WorkflowScheduleError",
+    "WorkflowScheduleModel",
     "WorkflowSettings",
     "WorkflowState",
     "WorkflowStateConflictError",
@@ -100,4 +140,6 @@ __all__ = [
     "WorkflowStore",
     "WorkflowTrigger",
     "WorkflowValidationError",
+    "compute_next_cron_run",
+    "validate_cron_expression",
 ]

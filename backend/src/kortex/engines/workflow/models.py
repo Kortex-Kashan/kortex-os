@@ -254,3 +254,122 @@ class WorkflowSettings(BaseModel):
     concurrency_limit: int = Field(default=100, ge=1, description="Maximum concurrent running workflows")
     logging_level: str = Field(default="INFO", description="Logging level string")
     metrics_enabled: bool = Field(default=True, description="Enable metrics collection")
+    scheduler_enabled: bool = Field(default=False, description="Enable background scheduler daemon")
+    scheduler_poll_interval_seconds: float = Field(default=1.0, ge=0.1, description="Scheduler polling interval")
+
+
+
+# ============================================================================
+# Scheduling Models (Milestone M5.4)
+# ============================================================================
+
+
+class ScheduleType(enum.StrEnum):
+    """Type of scheduling mechanism."""
+
+    CRON = "CRON"
+    INTERVAL = "INTERVAL"
+    ONCE = "ONCE"
+
+
+class ScheduleStatus(enum.StrEnum):
+    """Operational status of a scheduled workflow job."""
+
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    DISABLED = "DISABLED"
+    COMPLETED = "COMPLETED"
+
+
+class WorkflowSchedule(BaseModel):
+    """Declarative specification and runtime state for a scheduled workflow job."""
+
+    id: UUID = Field(default_factory=uuid4, description="Unique schedule UUID")
+    tenant_id: str = Field(default="default", description="Multi-tenant organization identifier")
+    name: str = Field(..., description="Unique human-readable schedule name within tenant")
+    definition_id: str = Field(..., description="Target workflow definition ID")
+    schedule_type: ScheduleType = Field(default=ScheduleType.INTERVAL, description="Scheduling strategy")
+    cron_expression: str | None = Field(default=None, description="5-field cron expression if type is CRON")
+    interval_seconds: int | None = Field(default=None, ge=1, description="Execution interval in seconds if INTERVAL")
+    run_at: datetime | None = Field(default=None, description="Target execution timestamp if type is ONCE")
+    next_run_at: datetime | None = Field(default=None, description="Next calculated UTC execution timestamp")
+    last_run_at: datetime | None = Field(default=None, description="Timestamp of the most recent execution trigger")
+    last_instance_id: UUID | None = Field(default=None, description="UUID of the instance created on last run")
+    status: ScheduleStatus = Field(default=ScheduleStatus.ACTIVE, description="Current schedule lifecycle status")
+    initial_context: dict[str, Any] = Field(default_factory=dict, description="Initial context passed to workflow")
+    max_runs: int | None = Field(default=None, ge=1, description="Maximum executions before auto-completing")
+    run_count: int = Field(default=0, ge=0, description="Total execution triggers performed")
+    timezone: str = Field(default="UTC", description="Timezone name for cron calculations")
+    created_by: str = Field(default="SYSTEM", description="Principal ID that created the schedule")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Creation timestamp")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Last update timestamp")
+
+
+class ScheduleEvent(BaseModel):
+    """Domain event payload for schedule lifecycle transitions."""
+
+    event_type: str = Field(..., description="Event type (created, triggered, paused, resumed, cancelled)")
+    schedule_id: UUID = Field(..., description="ID of the workflow schedule")
+    tenant_id: str = Field(default="default", description="Tenant ID")
+    name: str = Field(..., description="Schedule name")
+    definition_id: str = Field(..., description="Target workflow definition ID")
+    instance_id: UUID | None = Field(default=None, description="Spawned instance ID if triggered")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Event timestamp")
+
+
+# ============================================================================
+# Governed External Execution Models (Milestone M5.4)
+# ============================================================================
+
+
+class ExternalExecutionStatus(enum.StrEnum):
+    """Lifecycle status of a governed external execution."""
+
+    PENDING = "PENDING"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    TIMED_OUT = "TIMED_OUT"
+
+
+class ExternalExecutionRequest(BaseModel):
+    """Request payload to execute a governed external operation."""
+
+    id: UUID = Field(default_factory=uuid4, description="Unique execution request UUID")
+    tenant_id: str = Field(default="default", description="Multi-tenant organization identifier")
+    operation_type: str = Field(default="CAPABILITY", description="Operation category (e.g. CAPABILITY, HTTP)")
+    target: str = Field(..., description="Target capability name, endpoint, or driver action")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Invocation parameter payload")
+    timeout_seconds: float = Field(default=30.0, ge=0.1, description="Execution timeout in seconds")
+    retry_policy: RetryPolicy | None = Field(default=None, description="Custom retry policy")
+    requires_approval: bool = Field(default=False, description="Whether human approval is required prior to execution")
+    required_approval_role: str | None = Field(default=None, description="Role authorized to approve if required")
+    idempotency_key: str | None = Field(default=None, description="Caller-supplied idempotency key")
+    correlation_id: str | None = Field(default=None, description="Trace correlation ID")
+    created_by: str = Field(default="SYSTEM", description="Principal ID initiating the request")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Request timestamp")
+
+
+class ExternalExecutionRecord(BaseModel):
+    """Durable record of a governed external execution outcome."""
+
+    id: UUID = Field(default_factory=uuid4, description="Execution record UUID")
+    request_id: UUID = Field(..., description="Associated execution request UUID")
+    tenant_id: str = Field(default="default", description="Multi-tenant organization identifier")
+    operation_type: str = Field(..., description="Operation category")
+    target: str = Field(..., description="Target capability name or endpoint")
+    status: ExternalExecutionStatus = Field(default=ExternalExecutionStatus.PENDING, description="Execution status")
+    status_code: int | None = Field(default=None, description="HTTP status code or exit code if applicable")
+    output: Any | None = Field(default=None, description="Sanitized execution output payload")
+    error: str | None = Field(default=None, description="Error message if execution failed")
+    attempts: int = Field(default=1, ge=1, description="Number of execution attempts made")
+    execution_time_ms: float = Field(default=0.0, ge=0.0, description="Duration in milliseconds")
+    idempotency_key: str | None = Field(default=None, description="Idempotency key")
+    correlation_id: str | None = Field(default=None, description="Correlation ID")
+    approval_request_id: UUID | None = Field(default=None, description="Linked approval ticket UUID if approval gated")
+    created_by: str = Field(default="SYSTEM", description="Principal ID")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Creation timestamp")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Last update timestamp")
+    completed_at: datetime | None = Field(default=None, description="Completion timestamp")

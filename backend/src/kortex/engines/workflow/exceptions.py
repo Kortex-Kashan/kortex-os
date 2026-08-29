@@ -40,3 +40,23 @@ class WorkflowStateConflictError(WorkflowError):
 
 class WorkflowPersistenceError(WorkflowError):
     """Raised when a durable state persistence operation fails."""
+
+
+class WorkflowScheduleError(WorkflowError):
+    """Base exception for all workflow scheduling errors."""
+
+
+class ScheduleNotFoundError(WorkflowScheduleError):
+    """Raised when a requested schedule definition is not found."""
+
+
+class ScheduleConflictError(WorkflowScheduleError):
+    """Raised when a schedule name or execution state conflicts."""
+
+
+class ExternalExecutionError(WorkflowError):
+    """Raised when a governed external operation execution fails."""
+
+
+class ExternalExecutionTimeoutError(ExternalExecutionError):
+    """Raised when an external operation exceeds its allocated timeout."""

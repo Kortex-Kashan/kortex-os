@@ -28,17 +28,22 @@ from kortex.engines.workflow.approval import (
 )
 from kortex.engines.workflow.evaluator import StepEvaluator
 from kortex.engines.workflow.exceptions import (
+    ScheduleNotFoundError,
     WorkflowApprovalError,
     WorkflowExecutionError,
+    WorkflowScheduleError,
     WorkflowStateError,
     WorkflowValidationError,
 )
+from kortex.engines.workflow.executor import ExternalExecutionManager
 from kortex.engines.workflow.interfaces import IWorkflowExecutor
 from kortex.engines.workflow.models import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalState,
     ExecutionResult,
+    ExternalExecutionRequest,
+    RetryPolicy,
     WorkflowContext,
     WorkflowDefinition,
     WorkflowInstance,
@@ -50,6 +55,7 @@ from kortex.engines.workflow.models import (
 from kortex.engines.workflow.persistence import (
     WorkflowStore,
 )
+from kortex.engines.workflow.scheduler import DurableWorkflowScheduler
 from kortex.engines.workflow.state_machine import WorkflowStateMachine
 
 if TYPE_CHECKING:
@@ -68,15 +74,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             settings: WorkflowSettings configuration model.
         """
         super().__init__()
-        self._settings = settings or WorkflowSettings()
+        self._settings = settings if settings is not None else WorkflowSettings()
         self._definitions: dict[str, WorkflowDefinition] = {}
         self._instances: dict[UUID, WorkflowInstance] = {}
         self._approval_manager: ApprovalProvider | MemoryApprovalManager = MemoryApprovalManager()
         self._evaluator = StepEvaluator(self._approval_manager)
-        self._kernel: Kernel | None = None
         self._storage_engine: StorageEngine | None = None
         self._workflow_store: WorkflowStore | None = None
+        self._scheduler: DurableWorkflowScheduler | None = None
+        self._external_executor: ExternalExecutionManager | None = None
         self._recovery_lock = asyncio.Lock()
+        self._kernel: Kernel | None = None
         self._running_tasks: dict[UUID, asyncio.Task[Any]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._metrics: dict[str, Any] = {
@@ -87,6 +95,9 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "steps_executed": 0,
             "approvals_requested": 0,
             "compensations_executed": 0,
+            "schedules_created": 0,
+            "schedules_triggered": 0,
+            "external_executions": 0,
         }
         self._registered_capabilities: list[str] = [
             "kortex.workflow.instance.start",
@@ -102,6 +113,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "kortex.workflow.approval.get",
             "kortex.workflow.approval.decide",
             "kortex.workflow.approval.delegate",
+            "kortex.workflow.schedule.create",
+            "kortex.workflow.schedule.list",
+            "kortex.workflow.schedule.get",
+            "kortex.workflow.schedule.pause",
+            "kortex.workflow.schedule.resume",
+            "kortex.workflow.schedule.cancel",
+            "kortex.workflow.schedule.trigger",
+            "kortex.workflow.external.execute",
+            "kortex.workflow.external.get",
+            "kortex.workflow.external.list",
+            "kortex.workflow.external.cancel",
         ]
 
     @property
@@ -137,6 +159,24 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
     def set_workflow_store(self, store: WorkflowStore) -> None:
         """Explicitly inject or configure the WorkflowStore (e.g. for testing)."""
         self._workflow_store = store
+
+    @property
+    def scheduler(self) -> DurableWorkflowScheduler | None:
+        """Access the durable workflow scheduler subsystem."""
+        return self._scheduler
+
+    def set_scheduler(self, scheduler: DurableWorkflowScheduler) -> None:
+        """Explicitly inject or configure the scheduler (e.g. for testing)."""
+        self._scheduler = scheduler
+
+    @property
+    def external_executor(self) -> ExternalExecutionManager | None:
+        """Access the governed external executor subsystem."""
+        return self._external_executor
+
+    def set_external_executor(self, executor: ExternalExecutionManager) -> None:
+        """Explicitly inject or configure the external executor (e.g. for testing)."""
+        self._external_executor = executor
 
     # -- Lifecycle Implementation -------------------------------------------
 
@@ -175,6 +215,24 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 )
                 self._evaluator = StepEvaluator(self._approval_manager)
                 self.logger.info("WorkflowEngine wired to DurableApprovalManager backed by StorageEngine.data.")
+
+                self._scheduler = DurableWorkflowScheduler(
+                    data_store=self._storage_engine.data,
+                    workflow_engine=self,
+                    security_engine=sec_engine,
+                    outbox_store=outbox_store,
+                    event_engine=event_engine,
+                )
+                self.logger.info("WorkflowEngine wired to DurableWorkflowScheduler backed by StorageEngine.data.")
+
+                self._external_executor = ExternalExecutionManager(
+                    data_store=self._storage_engine.data,
+                    kernel=kernel,
+                    approval_manager=self._approval_manager,
+                    security_engine=sec_engine,
+                    outbox_store=outbox_store,
+                )
+                self.logger.info("WorkflowEngine wired to ExternalExecutionManager backed by StorageEngine.data.")
 
             # Register Kernel capabilities
             kernel.register_capability(
@@ -268,9 +326,89 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 handler=self.list_definitions,
                 required_permissions=["workflow:read"],
             )
+            # M5.4 Scheduling Capabilities
+            kernel.register_capability(
+                name="kortex.workflow.schedule.create",
+                description="Create a recurring or delayed workflow schedule",
+                provider=self.name,
+                handler=self.create_schedule,
+                required_permissions=["workflow:schedule"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.schedule.list",
+                description="List workflow schedules for tenant",
+                provider=self.name,
+                handler=self.list_schedules,
+                required_permissions=["workflow:read"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.schedule.get",
+                description="Get workflow schedule by ID or name",
+                provider=self.name,
+                handler=self.get_schedule,
+                required_permissions=["workflow:read"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.schedule.pause",
+                description="Pause an active workflow schedule",
+                provider=self.name,
+                handler=self.pause_schedule,
+                required_permissions=["workflow:schedule"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.schedule.resume",
+                description="Resume a paused workflow schedule",
+                provider=self.name,
+                handler=self.resume_schedule,
+                required_permissions=["workflow:schedule"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.schedule.cancel",
+                description="Cancel and disable a workflow schedule",
+                provider=self.name,
+                handler=self.cancel_schedule,
+                required_permissions=["workflow:schedule"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.schedule.trigger",
+                description="Manually trigger an execution of a workflow schedule",
+                provider=self.name,
+                handler=self.trigger_schedule,
+                required_permissions=["workflow:start"],
+            )
+            # M5.4 Governed External Execution Capabilities
+            kernel.register_capability(
+                name="kortex.workflow.external.execute",
+                description="Execute a governed external operation with safety guards and timeouts",
+                provider=self.name,
+                handler=self.execute_external_operation,
+                required_permissions=["workflow:execute"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.external.get",
+                description="Get external execution record by ID",
+                provider=self.name,
+                handler=self.get_external_execution,
+                required_permissions=["workflow:read"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.external.list",
+                description="List external execution records for tenant",
+                provider=self.name,
+                handler=self.list_external_executions,
+                required_permissions=["workflow:read"],
+            )
+            kernel.register_capability(
+                name="kortex.workflow.external.cancel",
+                description="Cancel a pending or waiting external execution",
+                provider=self.name,
+                handler=self.cancel_external_execution,
+                required_permissions=["workflow:cancel"],
+            )
 
             self._set_state(EngineState.READY)
             self.logger.info("Workflow Engine initialized successfully.")
+
         except Exception as e:
             self._set_state(EngineState.FAILED)
             self.logger.error("Failed to initialize Workflow Engine: %s", e, exc_info=True)
@@ -288,6 +426,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         except Exception as e:
             self.logger.error("Error during workflow startup hydration: %s", e, exc_info=True)
 
+        # Scheduler hydration and background polling daemon
+        if self._scheduler is not None:
+            try:
+                await self._scheduler.hydrate_and_recover_schedules()
+                if self._settings.scheduler_enabled:
+                    self._scheduler.start_background_loop(
+                        poll_interval_seconds=self._settings.scheduler_poll_interval_seconds
+                    )
+            except Exception as e:
+                self.logger.error("Error during scheduler startup hydration: %s", e, exc_info=True)
+
     async def stop(self) -> None:
         """Gracefully shut down engine tasks and cancel active execution jobs."""
         if self._state in (EngineState.STOPPED, EngineState.UNINITIALIZED):
@@ -296,14 +445,22 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self._set_state(EngineState.STOPPING)
         self.logger.info("Stopping Workflow Engine...")
 
+        # Stop scheduler background worker
+        if self._scheduler is not None:
+            self._scheduler.stop_background_loop()
+
         # Cancel any active running background execution tasks cleanly
-        for task in list(self._running_tasks.values()):
-            if not task.done():
-                task.cancel()
+        tasks_to_cancel = [task for task in self._running_tasks.values() if not task.done()]
+        for task in tasks_to_cancel:
+            task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         self._running_tasks.clear()
 
         self._set_state(EngineState.STOPPED)
         self.logger.info("Workflow Engine stopped cleanly.")
+
+
 
     # -- Hydration & Restart Recovery ---------------------------------------
 
@@ -629,7 +786,9 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         # Run workflow steps asynchronously
         task = asyncio.create_task(self._run_instance_steps(instance, definition))
         self._running_tasks[instance.id] = task
+        task.add_done_callback(lambda t: self._running_tasks.pop(instance.id, None))
         return instance
+
 
     async def _run_instance_steps(
         self, instance: WorkflowInstance, definition: WorkflowDefinition
@@ -1279,7 +1438,355 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             filtered = [i for i in filtered if i.state == state_filter]
         return filtered
 
+    # -- Scheduling Capability Handlers (Milestone M5.4) --------------------
+
+    async def create_schedule(
+        self,
+        name: str,
+        definition_id: str,
+        schedule_type: str = "INTERVAL",
+        cron_expression: str | None = None,
+        interval_seconds: int | None = None,
+        run_at: str | datetime.datetime | None = None,
+        initial_context: dict[str, Any] | None = None,
+        max_runs: int | None = None,
+        timezone: str = "UTC",
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Create a workflow execution schedule (kortex.workflow.schedule.create capability)."""
+        if self._scheduler is None:
+            raise WorkflowScheduleError("Scheduler subsystem is not initialized.")
+
+        tid = tenant_id or "default"
+        dt_run_at = (
+            datetime.datetime.fromisoformat(run_at)
+            if isinstance(run_at, str)
+            else run_at
+        )
+
+        # Resolve principal from session_token if not provided
+        if principal is None and "session_token" in kwargs:
+            raw_token = kwargs["session_token"]
+            sec_eng = self._kernel.get_engine("security") if self._kernel else None
+            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
+                try:
+                    from kortex.engines.security.models import TokenPayload
+                    if isinstance(raw_token, TokenPayload):
+                        principal = await sec_eng.authentication_manager.verify_token(raw_token)
+                    elif isinstance(raw_token, dict):
+                        tok_dict = dict(raw_token)
+                        raw_sig = tok_dict.get("signature")
+                        if isinstance(raw_sig, str):
+                            tok_dict["signature"] = bytes.fromhex(raw_sig)
+                        tok = TokenPayload(**tok_dict)
+                        principal = await sec_eng.authentication_manager.verify_token(tok)
+                except Exception as err:
+                    self.logger.debug("Could not verify session token in create_schedule: %s", err)
+
+        sch = await self._scheduler.create_schedule(
+            name=name,
+            definition_id=definition_id,
+            schedule_type=schedule_type,
+            cron_expression=cron_expression,
+            interval_seconds=interval_seconds,
+            run_at=dt_run_at,
+            initial_context=initial_context,
+            max_runs=max_runs,
+            timezone=timezone,
+            tenant_id=tid,
+            principal=principal,
+        )
+        self._metrics["schedules_created"] += 1
+        return {
+            "id": str(sch.id),
+            "name": sch.name,
+            "definition_id": sch.definition_id,
+            "schedule_type": sch.schedule_type.value,
+            "cron_expression": sch.cron_expression,
+            "interval_seconds": sch.interval_seconds,
+            "next_run_at": sch.next_run_at.isoformat() if sch.next_run_at else None,
+            "status": sch.status.value,
+            "tenant_id": sch.tenant_id,
+        }
+
+    async def list_schedules(
+        self,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> list[dict[str, Any]]:
+        """List workflow schedules for tenant (kortex.workflow.schedule.list capability)."""
+        if self._scheduler is None:
+            return []
+        tid = tenant_id or "default"
+        schedules = await self._scheduler.list_schedules(tenant_id=tid, status=status)
+        return [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "definition_id": s.definition_id,
+                "schedule_type": s.schedule_type.value,
+                "cron_expression": s.cron_expression,
+                "interval_seconds": s.interval_seconds,
+                "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
+                "status": s.status.value,
+                "run_count": s.run_count,
+                "tenant_id": s.tenant_id,
+            }
+            for s in schedules
+        ]
+
+    async def get_schedule(
+        self,
+        schedule_id: str,
+        tenant_id: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Get workflow schedule by ID or name (kortex.workflow.schedule.get capability)."""
+        if self._scheduler is None:
+            raise ScheduleNotFoundError("Scheduler subsystem is not initialized.")
+        tid = tenant_id or "default"
+        try:
+            target_uuid = UUID(schedule_id)
+            sch = await self._scheduler.get_schedule(target_uuid, tenant_id=tid)
+        except ValueError:
+            sch = await self._scheduler.get_schedule_by_name(schedule_id, tenant_id=tid)
+
+        if sch is None:
+            raise ScheduleNotFoundError(f"Schedule '{schedule_id}' not found in tenant '{tid}'.")
+
+        return {
+            "id": str(sch.id),
+            "name": sch.name,
+            "definition_id": sch.definition_id,
+            "schedule_type": sch.schedule_type.value,
+            "cron_expression": sch.cron_expression,
+            "interval_seconds": sch.interval_seconds,
+            "next_run_at": sch.next_run_at.isoformat() if sch.next_run_at else None,
+            "last_run_at": sch.last_run_at.isoformat() if sch.last_run_at else None,
+            "status": sch.status.value,
+            "run_count": sch.run_count,
+            "tenant_id": sch.tenant_id,
+        }
+
+    async def pause_schedule(
+        self,
+        schedule_id: str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Pause a workflow schedule (kortex.workflow.schedule.pause capability)."""
+        if self._scheduler is None:
+            raise ScheduleNotFoundError("Scheduler subsystem is not initialized.")
+        tid = tenant_id or "default"
+        sch = await self._scheduler.pause_schedule(schedule_id, tenant_id=tid, principal=principal)
+        return {"id": str(sch.id), "name": sch.name, "status": sch.status.value, "tenant_id": sch.tenant_id}
+
+    async def resume_schedule(
+        self,
+        schedule_id: str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Resume a paused workflow schedule (kortex.workflow.schedule.resume capability)."""
+        if self._scheduler is None:
+            raise ScheduleNotFoundError("Scheduler subsystem is not initialized.")
+        tid = tenant_id or "default"
+        sch = await self._scheduler.resume_schedule(schedule_id, tenant_id=tid, principal=principal)
+        return {
+            "id": str(sch.id),
+            "name": sch.name,
+            "status": sch.status.value,
+            "next_run_at": sch.next_run_at.isoformat() if sch.next_run_at else None,
+            "tenant_id": sch.tenant_id,
+        }
+
+    async def cancel_schedule(
+        self,
+        schedule_id: str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Cancel and disable a workflow schedule (kortex.workflow.schedule.cancel capability)."""
+        if self._scheduler is None:
+            raise ScheduleNotFoundError("Scheduler subsystem is not initialized.")
+        tid = tenant_id or "default"
+        sch = await self._scheduler.cancel_schedule(schedule_id, tenant_id=tid, principal=principal)
+        return {"id": str(sch.id), "name": sch.name, "status": sch.status.value, "tenant_id": sch.tenant_id}
+
+    async def trigger_schedule(
+        self,
+        schedule_id: str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Manually trigger a schedule execution (kortex.workflow.schedule.trigger capability)."""
+        if self._scheduler is None:
+            raise ScheduleNotFoundError("Scheduler subsystem is not initialized.")
+        tid = tenant_id or "default"
+        instance = await self._scheduler.trigger_schedule(schedule_id, tenant_id=tid, principal=principal)
+        self._metrics["schedules_triggered"] += 1
+        return {
+            "schedule_id": schedule_id,
+            "instance_id": str(instance.id),
+            "status": instance.status.value,
+            "state": instance.state.value,
+            "tenant_id": instance.tenant_id,
+        }
+
+    # -- Governed External Execution Handlers (Milestone M5.4) ---------------
+
+    async def execute_external_operation(
+        self,
+        target: str,
+        operation_type: str = "CAPABILITY",
+        parameters: dict[str, Any] | None = None,
+        timeout_seconds: float = 30.0,
+        retry_policy: dict[str, Any] | None = None,
+        requires_approval: bool = False,
+        required_approval_role: str | None = None,
+        idempotency_key: str | None = None,
+        correlation_id: str | None = None,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Execute a governed external operation with safety guards (kortex.workflow.external.execute capability)."""
+        if self._external_executor is None:
+            raise WorkflowExecutionError("External execution subsystem is not initialized.")
+
+        tid = tenant_id or "default"
+
+        # Resolve principal from session_token if not provided
+        session_token = kwargs.get("session_token")
+        if principal is None and session_token is not None:
+            sec_eng = self._kernel.get_engine("security") if self._kernel else None
+            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
+                try:
+                    from kortex.engines.security.models import TokenPayload
+                    if isinstance(session_token, TokenPayload):
+                        principal = await sec_eng.authentication_manager.verify_token(session_token)
+                    elif isinstance(session_token, dict):
+                        tok_dict = dict(session_token)
+                        raw_sig = tok_dict.get("signature")
+                        if isinstance(raw_sig, str):
+                            tok_dict["signature"] = bytes.fromhex(raw_sig)
+                        tok = TokenPayload(**tok_dict)
+                        principal = await sec_eng.authentication_manager.verify_token(tok)
+                except Exception as err:
+                    self.logger.debug("Could not verify session token in execute_external_operation: %s", err)
+
+        pol = RetryPolicy(**retry_policy) if retry_policy else None
+
+        req = ExternalExecutionRequest(
+            tenant_id=tid,
+            operation_type=operation_type,
+            target=target,
+            parameters=parameters or {},
+            timeout_seconds=timeout_seconds,
+            retry_policy=pol,
+            requires_approval=requires_approval,
+            required_approval_role=required_approval_role,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+        )
+
+        record = await self._external_executor.execute_operation(
+            request=req,
+            principal=principal,
+            session_token=session_token,
+        )
+        self._metrics["external_executions"] += 1
+        return {
+            "id": str(record.id),
+            "status": record.status.value,
+            "target": record.target,
+            "output": record.output,
+            "error": record.error,
+            "attempts": record.attempts,
+            "execution_time_ms": record.execution_time_ms,
+            "approval_request_id": str(record.approval_request_id) if record.approval_request_id else None,
+            "tenant_id": record.tenant_id,
+        }
+
+    async def get_external_execution(
+        self,
+        execution_id: str,
+        tenant_id: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Get external execution record by ID (kortex.workflow.external.get capability)."""
+        if self._external_executor is None:
+            raise ResourceNotFoundError("External execution subsystem is not initialized.")
+        tid = tenant_id or "default"
+        record = await self._external_executor.get_execution(execution_id, tenant_id=tid)
+        if record is None:
+            raise ResourceNotFoundError(f"External execution '{execution_id}' not found in tenant '{tid}'.")
+        return {
+            "id": str(record.id),
+            "status": record.status.value,
+            "target": record.target,
+            "output": record.output,
+            "error": record.error,
+            "attempts": record.attempts,
+            "execution_time_ms": record.execution_time_ms,
+            "approval_request_id": str(record.approval_request_id) if record.approval_request_id else None,
+            "tenant_id": record.tenant_id,
+        }
+
+    async def list_external_executions(
+        self,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> list[dict[str, Any]]:
+        """List external execution records for tenant (kortex.workflow.external.list capability)."""
+        if self._external_executor is None:
+            return []
+        tid = tenant_id or "default"
+        records = await self._external_executor.list_executions(
+            tenant_id=tid, status=status, limit=limit
+        )
+        return [
+            {
+                "id": str(r.id),
+                "status": r.status.value,
+                "target": r.target,
+                "output": r.output,
+                "error": r.error,
+                "attempts": r.attempts,
+                "execution_time_ms": r.execution_time_ms,
+                "approval_request_id": str(r.approval_request_id) if r.approval_request_id else None,
+                "tenant_id": r.tenant_id,
+            }
+            for r in records
+        ]
+
+    async def cancel_external_execution(
+        self,
+        execution_id: str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        """Cancel a pending external execution (kortex.workflow.external.cancel capability)."""
+        if self._external_executor is None:
+            raise ResourceNotFoundError("External execution subsystem is not initialized.")
+        tid = tenant_id or "default"
+        record = await self._external_executor.cancel_execution(
+            execution_id=execution_id, tenant_id=tid, principal=principal
+        )
+        return {"id": str(record.id), "status": record.status.value, "tenant_id": record.tenant_id}
+
     # -- Common Diagnostics Interface (IEngineDiagnostics) -------------------
+
 
     def health(self) -> dict[str, Any]:
         """Return diagnostic health check report."""
