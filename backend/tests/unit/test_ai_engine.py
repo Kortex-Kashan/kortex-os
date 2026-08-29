@@ -280,8 +280,9 @@ async def test_kernel_capability_registration() -> None:
     engine, kernel = _make_engine()
     await engine.initialize(kernel)
 
-    assert len(kernel.capabilities) == 10
+    assert len(kernel.capabilities) == len(CANONICAL_CAPABILITIES)
     for cap_name in CANONICAL_CAPABILITIES:
+
         assert cap_name in kernel.capabilities
         assert kernel.capabilities[cap_name]["provider"] == "ai"
         assert kernel.capabilities[cap_name]["handler"] is not None

@@ -51,6 +51,13 @@ from kortex.engines.ai.exceptions import (
     ConversationStoreError,
     NoRoutableProviderError,
 )
+from kortex.engines.ai.governance import (
+    AIGovernanceManager,
+    AIGovernancePolicy,
+    AITenantQuota,
+    ContentSafetyGuardrail,
+    ToolGovernanceEvaluator,
+)
 from kortex.engines.ai.interfaces import (
     IEngineDiagnostics,
     IKernelBridge,
@@ -315,6 +322,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         diagnostics: AIDiagnostics | None = None,
         telemetry: AITelemetryEmitter | None = None,
         throttler: TenantConcurrencyThrottler | None = None,
+        governance_manager: AIGovernanceManager | None = None,
         default_generation_timeout_seconds: float = DEFAULT_GENERATION_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
@@ -369,6 +377,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             if telemetry is not None
             else AITelemetryEmitter(diagnostics=self._diagnostics)
         )
+        self._governance_manager = (
+            governance_manager
+            if governance_manager is not None
+            else AIGovernanceManager(tool_registry=self._tool_registry)
+        )
 
         # Wire AgentOrchestrator with production adapters
         if agent_orchestrator is not None:
@@ -383,9 +396,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 composer=self._context_composer,
                 memory_manager=self._memory_manager,
             )
-            approval_policy = KernelSecurityApprovalPolicy(
-                tool_registry=self._tool_registry,
-            )
+            approval_policy = self._governance_manager.create_approval_policy()
             self._agent_orchestrator = AgentOrchestrator(
                 tool_invoker=self._tool_invoker,
                 llm_port=llm_port,
@@ -395,6 +406,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
 
         self._kernel: IKernelBridge | None = None
+
 
     @property
     def name(self) -> str:
@@ -456,6 +468,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         """Access the telemetry subsystem."""
         return self._telemetry
 
+    @property
+    def governance_manager(self) -> AIGovernanceManager:
+        """Access the AI governance, guardrails, and quota subsystem."""
+        return self._governance_manager
+
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
     async def initialize(self, kernel: IKernelBridge) -> None:  # type: ignore[override]
@@ -469,7 +486,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             if self._telemetry._kernel_bridge is None:
                 self._telemetry._kernel_bridge = kernel
 
-            # Register 6 canonical capabilities with the Kernel Registry
+            # Register canonical capabilities with the Kernel Registry
             kernel.register_capability(
                 name="kortex.ai.response.generate",
                 description="Generate an LLM response with context composition and model routing",
@@ -551,7 +568,74 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 security_classification="INTERNAL",
             )
 
+            # AI Governance Capabilities (M5.5)
+            kernel.register_capability(
+                name="kortex.ai.governance.policy.evaluate",
+                description="Evaluate prompts and proposed tool calls against tenant governance policy",
+                provider=self.name,
+                handler=self.evaluate_governance_policy,
+                required_permissions=["ai:governance"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.policy.upsert",
+                description="Create or update tenant AI governance and guardrail policy",
+                provider=self.name,
+                handler=self.upsert_governance_policy,
+                required_permissions=["ai:manage"],
+                security_classification="RESTRICTED",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.policy.get",
+                description="Retrieve active AI governance policy for a tenant",
+                provider=self.name,
+                handler=self.get_governance_policy,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.quota.get",
+                description="Retrieve token consumption quota and usage for a tenant",
+                provider=self.name,
+                handler=self.get_tenant_quota,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.quota.update",
+                description="Update tenant token budget limits and concurrency limits",
+                provider=self.name,
+                handler=self.update_tenant_quota,
+                required_permissions=["ai:manage"],
+                security_classification="RESTRICTED",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.audit.query",
+                description="Query immutable AI reasoning decision records",
+                provider=self.name,
+                handler=self.query_decision_records,
+                required_permissions=["audit:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.guardrail.check",
+                description="Evaluate text against prompt injection, safety patterns, and PII guardrails",
+                provider=self.name,
+                handler=self.check_content_guardrail,
+                required_permissions=["ai:generate"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.governance.approval.create",
+                description="Create a durable human approval request for an AI action",
+                provider=self.name,
+                handler=self.create_governance_approval,
+                required_permissions=["ai:orchestrate"],
+                security_classification="INTERNAL",
+            )
+
             self._set_state(EngineState.READY)
+
             self.logger.info("AI Orchestration Engine initialized successfully.")
         except Exception as exc:
             self._set_state(EngineState.FAILED)
@@ -894,7 +978,150 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             self.logger.warning("Tool invocation failed: %s", exc)
             raise
 
+    # -- AI Governance Capability Handlers (M5.5) ----------------------------
+
+    async def evaluate_governance_policy(
+        self,
+        tenant_id: str,
+        prompt: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate prompt guardrails and proposed tool calls against tenant policy."""
+        require_identifier(tenant_id, "tenant_id")
+        policy = await self._governance_manager.get_policy(tenant_id)
+
+        prompt_passed = True
+        prompt_violations: list[str] = []
+        if prompt:
+            res = ContentSafetyGuardrail.evaluate_text(prompt, policy)
+            prompt_passed = res.passed
+            prompt_violations = res.violations
+
+        tools_passed = True
+        tool_violations: list[str] = []
+        requires_approval = False
+        if tool_calls:
+            calls = [ToolCall.model_validate(c) for c in tool_calls]
+            evaluator = ToolGovernanceEvaluator(self._tool_registry)
+            tools_passed, tool_violations, requires_approval = evaluator.evaluate_tool_calls(calls, policy)
+
+        all_passed = prompt_passed and tools_passed
+        all_violations = prompt_violations + tool_violations
+        return {
+            "passed": all_passed,
+            "violations": all_violations,
+            "requires_human_approval": requires_approval,
+            "tenant_id": tenant_id,
+        }
+
+    async def upsert_governance_policy(
+        self,
+        policy: dict[str, Any] | AIGovernancePolicy,
+    ) -> dict[str, Any]:
+        """Create or update a tenant AI governance policy."""
+        pol = AIGovernancePolicy.model_validate(policy) if isinstance(policy, dict) else policy
+        saved = await self._governance_manager.set_policy(pol)
+        return saved.model_dump(mode="json")
+
+    async def get_governance_policy(
+        self,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """Retrieve the governance policy for a tenant."""
+        require_identifier(tenant_id, "tenant_id")
+        policy = await self._governance_manager.get_policy(tenant_id)
+        return policy.model_dump(mode="json")
+
+    async def get_tenant_quota(
+        self,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """Retrieve token consumption quota for a tenant."""
+        require_identifier(tenant_id, "tenant_id")
+        quota = await self._governance_manager.quota_manager.get_or_create_quota(tenant_id)
+        return quota.model_dump(mode="json")
+
+    async def update_tenant_quota(
+        self,
+        quota: dict[str, Any] | AITenantQuota,
+    ) -> dict[str, Any]:
+        """Update token consumption quota and concurrency limits for a tenant."""
+        q = AITenantQuota.model_validate(quota) if isinstance(quota, dict) else quota
+        if self._governance_manager._store is not None:
+            await self._governance_manager._store.save_quota(q)
+        else:
+            self._governance_manager.quota_manager._memory_quotas[q.tenant_id] = q
+        return q.model_dump(mode="json")
+
+
+    async def query_decision_records(
+        self,
+        tenant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Query immutable AI decision audit records."""
+        require_identifier(tenant_id, "tenant_id")
+        if self._governance_manager._store is not None:
+            records = await self._governance_manager._store.query_decision_records(
+                tenant_id=tenant_id,
+                limit=limit,
+                offset=offset,
+                user_id=user_id,
+                task_id=task_id,
+            )
+            return [r.model_dump(mode="json") for r in records]
+        return []
+
+    async def check_content_guardrail(
+        self,
+        text: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Check and sanitize content against prompt injection, safety patterns, and PII."""
+        policy = None
+        if tenant_id:
+            policy = await self._governance_manager.get_policy(tenant_id)
+        res = ContentSafetyGuardrail.evaluate_text(text, policy)
+        return res.model_dump(mode="json")
+
+    async def create_governance_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        goal: str,
+        proposed_calls: list[dict[str, Any]],
+        required_role: str = "ai_approver",
+    ) -> dict[str, Any]:
+        """Create a durable human approval request for an AI action."""
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(task_id, "task_id")
+        approval_id = str(uuid.uuid4())
+        if self._governance_manager._approval_manager is not None:
+            await self._governance_manager._approval_manager.create_request(
+                instance_id=task_id,
+                step_id=task_id,
+                required_role=required_role,
+                tenant_id=tenant_id,
+                context={
+                    "action": "ai_tool_invocation",
+                    "task_id": task_id,
+                    "goal": goal,
+                    "proposed_calls": proposed_calls,
+                },
+            )
+        return {
+            "approval_id": approval_id,
+            "task_id": task_id,
+            "tenant_id": tenant_id,
+            "status": "WAITING_APPROVAL",
+            "required_role": required_role,
+        }
+
     def register_provider(self, provider: BaseAIProvider) -> None:
+
         """Register an AI provider in the provider registry."""
         self._provider_registry.register(provider)
 

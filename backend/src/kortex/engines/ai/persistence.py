@@ -25,7 +25,7 @@ import logging
 import random
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Final, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
 
 from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, func, select, update
 from sqlalchemy.engine import CursorResult
@@ -52,6 +52,15 @@ from kortex.engines.ai.memory import ConversationTurn, require_identifier
 from kortex.engines.ai.models import TokenUsage
 from kortex.engines.ai.tools import ToolCall
 from kortex.engines.storage.interfaces import IDataStore
+
+if TYPE_CHECKING:
+    from kortex.engines.ai.governance import (
+        AIDecisionAuditRecord,
+        AIGovernancePolicy,
+        AITenantQuota,
+    )
+
+
 
 logger = logging.getLogger("kortex.engines.ai.persistence")
 
@@ -531,10 +540,366 @@ class StorageAgentTaskStore(IAgentTaskStore):
         )
 
 
+# ===========================================================================
+# AI Governance Relational Persistence Models (M5.5)
+# ===========================================================================
+
+
+class AIGovernancePolicyRow(BaseModel):
+    """Relational store model for tenant AI governance and guardrail policies."""
+
+    __tablename__ = "ai_governance_policies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    strict_local_only: Mapped[bool] = mapped_column(nullable=False, default=False)
+    require_human_approval_for_mutations: Mapped[bool] = mapped_column(nullable=False, default=True)
+    banned_prompt_patterns_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    pii_redaction_enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    allowed_tools_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_tools_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    max_tokens_per_request: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
+    max_daily_budget_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000_000)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AITenantQuotaRow(BaseModel):
+    """Relational store model for tenant AI token consumption and limits."""
+
+    __tablename__ = "ai_tenant_quotas"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    daily_token_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000_000)
+    monthly_token_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=25_000_000)
+    daily_tokens_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    monthly_tokens_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_reset_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    max_concurrent_agents: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    max_concurrent_generations: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+
+
+class AIDecisionAuditRow(BaseModel):
+    """Relational store model for immutable AI reasoning decision records."""
+
+    __tablename__ = "ai_decision_records"
+    __table_args__ = (
+        Index("ix_ai_decision_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    tool_calls_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    approval_request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    policy_violations_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+# ===========================================================================
+# AIGovernanceStore Infrastructure Store
+# ===========================================================================
+
+
+class AIGovernanceStore:
+    """Relational persistence store for AI governance policies, quotas, and decision audits."""
+
+    def __init__(self, data_store: IDataStore) -> None:
+        self._data_store = data_store
+
+    async def get_policy(self, tenant_id: str) -> AIGovernancePolicy | None:
+        """Fetch governance policy for a tenant."""
+        from kortex.engines.ai.governance import AIGovernancePolicy
+
+        require_identifier(tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> AIGovernancePolicyRow | None:
+            stmt = select(AIGovernancePolicyRow).where(AIGovernancePolicyRow.tenant_id == tenant_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+        row = await self._data_store.execute_in_transaction(_action)
+        if row is None:
+            return None
+
+        allowed = json.loads(row.allowed_tools_json) if row.allowed_tools_json else None
+        return AIGovernancePolicy(
+            id=uuid.UUID(row.id),
+            tenant_id=row.tenant_id,
+            strict_local_only=row.strict_local_only,
+            require_human_approval_for_mutations=row.require_human_approval_for_mutations,
+            banned_prompt_patterns=json.loads(row.banned_prompt_patterns_json),
+            pii_redaction_enabled=row.pii_redaction_enabled,
+            allowed_tools=allowed,
+            blocked_tools=json.loads(row.blocked_tools_json),
+            max_tokens_per_request=row.max_tokens_per_request,
+            max_daily_budget_tokens=row.max_daily_budget_tokens,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    async def save_policy(
+        self,
+        policy: AIGovernancePolicy,
+        outbox_store: object | None = None,
+    ) -> AIGovernancePolicy:
+        """Upsert governance policy and optionally stage outbox event."""
+        require_identifier(policy.tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> AIGovernancePolicyRow:
+            now = datetime.datetime.now(datetime.UTC)
+            stmt = select(AIGovernancePolicyRow).where(AIGovernancePolicyRow.tenant_id == policy.tenant_id)
+            existing = (await session.execute(stmt)).scalar_one_or_none()
+
+            allowed_json = json.dumps(policy.allowed_tools) if policy.allowed_tools is not None else None
+            banned_json = json.dumps(policy.banned_prompt_patterns)
+            blocked_json = json.dumps(policy.blocked_tools)
+
+            if existing is not None:
+                existing.strict_local_only = policy.strict_local_only
+                existing.require_human_approval_for_mutations = policy.require_human_approval_for_mutations
+                existing.banned_prompt_patterns_json = banned_json
+                existing.pii_redaction_enabled = policy.pii_redaction_enabled
+                existing.allowed_tools_json = allowed_json
+                existing.blocked_tools_json = blocked_json
+                existing.max_tokens_per_request = policy.max_tokens_per_request
+                existing.max_daily_budget_tokens = policy.max_daily_budget_tokens
+                existing.updated_at = now
+                row = existing
+            else:
+                row = AIGovernancePolicyRow(
+                    id=str(policy.id),
+                    tenant_id=policy.tenant_id,
+                    strict_local_only=policy.strict_local_only,
+                    require_human_approval_for_mutations=policy.require_human_approval_for_mutations,
+                    banned_prompt_patterns_json=banned_json,
+                    pii_redaction_enabled=policy.pii_redaction_enabled,
+                    allowed_tools_json=allowed_json,
+                    blocked_tools_json=blocked_json,
+                    max_tokens_per_request=policy.max_tokens_per_request,
+                    max_daily_budget_tokens=policy.max_daily_budget_tokens,
+                    created_at=policy.created_at or now,
+                    updated_at=now,
+                )
+                session.add(row)
+
+            if outbox_store is not None:
+                if hasattr(outbox_store, "stage_event_in_session"):
+                    outbox_store.stage_event_in_session(
+                        session=session,
+                        tenant_id=policy.tenant_id,
+                        topic="ai.governance.policy_updated",
+                        payload={"tenant_id": policy.tenant_id, "policy_id": str(policy.id)},
+                    )
+                elif hasattr(outbox_store, "stage_event"):
+                    await outbox_store.stage_event(
+                        tenant_id=policy.tenant_id,
+                        topic="ai.governance.policy_updated",
+                        payload={"tenant_id": policy.tenant_id, "policy_id": str(policy.id)},
+                    )
+
+            await session.flush()
+            return row
+
+        await self._data_store.execute_in_transaction(_action)
+        return policy
+
+    async def get_quota(self, tenant_id: str) -> AITenantQuota | None:
+        """Fetch quota record for tenant."""
+        from kortex.engines.ai.governance import AITenantQuota
+
+        require_identifier(tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> AITenantQuotaRow | None:
+            stmt = select(AITenantQuotaRow).where(AITenantQuotaRow.tenant_id == tenant_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+        row = await self._data_store.execute_in_transaction(_action)
+        if row is None:
+            return None
+
+        return AITenantQuota(
+            tenant_id=row.tenant_id,
+            daily_token_limit=row.daily_token_limit,
+            monthly_token_limit=row.monthly_token_limit,
+            daily_tokens_consumed=row.daily_tokens_consumed,
+            monthly_tokens_consumed=row.monthly_tokens_consumed,
+            last_reset_date=row.last_reset_date,
+            max_concurrent_agents=row.max_concurrent_agents,
+            max_concurrent_generations=row.max_concurrent_generations,
+        )
+
+    async def save_quota(self, quota: AITenantQuota) -> AITenantQuota:
+        """Upsert quota record."""
+        require_identifier(quota.tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> AITenantQuotaRow:
+            stmt = select(AITenantQuotaRow).where(AITenantQuotaRow.tenant_id == quota.tenant_id)
+            existing = (await session.execute(stmt)).scalar_one_or_none()
+
+            if existing is not None:
+                existing.daily_token_limit = quota.daily_token_limit
+                existing.monthly_token_limit = quota.monthly_token_limit
+                existing.daily_tokens_consumed = quota.daily_tokens_consumed
+                existing.monthly_tokens_consumed = quota.monthly_tokens_consumed
+                existing.last_reset_date = quota.last_reset_date
+                existing.max_concurrent_agents = quota.max_concurrent_agents
+                existing.max_concurrent_generations = quota.max_concurrent_generations
+                row = existing
+            else:
+                row = AITenantQuotaRow(
+                    id=str(uuid.uuid4()),
+                    tenant_id=quota.tenant_id,
+                    daily_token_limit=quota.daily_token_limit,
+                    monthly_token_limit=quota.monthly_token_limit,
+                    daily_tokens_consumed=quota.daily_tokens_consumed,
+                    monthly_tokens_consumed=quota.monthly_tokens_consumed,
+                    last_reset_date=quota.last_reset_date,
+                    max_concurrent_agents=quota.max_concurrent_agents,
+                    max_concurrent_generations=quota.max_concurrent_generations,
+                )
+                session.add(row)
+
+            await session.flush()
+            return row
+
+        await self._data_store.execute_in_transaction(_action)
+        return quota
+
+    async def save_decision_record(
+        self,
+        record: AIDecisionAuditRecord,
+        outbox_store: object | None = None,
+    ) -> None:
+
+        """Save immutable decision audit record and optionally stage outbox event."""
+        require_identifier(record.tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> None:
+            row = AIDecisionAuditRow(
+                id=str(record.record_id),
+                tenant_id=record.tenant_id,
+                user_id=record.user_id,
+                task_id=record.task_id,
+                request_id=record.request_id,
+                correlation_id=record.correlation_id,
+                provider_id=record.provider_id,
+                model_name=record.model_name,
+                prompt_hash=record.prompt_hash,
+                output_hash=record.output_hash,
+                prompt_tokens=record.prompt_tokens,
+                completion_tokens=record.completion_tokens,
+                total_tokens=record.total_tokens,
+                latency_ms=record.latency_ms,
+                tool_calls_json=json.dumps(record.tool_calls_requested),
+                approval_request_id=str(record.approval_request_id) if record.approval_request_id else None,
+                policy_violations_json=json.dumps(record.policy_violations),
+                created_at=record.created_at,
+            )
+            session.add(row)
+
+            if outbox_store is not None:
+                if hasattr(outbox_store, "stage_event_in_session"):
+                    outbox_store.stage_event_in_session(
+                        session=session,
+                        tenant_id=record.tenant_id,
+                        topic="ai.governance.decision_logged",
+                        payload={
+                            "record_id": str(record.record_id),
+                            "tenant_id": record.tenant_id,
+                            "task_id": record.task_id,
+                            "total_tokens": record.total_tokens,
+                        },
+                    )
+                elif hasattr(outbox_store, "stage_event"):
+                    await outbox_store.stage_event(
+                        tenant_id=record.tenant_id,
+                        topic="ai.governance.decision_logged",
+                        payload={
+                            "record_id": str(record.record_id),
+                            "tenant_id": record.tenant_id,
+                            "task_id": record.task_id,
+                            "total_tokens": record.total_tokens,
+                        },
+                    )
+
+            await session.flush()
+
+        await self._data_store.execute_in_transaction(_action)
+
+    async def query_decision_records(
+        self,
+        tenant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[AIDecisionAuditRecord]:
+
+        """Query decision audit records partitioned by tenant."""
+        from kortex.engines.ai.governance import AIDecisionAuditRecord
+
+        require_identifier(tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> list[AIDecisionAuditRow]:
+            stmt = select(AIDecisionAuditRow).where(AIDecisionAuditRow.tenant_id == tenant_id)
+            if user_id:
+                stmt = stmt.where(AIDecisionAuditRow.user_id == user_id)
+            if task_id:
+                stmt = stmt.where(AIDecisionAuditRow.task_id == task_id)
+            stmt = stmt.order_by(AIDecisionAuditRow.created_at.desc()).limit(limit).offset(offset)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        results: list[AIDecisionAuditRecord] = []
+        for r in rows:
+            results.append(
+                AIDecisionAuditRecord(
+                    record_id=uuid.UUID(r.id),
+                    tenant_id=r.tenant_id,
+                    user_id=r.user_id,
+                    task_id=r.task_id,
+                    request_id=r.request_id,
+                    correlation_id=r.correlation_id,
+                    provider_id=r.provider_id,
+                    model_name=r.model_name,
+                    prompt_hash=r.prompt_hash,
+                    output_hash=r.output_hash,
+                    prompt_tokens=r.prompt_tokens,
+                    completion_tokens=r.completion_tokens,
+                    total_tokens=r.total_tokens,
+                    latency_ms=r.latency_ms,
+                    tool_calls_requested=json.loads(r.tool_calls_json),
+                    approval_request_id=uuid.UUID(r.approval_request_id) if r.approval_request_id else None,
+                    policy_violations=json.loads(r.policy_violations_json),
+                    created_at=r.created_at,
+                )
+            )
+        return results
+
+
 __all__ = [
     "MAX_APPEND_RETRIES",
     "AIAgentTaskRow",
     "AIConversationTurnRow",
+    "AIDecisionAuditRow",
+    "AIGovernancePolicyRow",
+    "AIGovernanceStore",
+    "AITenantQuotaRow",
     "StorageAgentTaskStore",
     "StorageConversationStore",
 ]

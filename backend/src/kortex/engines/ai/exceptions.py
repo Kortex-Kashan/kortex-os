@@ -265,9 +265,43 @@ class TenantQuotaExceededError(AIOrchestrationError):
         self.tenant_id = tenant_id
 
 
+class AIGovernanceError(AIOrchestrationError):
+    """Base exception for all AI governance, policy, and guardrail errors."""
+
+
+class AIPolicyViolationError(AIGovernanceError):
+    """Raised when an AI prompt, output, or tool call violates safety or compliance policy."""
+
+    def __init__(self, tenant_id: str, violations: list[str]) -> None:
+        super().__init__(f"AI policy violation in tenant '{tenant_id}': {', '.join(violations)}")
+        self.tenant_id = tenant_id
+        self.violations = violations
+
+
+class AIGovernanceQuotaExceededError(AIGovernanceError):
+    """Raised when a tenant exceeds its daily or monthly AI token or spend budget."""
+
+    def __init__(self, tenant_id: str, message: str) -> None:
+        super().__init__(f"AI governance token budget exceeded for tenant '{tenant_id}': {message}")
+        self.tenant_id = tenant_id
+
+
+class AIGovernanceNotFoundError(AIGovernanceError):
+    """Raised when an AI governance policy or audit record is not found."""
+
+
+class AIGovernanceApprovalRequiredError(AIGovernanceError):
+    """Raised when an AI action cannot proceed without explicit human approval."""
+
+
 __all__ = [
     "AIBootstrapError",
+    "AIGovernanceApprovalRequiredError",
+    "AIGovernanceError",
+    "AIGovernanceNotFoundError",
+    "AIGovernanceQuotaExceededError",
     "AIOrchestrationError",
+    "AIPolicyViolationError",
     "AIProviderError",
     "AIProviderTimeoutError",
     "AgentCancelledError",
@@ -304,5 +338,3 @@ __all__ = [
     "ToolValidationError",
     "TransientProviderError",
 ]
-
-

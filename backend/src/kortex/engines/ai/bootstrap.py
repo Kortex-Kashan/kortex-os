@@ -33,6 +33,7 @@ from kortex.engines.ai.engine import (
     RouterLLMExecutionPort,
 )
 from kortex.engines.ai.exceptions import AIBootstrapError
+from kortex.engines.ai.governance import AIGovernanceManager
 from kortex.engines.ai.interfaces import IKernelBridge
 from kortex.engines.ai.memory import (
     AIMemoryManager,
@@ -40,6 +41,7 @@ from kortex.engines.ai.memory import (
     InMemoryConversationStore,
 )
 from kortex.engines.ai.persistence import (
+    AIGovernanceStore,
     StorageAgentTaskStore,
     StorageConversationStore,
 )
@@ -318,6 +320,13 @@ class KernelProductionBootstrap:
             max_concurrent_agents=self._config.max_concurrent_agents_per_tenant,
         )
 
+        # 6.5. AI Governance Manager & Relational Store (M5.5)
+        gov_store = AIGovernanceStore(data_store=data_store) if data_store is not None else None
+        governance_manager = AIGovernanceManager(
+            governance_store=gov_store,
+            tool_registry=tool_registry,
+        )
+
         # 7. Core Facade Construction
         engine = AIOrchestrationEngine(
             provider_registry=provider_registry,
@@ -330,8 +339,10 @@ class KernelProductionBootstrap:
             diagnostics=diagnostics,
             telemetry=telemetry,
             throttler=throttler,
+            governance_manager=governance_manager,
             default_generation_timeout_seconds=self._config.default_generation_timeout_seconds,
         )
+
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")
         return engine

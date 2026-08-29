@@ -40,7 +40,16 @@ CANONICAL_CAPABILITIES: list[str] = [
     "kortex.ai.agent.cancel",
     "kortex.ai.agent.status",
     "kortex.ai.agent.list",
+    "kortex.ai.governance.policy.evaluate",
+    "kortex.ai.governance.policy.upsert",
+    "kortex.ai.governance.policy.get",
+    "kortex.ai.governance.quota.get",
+    "kortex.ai.governance.quota.update",
+    "kortex.ai.governance.audit.query",
+    "kortex.ai.governance.guardrail.check",
+    "kortex.ai.governance.approval.create",
 ]
+
 
 
 class AIDiagnostics(IEngineDiagnostics):

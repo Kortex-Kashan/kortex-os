@@ -35,6 +35,12 @@ from kortex.core.exceptions import (
     IdempotencyError,
     ResourceNotFoundError,
 )
+from kortex.engines.ai.exceptions import (
+    AIGovernanceError,
+    AIGovernanceNotFoundError,
+    AIGovernanceQuotaExceededError,
+    AIPolicyViolationError,
+)
 from kortex.engines.security.exceptions import (
     AuthenticationError,
     AuthorizationDeniedError,
@@ -71,12 +77,18 @@ def map_exception(exc: BaseException) -> ErrorMapping:
         return ErrorMapping("CAPABILITY_NOT_FOUND", http.HTTPStatus.NOT_FOUND)
     if isinstance(exc, ScheduleNotFoundError):
         return ErrorMapping("CAPABILITY_NOT_FOUND", http.HTTPStatus.NOT_FOUND)
+    if isinstance(exc, AIGovernanceNotFoundError):
+        return ErrorMapping("CAPABILITY_NOT_FOUND", http.HTTPStatus.NOT_FOUND)
     if isinstance(exc, InvalidSignatureError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
     if isinstance(exc, AuthorizationDeniedError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
     if isinstance(exc, AuthenticationError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.UNAUTHORIZED)
+    if isinstance(exc, AIPolicyViolationError):
+        return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.UNPROCESSABLE_ENTITY)
+    if isinstance(exc, AIGovernanceQuotaExceededError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.TOO_MANY_REQUESTS)
     if isinstance(exc, ScheduleConflictError):
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
     if isinstance(exc, ApprovalConflictError):
@@ -93,12 +105,13 @@ def map_exception(exc: BaseException) -> ErrorMapping:
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.BAD_REQUEST)
     if isinstance(exc, WorkflowApprovalError):
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.BAD_REQUEST)
+    if isinstance(exc, AIGovernanceError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.BAD_REQUEST)
     if isinstance(exc, TimeoutError):
         return ErrorMapping("TIMEOUT_EXCEEDED", http.HTTPStatus.REQUEST_TIMEOUT)
     if isinstance(exc, SecurityEngineError):
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.INTERNAL_SERVER_ERROR)
     return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.INTERNAL_SERVER_ERROR)
-
 
 
 def error_message(exc: BaseException) -> str:
