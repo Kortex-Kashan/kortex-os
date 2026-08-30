@@ -348,10 +348,19 @@ class DurableAIApprovalPolicy(IApprovalPolicy):
         task: AgentTask,
         proposed_calls: list[ToolCall],
     ) -> bool:
-        """Evaluate if proposed tool calls require durable human approval."""
-        if not task.require_human_approval_for_mutations:
-            return False
+        """Evaluate if proposed tool calls require durable human approval.
 
+        M5-A3 (M55-3): tool-policy enforcement (blocklist/allowlist) below
+        is unconditional and runs regardless of
+        `task.require_human_approval_for_mutations` — that flag previously
+        short-circuited this method before `evaluate_tool_calls` ever ran,
+        which meant it silently disabled the blocklist/allowlist check
+        entirely, not merely the human-approval pause it was meant to
+        control. A tenant's `blocked_tools` policy must not be bypassable
+        just by a caller constructing an `AgentTask` with this one flag
+        off. The flag now only gates whether a mutation-flagged tool call
+        pauses for a human decision.
+        """
         # If policy provider given, retrieve tenant policy
         policy: AIGovernancePolicy | None = None
         if self._policy_provider is not None:
@@ -366,6 +375,9 @@ class DurableAIApprovalPolicy(IApprovalPolicy):
 
         if not is_allowed:
             raise AIPolicyViolationError(task.tenant_id, violations)
+
+        if not task.require_human_approval_for_mutations:
+            return False
 
         if requires_approval and self._approval_manager is not None:
             # Create durable approval request if manager available
@@ -421,9 +433,38 @@ class TenantQuotaManager:
         token_usage: TokenUsage,
         policy: AIGovernancePolicy | None = None,
     ) -> None:
-        """Verify token budget limits and record consumption."""
-        quota = await self.get_or_create_quota(tenant_id)
+        """Verify token budget limits and record consumption.
+
+        M5-A3/M5-A5: when a durable `atomic_consume_quota` is available on
+        the wired store, consumption is a single atomic conditional UPDATE
+        — see `AIGovernanceStore.atomic_consume_quota`'s docstring for why
+        the previous read-modify-write (`get_or_create_quota` then
+        `save_quota` of the whole computed row) was a genuine concurrency
+        bug, not just a style preference. The in-memory fallback path
+        (no durable store wired — a single-process, non-durable
+        configuration) keeps the simpler read-modify-write, since it is not
+        exposed to the same cross-request/cross-connection race.
+        """
         today = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+        tokens = token_usage.total_tokens
+
+        if self._quota_store is not None and hasattr(self._quota_store, "atomic_consume_quota"):
+            quota = await self.get_or_create_quota(tenant_id)
+            daily_limit = policy.max_daily_budget_tokens if policy else quota.daily_token_limit
+            within_budget, new_total = await self._quota_store.atomic_consume_quota(
+                tenant_id=tenant_id,
+                tokens=tokens,
+                daily_limit=daily_limit,
+                today=today,
+            )
+            if not within_budget:
+                raise AIGovernanceQuotaExceededError(
+                    tenant_id,
+                    f"Daily limit of {daily_limit} tokens exceeded (now at {new_total}).",
+                )
+            return
+
+        quota = await self.get_or_create_quota(tenant_id)
 
         # Daily rollover
         if quota.last_reset_date != today:
@@ -432,18 +473,23 @@ class TenantQuotaManager:
 
         daily_limit = policy.max_daily_budget_tokens if policy else quota.daily_token_limit
 
-        new_daily = quota.daily_tokens_consumed + token_usage.total_tokens
-        if new_daily > daily_limit:
-            raise AIGovernanceQuotaExceededError(
-                tenant_id,
-                f"Daily limit of {daily_limit} tokens exceeded (attempted {new_daily}).",
-            )
-
-        quota.daily_tokens_consumed = new_daily
-        quota.monthly_tokens_consumed += token_usage.total_tokens
+        # The write always commits, even over budget — see
+        # `AIGovernanceStore.atomic_consume_quota`'s docstring for why: the
+        # generation this represents already happened, and refusing to
+        # record its real cost would only make the next pre-flight check
+        # see a stale, too-low total. Enforcement is the pre-flight check's
+        # job, not this write's.
+        quota.daily_tokens_consumed += tokens
+        quota.monthly_tokens_consumed += tokens
 
         if self._quota_store is not None:
             await self._quota_store.save_quota(quota)
+
+        if quota.daily_tokens_consumed > daily_limit:
+            raise AIGovernanceQuotaExceededError(
+                tenant_id,
+                f"Daily limit of {daily_limit} tokens exceeded (now at {quota.daily_tokens_consumed}).",
+            )
 
 
 # ---------------------------------------------------------------------------

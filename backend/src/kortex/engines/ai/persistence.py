@@ -779,6 +779,101 @@ class AIGovernanceStore:
         await self._data_store.execute_in_transaction(_action)
         return quota
 
+    async def atomic_consume_quota(
+        self,
+        tenant_id: str,
+        tokens: int,
+        daily_limit: int,
+        today: str,
+    ) -> tuple[bool, int]:
+        """Atomically roll over (if a new day) and unconditionally commit
+        `tokens` against the tenant's daily quota, returning
+        `(within_budget, new_daily_total)`.
+
+        The write always commits, even if it pushes the tenant over
+        `daily_limit`: this method is called from `AIOrchestrationEngine
+        .generate_response`'s *post-call* debit, after a generation has
+        already happened and consumed a real, non-refundable resource.
+        Refusing to record that consumption when it exceeds the limit
+        would not undo the generation — it would only make the running
+        total in the database understate reality, so the *next* request's
+        pre-flight check (which reads this same total) would keep seeing
+        the tenant as under budget indefinitely. Enforcement — actually
+        preventing the next generation — belongs to that pre-flight check,
+        not to this write; `within_budget` is purely an informational
+        signal for the immediate caller (e.g. to log the overage).
+
+        M5-A3/M5-A5: `TenantQuotaManager.check_and_record_consumption`
+        previously read the quota row, computed the new total in Python,
+        and wrote the entire row back (`save_quota` above) — a
+        check-then-overwrite race. Two concurrent requests for the same
+        tenant could both read the same starting value before either
+        commits, and the second write silently clobbers the first's
+        increment, permanently undercounting real consumption. The actual
+        consumption step here is a single atomic `UPDATE ... SET consumed
+        = consumed + :n` — concurrency safety comes from the increment
+        itself being one statement, not from conditioning it on the limit
+        (unlike the CAS patterns elsewhere in this codebase, e.g.
+        `IdempotencyStore`'s state transitions or `SchedulerStore`'s
+        schedule claiming, where only one of several concurrent callers is
+        *allowed* to win — here every concurrent caller's consumption is
+        real and must be counted, not just one of them).
+        """
+        require_identifier(tenant_id, "tenant_id")
+
+        async def _ensure_row(session: AsyncSession) -> None:
+            existing = await session.scalar(
+                select(AITenantQuotaRow).where(AITenantQuotaRow.tenant_id == tenant_id)
+            )
+            if existing is None:
+                try:
+                    session.add(
+                        AITenantQuotaRow(id=str(uuid.uuid4()), tenant_id=tenant_id, last_reset_date=today)
+                    )
+                    await session.flush()
+                except IntegrityError:
+                    # Lost a concurrent first-ever-request race for this
+                    # tenant to another caller's insert — the row now
+                    # exists either way, nothing further to do here.
+                    pass
+
+        await self._data_store.execute_in_transaction(_ensure_row)
+
+        async def _rollover_if_new_day(session: AsyncSession) -> None:
+            # A plain bulk UPDATE, not a CAS: resetting to (0, today) is
+            # idempotent no matter how many concurrent callers also observe
+            # a stale `last_reset_date` and issue the same reset — unlike
+            # the consumption step below, there is no "only one may win"
+            # requirement here.
+            await session.execute(
+                update(AITenantQuotaRow)
+                .where(
+                    AITenantQuotaRow.tenant_id == tenant_id,
+                    AITenantQuotaRow.last_reset_date != today,
+                )
+                .values(daily_tokens_consumed=0, last_reset_date=today)
+            )
+
+        await self._data_store.execute_in_transaction(_rollover_if_new_day)
+
+        async def _consume(session: AsyncSession) -> int:
+            stmt = (
+                update(AITenantQuotaRow)
+                .where(AITenantQuotaRow.tenant_id == tenant_id)
+                .values(
+                    daily_tokens_consumed=AITenantQuotaRow.daily_tokens_consumed + tokens,
+                    monthly_tokens_consumed=AITenantQuotaRow.monthly_tokens_consumed + tokens,
+                )
+            )
+            await session.execute(stmt)
+            updated = await session.scalar(
+                select(AITenantQuotaRow.daily_tokens_consumed).where(AITenantQuotaRow.tenant_id == tenant_id)
+            )
+            return int(updated or 0)
+
+        new_total = await self._data_store.execute_in_transaction(_consume)
+        return new_total <= daily_limit, new_total
+
     async def save_decision_record(
         self,
         record: AIDecisionAuditRecord,

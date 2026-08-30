@@ -21,6 +21,7 @@ Invariants:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import time
@@ -47,6 +48,7 @@ from kortex.engines.ai.events import (
     AIBaseEvent,
 )
 from kortex.engines.ai.exceptions import (
+    AIGovernanceQuotaExceededError,
     AIProviderTimeoutError,
     ConversationStoreError,
     NoRoutableProviderError,
@@ -74,6 +76,7 @@ from kortex.engines.ai.models import (
     AIProviderMetadata,
     LLMRequest,
     LLMResponse,
+    TokenUsage,
 )
 from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
 from kortex.engines.ai.registry import ProviderRegistry
@@ -86,6 +89,7 @@ from kortex.engines.ai.tools import (
     InMemoryToolExecutionPort,
     IToolExecutionPort,
     ToolCall,
+    ToolExecutionStatus,
     ToolRegistry,
     ToolResult,
     scrub_secrets_from_text,
@@ -713,6 +717,34 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
 
             async def _execute_generation() -> LLMResponse:
+                # M5-A3: AI governance now actually executes on this, the
+                # real generation path — previously these checks existed
+                # only as isolated, unit-tested components reachable via
+                # separate, manually-invoked `kortex.ai.governance.*`
+                # capabilities that `generate_response` never called,
+                # meaning tenant policy/guardrails/quotas had zero effect on
+                # real requests. `evaluate_prompt_guardrails` raises
+                # `AIPolicyViolationError` itself on a failed check.
+                policy = await self._governance_manager.get_policy(request.tenant_id)
+                await self._governance_manager.evaluate_prompt_guardrails(request)
+
+                # Cheap pre-flight rejection of a tenant already over budget
+                # — avoids spending a provider call before the authoritative
+                # post-call debit below (which uses the real token count,
+                # per the M5-A5 hardening of `check_and_record_consumption`)
+                # would reject it anyway.
+                quota_manager = self._governance_manager.quota_manager
+                pre_quota = await quota_manager.get_or_create_quota(request.tenant_id)
+                today = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+                already_consumed = (
+                    pre_quota.daily_tokens_consumed if pre_quota.last_reset_date == today else 0
+                )
+                if already_consumed >= policy.max_daily_budget_tokens:
+                    raise AIGovernanceQuotaExceededError(
+                        request.tenant_id,
+                        f"Daily token budget of {policy.max_daily_budget_tokens} already exhausted.",
+                    )
+
                 # 2. Single-point Context Composition (RAG + Prompt Template)
                 enriched_request = await self._context_composer.compose(request)
 
@@ -752,7 +784,39 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                         error_category=type(exc).__name__,
                         user_id=request.user_id,
                     )
-                    return response.model_copy(update={"degraded": True})
+                    response = response.model_copy(update={"degraded": True})
+
+                # M5-A3: authoritative, atomic quota debit from the REAL
+                # token usage the provider reported (never pre-flight-only
+                # — see `check_and_record_consumption`'s docstring on why a
+                # provider failure must not leave quota debited with
+                # nothing to show for it), and immutable decision-audit
+                # logging, on every completed generation — degraded or not.
+                usage = TokenUsage.from_dict(response.token_usage)
+                try:
+                    await quota_manager.check_and_record_consumption(request.tenant_id, usage, policy)
+                except AIGovernanceQuotaExceededError:
+                    # This generation already happened and is still
+                    # returned below — discarding a completed response
+                    # here wastes the resource without preventing anything.
+                    # Recording the overage means the pre-flight check
+                    # above rejects the tenant's *next* request before
+                    # another generation is attempted.
+                    self.logger.warning(
+                        "Tenant '%s' exceeded its daily AI token budget as of request '%s'.",
+                        request.tenant_id,
+                        request.request_id,
+                    )
+
+                await self._governance_manager.log_decision(
+                    tenant_id=request.tenant_id,
+                    user_id=request.user_id,
+                    prompt_text=request.prompt,
+                    output_text=response.text_content,
+                    request_id=request.request_id,
+                    token_usage=usage,
+                    latency_ms=response.execution_time_ms,
+                )
 
                 return response
 
@@ -928,6 +992,35 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     ) -> ToolResult:
         """Invoke an authorized tool capability through the tool invoker subsystem."""
         start_time = time.perf_counter()
+
+        # M5-A3: tenant tool governance (blocklist/allowlist) is enforced
+        # here, unconditionally, at the actual point of execution — not
+        # merely when tools are offered to the model, and not contingent on
+        # whether `authorizer` happens to also be supplied. Previously
+        # nothing on this path consulted `AIGovernancePolicy` at all; a
+        # tenant's `blocked_tools` list had zero effect on what a live tool
+        # call could actually do.
+        policy = await self._governance_manager.get_policy(tenant_id)
+        governance_evaluator = ToolGovernanceEvaluator(self._tool_registry)
+        is_allowed, violations, _ = governance_evaluator.evaluate_tool_calls([tool_call], policy)
+        if not is_allowed:
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            reason = "; ".join(violations)
+            await self._telemetry.emit_tool_denied(
+                tenant_id=tenant_id,
+                tool_name=tool_call.tool_name,
+                request_id=tool_call.call_id,
+                reason=reason,
+                latency_ms=latency_ms,
+            )
+            return ToolResult(
+                call_id=tool_call.call_id,
+                tool_name=tool_call.tool_name,
+                status=ToolExecutionStatus.DENIED,
+                error_message=reason,
+                execution_time_ms=latency_ms,
+            )
+
         await self._telemetry.emit_tool_invoked(
             tenant_id=tenant_id,
             tool_name=tool_call.tool_name,

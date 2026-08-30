@@ -6,7 +6,10 @@ docs/architecture/ai_engine_m9_production_runtime_spec.md
 Implements:
 - Production dependency graph construction and IoC assembly
 - Explicit port-adapter wiring (RouterLLMExecutionPort, EngineAgentContextPort,
-  KernelToolExecutionPort, KernelSecurityApprovalPolicy)
+  KernelToolExecutionPort) and a governance-aware approval policy
+  (`AIGovernanceManager.create_approval_policy()`, M5-A3 — not
+  `KernelSecurityApprovalPolicy`, which only ever checked a tool's
+  `is_mutation` flag and had no tenant-policy awareness at all)
 - Startup dependency order validation
 - Tri-tier telemetry and diagnostics integration
 - Support for development (SQLite/Local) and production (PostgreSQL/External) profiles
@@ -28,7 +31,6 @@ from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.engine import (
     AIOrchestrationEngine,
     EngineAgentContextPort,
-    KernelSecurityApprovalPolicy,
     KernelToolExecutionPort,
     RouterLLMExecutionPort,
 )
@@ -303,9 +305,33 @@ class KernelProductionBootstrap:
             max_step_history_window=self._config.max_step_history_window,
             max_step_result_chars=self._config.max_step_result_chars,
         )
-        approval_policy = KernelSecurityApprovalPolicy(
+
+        # 6.5. AI Governance Manager & Relational Store (M5.5), constructed
+        # BEFORE the orchestrator below so its approval policy can be
+        # governance-aware.
+        gov_store = AIGovernanceStore(data_store=data_store) if data_store is not None else None
+        governance_manager = AIGovernanceManager(
+            governance_store=gov_store,
             tool_registry=tool_registry,
+            # M5-A3 (M55-6): a real `IDurableApprovalBridge` is deliberately
+            # NOT wired here yet. Routing an AI-initiated approval through
+            # `kortex.workflow.approval.create` would have to go through
+            # `kernel_bridge.invoke_capability` (the same boundary
+            # `KernelToolExecutionPort` above uses) with no session token —
+            # that capability requires authentication by default, and there
+            # is currently no KORTEX-wide mechanism for a system/AI-initiated
+            # action to authenticate to a permission-gated capability (no
+            # service-principal credential, no documented "system actor"
+            # bypass). Wiring this bridge without resolving that would not
+            # fix M55-6, only swap a silent no-op for a caught-and-logged
+            # `AuthenticationError` — see `DurableAIApprovalPolicy
+            # .requires_approval`'s own `except Exception` around this call.
+            # `AgentOrchestrator`'s own internal `PAUSED_FOR_APPROVAL`/
+            # `ResumeToken` pause mechanism (unaffected by this) still
+            # correctly gates mutation-flagged tool calls in the meantime.
         )
+
+        approval_policy = governance_manager.create_approval_policy()
         agent_orchestrator = AgentOrchestrator(
             tool_invoker=tool_invoker,
             llm_port=llm_port,
@@ -318,13 +344,6 @@ class KernelProductionBootstrap:
         throttler = TenantConcurrencyThrottler(
             max_concurrent_generations=self._config.max_concurrent_generations_per_tenant,
             max_concurrent_agents=self._config.max_concurrent_agents_per_tenant,
-        )
-
-        # 6.5. AI Governance Manager & Relational Store (M5.5)
-        gov_store = AIGovernanceStore(data_store=data_store) if data_store is not None else None
-        governance_manager = AIGovernanceManager(
-            governance_store=gov_store,
-            tool_registry=tool_registry,
         )
 
         # 7. Core Facade Construction

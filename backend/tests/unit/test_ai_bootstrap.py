@@ -24,11 +24,11 @@ from kortex.engines.ai.bootstrap import (
 from kortex.engines.ai.engine import (
     AIOrchestrationEngine,
     EngineAgentContextPort,
-    KernelSecurityApprovalPolicy,
     KernelToolExecutionPort,
     RouterLLMExecutionPort,
 )
 from kortex.engines.ai.exceptions import AIBootstrapError
+from kortex.engines.ai.governance import DurableAIApprovalPolicy
 from kortex.engines.ai.models import (
     AIProviderMetadata,
     LLMRequest,
@@ -116,7 +116,15 @@ def test_bootstrap_creates_fully_assembled_ai_engine() -> None:
 
 
 def test_bootstrap_wires_production_ports() -> None:
-    """Verify that AgentOrchestrator is wired with production port adapters."""
+    """Verify that AgentOrchestrator is wired with production port adapters.
+
+    M5-A3: the approval policy must be the governance-aware
+    `DurableAIApprovalPolicy` (via `AIGovernanceManager.create_approval_policy()`),
+    not `KernelSecurityApprovalPolicy` — the latter only ever checked a
+    tool's `is_mutation` flag and had no tenant-policy (blocklist/allowlist/
+    quota) awareness at all, meaning a tenant's AI governance policy had
+    zero effect on the production agent orchestrator's tool-call gating.
+    """
     bridge = DummyBridge()
     bootstrap = KernelProductionBootstrap(
         config=AIEngineRuntimeConfig(enable_cloud_models=True)
@@ -126,7 +134,7 @@ def test_bootstrap_wires_production_ports() -> None:
     orchestrator = engine.agent_orchestrator
     assert isinstance(orchestrator._llm_port, RouterLLMExecutionPort)
     assert isinstance(orchestrator._context_port, EngineAgentContextPort)
-    assert isinstance(orchestrator._approval_policy, KernelSecurityApprovalPolicy)
+    assert isinstance(orchestrator._approval_policy, DurableAIApprovalPolicy)
     assert isinstance(engine.tool_invoker._execution_port, KernelToolExecutionPort)
 
 
