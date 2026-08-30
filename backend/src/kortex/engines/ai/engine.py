@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import time
@@ -279,10 +280,30 @@ class KernelSecurityApprovalPolicy(IApprovalPolicy):
 
 
 class KernelToolExecutionPort(IToolExecutionPort):
-    """Production adapter for `IToolExecutionPort` dispatching to `IKernelBridge`."""
+    """Production adapter for `IToolExecutionPort` dispatching to `IKernelBridge`.
 
-    def __init__(self, kernel_bridge: IKernelBridge) -> None:
+    M6.2-2: previously never supplied a `session_token` to
+    `IKernelBridge.invoke_capability`, so every AI tool call against an
+    authenticated capability failed closed with `AuthenticationError` —
+    silently misclassified downstream as a generic `EXECUTION_ERROR`
+    (`AuthenticationError` is not a subclass of this package's own
+    `ToolAuthorizationError`). `ai_identity`, when supplied, resolves the
+    AI system principal's own session token for the target tenant and
+    attaches it to every capability invocation this port makes — the sole
+    boundary crossing from the AI engine into the Kernel, and therefore the
+    correct single place to inject a static system identity (there is
+    nothing further upstream — `AgentTask`/`ToolCall`/`AIToolInvoker` never
+    carried a per-call caller identity to begin with; the AI has exactly
+    one identity, not a passthrough of someone else's).
+    """
+
+    def __init__(
+        self,
+        kernel_bridge: IKernelBridge,
+        ai_identity: object | None = None,
+    ) -> None:
         self._kernel_bridge = kernel_bridge
+        self._ai_identity = ai_identity
 
     async def execute_tool(
         self,
@@ -290,6 +311,7 @@ class KernelToolExecutionPort(IToolExecutionPort):
         capability_name: str,
         arguments: dict[str, object],
         authorizer: ToolAuthorizer | None = None,
+        correlation_id: str | None = None,
     ) -> object:
         """Execute capability handler through Kernel enforcement boundary."""
         require_identifier(tenant_id, "tenant_id")
@@ -299,10 +321,16 @@ class KernelToolExecutionPort(IToolExecutionPort):
                 from kortex.engines.ai.exceptions import ToolAuthorizationError
                 raise ToolAuthorizationError(f"Authorization denied for capability '{capability_name}'.")
 
+        session_token = None
+        if self._ai_identity is not None:
+            session_token = await self._ai_identity.get_session_token(tenant_id)
+
         return await self._kernel_bridge.invoke_capability(
             name=capability_name,
             arguments=arguments,
             tenant_id=tenant_id,
+            request_id=correlation_id,
+            session_token=session_token,
         )
 
 
@@ -489,6 +517,16 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             self._kernel = kernel
             if self._telemetry._kernel_bridge is None:
                 self._telemetry._kernel_bridge = kernel
+
+            # M6.2-4: react to durable approval decisions for AI-originated
+            # tickets so an approved/rejected mutation actually resumes or
+            # cancels the paused agent task that proposed it.
+            if hasattr(kernel, "subscribe_event"):
+                kernel.subscribe_event(
+                    topic="workflow.approval.decided",
+                    handler=self._on_approval_decided,
+                    subscriber_name=self.name,
+                )
 
             # Register canonical capabilities with the Kernel Registry
             kernel.register_capability(
@@ -908,11 +946,31 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         self,
         task: AgentTask,
         authorizer: ToolAuthorizer | None = None,
+        principal: Any = None,
     ) -> AgentExecutionResult:
-        """Orchestrate a bounded multi-step agent reasoning workflow."""
+        """Orchestrate a bounded multi-step agent reasoning workflow.
+
+        `principal` (M6.2-2): same fix as `generate_response` (M6.1-1) and
+        for the identical reason, now with materially higher stakes --
+        `AgentOrchestrator` eventually reaches `KernelToolExecutionPort`,
+        which (as of M6.2-1) authenticates as a REAL AI system principal
+        scoped to `task.tenant_id`. Before this fix, a caller-spoofed
+        `task.tenant_id` was inert (every tool call failed authentication
+        regardless); after M6.2-1 it would have let a caller in tenant B
+        cause the AI to genuinely act against tenant A's resources merely
+        by constructing an `AgentTask(tenant_id="tenant_a", ...)`. Typed
+        `Any`, not `SecurityPrincipal`, for the same AST-quarantine reason
+        as `generate_response`.
+        """
         start_time = time.perf_counter()
         require_identifier(task.tenant_id, "tenant_id")
         require_identifier(task.task_id, "task_id")
+
+        if principal is not None:
+            principal_tenant_id = getattr(principal, "tenant_id", None)
+            require_identifier(principal_tenant_id, "principal.tenant_id")
+            if principal_tenant_id != task.tenant_id:
+                task = task.model_copy(update={"tenant_id": principal_tenant_id})
 
         async with self._throttler.acquire_agent_slot(task.tenant_id):
             try:
@@ -948,11 +1006,21 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         resume_token: ResumeToken,
         approved_tool_calls: list[ToolCall],
         authorizer: ToolAuthorizer | None = None,
+        principal: Any = None,
     ) -> AgentExecutionResult:
-        """Resume a paused agent workflow with a verified ResumeToken."""
+        """Resume a paused agent workflow with a verified ResumeToken.
+
+        `principal` (M6.2-2): same tenant-correction fix as `orchestrate_agent`.
+        """
         start_time = time.perf_counter()
         require_identifier(task.tenant_id, "tenant_id")
         require_identifier(task.task_id, "task_id")
+
+        if principal is not None:
+            principal_tenant_id = getattr(principal, "tenant_id", None)
+            require_identifier(principal_tenant_id, "principal.tenant_id")
+            if principal_tenant_id != task.tenant_id:
+                task = task.model_copy(update={"tenant_id": principal_tenant_id})
 
         async with self._throttler.acquire_agent_slot(task.tenant_id):
             try:
@@ -1022,9 +1090,20 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         tenant_id: str,
         tool_call: ToolCall,
         authorizer: ToolAuthorizer | None = None,
+        principal: Any = None,
     ) -> ToolResult:
-        """Invoke an authorized tool capability through the tool invoker subsystem."""
+        """Invoke an authorized tool capability through the tool invoker subsystem.
+
+        `principal` (M6.2-2): same tenant-correction fix as `generate_response`/
+        `orchestrate_agent` -- a caller-supplied `tenant_id` is never
+        authoritative once a verified principal is available.
+        """
         start_time = time.perf_counter()
+
+        if principal is not None:
+            principal_tenant_id = getattr(principal, "tenant_id", None)
+            require_identifier(principal_tenant_id, "principal.tenant_id")
+            tenant_id = principal_tenant_id
 
         # M5-A3: tenant tool governance (blocklist/allowlist) is enforced
         # here, unconditionally, at the actual point of execution — not
@@ -1226,8 +1305,13 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(task_id, "task_id")
         approval_id = str(uuid.uuid4())
         if self._governance_manager._approval_manager is not None:
+            # M6.2-3: `instance_id` is a `WorkflowInstance.id` (a UUID) --
+            # this AI-created ticket has no workflow instance, so it must
+            # never be `task_id` (an arbitrary string). See the identical
+            # fix and full rationale in `governance.py`'s
+            # `DurableAIApprovalPolicy.requires_approval`.
             await self._governance_manager._approval_manager.create_request(
-                instance_id=task_id,
+                instance_id=None,
                 step_id=task_id,
                 required_role=required_role,
                 tenant_id=tenant_id,
@@ -1237,6 +1321,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     "goal": goal,
                     "proposed_calls": proposed_calls,
                 },
+                correlation_id=task_id,
             )
         return {
             "approval_id": approval_id,
@@ -1270,6 +1355,84 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             for provider in self._provider_registry.list_providers()
             for model_id in provider.supported_models
         ]
+
+    # -- Durable Approval Decision Resume (M6.2-4) ---------------------------
+
+    @staticmethod
+    def _action_fingerprint(tool_calls: list[ToolCall]) -> str:
+        """Recompute the same fingerprint `DurableAIApprovalPolicy.requires_approval`
+        (governance.py) stamps onto an AI-originated approval ticket at
+        creation time -- must stay byte-for-byte identical to that formula
+        (scrubbed args, `sort_keys=True`) or a legitimate approval would
+        spuriously fail re-verification here."""
+        calls_summary = [
+            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
+            for c in tool_calls
+        ]
+        return hashlib.sha256(json.dumps(calls_summary, sort_keys=True).encode("utf-8")).hexdigest()
+
+    async def _on_approval_decided(self, event: Any) -> None:
+        """React to a durable approval decision for an AI-originated ticket (M6.2-4).
+
+        Subscribed to the generic `workflow.approval.decided` event
+        (published unconditionally by `WorkflowEngine.decide_approval_request`
+        regardless of whether the ticket is linked to a workflow instance —
+        an AI-originated ticket never is). This keeps the Workflow Engine
+        entirely unaware of the AI engine's existence: it publishes one
+        plain domain event, and this handler is simply one of potentially
+        several subscribers. Filters on the ticket's own
+        `context_snapshot["action"] == "ai_tool_invocation"` marker so
+        every other (human/workflow-instance) decision is ignored.
+
+        Fails closed: any ambiguity (task not found, wrong status, missing
+        or mismatched action fingerprint) results in the paused task being
+        left alone or cancelled — never resumed on uncertain grounds.
+        """
+        try:
+            payload = getattr(event, "payload", None)
+            if not isinstance(payload, dict):
+                return
+            context_snapshot = payload.get("context_snapshot")
+            if not isinstance(context_snapshot, dict) or context_snapshot.get("action") != "ai_tool_invocation":
+                return
+
+            task_id = context_snapshot.get("task_id")
+            tenant_id = payload.get("tenant_id")
+            decision = payload.get("decision")
+            if not task_id or not tenant_id:
+                return
+
+            record = await self._agent_orchestrator.get_task(task_id, tenant_id)
+            if record is None or record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+                # Already resumed/cancelled by a prior delivery of this
+                # event, or the task never reached this pause state --
+                # idempotent no-op either way.
+                return
+
+            if decision == "APPROVED":
+                stored_fingerprint = payload.get("action_fingerprint")
+                actual_fingerprint = self._action_fingerprint(record.pending_tool_calls)
+                if stored_fingerprint and stored_fingerprint != actual_fingerprint:
+                    self.logger.error(
+                        "Refusing to resume agent task '%s': approved action fingerprint does not "
+                        "match the task's current pending tool calls (approve-one/execute-another "
+                        "attempt or stale approval).",
+                        task_id,
+                    )
+                    await self._agent_orchestrator.cancel_task(task_id, tenant_id)
+                    return
+                await self._agent_orchestrator.resume_task(
+                    task=record.task,
+                    resume_token=record.resume_token,
+                    approved_tool_calls=record.pending_tool_calls,
+                )
+            else:
+                # REJECTED (or any other terminal, non-approved decision):
+                # the paused task must never execute the calls it was
+                # paused on.
+                await self._agent_orchestrator.cancel_task(task_id, tenant_id)
+        except Exception as exc:
+            self.logger.error("Failed to process approval decision event for AI task: %s", exc, exc_info=True)
 
     # -- Internal Event Helper -----------------------------------------------
 

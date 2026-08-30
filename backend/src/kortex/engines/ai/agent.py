@@ -951,7 +951,9 @@ class AgentOrchestrator:
         # --- Handle pre-approved calls from resume_task() ---
         if preapproved_calls:
             step_start = time.monotonic()
-            tool_results = await self._invoke_tools(preapproved_calls, authorizer, tenant_id=task.tenant_id)
+            tool_results = await self._invoke_tools(
+                preapproved_calls, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
+            )
             step_count += 1
             step = AgentStep(
                 step_number=step_count,
@@ -1166,7 +1168,9 @@ class AgentOrchestrator:
                 )
 
             # --- M6 tool invocation ---
-            tool_results = await self._invoke_tools(tool_calls, authorizer, tenant_id=task.tenant_id)
+            tool_results = await self._invoke_tools(
+                tool_calls, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
+            )
             step_count += 1
             step = AgentStep(
                 step_number=step_count,
@@ -1184,8 +1188,16 @@ class AgentOrchestrator:
         tool_calls: list[ToolCall],
         authorizer: Callable[[str, dict[str, Any]], Awaitable[bool]] | None,
         tenant_id: str = "default",
+        correlation_id: str | None = None,
     ) -> list[ToolResult]:
-        """Delegate all tool invocations to M6 AIToolInvoker."""
+        """Delegate all tool invocations to M6 AIToolInvoker.
+
+        `correlation_id` (M6.2-4): the originating `AgentTask.task_id`,
+        reused as-is rather than minting a new correlation identifier —
+        threaded through to `KernelToolExecutionPort` so a resumed,
+        approval-gated tool call and its original proposal share one
+        traceable ID end to end.
+        """
         if not tool_calls:
             return []
 
@@ -1197,6 +1209,7 @@ class AgentOrchestrator:
             tenant_id=tenant_id,
             tool_calls=tool_calls,
             authorizer=effective_authorizer,
+            correlation_id=correlation_id,
         )
         return results
 

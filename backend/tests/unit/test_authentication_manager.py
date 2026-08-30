@@ -739,3 +739,149 @@ def test_signing_private_key_never_appears_in_any_constructor_exception() -> Non
                 data_store=_FailingDataStore(), crypto_provider=LocalCrypto(), signing_private_key=bad_key
             )
         assert bad_key.hex() not in str(exc_info.value) or bad_key == b""
+
+
+# ---------------------------------------------------------------------------
+# M6.2-1: provision_principal (AI system principal bootstrap)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provision_principal_creates_new_record_and_returns_true(tmp_path: Path) -> None:
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, _storage, manager = await _make_manager(tmp_path)
+
+    created = await manager.provision_principal(
+        tenant_id=tenant_a,
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        credential="a-strong-generated-credential",
+        roles=["AI_SYSTEM_ACTOR"],
+    )
+
+    assert created is True
+
+    # The provisioned principal must actually authenticate via the exact
+    # same real Argon2id path every other principal type uses -- proving
+    # this is not a special-cased bypass.
+    principal = await manager.authenticate(
+        {
+            "principal_type": "AGENT",
+            "tenant_id": tenant_a,
+            "principal_id": "kortex-ai-system",
+            "credential": "a-strong-generated-credential",
+        }
+    )
+    assert principal.principal_id == "kortex-ai-system"
+    assert principal.principal_type == PrincipalType.AGENT
+    assert principal.tenant_id == tenant_a
+    assert principal.roles == ["AI_SYSTEM_ACTOR"]
+
+
+@pytest.mark.asyncio
+async def test_provision_principal_is_idempotent_second_call_is_noop(tmp_path: Path) -> None:
+    """Repeated application boots must not create duplicate AI principals,
+    and must never silently rotate the stored credential hash underneath an
+    already-provisioned principal."""
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+
+    first = await manager.provision_principal(
+        tenant_id=tenant_a,
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        credential="original-credential",
+        roles=["AI_SYSTEM_ACTOR"],
+    )
+    second = await manager.provision_principal(
+        tenant_id=tenant_a,
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        credential="a-completely-different-credential",
+        roles=["SOME_OTHER_ROLE"],
+    )
+
+    assert first is True
+    assert second is False
+
+    # The ORIGINAL credential must still be the one that authenticates --
+    # the second call's different credential/roles must never have applied.
+    principal = await manager.authenticate(
+        {
+            "principal_type": "AGENT",
+            "tenant_id": tenant_a,
+            "principal_id": "kortex-ai-system",
+            "credential": "original-credential",
+        }
+    )
+    assert principal.roles == ["AI_SYSTEM_ACTOR"]
+
+    with pytest.raises(AuthenticationError):
+        await manager.authenticate(
+            {
+                "principal_type": "AGENT",
+                "tenant_id": tenant_a,
+                "principal_id": "kortex-ai-system",
+                "credential": "a-completely-different-credential",
+            }
+        )
+
+    # Exactly one row exists for this (tenant, principal_id, principal_type).
+    async def _count(session: AsyncSession) -> int:
+        from sqlalchemy import select
+
+        stmt = select(PrincipalRecord).where(
+            PrincipalRecord.tenant_id == tenant_a,
+            PrincipalRecord.principal_id == "kortex-ai-system",
+            PrincipalRecord.principal_type == "AGENT",
+        )
+        res = await session.execute(stmt)
+        return len(list(res.scalars().all()))
+
+    assert await storage.data.execute_in_transaction(_count) == 1
+
+
+@pytest.mark.asyncio
+async def test_provision_principal_is_tenant_scoped(tmp_path: Path) -> None:
+    """One principal/credential per tenant -- provisioning tenant B must not
+    affect, or be satisfied by, tenant A's already-provisioned principal."""
+    tenant_a = _tenant_a(tmp_path)
+    tenant_b = _tenant_b(tmp_path)
+    _kernel, _storage, manager = await _make_manager(tmp_path)
+
+    await manager.provision_principal(
+        tenant_id=tenant_a,
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        credential="credential-a",
+        roles=["AI_SYSTEM_ACTOR"],
+    )
+    created_b = await manager.provision_principal(
+        tenant_id=tenant_b,
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        credential="credential-b",
+        roles=["AI_SYSTEM_ACTOR"],
+    )
+
+    assert created_b is True
+
+    with pytest.raises(AuthenticationError):
+        await manager.authenticate(
+            {
+                "principal_type": "AGENT",
+                "tenant_id": tenant_b,
+                "principal_id": "kortex-ai-system",
+                "credential": "credential-a",
+            }
+        )
+
+    principal_b = await manager.authenticate(
+        {
+            "principal_type": "AGENT",
+            "tenant_id": tenant_b,
+            "principal_id": "kortex-ai-system",
+            "credential": "credential-b",
+        }
+    )
+    assert principal_b.tenant_id == tenant_b

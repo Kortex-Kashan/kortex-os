@@ -46,9 +46,18 @@ class FakeKernelBridge:
         })
 
     async def invoke_capability(
-        self, name: str, arguments: dict[str, object], tenant_id: str
+        self,
+        name: str,
+        arguments: dict[str, object],
+        tenant_id: str,
+        user_id: str | None = None,
+        request_id: str | None = None,
+        session_token: object | None = None,
     ) -> object:
         return {"status": "ok"}
+
+    def subscribe_event(self, topic: str, handler: object, subscriber_name: str = "anonymous") -> str:
+        return "sub-dummy"
 
     def register_capability(self, **kwargs: object) -> None:
         pass

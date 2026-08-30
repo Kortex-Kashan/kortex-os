@@ -360,6 +360,7 @@ class IToolExecutionPort(Protocol):
         capability_name: str,
         arguments: dict[str, object],
         authorizer: ToolAuthorizer | None = None,
+        correlation_id: str | None = None,
     ) -> object:
         """Execute capability handler with arguments for the given tenant."""
         ...
@@ -429,6 +430,7 @@ class InMemoryToolExecutionPort(IToolExecutionPort):
         capability_name: str,
         arguments: dict[str, object],
         authorizer: ToolAuthorizer | None = None,
+        correlation_id: str | None = None,
     ) -> object:
         require_identifier(tenant_id, "tenant_id")
         if authorizer is not None:
@@ -497,6 +499,7 @@ class AIToolInvoker:
         tenant_id: str,
         tool_call: ToolCall,
         authorizer: ToolAuthorizer | None = None,
+        correlation_id: str | None = None,
     ) -> ToolResult:
         """Validate, authorize, and invoke a single tool call with timeout and error handling."""
         start_time = time.perf_counter()
@@ -561,6 +564,7 @@ class AIToolInvoker:
                     capability_name=tool.canonical_capability,
                     arguments=tool_call.arguments,
                     authorizer=authorizer,
+                    correlation_id=correlation_id,
                 ),
                 timeout=timeout,
             )
@@ -602,6 +606,7 @@ class AIToolInvoker:
         tool_calls: list[ToolCall],
         authorizer: ToolAuthorizer | None = None,
         sequential: bool = True,
+        correlation_id: str | None = None,
     ) -> list[ToolResult]:
         """Invoke a batch of tool calls with ordering guarantee."""
         if len(tool_calls) > MAX_BATCH_SIZE:
@@ -612,11 +617,14 @@ class AIToolInvoker:
         if sequential:
             results: list[ToolResult] = []
             for call in tool_calls:
-                res = await self.invoke_tool(tenant_id, call, authorizer=authorizer)
+                res = await self.invoke_tool(tenant_id, call, authorizer=authorizer, correlation_id=correlation_id)
                 results.append(res)
             return results
 
-        tasks = [self.invoke_tool(tenant_id, call, authorizer=authorizer) for call in tool_calls]
+        tasks = [
+            self.invoke_tool(tenant_id, call, authorizer=authorizer, correlation_id=correlation_id)
+            for call in tool_calls
+        ]
         return list(await asyncio.gather(*tasks))
 
 

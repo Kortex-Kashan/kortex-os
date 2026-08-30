@@ -37,6 +37,7 @@ class FakeKernel:
         self.dispatched_requests: list[CapabilityRequest] = []
         self.mock_response: object = {"status": "success", "data": "test-data"}
         self.should_raise: Exception | None = None
+        self.subscriptions: list[dict[str, object]] = []
 
     def register_capability(
         self,
@@ -74,6 +75,15 @@ class FakeKernel:
         self.published_events.append(event_record)
         return event_record
 
+    def subscribe_event(
+        self,
+        topic: str,
+        handler: Callable[..., object],
+        subscriber_name: str = "anonymous",
+    ) -> str:
+        self.subscriptions.append({"topic": topic, "handler": handler, "subscriber_name": subscriber_name})
+        return f"sub-{len(self.subscriptions)}"
+
     async def invoke_capability(self, request: CapabilityRequest) -> object:
         if self.should_raise is not None:
             raise self.should_raise
@@ -92,6 +102,55 @@ def test_kernel_bridge_adapter_satisfies_ikernel_bridge_protocol() -> None:
     adapter = KernelBridgeAdapter(fake_kernel)
 
     assert isinstance(adapter, IKernelBridge)
+
+
+def test_subscribe_event_delegates_to_kernel() -> None:
+    """M6.2-4: subscribe_event() forwards topic/handler/subscriber_name to the Kernel unchanged."""
+    fake_kernel = FakeKernel()
+    adapter = KernelBridgeAdapter(fake_kernel)
+
+    def _handler(event: object) -> None:
+        pass
+
+    sub_id = adapter.subscribe_event("workflow.approval.decided", _handler, subscriber_name="ai")
+
+    assert sub_id
+    assert len(fake_kernel.subscriptions) == 1
+    assert fake_kernel.subscriptions[0]["topic"] == "workflow.approval.decided"
+    assert fake_kernel.subscriptions[0]["handler"] is _handler
+    assert fake_kernel.subscriptions[0]["subscriber_name"] == "ai"
+
+
+def test_invoke_capability_forwards_request_id_and_session_token() -> None:
+    """M6.2-2: request_id/session_token pass through to the underlying CapabilityRequest unchanged."""
+    fake_kernel = FakeKernel()
+    adapter = KernelBridgeAdapter(fake_kernel)
+    token = TokenPayload(
+        token_id="tok-1",
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        tenant_id="acme",
+        issued_at_utc=datetime.now(UTC),
+        expires_at_utc=datetime.now(UTC),
+        signature=b"sig",
+    )
+
+    import asyncio
+
+    asyncio.run(
+        adapter.invoke_capability(
+            name="kortex.connector.action.execute",
+            arguments={"x": 1},
+            tenant_id="acme",
+            request_id="corr-123",
+            session_token=token,
+        )
+    )
+
+    assert len(fake_kernel.dispatched_requests) == 1
+    dispatched = fake_kernel.dispatched_requests[0]
+    assert dispatched.context["request_id"] == "corr-123"
+    assert dispatched.session_token is token
 
 
 def test_kernel_bridge_adapter_rejects_none_kernel() -> None:
@@ -139,6 +198,7 @@ async def test_invoke_capability_translation_to_capability_request() -> None:
     assert req.parameters == {"query": "Find latest Q3 invoices", "limit": 10}
     assert req.context == {
         "tenant_id": "tenant-alpha",
+        "resource_tenant_id": "tenant-alpha",
         "user_id": "user-42",
         "request_id": "req-999",
     }
@@ -158,7 +218,7 @@ async def test_invoke_capability_optional_context_fields() -> None:
     )
 
     req = fake_kernel.dispatched_requests[0]
-    assert req.context == {"tenant_id": "tenant-beta"}
+    assert req.context == {"tenant_id": "tenant-beta", "resource_tenant_id": "tenant-beta"}
     assert req.session_token is None
 
 

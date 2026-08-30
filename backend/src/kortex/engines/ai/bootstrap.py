@@ -35,7 +35,8 @@ from kortex.engines.ai.engine import (
     RouterLLMExecutionPort,
 )
 from kortex.engines.ai.exceptions import AIBootstrapError
-from kortex.engines.ai.governance import AIGovernanceManager
+from kortex.engines.ai.governance import AIGovernanceManager, KernelDurableApprovalBridge
+from kortex.engines.ai.identity import AISystemIdentity
 from kortex.engines.ai.interfaces import IKernelBridge
 from kortex.engines.ai.memory import (
     AIMemoryManager,
@@ -175,6 +176,7 @@ class KernelProductionBootstrap:
         custom_providers: list[BaseAIProvider] | None = None,
         registered_engines: set[str] | list[str] | None = None,
         exporter: ITelemetryExporter | None = None,
+        ai_identity: AISystemIdentity | None = None,
     ) -> AIOrchestrationEngine:
         """Construct all subsystems, wire production ports, and return a production-ready AIOrchestrationEngine.
 
@@ -184,6 +186,15 @@ class KernelProductionBootstrap:
             custom_providers: Optional pre-configured AI providers to register at boot.
             registered_engines: Optional list of available engine names for dependency order validation.
             exporter: Optional external telemetry and metric exporter.
+            ai_identity: Optional AI system principal session-token holder
+                (M6.2-1). When supplied, every tool invocation
+                (`KernelToolExecutionPort`) and every durable approval
+                request the AI itself proposes (`KernelDurableApprovalBridge`)
+                authenticates as the AI system principal instead of failing
+                closed with `AuthenticationError`. Constructed by
+                `kortex.api.kernel_bootstrap`, which already imports
+                `SecurityEngine` for other bootstrap-time concerns — this
+                package never does.
 
         Returns:
             Fully assembled, production-wired AIOrchestrationEngine instance.
@@ -264,7 +275,7 @@ class KernelProductionBootstrap:
 
         tool_execution_port: IToolExecutionPort
         if kernel_bridge is not None:
-            tool_execution_port = KernelToolExecutionPort(kernel_bridge=kernel_bridge)
+            tool_execution_port = KernelToolExecutionPort(kernel_bridge=kernel_bridge, ai_identity=ai_identity)
         else:
             # Unreachable in the production profile — validate_production_wiring
             # rejects a missing kernel_bridge before assembly begins.
@@ -310,25 +321,26 @@ class KernelProductionBootstrap:
         # BEFORE the orchestrator below so its approval policy can be
         # governance-aware.
         gov_store = AIGovernanceStore(data_store=data_store) if data_store is not None else None
+
+        # M6.2-3: the M55-6 gap this comment used to describe is now closed —
+        # `ai_identity` (M6.2-1) gives the AI a real, authenticatable system
+        # principal, so a durable approval request can now be created
+        # through the real `kortex.workflow.approval.create` capability
+        # instead of silently no-oping behind a caught `AuthenticationError`.
+        # `AgentOrchestrator`'s own in-process `PAUSED_FOR_APPROVAL`/
+        # `ResumeToken` pause mechanism is unchanged; this bridge only adds
+        # the durable, human-visible ticket alongside it.
+        approval_bridge: KernelDurableApprovalBridge | None = None
+        if kernel_bridge is not None and ai_identity is not None:
+            approval_bridge = KernelDurableApprovalBridge(
+                kernel_bridge=kernel_bridge,
+                ai_identity=ai_identity,
+            )
+
         governance_manager = AIGovernanceManager(
             governance_store=gov_store,
             tool_registry=tool_registry,
-            # M5-A3 (M55-6): a real `IDurableApprovalBridge` is deliberately
-            # NOT wired here yet. Routing an AI-initiated approval through
-            # `kortex.workflow.approval.create` would have to go through
-            # `kernel_bridge.invoke_capability` (the same boundary
-            # `KernelToolExecutionPort` above uses) with no session token —
-            # that capability requires authentication by default, and there
-            # is currently no KORTEX-wide mechanism for a system/AI-initiated
-            # action to authenticate to a permission-gated capability (no
-            # service-principal credential, no documented "system actor"
-            # bypass). Wiring this bridge without resolving that would not
-            # fix M55-6, only swap a silent no-op for a caught-and-logged
-            # `AuthenticationError` — see `DurableAIApprovalPolicy
-            # .requires_approval`'s own `except Exception` around this call.
-            # `AgentOrchestrator`'s own internal `PAUSED_FOR_APPROVAL`/
-            # `ResumeToken` pause mechanism (unaffected by this) still
-            # correctly gates mutation-flagged tool calls in the meantime.
+            approval_manager=approval_bridge,
         )
 
         approval_policy = governance_manager.create_approval_policy()

@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+from typing import Any
 
 from kortex.core.kernel import Kernel
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter
+from kortex.engines.ai.identity import AI_SYSTEM_PRINCIPAL_ID, AI_SYSTEM_ROLE, AISystemIdentity
 from kortex.engines.ai.ollama_provider import OllamaProvider
 from kortex.engines.configuration.engine import SystemSettings
 from kortex.engines.connector.engine import ConnectorEngine
@@ -31,6 +34,8 @@ from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
+from kortex.engines.security.exceptions import SecretNotFoundError
+from kortex.engines.security.models import PrincipalType
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.engine import WorkflowEngine
@@ -41,6 +46,60 @@ _MASTER_KEY_ENV = "KORTEX_MASTER_KEY"
 _SIGNING_KEY_ENV = "KORTEX_AUTH_SIGNING_PRIVATE_KEY"
 _STORAGE_DIR_ENV = "KORTEX_STORAGE_DIR"
 _DEFAULT_STORAGE_DIR = "kortex_api_storage"
+_AI_SYSTEM_CREDENTIAL_SECRET_HANDLE = "kortex/ai-system-credential"
+
+
+def _build_ai_system_identity(security_engine: SecurityEngine) -> AISystemIdentity:
+    """Construct the AI system principal's session-token holder (M6.2-1).
+
+    Only holds a reference to `security_engine` in closures defined here —
+    `AISystemIdentity` itself (part of the AI package) never sees that
+    reference; it only ever receives the opaque token objects these two
+    callables return. Both callables are lazy: neither is invoked until the
+    AI actually attempts to act within a given tenant, which is always well
+    after `await kernel.boot()` below has completed and Security Engine is
+    RUNNING — safe even though this function itself runs before that boot
+    call, since it only *constructs* the closures here, it does not call
+    them.
+    """
+
+    async def _provision(tenant_id: str) -> None:
+        try:
+            credential = await security_engine.get_secret(_AI_SYSTEM_CREDENTIAL_SECRET_HANDLE, tenant_id)
+        except SecretNotFoundError:
+            credential = secrets.token_urlsafe(32)
+            await security_engine.put_secret(_AI_SYSTEM_CREDENTIAL_SECRET_HANDLE, tenant_id, credential)
+
+        await security_engine.authentication_manager.provision_principal(
+            tenant_id=tenant_id,
+            principal_id=AI_SYSTEM_PRINCIPAL_ID,
+            principal_type=PrincipalType.AGENT,
+            credential=credential,
+            roles=[AI_SYSTEM_ROLE],
+            # ABAC's classification check (`abac.py`) compares this against
+            # each capability's own `security_classification` — most
+            # existing capabilities default to "INTERNAL" (see
+            # `Kernel.register_capability`'s own default), so an unset
+            # clearance (which ranks as the lowest, "PUBLIC") would deny the
+            # AI system principal from calling almost anything. "INTERNAL"
+            # is the least-elevated clearance that matches the platform's
+            # own prevailing default classification, not a broad grant.
+            attributes={"clearance_level": "INTERNAL"},
+        )
+
+    async def _authenticate(tenant_id: str) -> Any:
+        credential = await security_engine.get_secret(_AI_SYSTEM_CREDENTIAL_SECRET_HANDLE, tenant_id)
+        principal = await security_engine.authenticate(
+            {
+                "principal_type": PrincipalType.AGENT.value,
+                "tenant_id": tenant_id,
+                "principal_id": AI_SYSTEM_PRINCIPAL_ID,
+                "credential": credential,
+            }
+        )
+        return await security_engine.authentication_manager.issue_token(principal)
+
+    return AISystemIdentity(provisioner=_provision, authenticator=_authenticate)
 
 
 def _resolve_key(env_var: str, length: int) -> bytes:
@@ -127,6 +186,13 @@ async def build_and_boot_kernel() -> Kernel:
         model_name=system_settings.ollama_default_model,
         timeout_seconds=max(1.0, ai_config.default_generation_timeout_seconds - 5.0),
     )
+    # M6.2-1: the AI system principal's session-token holder. Constructed
+    # here (not inside the AI package) because provisioning/authentication
+    # requires direct `SecurityEngine` access, which is a hard, AST-enforced
+    # forbidden import for `kortex.engines.ai.*` — see `identity.py`'s
+    # module docstring. Safe to construct before `kernel.boot()`: it only
+    # captures `security_engine` in a closure, it does not call it yet.
+    ai_identity = _build_ai_system_identity(security_engine)
     ai_bootstrap = KernelProductionBootstrap(ai_config)
     ai_engine = ai_bootstrap.create_ai_engine(
         # `KernelBridgeAdapter.__init__` structurally requires
@@ -139,6 +205,7 @@ async def build_and_boot_kernel() -> Kernel:
         data_store=RelationalDataStore(kernel.db),
         custom_providers=[ollama_provider],
         registered_engines=list(kernel.get_all_engines().keys()),
+        ai_identity=ai_identity,
     )
     kernel.register_engine(ai_engine)
 

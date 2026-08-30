@@ -43,6 +43,13 @@ class _KernelRuntime(Protocol):
         sender: str = "ai",
     ) -> object: ...
 
+    def subscribe_event(
+        self,
+        topic: str,
+        handler: Callable[..., object],
+        subscriber_name: str = "anonymous",
+    ) -> str: ...
+
     async def invoke_capability(self, request: object) -> object: ...
 
 
@@ -106,6 +113,19 @@ class KernelBridgeAdapter(IKernelBridge):
             sender=sender,
         )
 
+    def subscribe_event(
+        self,
+        topic: str,
+        handler: Callable[..., object],
+        subscriber_name: str = "ai",
+    ) -> str:
+        """Subscribe a handler to a Kernel Event Engine topic."""
+        return self._kernel.subscribe_event(
+            topic=topic,
+            handler=handler,
+            subscriber_name=subscriber_name,
+        )
+
     async def invoke_capability(
         self,
         name: str,
@@ -125,7 +145,17 @@ class KernelBridgeAdapter(IKernelBridge):
         elif not isinstance(arguments, dict):
             raise BridgeValidationError("arguments must be a dict.")
 
-        context: dict[str, object] = {"tenant_id": tenant_id.strip()}
+        # `resource_tenant_id` (M6.2-2): ABAC's tenant check
+        # (`abac.py::ABACEvaluator.evaluate`) denies by default whenever this
+        # is absent from context, exactly like `api/main.py`'s own transport
+        # layer already sets it from the caller's own verified session
+        # token. Safe here for the identical reason: this is the tenant the
+        # calling engine (AI or otherwise) is itself acting within, not a
+        # value read back out of `arguments` — it can only ever equal the
+        # authenticated principal's own `tenant_id` once dispatch resolves
+        # one, never let a caller assert access to a *different* tenant's
+        # resource through this bridge.
+        context: dict[str, object] = {"tenant_id": tenant_id.strip(), "resource_tenant_id": tenant_id.strip()}
         if user_id is not None:
             if not isinstance(user_id, str) or not user_id.strip():
                 raise BridgeValidationError("user_id, if provided, must not be whitespace-only.")

@@ -13,8 +13,11 @@ Tests adhere strictly to the ratified M8 specification:
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -62,6 +65,7 @@ from kortex.engines.ai.tools import (
     ToolCall,
     ToolDefinition,
     ToolRegistry,
+    scrub_secrets_from_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,6 +81,7 @@ class InMemoryKernelBridge(IKernelBridge):
         self.events_published: list[tuple[str, dict[str, Any] | None, str]] = []
         self.invocations: list[tuple[str, dict[str, Any], str]] = []
         self.should_fail_events: bool = False
+        self.subscriptions: list[tuple[str, Callable[..., Any], str]] = []
 
     def register_capability(
         self,
@@ -109,12 +114,23 @@ class InMemoryKernelBridge(IKernelBridge):
             raise RuntimeError("Event engine failure simulation.")
         self.events_published.append((topic, payload, sender))
 
+    def subscribe_event(
+        self,
+        topic: str,
+        handler: Callable[..., Any],
+        subscriber_name: str = "anonymous",
+    ) -> str:
+        self.subscriptions.append((topic, handler, subscriber_name))
+        return f"sub-{len(self.subscriptions)}"
+
     async def invoke_capability(
         self,
         name: str,
         arguments: dict[str, Any],
         tenant_id: str,
         user_id: str | None = None,
+        request_id: str | None = None,
+        session_token: object | None = None,
     ) -> object:
         self.invocations.append((name, arguments, tenant_id))
         return {"status": "success", "echo": arguments}
@@ -741,6 +757,257 @@ async def test_orchestrate_agent_pause_and_resume() -> None:
 
 
 # ---------------------------------------------------------------------------
+# §4.4b — Durable Approval Decision Resume (M6.2-4)
+# ---------------------------------------------------------------------------
+
+
+def _fingerprint(tool_calls: list[ToolCall]) -> str:
+    """Mirrors `governance.py`'s `DurableAIApprovalPolicy.requires_approval`
+    fingerprint formula exactly -- see `AIOrchestrationEngine._action_fingerprint`."""
+    calls_summary = [
+        {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
+        for c in tool_calls
+    ]
+    return hashlib.sha256(json.dumps(calls_summary, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _decided_event(
+    *,
+    tenant_id: str,
+    decision: str,
+    task_id: str,
+    action_fingerprint: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        topic="workflow.approval.decided",
+        payload={
+            "request_id": "req-1",
+            "tenant_id": tenant_id,
+            "decision": decision,
+            "action_fingerprint": action_fingerprint,
+            "context_snapshot": {"action": "ai_tool_invocation", "task_id": task_id},
+        },
+    )
+
+
+async def _paused_engine_and_result() -> tuple[AIOrchestrationEngine, AgentTask, Any]:
+    """Build a real engine + orchestrator with a task paused for approval,
+    mirroring `test_orchestrate_agent_pause_and_resume`'s exact setup."""
+    llm_port = InMemoryLLMExecutionPort(
+        responses=[
+            LLMResponse(
+                request_id="r1",
+                text_content="Creating order",
+                tool_calls=[{"name": "create_order", "arguments": {"item": "Laptop"}}],
+            ),
+            LLMResponse(
+                request_id="r2",
+                text_content="Order created successfully.",
+                tool_calls=[],
+            ),
+        ]
+    )
+    ctx_port = InMemoryAgentContextPort()
+    tools = ToolRegistry()
+    tools.register_tool(
+        ToolDefinition(
+            name="create_order",
+            description="desc",
+            canonical_capability="kortex.order.create",
+            parameters_schema={"type": "object"},
+            is_mutation=True,
+        )
+    )
+    kernel = InMemoryKernelBridge()
+    invoker = AIToolInvoker(registry=tools, execution_port=KernelToolExecutionPort(kernel))
+    task_store = InMemoryAgentTaskStore()
+
+    orchestrator = AgentOrchestrator(
+        tool_invoker=invoker,
+        llm_port=llm_port,
+        context_port=ctx_port,
+        approval_policy=AlwaysDenyPolicy(),
+        task_store=task_store,
+    )
+    engine = AIOrchestrationEngine(agent_orchestrator=orchestrator, tool_registry=tools)
+    await engine.initialize(kernel)
+
+    task = AgentTask(
+        task_id="task-resume-1",
+        tenant_id="tenant-resume",
+        user_id="user-1",
+        conversation_id="conv-1",
+        goal="Order a laptop",
+    )
+    result = await engine.orchestrate_agent(task)
+    assert result.status == AgentStatus.PAUSED_FOR_APPROVAL
+    return engine, task, result
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_approved_resumes_paused_task() -> None:
+    engine, task, paused = await _paused_engine_and_result()
+    fp = _fingerprint(paused.pending_tool_calls)
+
+    event = _decided_event(
+        tenant_id=task.tenant_id, decision="APPROVED", task_id=task.task_id, action_fingerprint=fp
+    )
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_rejected_cancels_paused_task() -> None:
+    engine, task, paused = await _paused_engine_and_result()
+
+    event = _decided_event(tenant_id=task.tenant_id, decision="REJECTED", task_id=task.task_id)
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_fingerprint_mismatch_refuses_resume_and_cancels() -> None:
+    """SECURITY: an APPROVED decision whose stored fingerprint does not
+    match the task's actual pending tool calls (approve-one/execute-another,
+    or a stale approval) must never resume execution -- it fails closed by
+    cancelling the paused task instead."""
+    engine, task, _paused = await _paused_engine_and_result()
+
+    event = _decided_event(
+        tenant_id=task.tenant_id,
+        decision="APPROVED",
+        task_id=task.task_id,
+        action_fingerprint="0" * 64,  # deliberately wrong
+    )
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_ignores_non_ai_originated_tickets() -> None:
+    """A decision event for a ticket whose context_snapshot doesn't carry
+    the AI's own `ai_tool_invocation` marker (e.g. a human workflow-instance
+    approval) must be ignored entirely -- no task lookup, no mutation."""
+    engine, task, _paused = await _paused_engine_and_result()
+
+    event = SimpleNamespace(
+        topic="workflow.approval.decided",
+        payload={
+            "request_id": "req-2",
+            "tenant_id": task.tenant_id,
+            "decision": "APPROVED",
+            "context_snapshot": {"some": "other-workflow-ticket"},
+        },
+    )
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.PAUSED_FOR_APPROVAL
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_unknown_task_id_is_a_safe_noop() -> None:
+    """Idempotency/robustness: a decision event referencing a task_id this
+    engine has no record of (e.g. delivered twice, or for a task run by a
+    different process) must not raise."""
+    engine, _task, _paused = await _paused_engine_and_result()
+
+    event = _decided_event(tenant_id="tenant-resume", decision="APPROVED", task_id="no-such-task")
+    await engine._on_approval_decided(event)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_subscribes_at_initialize() -> None:
+    """M6.2-4: the engine registers its resume handler with the Kernel
+    Event Engine during initialize(), so a real decision event actually
+    reaches it in production."""
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    assert any(
+        topic == "workflow.approval.decided" and handler == engine._on_approval_decided
+        for topic, handler, _name in kernel.subscriptions
+    )
+
+
+# ---------------------------------------------------------------------------
+# §4.4c — Tenant Isolation on orchestrate_agent/resume_agent/invoke_tool (M6.2-2)
+# ---------------------------------------------------------------------------
+
+
+class _FakePrincipal:
+    def __init__(self, tenant_id: str) -> None:
+        self.tenant_id = tenant_id
+        self.principal_id = "kortex-ai-system"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_agent_forces_principal_tenant_not_spoofed_task_tenant() -> None:
+    """SECURITY (M6.2-2): before this fix, `orchestrate_agent` never
+    consulted the dispatcher-injected principal at all, so a caller
+    authenticated in tenant B could cause the AI to act under a
+    caller-spoofed `AgentTask.tenant_id='tenant_a'` -- previously inert
+    (every real tool call failed authentication regardless), but genuinely
+    exploitable once M6.2-1 gives the AI a real, authenticatable identity."""
+    llm_port = InMemoryLLMExecutionPort()
+    ctx_port = InMemoryAgentContextPort()
+    tools = ToolRegistry()
+    kernel = InMemoryKernelBridge()
+    invoker = AIToolInvoker(registry=tools, execution_port=KernelToolExecutionPort(kernel))
+    orchestrator = AgentOrchestrator(
+        tool_invoker=invoker,
+        llm_port=llm_port,
+        context_port=ctx_port,
+        approval_policy=AlwaysApprovePolicy(),
+    )
+    engine = AIOrchestrationEngine(agent_orchestrator=orchestrator, tool_registry=tools)
+    await engine.initialize(kernel)
+
+    spoofed_task = AgentTask(
+        task_id="task-spoof-1",
+        tenant_id="tenant_a",  # spoofed: caller is actually tenant_b
+        user_id="user-1",
+        conversation_id="conv-spoof-1",
+        goal="do something",
+    )
+    result = await engine.orchestrate_agent(spoofed_task, principal=_FakePrincipal("tenant_b"))
+
+    assert result.tenant_id == "tenant_b"
+    assert result.tenant_id != "tenant_a"
+
+    # The persisted record must exist under the REAL tenant, not the
+    # spoofed one.
+    record_b = await engine.agent_orchestrator.get_task("task-spoof-1", "tenant_b")
+    assert record_b is not None
+    record_a = await engine.agent_orchestrator.get_task("task-spoof-1", "tenant_a")
+    assert record_a is None
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_forces_principal_tenant_not_spoofed_caller_tenant() -> None:
+    """SECURITY (M6.2-2): `invoke_tool`'s own `tenant_id` argument must not
+    be authoritative once a verified principal is available."""
+    engine, kernel = _make_engine()
+    await engine.initialize(kernel)
+
+    call = ToolCall(call_id="call-spoof", tool_name="get_weather", arguments={"city": "Paris"})
+    await engine.invoke_tool("tenant_a", call, principal=_FakePrincipal("tenant_b"))
+
+    assert kernel.invocations[-1][2] == "tenant_b"
+    assert kernel.invocations[-1][2] != "tenant_a"
+
+
+# ---------------------------------------------------------------------------
 # §4.5 — Agent Task Lifecycle Control & Observability (M13 Kernel Exposure)
 # ---------------------------------------------------------------------------
 
@@ -990,7 +1257,7 @@ FORBIDDEN_NAMESPACES = [
 ]
 
 
-@pytest.mark.parametrize("file_name", ["engine.py", "diagnostics.py", "interfaces.py"])
+@pytest.mark.parametrize("file_name", ["engine.py", "diagnostics.py", "interfaces.py", "identity.py"])
 def test_m8_files_quarantine_forbidden_imports(file_name: str) -> None:
     target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / file_name
     imports = _collect_imports(target_path)

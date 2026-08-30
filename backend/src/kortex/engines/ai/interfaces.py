@@ -267,12 +267,30 @@ class IKernelBridge(Protocol):
         """Publish an asynchronous system event to the Kernel Event Engine."""
         ...
 
+    def subscribe_event(
+        self,
+        topic: str,
+        handler: Callable[[Any], Any],
+        subscriber_name: str = "ai",
+    ) -> str:
+        """Subscribe a handler to a Kernel Event Engine topic (M6.2-4).
+
+        Used to react to `workflow.approval.decided` so an AI-originated
+        durable approval decision can resume (or cancel) the paused agent
+        task that proposed it, without the Workflow Engine needing any
+        AI-specific knowledge -- the event fires identically regardless of
+        who subscribes to it.
+        """
+        ...
+
     async def invoke_capability(
         self,
         name: str,
         arguments: dict[str, Any],
         tenant_id: str,
         user_id: str | None = None,
+        request_id: str | None = None,
+        session_token: object | None = None,
     ) -> object:
         """Invoke a registered capability through the Kernel enforcement boundary."""
         ...

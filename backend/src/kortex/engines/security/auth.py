@@ -54,6 +54,7 @@ Explicit M3 non-goals (see the ratified architecture / implementation plan):
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, NamedTuple, Optional, cast
 
@@ -342,6 +343,62 @@ class AuthenticationManager(IAuthenticationManager):
             roles=list(snapshot.roles),
             attributes=dict(snapshot.attributes),
         )
+
+    async def provision_principal(
+        self,
+        tenant_id: str,
+        principal_id: str,
+        principal_type: PrincipalType,
+        credential: str,
+        roles: list[str] | None = None,
+        attributes: Dict[str, Any] | None = None,
+    ) -> bool:
+        """Idempotently ensure a `PrincipalRecord` exists for a system/service identity (M6.2-1).
+
+        This is bootstrap-time infrastructure setup for the platform's own
+        AI system principal, not a general-purpose principal registration
+        capability — it does not contradict this module's own "no
+        principal provisioning" precedent (see module docstring), which
+        concerns provisioning as something a *caller* can invoke; this
+        method is only ever called from `kortex.api.kernel_bootstrap`.
+
+        Never overwrites an existing row: if a `PrincipalRecord` already
+        exists for `(tenant_id, principal_id, principal_type)`, this is a
+        no-op that returns `False` — `credential`/`roles`/`attributes` are
+        applied only at first creation, so a restart never silently
+        rotates the stored credential hash or role grants underneath an
+        already-provisioned principal.
+
+        Returns:
+            True if a new `PrincipalRecord` was created, False if one
+            already existed.
+        """
+        credential_hash = self._password_hasher.hash(credential)
+
+        async def _action(session: AsyncSession) -> bool:
+            stmt = select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == tenant_id,
+                PrincipalRecord.principal_id == principal_id,
+                PrincipalRecord.principal_type == principal_type.value,
+            )
+            res = await session.execute(stmt)
+            existing = res.scalar_one_or_none()
+            if existing is not None:
+                return False
+            record = PrincipalRecord(
+                id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                principal_type=principal_type.value,
+                enabled=True,
+                credential_hash=credential_hash,
+                roles=list(roles or []),
+                attributes=dict(attributes or {}),
+            )
+            session.add(record)
+            return True
+
+        return cast(bool, await self._run_in_transaction(_action))
 
     async def issue_token(self, principal: SecurityPrincipal) -> TokenPayload:
         """Issue a short-lived (15-minute), Ed25519-signed session token for `principal`.
