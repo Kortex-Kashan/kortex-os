@@ -948,6 +948,24 @@ async def test_all_five_capability_dispatch_paths(tmp_path: Path) -> None:
                 attributes={"clearance_level": "RESTRICTED"},
             )
         )
+        # M6.2-3: a distinct approver identity, separate from the ticket's
+        # own requester ("user_writer") -- self-approval is now denied
+        # (see `test_self_approval_denied_even_with_correct_role`), so the
+        # capability-dispatch happy path below must decide via a different,
+        # equally-permissioned principal, matching real separation-of-duties
+        # practice rather than incidentally reusing the requester's own
+        # token for convenience.
+        session.add(
+            PrincipalRecord(
+                id=str(uuid4()),
+                tenant_id="tenant_cap",
+                principal_id="user_approver",
+                principal_type="USER",
+                credential_hash=hasher.hash("pass123"),
+                roles=["APPROVER_ROLE", "FINANCE_DEPT"],
+                attributes={"clearance_level": "RESTRICTED"},
+            )
+        )
 
     await storage_engine.data.execute_in_transaction(_seed_rbac)
 
@@ -955,6 +973,11 @@ async def test_all_five_capability_dispatch_paths(tmp_path: Path) -> None:
         {"principal_type": "USER", "tenant_id": "tenant_cap", "principal_id": "user_writer", "password": "pass123"}
     )
     writer_token_payload = await security_engine.authentication_manager.issue_token(p_writer)
+
+    p_approver = await security_engine.authentication_manager.authenticate(
+        {"principal_type": "USER", "tenant_id": "tenant_cap", "principal_id": "user_approver", "password": "pass123"}
+    )
+    approver_token_payload = await security_engine.authentication_manager.issue_token(p_approver)
 
     p_reader = await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": "tenant_cap", "principal_id": "user_reader", "password": "pass123"}
@@ -1028,14 +1051,16 @@ async def test_all_five_capability_dispatch_paths(tmp_path: Path) -> None:
     res_delegate = await kernel.invoke_capability(req_delegate)
     assert res_delegate["role"] == "FINANCE_DEPT"
 
-    # 6. Capability: kortex.workflow.approval.decide by authorized writer
+    # 6. Capability: kortex.workflow.approval.decide by a different,
+    # equally-authorized approver (M6.2-3: the requester, "user_writer",
+    # cannot decide the ticket it itself created).
     req_decide = CapabilityRequest(
         capability_name="kortex.workflow.approval.decide",
-        session_token=writer_token_payload,
+        session_token=approver_token_payload,
         parameters={
             "request_id": ticket_id,
             "decision": "APPROVED",
-            "approver_id": "user_writer",
+            "approver_id": "user_approver",
             "tenant_id": "tenant_cap",
         },
         context={"resource_tenant_id": "tenant_cap"},
@@ -1247,3 +1272,239 @@ async def test_adversarial_expiration_race_and_hydration_idempotency(
         await durable_env.approval_manager.submit_decision(
             decision, principal=lead_principal, tenant_id="tenant_race"
         )
+
+
+# ============================================================================
+# M6.2-3: Requester Identity, Self-Approval Prevention, Actor-Type Attribution
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_create_request_records_requester_principal_identity(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """A ticket created by a verified principal must persist that principal's
+    identity, roundtripping correctly through the real database."""
+    ai_principal = SecurityPrincipal(
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        tenant_id="tenant_ai",
+        roles=["AI_SYSTEM_ACTOR"],
+    )
+
+    ticket = await durable_env.approval_manager.create_request(
+        instance_id=None,
+        step_id="task-123",
+        required_role="ai_approver",
+        tenant_id="tenant_ai",
+        context_snapshot={"action": "ai_tool_invocation", "task_id": "task-123"},
+        principal=ai_principal,
+        correlation_id="task-123",
+        action_fingerprint="deadbeef",
+    )
+
+    assert ticket.requester_principal_id == "kortex-ai-system"
+    assert ticket.requester_principal_type == "AGENT"
+    assert ticket.correlation_id == "task-123"
+    assert ticket.action_fingerprint == "deadbeef"
+
+    fetched = await durable_env.approval_manager.get_request(ticket.id, tenant_id="tenant_ai")
+    assert fetched is not None
+    assert fetched.requester_principal_id == "kortex-ai-system"
+    assert fetched.requester_principal_type == "AGENT"
+    assert fetched.correlation_id == "task-123"
+    assert fetched.action_fingerprint == "deadbeef"
+
+
+@pytest.mark.asyncio
+async def test_ticket_with_no_requester_recorded_has_null_requester_fields(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """Backward-compatible default: a ticket created without a principal
+    (existing callers that never supplied one) must not fabricate a
+    requester identity."""
+    ticket = await durable_env.approval_manager.create_request(
+        required_role="FINANCE_MANAGER", tenant_id="tenant_legacy"
+    )
+    assert ticket.requester_principal_id is None
+    assert ticket.requester_principal_type is None
+
+
+@pytest.mark.asyncio
+async def test_self_approval_denied_even_with_correct_role(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """SECURITY (M6.2-3): a principal must never be able to decide a ticket
+    it itself requested -- even if it happens to also hold the ticket's own
+    `required_role`. This is the defense-in-depth layer on top of the
+    primary control (role-scoping, which is an operational/configuration
+    concern this test cannot exercise directly)."""
+    requester = SecurityPrincipal(
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        tenant_id="tenant_self_appr",
+        # Deliberately holds the ticket's own required_role, to prove the
+        # requester-identity check is what actually blocks this -- not RBAC
+        # or role-scoping, which would otherwise mask the gap this test
+        # exists to close.
+        roles=["ai_approver"],
+    )
+
+    ticket = await durable_env.approval_manager.create_request(
+        required_role="ai_approver",
+        tenant_id="tenant_self_appr",
+        principal=requester,
+    )
+
+    decision = ApprovalDecision(
+        request_id=ticket.id,
+        tenant_id="tenant_self_appr",
+        approver_id="kortex-ai-system",
+        decision=ApprovalState.APPROVED,
+    )
+
+    with pytest.raises(AuthorizationDeniedError, match="cannot decide an approval ticket it itself requested"):
+        await durable_env.approval_manager.submit_decision(
+            decision, principal=requester, tenant_id="tenant_self_appr"
+        )
+
+    # The ticket must remain PENDING -- the denied attempt must not have
+    # partially mutated its state.
+    still_pending = await durable_env.approval_manager.get_request(ticket.id, tenant_id="tenant_self_appr")
+    assert still_pending is not None
+    assert still_pending.state == ApprovalState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_different_principal_with_role_can_still_decide(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """Regression guard: the self-approval check must not block a
+    DIFFERENT, correctly-roled principal from deciding a ticket it did not
+    request."""
+    requester = SecurityPrincipal(
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        tenant_id="tenant_self_appr_2",
+        roles=["AI_SYSTEM_ACTOR"],
+    )
+    decider = SecurityPrincipal(
+        principal_id="human_reviewer_1",
+        principal_type=PrincipalType.USER,
+        tenant_id="tenant_self_appr_2",
+        roles=["ai_approver"],
+    )
+
+    ticket = await durable_env.approval_manager.create_request(
+        required_role="ai_approver",
+        tenant_id="tenant_self_appr_2",
+        principal=requester,
+    )
+
+    decision = ApprovalDecision(
+        request_id=ticket.id,
+        tenant_id="tenant_self_appr_2",
+        approver_id="human_reviewer_1",
+        decision=ApprovalState.APPROVED,
+    )
+    result = await durable_env.approval_manager.submit_decision(
+        decision, principal=decider, tenant_id="tenant_self_appr_2"
+    )
+    assert result.state == ApprovalState.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_actor_type_derived_from_principal_type_for_ai_agent(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """M6.2-3: the audit trail must label an AI-originated ticket/decision
+    `AI_AGENT`, not the previous hardcoded `HUMAN` fallback."""
+    ai_principal = SecurityPrincipal(
+        principal_id="kortex-ai-system",
+        principal_type=PrincipalType.AGENT,
+        tenant_id="tenant_actor_type",
+        roles=["ai_approver"],
+    )
+    other_ai_principal = SecurityPrincipal(
+        principal_id="kortex-ai-system-2",
+        principal_type=PrincipalType.AGENT,
+        tenant_id="tenant_actor_type",
+        roles=["ai_approver"],
+    )
+
+    ticket = await durable_env.approval_manager.create_request(
+        required_role="ai_approver",
+        tenant_id="tenant_actor_type",
+        principal=ai_principal,
+    )
+    decision = ApprovalDecision(
+        request_id=ticket.id,
+        tenant_id="tenant_actor_type",
+        approver_id="kortex-ai-system-2",
+        decision=ApprovalState.APPROVED,
+    )
+    await durable_env.approval_manager.submit_decision(
+        decision, principal=other_ai_principal, tenant_id="tenant_actor_type"
+    )
+
+    entries = await durable_env.security_engine.audit_manager.get_audit_entries(tenant_id="tenant_actor_type")
+    create_entries = [e for e in entries if e.action == "kortex.workflow.approval.create"]
+    decide_entries = [e for e in entries if e.action == "kortex.workflow.approval.decide"]
+    assert len(create_entries) == 1
+    assert create_entries[0].actor_type == "AI_AGENT"
+    assert len(decide_entries) == 1
+    assert decide_entries[0].actor_type == "AI_AGENT"
+
+
+@pytest.mark.asyncio
+async def test_actor_type_still_human_for_user_principal(durable_env: ApprovalTestEnvironment) -> None:
+    """Regression guard: a human (`USER`) principal's create/decide audit
+    entries are unaffected by the M6.2-3 fix."""
+    human_principal = SecurityPrincipal(
+        principal_id="human_requester_1",
+        principal_type=PrincipalType.USER,
+        tenant_id="tenant_actor_type_human",
+        roles=["ai_approver"],
+    )
+
+    ticket = await durable_env.approval_manager.create_request(
+        required_role="ai_approver",
+        tenant_id="tenant_actor_type_human",
+        principal=human_principal,
+    )
+    decision = ApprovalDecision(
+        request_id=ticket.id,
+        tenant_id="tenant_actor_type_human",
+        approver_id="human_requester_1",
+        decision=ApprovalState.REJECTED,
+    )
+    # A human CAN decide their own request today (self-approval prevention
+    # only fires when the ticket recorded a requester and this decider is
+    # that same requester -- which is exactly the case here, so this must
+    # actually be denied too; use a different decider to isolate the
+    # actor_type assertion from the self-approval control).
+    other_human = SecurityPrincipal(
+        principal_id="human_reviewer_2",
+        principal_type=PrincipalType.USER,
+        tenant_id="tenant_actor_type_human",
+        roles=["ai_approver"],
+    )
+    decision = ApprovalDecision(
+        request_id=ticket.id,
+        tenant_id="tenant_actor_type_human",
+        approver_id="human_reviewer_2",
+        decision=ApprovalState.REJECTED,
+    )
+    await durable_env.approval_manager.submit_decision(
+        decision, principal=other_human, tenant_id="tenant_actor_type_human"
+    )
+
+    entries = await durable_env.security_engine.audit_manager.get_audit_entries(
+        tenant_id="tenant_actor_type_human"
+    )
+    create_entries = [e for e in entries if e.action == "kortex.workflow.approval.create"]
+    decide_entries = [e for e in entries if e.action == "kortex.workflow.approval.decide"]
+    assert len(create_entries) == 1
+    assert create_entries[0].actor_type == "HUMAN"
+    assert len(decide_entries) == 1
+    assert decide_entries[0].actor_type == "HUMAN"

@@ -171,6 +171,10 @@ class ApprovalRequestModel(BaseModel):
     timeout_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     context_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     signature_required: Mapped[bool] = mapped_column(nullable=False, default=False)
+    requester_principal_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    requester_principal_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    action_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ApprovalDecisionModel(BaseModel):
@@ -434,6 +438,10 @@ def _request_to_model(req: ApprovalRequest, tenant_id: str = "default") -> Appro
         timeout_at=req.timeout_at,
         context_snapshot_json=ctx_json,
         signature_required=req.signature_required,
+        requester_principal_id=req.requester_principal_id,
+        requester_principal_type=req.requester_principal_type,
+        correlation_id=req.correlation_id,
+        action_fingerprint=req.action_fingerprint,
     )
 
 
@@ -468,6 +476,10 @@ def _model_to_request(row: ApprovalRequestModel) -> ApprovalRequest:
         state=state,
         timeout_at=timeout_at,
         context_snapshot=ctx,
+        requester_principal_id=row.requester_principal_id,
+        requester_principal_type=row.requester_principal_type,
+        correlation_id=row.correlation_id,
+        action_fingerprint=row.action_fingerprint,
         signature_required=row.signature_required,
         created_at=created_at,
         updated_at=updated_at,

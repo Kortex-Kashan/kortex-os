@@ -63,6 +63,8 @@ class IDurableApprovalBridge(Protocol):
         required_role: str,
         tenant_id: str,
         context: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+        action_fingerprint: str | None = None,
     ) -> object: ...
 
 
@@ -386,8 +388,31 @@ class DurableAIApprovalPolicy(IApprovalPolicy):
                     {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
                     for c in proposed_calls
                 ]
+                # M6.2-3: a stable fingerprint of the exact proposed action,
+                # re-verified against the paused task's still-pending tool
+                # calls before a durable APPROVED decision is allowed to
+                # resume execution -- prevents "approve one action, execute
+                # a different one" (see `engine.py`'s
+                # `AIOrchestrationEngine._on_approval_decided`).
+                action_fingerprint = hashlib.sha256(
+                    json.dumps(calls_summary, sort_keys=True).encode("utf-8")
+                ).hexdigest()
                 await self._approval_manager.create_request(
-                    instance_id=task.task_id,
+                    # M6.2-3 bug fix: `instance_id` is a `WorkflowInstance.id`
+                    # (a UUID) -- an AI-originated ticket has no workflow
+                    # instance at all (the AI's tool-invocation path never
+                    # goes through WorkflowEngine instances), so this must
+                    # never be `task.task_id` (an arbitrary string, not a
+                    # UUID). Passing it as `instance_id` previously raised
+                    # `ValueError: badly formed hexadecimal UUID string`
+                    # inside `DurableApprovalManager.create_request` on
+                    # every real attempt -- silently swallowed by this
+                    # method's own wrapping `except Exception` below, which
+                    # is exactly why this defect went unnoticed before the
+                    # durable bridge was ever really wired (M6.2-3).
+                    # `task_id` still travels via `context["task_id"]` and
+                    # the new `correlation_id` parameter below.
+                    instance_id=None,
                     step_id=task.task_id,
                     required_role="ai_approver",
                     tenant_id=task.tenant_id,
@@ -397,11 +422,63 @@ class DurableAIApprovalPolicy(IApprovalPolicy):
                         "goal": task.goal,
                         "proposed_calls": calls_summary,
                     },
+                    correlation_id=task.task_id,
+                    action_fingerprint=action_fingerprint,
                 )
             except Exception as exc:
                 logger.error("Failed to stage durable approval request for task '%s': %s", task.task_id, exc)
 
         return requires_approval
+
+
+class KernelDurableApprovalBridge:
+    """Real `IDurableApprovalBridge` routing AI-initiated approvals through
+    the existing durable approval queue (M6.2-3).
+
+    Calls the real `kortex.workflow.approval.create` capability,
+    authenticated as the AI system principal via `ai_identity` (M6.2-1) --
+    this is not a second approval mechanism. Prior to M6.2 this bridge was
+    never wired in production because nothing let the AI authenticate to a
+    permission-gated capability at all; `ai_identity` closes exactly that
+    gap, so the real durable queue can now be used as-is.
+    """
+
+    def __init__(self, kernel_bridge: Any, ai_identity: Any) -> None:
+        self._kernel_bridge = kernel_bridge
+        self._ai_identity = ai_identity
+
+    async def create_request(
+        self,
+        instance_id: str,
+        step_id: str,
+        required_role: str,
+        tenant_id: str,
+        context: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+        action_fingerprint: str | None = None,
+    ) -> object:
+        """Create a durable approval ticket, attributed to the AI system principal.
+
+        The ticket's `requester_principal_id`/`tenant_id` are set
+        server-side from the AI's own verified session token by
+        `WorkflowEngine.create_approval_request` -- never from any value
+        this method supplies -- so a compromised or misbehaving caller of
+        this bridge cannot forge a different requester or tenant.
+        """
+        session_token = await self._ai_identity.get_session_token(tenant_id)
+        return await self._kernel_bridge.invoke_capability(
+            name="kortex.workflow.approval.create",
+            arguments={
+                "instance_id": instance_id,
+                "step_id": step_id,
+                "required_role": required_role,
+                "context_snapshot": context or {},
+                "correlation_id": correlation_id,
+                "action_fingerprint": action_fingerprint,
+            },
+            tenant_id=tenant_id,
+            session_token=session_token,
+        )
 
 
 # ---------------------------------------------------------------------------

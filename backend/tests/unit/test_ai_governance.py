@@ -43,6 +43,7 @@ from kortex.engines.ai.governance import (
     AIGovernancePolicy,
     ContentSafetyGuardrail,
     DurableAIApprovalPolicy,
+    KernelDurableApprovalBridge,
     TenantQuotaManager,
     ToolGovernanceEvaluator,
 )
@@ -293,6 +294,183 @@ async def test_durable_ai_approval_policy_evaluates_and_gates() -> None:
     calls = [ToolCall(call_id="call_4", tool_name="transfer_funds", arguments={"amount": 5000})]
     req = await approval_policy.requires_approval(task, calls)
     assert req is True
+
+
+class _RecordingApprovalBridge:
+    """Fake `IDurableApprovalBridge` recording every `create_request` call."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create_request(
+        self,
+        instance_id,
+        step_id,
+        required_role,
+        tenant_id,
+        context=None,
+        correlation_id=None,
+        action_fingerprint=None,
+    ):
+        self.calls.append(
+            {
+                "instance_id": instance_id,
+                "step_id": step_id,
+                "required_role": required_role,
+                "tenant_id": tenant_id,
+                "context": context,
+                "correlation_id": correlation_id,
+                "action_fingerprint": action_fingerprint,
+            }
+        )
+        return object()
+
+
+@pytest.mark.asyncio
+async def test_durable_ai_approval_policy_never_sets_instance_id_and_threads_correlation() -> None:
+    """M6.2-3 regression: an AI-created ticket has no `WorkflowInstance` at
+    all (the AI's tool-invocation path never goes through one) --
+    `instance_id` must always be `None`, never `task.task_id` (previously a
+    bug: `task_id` is an arbitrary string, not a UUID, and passing it as
+    `instance_id` raised `ValueError` inside the real
+    `DurableApprovalManager.create_request` on every real attempt, silently
+    swallowed by this method's own `except Exception`).
+
+    `correlation_id` must be the task's own `task_id` (M6.2-4), and
+    `action_fingerprint` must be a stable, non-empty hash of the exact
+    proposed calls.
+    """
+    reg = ToolRegistry()
+    reg.register_tool(
+        ToolDefinition(
+            name="transfer_funds",
+            description="Transfer funds",
+            canonical_capability="kortex.finance.transfer",
+            is_mutation=True,
+        )
+    )
+    bridge = _RecordingApprovalBridge()
+    approval_policy = DurableAIApprovalPolicy(tool_registry=reg, approval_manager=bridge)
+
+    task = AgentTask(
+        task_id="task_fingerprint_1",
+        tenant_id="tenant_alpha",
+        user_id="user_1",
+        conversation_id="conv_1",
+        goal="Transfer funds to vendor",
+        require_human_approval_for_mutations=True,
+    )
+    calls = [ToolCall(call_id="call_1", tool_name="transfer_funds", arguments={"amount": 5000})]
+
+    result = await approval_policy.requires_approval(task, calls)
+
+    assert result is True
+    assert len(bridge.calls) == 1
+    recorded = bridge.calls[0]
+    assert recorded["instance_id"] is None
+    assert recorded["step_id"] == "task_fingerprint_1"
+    assert recorded["correlation_id"] == "task_fingerprint_1"
+    assert isinstance(recorded["action_fingerprint"], str)
+    assert len(recorded["action_fingerprint"]) == 64  # sha256 hex digest
+
+
+@pytest.mark.asyncio
+async def test_durable_ai_approval_policy_fingerprint_is_stable_for_identical_calls() -> None:
+    """Two identical proposed-call batches must produce the same
+    fingerprint -- required for the resume-time re-verification
+    (`AIOrchestrationEngine._on_approval_decided`) to ever match."""
+    reg = ToolRegistry()
+    reg.register_tool(
+        ToolDefinition(
+            name="transfer_funds",
+            description="Transfer funds",
+            canonical_capability="kortex.finance.transfer",
+            is_mutation=True,
+        )
+    )
+    bridge = _RecordingApprovalBridge()
+    approval_policy = DurableAIApprovalPolicy(tool_registry=reg, approval_manager=bridge)
+    task = AgentTask(
+        task_id="task_fingerprint_2",
+        tenant_id="tenant_alpha",
+        user_id="user_1",
+        conversation_id="conv_1",
+        goal="Transfer funds to vendor",
+        require_human_approval_for_mutations=True,
+    )
+    calls = [ToolCall(call_id="call_1", tool_name="transfer_funds", arguments={"amount": 5000})]
+
+    await approval_policy.requires_approval(task, calls)
+    await approval_policy.requires_approval(task, calls)
+
+    assert bridge.calls[0]["action_fingerprint"] == bridge.calls[1]["action_fingerprint"]
+
+
+class _FakeKernelBridgeForApprovalBridge:
+    def __init__(self) -> None:
+        self.invocations: list[dict] = []
+
+    async def invoke_capability(
+        self,
+        name,
+        arguments,
+        tenant_id,
+        user_id=None,
+        request_id=None,
+        session_token=None,
+    ):
+        self.invocations.append(
+            {
+                "name": name,
+                "arguments": arguments,
+                "tenant_id": tenant_id,
+                "session_token": session_token,
+            }
+        )
+        return {"id": "ticket-1"}
+
+
+class _FakeAISystemIdentity:
+    def __init__(self, token: str = "fake-token") -> None:
+        self.token = token
+        self.requested_tenants: list[str] = []
+
+    async def get_session_token(self, tenant_id: str):
+        self.requested_tenants.append(tenant_id)
+        return self.token
+
+
+@pytest.mark.asyncio
+async def test_kernel_durable_approval_bridge_routes_through_real_capability() -> None:
+    """M6.2-3: `KernelDurableApprovalBridge` must call the real
+    `kortex.workflow.approval.create` capability, authenticated with the AI
+    system principal's own session token for the target tenant -- never a
+    bypass, never a second approval mechanism."""
+    kernel_bridge = _FakeKernelBridgeForApprovalBridge()
+    ai_identity = _FakeAISystemIdentity(token="ai-token-for-acme")
+    bridge = KernelDurableApprovalBridge(kernel_bridge=kernel_bridge, ai_identity=ai_identity)
+
+    result = await bridge.create_request(
+        instance_id=None,
+        step_id="task-99",
+        required_role="ai_approver",
+        tenant_id="acme",
+        context={"action": "ai_tool_invocation", "task_id": "task-99"},
+        correlation_id="task-99",
+        action_fingerprint="abc123",
+    )
+
+    assert result == {"id": "ticket-1"}
+    assert ai_identity.requested_tenants == ["acme"]
+    assert len(kernel_bridge.invocations) == 1
+    call = kernel_bridge.invocations[0]
+    assert call["name"] == "kortex.workflow.approval.create"
+    assert call["tenant_id"] == "acme"
+    assert call["session_token"] == "ai-token-for-acme"
+    assert call["arguments"]["required_role"] == "ai_approver"
+    assert call["arguments"]["instance_id"] is None
+    assert call["arguments"]["correlation_id"] == "task-99"
+    assert call["arguments"]["action_fingerprint"] == "abc123"
 
 
 # ===========================================================================

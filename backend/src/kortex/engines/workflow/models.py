@@ -198,6 +198,22 @@ class ApprovalRequest(BaseModel):
     timeout_at: datetime | None = Field(default=None, description="Timeout expiration timestamp")
     context_snapshot: dict[str, Any] = Field(default_factory=dict, description="Execution context snapshot")
     signature_required: bool = Field(default=False, description="Whether Ed25519 signature is strictly mandatory")
+    requester_principal_id: str | None = Field(
+        default=None, description="Principal ID that created this ticket (M6.2-3, additive)"
+    )
+    requester_principal_type: str | None = Field(
+        default=None, description="PrincipalType of the requester, e.g. 'AGENT' or 'USER' (M6.2-3, additive)"
+    )
+    correlation_id: str | None = Field(
+        default=None, description="Cross-system correlation ID linking this ticket to its originating action (M6.2-3, additive)"
+    )
+    action_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "Stable hash of the exact proposed action this ticket gates, re-verified before an "
+            "APPROVED decision is allowed to resume execution (M6.2-3, additive)"
+        ),
+    )
     created_at: datetime | None = Field(default=None, description="Creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Update timestamp")
 

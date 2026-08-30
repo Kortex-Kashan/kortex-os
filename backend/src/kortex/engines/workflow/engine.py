@@ -1153,6 +1153,8 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         context_snapshot: dict[str, Any] | None = None,
         signature_required: bool = False,
         tenant_id: str | None = None,
+        correlation_id: str | None = None,
+        action_fingerprint: str | None = None,
         principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
@@ -1161,7 +1163,9 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         `principal`, when present, is authoritative over a caller-supplied
         `tenant_id` — the ticket is always created under the authenticated
         caller's own tenant, never an arbitrary tenant the caller names
-        (M6.0-3).
+        (M6.0-3) — and is recorded as the ticket's requester identity
+        (M6.2-3), enabling self-approval prevention and correct audit
+        attribution for any requester, AI or human.
         """
         tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         req = await self._approval_manager.create_request(
@@ -1172,6 +1176,9 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             timeout_seconds=timeout_seconds,
             context_snapshot=context_snapshot,
             signature_required=signature_required,
+            principal=principal,
+            correlation_id=correlation_id,
+            action_fingerprint=action_fingerprint,
         )
         return {
             "id": str(req.id),
@@ -1182,6 +1189,9 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "state": req.state.value if hasattr(req.state, "value") else str(req.state),
             "timeout_at": req.timeout_at.isoformat() if req.timeout_at else None,
             "signature_required": req.signature_required,
+            "requester_principal_id": req.requester_principal_id,
+            "requester_principal_type": req.requester_principal_type,
+            "correlation_id": req.correlation_id,
         }
 
     async def list_approval_requests(
@@ -1218,6 +1228,10 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 "state": r.state.value if hasattr(r.state, "value") else str(r.state),
                 "timeout_at": r.timeout_at.isoformat() if r.timeout_at else None,
                 "signature_required": r.signature_required,
+                "requester_principal_id": r.requester_principal_id,
+                "requester_principal_type": r.requester_principal_type,
+                "correlation_id": r.correlation_id,
+                "action_fingerprint": r.action_fingerprint,
             }
             for r in requests
         ]
@@ -1256,6 +1270,10 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "timeout_at": req.timeout_at.isoformat() if req.timeout_at else None,
             "context_snapshot": req.context_snapshot,
             "signature_required": req.signature_required,
+            "requester_principal_id": req.requester_principal_id,
+            "requester_principal_type": req.requester_principal_type,
+            "correlation_id": req.correlation_id,
+            "action_fingerprint": req.action_fingerprint,
         }
 
     async def decide_approval_request(
@@ -1324,6 +1342,26 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
 
         if updated_ticket.instance_id:
             await self._advance_workflow_after_approval(updated_ticket, decision_obj, tenant_id=tid)
+
+        # M6.2-4: publish unconditionally, regardless of whether this ticket
+        # is linked to a workflow instance -- an AI-originated ticket
+        # (`context_snapshot["action"] == "ai_tool_invocation"`) never has
+        # one, since the AI's tool-invocation path never goes through
+        # WorkflowEngine instances at all. This is a plain, generic domain
+        # event; the Workflow Engine has no AI-specific knowledge of who (if
+        # anyone) is subscribed to it -- `AIOrchestrationEngine` reacts to it
+        # independently (see `engine.py`'s `_on_approval_decided`).
+        await self._publish_event(
+            "workflow.approval.decided",
+            {
+                "request_id": str(updated_ticket.id),
+                "tenant_id": tid,
+                "decision": dec_state.value,
+                "correlation_id": updated_ticket.correlation_id,
+                "action_fingerprint": updated_ticket.action_fingerprint,
+                "context_snapshot": updated_ticket.context_snapshot,
+            },
+        )
 
         ticket_state_val = (
             updated_ticket.state.value

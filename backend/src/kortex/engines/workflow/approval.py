@@ -37,6 +37,34 @@ from kortex.engines.workflow.persistence import ApprovalStore
 
 logger = logging.getLogger("kortex.engines.workflow.approval")
 
+# Maps `PrincipalType` (USER/SERVICE_PRINCIPAL/AGENT) to
+# `UniversalAuditEntry.actor_type`'s own, separate frozen vocabulary
+# (HUMAN/AI_AGENT/SYSTEM_ENGINE/CONNECTOR). Duplicated from
+# `kortex.engines.security.engine._actor_type_for_principal_type` /
+# `kortex.core.dispatch._actor_type_for_principal_type` rather than
+# imported -- both are module-private to their own files, and this module
+# keeps its own copy following the same established precedent (M6.2-3: this
+# fixes the approval audit trail's previous hardcoded
+# `"HUMAN" if actor_id != "SYSTEM" else "SYSTEM_ENGINE"` mislabeling, which
+# never consulted the actual authenticated principal's type at all).
+_PRINCIPAL_TYPE_TO_ACTOR_TYPE: dict[str, str] = {
+    "USER": "HUMAN",
+    "AGENT": "AI_AGENT",
+    "SERVICE_PRINCIPAL": "CONNECTOR",
+}
+
+
+def _actor_type_for_principal(principal: SecurityPrincipal | None, actor_id: str) -> str:
+    """Derive an audit `actor_type` from a verified principal's own type.
+
+    Falls back to the pre-M6.2 heuristic (`"HUMAN"`/`"SYSTEM_ENGINE"` by
+    `actor_id`) only when no principal is available at all, preserving
+    existing behavior for the few call sites that still legitimately have
+    none (e.g. system-initiated expiry sweeps)."""
+    if principal is not None:
+        return _PRINCIPAL_TYPE_TO_ACTOR_TYPE.get(principal.principal_type.value, "SYSTEM_ENGINE")
+    return "HUMAN" if actor_id != "SYSTEM" else "SYSTEM_ENGINE"
+
 
 # ============================================================================
 # 1. Protocols / Interfaces
@@ -141,6 +169,9 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
         instance_id: UUID | str | None = None,
         step_id: str | None = None,
         required_role: str = "",
+        principal: SecurityPrincipal | None = None,
+        correlation_id: str | None = None,
+        action_fingerprint: str | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> ApprovalRequest:
         """Create and register a new pending approval ticket."""
@@ -154,6 +185,10 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
             step_id=step_id,
             required_role=required_role,
             state=ApprovalState.PENDING,
+            requester_principal_id=principal.principal_id if principal is not None else None,
+            requester_principal_type=principal.principal_type.value if principal is not None else None,
+            correlation_id=correlation_id,
+            action_fingerprint=action_fingerprint,
         )
         await self.save_request(request)
         logger.info(
@@ -236,8 +271,14 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         tenant_id: str,
         resource_id: str | None = None,
         context: dict[str, Any] | None = None,
+        principal: SecurityPrincipal | None = None,
     ) -> None:
-        """Record an immutable UniversalAuditEntry via SecurityEngine."""
+        """Record an immutable UniversalAuditEntry via SecurityEngine.
+
+        `actor_type` (M6.2-3) is derived from `principal.principal_type`
+        when a verified principal is available, correctly labeling an
+        AI-originated ticket/decision `AI_AGENT` instead of the previous
+        hardcoded `"HUMAN"` fallback."""
         if self._security_engine is not None:
             audit_mgr = getattr(self._security_engine, "_audit_manager", None)
             if audit_mgr is None:
@@ -250,7 +291,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                     entry = UniversalAuditEntry(
                         action=action,
                         actor_id=actor_id,
-                        actor_type="HUMAN" if actor_id != "SYSTEM" else "SYSTEM_ENGINE",
+                        actor_type=_actor_type_for_principal(principal, actor_id),
                         tenant_id=tenant_id,
                         resource_id=resource_id,
                         context=sanitize_for_persistence(context or {}),
@@ -323,9 +364,20 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         timeout_seconds: int | None = None,
         context_snapshot: dict[str, Any] | None = None,
         signature_required: bool = False,
+        principal: SecurityPrincipal | None = None,
+        correlation_id: str | None = None,
+        action_fingerprint: str | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> ApprovalRequest:
-        """Create and persist a new pending approval ticket."""
+        """Create and persist a new pending approval ticket.
+
+        `principal` (M6.2-3), when present, is recorded as the ticket's
+        `requester_principal_id`/`requester_principal_type` -- a real,
+        persisted requester identity that `submit_decision` can compare a
+        decision-maker against (self-approval prevention), and that the
+        audit trail can use to correctly attribute an AI-originated ticket
+        rather than mislabeling it `HUMAN`.
+        """
         inst_id: UUID | None = (
             UUID(str(instance_id))
             if instance_id is not None and str(instance_id).strip()
@@ -348,6 +400,10 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
             timeout_at=timeout_at,
             context_snapshot=sanitized_context,
             signature_required=signature_required,
+            requester_principal_id=principal.principal_id if principal is not None else None,
+            requester_principal_type=principal.principal_type.value if principal is not None else None,
+            correlation_id=correlation_id,
+            action_fingerprint=action_fingerprint,
         )
         # Atomically save ticket and stage outbox event in same transaction
         await self._store.save_request(
@@ -359,7 +415,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         # Record universal audit entry
         await self._record_audit(
             action="kortex.workflow.approval.create",
-            actor_id="SYSTEM",
+            actor_id=principal.principal_id if principal is not None else "SYSTEM",
             tenant_id=tenant_id,
             resource_id=str(request.id),
             context={
@@ -367,7 +423,9 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                 "instance_id": str(instance_id) if instance_id else None,
                 "step_id": step_id,
                 "timeout_seconds": timeout_seconds,
+                "correlation_id": correlation_id,
             },
+            principal=principal,
         )
 
         logger.info(
@@ -523,6 +581,23 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                 f"authenticated principal ID '{principal.principal_id}'."
             )
 
+        # SECURITY (M6.2-3): defense in depth against self-approval. The
+        # primary control is role-scoping (an AI or human requester is never
+        # granted the `required_role` its own tickets carry), but that is an
+        # operational/configuration invariant, not something this method can
+        # verify on its own. `requester_principal_id` (recorded at ticket
+        # creation, M6.2-3) is a real, persisted fact this method CAN check
+        # directly: a principal may never decide a ticket it itself
+        # requested, regardless of role. Only enforced when the ticket
+        # actually recorded a requester -- tickets created before this field
+        # existed, or by callers that never supplied `principal`, have
+        # `requester_principal_id is None` and are unaffected (they carry no
+        # requester claim to compare against).
+        if ticket.requester_principal_id is not None and ticket.requester_principal_id == principal.principal_id:
+            raise AuthorizationDeniedError(
+                f"Principal '{principal.principal_id}' cannot decide an approval ticket it itself requested."
+            )
+
         # Check direct role
         has_role = ticket.required_role in principal.roles
         if not has_role and ticket.required_role:
@@ -614,7 +689,9 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                 "signed": bool(decision.signature_hex),
                 "instance_id": str(ticket.instance_id) if ticket.instance_id else None,
                 "step_id": ticket.step_id,
+                "correlation_id": ticket.correlation_id,
             },
+            principal=principal,
         )
 
         logger.info(
