@@ -108,15 +108,23 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         interval_seconds: int | None,
         run_at: datetime.datetime | None,
         after_dt: datetime.datetime,
+        timezone: str = "UTC",
     ) -> datetime.datetime | None:
-        """Calculate the next execution UTC datetime based on schedule strategy."""
+        """Calculate the next execution UTC datetime based on schedule strategy.
+
+        `timezone` (M5-A5) only affects CRON schedules — a cron expression's
+        fields are a local wall-clock specification. INTERVAL is a fixed
+        elapsed-time period and ONCE is a fixed absolute instant; neither is
+        anchored to a particular timezone's wall clock, so both remain
+        timezone-agnostic exactly as before.
+        """
         base_dt = after_dt.replace(tzinfo=UTC) if after_dt.tzinfo is None else after_dt
 
         if schedule_type == ScheduleType.CRON:
             if not cron_expression:
                 raise WorkflowValidationError("Cron expression is required for CRON schedule type.")
             validate_cron_expression(cron_expression)
-            return compute_next_cron_run(cron_expression, after_dt=base_dt)
+            return compute_next_cron_run(cron_expression, after_dt=base_dt, timezone=timezone)
 
         elif schedule_type == ScheduleType.INTERVAL:
             if not interval_seconds or interval_seconds <= 0:
@@ -261,6 +269,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
             interval_seconds=interval_seconds,
             run_at=run_at,
             after_dt=now,
+            timezone=timezone,
         )
 
         schedule = WorkflowSchedule(
@@ -386,6 +395,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
             interval_seconds=sch.interval_seconds,
             run_at=sch.run_at,
             after_dt=now,
+            timezone=sch.timezone,
         )
 
         sch.status = ScheduleStatus.ACTIVE
@@ -480,6 +490,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
                 sch.interval_seconds,
                 sch.run_at,
                 after_dt=now,
+                timezone=sch.timezone,
             )
         )
 
@@ -523,83 +534,132 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
 
+        # `claim_due_schedules` (M5-A5) atomically transitions each returned
+        # row ACTIVE -> TRIGGERING before returning it, so every schedule in
+        # `due_schedules` is now exclusively ours to execute.
         due_schedules = await self._store.claim_due_schedules(
             before_time=now, tenant_id=tenant_id, limit=limit
         )
         triggered: list[WorkflowSchedule] = []
 
         for sch in due_schedules:
-            tid = sch.tenant_id
-            try:
-                inst_id: UUID | None = None
-                if self._workflow_engine is not None:
-                    context_payload = dict(sch.initial_context)
-                    context_payload["_schedule_id"] = str(sch.id)
-                    context_payload["_schedule_name"] = sch.name
-                    context_payload["_schedule_tick_at"] = now.isoformat()
-
-                    instance = await self._workflow_engine.start_workflow(
-                        definition_id=sch.definition_id,
-                        initial_context=context_payload,
-                        tenant_id=tid,
-                    )
-                    inst_id = instance.id
-
-
-                new_count = sch.run_count + 1
-                if (sch.max_runs and new_count >= sch.max_runs) or sch.schedule_type == ScheduleType.ONCE:
-                    new_status = ScheduleStatus.COMPLETED.value
-                    next_run = None
-                else:
-                    new_status = ScheduleStatus.ACTIVE.value
-                    next_run = self._compute_next_run(
-                        sch.schedule_type,
-                        sch.cron_expression,
-                        sch.interval_seconds,
-                        sch.run_at,
-                        after_dt=now,
-                    )
-
-                updated = await self._store.record_schedule_tick(
-                    schedule_id=sch.id,
-                    last_run_at=now,
-                    next_run_at=next_run,
-                    last_instance_id=inst_id,
-                    run_count=new_count,
-                    new_status=new_status,
-                    tenant_id=tid,
-                    outbox_store=self._outbox_store,
-                )
-                if updated:
-                    triggered.append(updated)
-
-                await self._record_audit(
-                    action="kortex.workflow.schedule.tick",
-                    actor_id="SCHEDULER",
-                    tenant_id=tid,
-                    resource_id=str(sch.id),
-                    context={
-                        "name": sch.name,
-                        "instance_id": str(inst_id) if inst_id else None,
-                        "run_count": new_count,
-                        "next_run_at": next_run.isoformat() if next_run else None,
-                    },
-                )
-
-                logger.info(
-                    "Scheduled tick triggered '%s' -> instance '%s' (Run: %d, Next: %s)",
-                    sch.name,
-                    inst_id,
-                    new_count,
-                    next_run.isoformat() if next_run else "None",
-                )
-
-            except Exception as exc:
-                logger.error("Failed to execute schedule tick for '%s': %s", sch.name, exc, exc_info=True)
+            updated = await self._execute_claimed_schedule(sch, now)
+            if updated is not None:
+                triggered.append(updated)
 
         return triggered
 
+    async def _execute_claimed_schedule(
+        self, sch: WorkflowSchedule, now: datetime.datetime
+    ) -> WorkflowSchedule | None:
+        """Start the workflow instance for one already-claimed (TRIGGERING)
+        due schedule and record the tick. Shared by `tick()` and
+        `hydrate_and_recover_schedules()` (M5-A5) — the latter must drive
+        the schedules it claims directly through this, never back through
+        `tick()`'s own `claim_due_schedules` call, which would find nothing
+        to claim (they are no longer `ACTIVE`) and silently do nothing."""
+        tid = sch.tenant_id
+        try:
+            inst_id: UUID | None = None
+            if self._workflow_engine is not None:
+                context_payload = dict(sch.initial_context)
+                context_payload["_schedule_id"] = str(sch.id)
+                context_payload["_schedule_name"] = sch.name
+                context_payload["_schedule_tick_at"] = now.isoformat()
+
+                instance = await self._workflow_engine.start_workflow(
+                    definition_id=sch.definition_id,
+                    initial_context=context_payload,
+                    tenant_id=tid,
+                )
+                inst_id = instance.id
+
+            new_count = sch.run_count + 1
+            if (sch.max_runs and new_count >= sch.max_runs) or sch.schedule_type == ScheduleType.ONCE:
+                new_status = ScheduleStatus.COMPLETED.value
+                next_run = None
+            else:
+                new_status = ScheduleStatus.ACTIVE.value
+                next_run = self._compute_next_run(
+                    sch.schedule_type,
+                    sch.cron_expression,
+                    sch.interval_seconds,
+                    sch.run_at,
+                    after_dt=now,
+                    timezone=sch.timezone,
+                )
+
+            updated = await self._store.record_schedule_tick(
+                schedule_id=sch.id,
+                last_run_at=now,
+                next_run_at=next_run,
+                last_instance_id=inst_id,
+                run_count=new_count,
+                new_status=new_status,
+                tenant_id=tid,
+                outbox_store=self._outbox_store,
+            )
+
+            await self._record_audit(
+                action="kortex.workflow.schedule.tick",
+                actor_id="SCHEDULER",
+                tenant_id=tid,
+                resource_id=str(sch.id),
+                context={
+                    "name": sch.name,
+                    "instance_id": str(inst_id) if inst_id else None,
+                    "run_count": new_count,
+                    "next_run_at": next_run.isoformat() if next_run else None,
+                },
+            )
+
+            logger.info(
+                "Scheduled tick triggered '%s' -> instance '%s' (Run: %d, Next: %s)",
+                sch.name,
+                inst_id,
+                new_count,
+                next_run.isoformat() if next_run else "None",
+            )
+            return updated
+
+        except Exception as exc:
+            logger.error("Failed to execute schedule tick for '%s': %s", sch.name, exc, exc_info=True)
+            return None
+
     # -- Hydration, Crash Recovery & Catch-Up Policy --------------------------
+
+    def _estimate_missed_occurrences(self, sch: WorkflowSchedule, now: datetime.datetime) -> int:
+        """Best-effort count of how many scheduled fires were skipped between
+        this schedule's last recorded due time and `now` (M5-A5).
+
+        Recovery still executes exactly one catch-up run regardless of this
+        count — replaying every missed fire after a long outage could mean
+        starting an unbounded flood of workflow instances, which is its own
+        hazard. What this fixes is the previous behavior of dropping every
+        occurrence but one with no record of it happening at all: the count
+        computed here is persisted to the audit trail below, so "62 payroll
+        runs were coalesced into 1 catch-up run at date X" is answerable
+        after the fact instead of silently invisible.
+        """
+        if sch.next_run_at is None:
+            return 1
+        original_due = sch.next_run_at.replace(tzinfo=UTC) if sch.next_run_at.tzinfo is None else sch.next_run_at
+        if sch.schedule_type == ScheduleType.INTERVAL and sch.interval_seconds:
+            elapsed = (now - original_due).total_seconds()
+            return max(1, int(elapsed // sch.interval_seconds) + 1)
+        if sch.schedule_type == ScheduleType.ONCE:
+            return 1
+        if sch.schedule_type == ScheduleType.CRON and sch.cron_expression:
+            count = 0
+            cursor = original_due
+            try:
+                while cursor <= now and count < 10_000:
+                    count += 1
+                    cursor = compute_next_cron_run(sch.cron_expression, after_dt=cursor, timezone=sch.timezone)
+            except Exception as exc:
+                logger.debug("Could not fully count missed cron occurrences for '%s': %s", sch.name, exc)
+            return max(1, count)
+        return 1
 
     async def hydrate_and_recover_schedules(
         self, tenant_id: str | None = None
@@ -608,19 +668,38 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         now = datetime.datetime.now(UTC)
         logger.info("Hydrating and recovering durable workflow schedules (Tenant: %s)...", tenant_id or "ALL")
 
-        # Query all active schedules that are overdue
+        # Query all active schedules that are overdue. Like `tick()`, this
+        # atomically claims them (ACTIVE -> TRIGGERING) — they must be
+        # executed directly via `_execute_claimed_schedule` below, NOT by
+        # calling `self.tick()` (M5-A5), which would try to claim the same
+        # rows again, find them no longer `ACTIVE`, and do nothing.
         overdue = await self._store.claim_due_schedules(before_time=now, tenant_id=tenant_id, limit=200)
         recovered: list[WorkflowSchedule] = []
 
         for sch in overdue:
+            missed = self._estimate_missed_occurrences(sch, now)
             logger.warning(
-                "Schedule '%s' missed scheduled run at '%s' while offline. Executing catch-up run...",
+                "Schedule '%s' missed scheduled run at '%s' while offline (~%d occurrence(s) "
+                "coalesced into one catch-up run). Executing catch-up run...",
                 sch.name,
                 sch.next_run_at.isoformat() if sch.next_run_at else "unknown",
+                missed,
             )
-            # Run one catch-up tick
-            ticks = await self.tick(now_dt=now, tenant_id=sch.tenant_id, limit=1)
-            recovered.extend(ticks)
+            await self._record_audit(
+                action="kortex.workflow.schedule.recovery_catchup",
+                actor_id="SCHEDULER",
+                tenant_id=sch.tenant_id,
+                resource_id=str(sch.id),
+                context={
+                    "name": sch.name,
+                    "missed_occurrences": missed,
+                    "originally_due_at": sch.next_run_at.isoformat() if sch.next_run_at else None,
+                    "recovered_at": now.isoformat(),
+                },
+            )
+            updated = await self._execute_claimed_schedule(sch, now)
+            if updated is not None:
+                recovered.append(updated)
 
         return recovered
 

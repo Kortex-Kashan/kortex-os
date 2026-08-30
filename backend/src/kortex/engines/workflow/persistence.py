@@ -68,6 +68,13 @@ from kortex.engines.workflow.models import (
 
 logger = logging.getLogger("kortex.engines.workflow.persistence")
 
+# M5-A5: how long a schedule may sit claimed (TRIGGERING) before it is
+# considered abandoned — the scheduler process that claimed it crashed
+# between the claim and `record_schedule_tick` — and is reset back to
+# ACTIVE for another tick to claim. Generous relative to how long starting
+# one workflow instance is expected to take.
+SCHEDULE_CLAIM_LEASE_SECONDS = 120
+
 
 
 # ============================================================================
@@ -1621,22 +1628,87 @@ class SchedulerStore:
         tenant_id: str | None = None,
         limit: int = 50,
     ) -> list[WorkflowSchedule]:
-        """Claim due schedules atomically to prevent concurrent runner collisions."""
-        dt = before_time.replace(tzinfo=datetime.UTC) if before_time.tzinfo is None else before_time
+        """Claim due schedules atomically to prevent concurrent runner collisions.
 
-        async def _action(session: AsyncSession) -> list[WorkflowScheduleModel]:
-            stmt = select(WorkflowScheduleModel).where(
-                WorkflowScheduleModel.status == "ACTIVE",
+        M5-A5: the previous implementation was a bare SELECT with no
+        claiming step at all — two concurrent callers (two scheduler
+        processes, or a manual `trigger_schedule` racing the background poll
+        loop) could both select and both act on the same due row, starting
+        two workflow instances for one fire. Claiming is now a
+        compare-and-swap per candidate row (`ACTIVE -> TRIGGERING`, `WHERE
+        status='ACTIVE'`, checking `rowcount`) — the same atomic-UPDATE
+        pattern already used elsewhere in this codebase for exclusive
+        claims (e.g. `IdempotencyStore`'s `FAILED -> PROCESSING` transition
+        and its stale-`PROCESSING` reclaim). Only rows this call actually
+        won the CAS on are returned; a candidate another concurrent caller
+        claims first is silently dropped, not retried, exactly like those
+        other CAS sites.
+
+        Before claiming new work, any row abandoned in `TRIGGERING` past
+        `SCHEDULE_CLAIM_LEASE_SECONDS` (a scheduler process died between
+        claiming it and calling `record_schedule_tick`) is reset back to
+        `ACTIVE` first, so a crash can never permanently strand a schedule.
+        This reset step is a plain bulk UPDATE, not a CAS: two callers both
+        resetting the same stale row to `ACTIVE` is harmless (both write
+        the same value), and the actual mutual-exclusion for claiming it
+        again happens in the CAS step immediately after.
+        """
+        dt = before_time.replace(tzinfo=datetime.UTC) if before_time.tzinfo is None else before_time
+        stale_cutoff = dt - datetime.timedelta(seconds=SCHEDULE_CLAIM_LEASE_SECONDS)
+
+        async def _reclaim_abandoned(session: AsyncSession) -> None:
+            stmt = (
+                update(WorkflowScheduleModel)
+                .where(
+                    WorkflowScheduleModel.status == ScheduleStatus.TRIGGERING.value,
+                    WorkflowScheduleModel.updated_at < stale_cutoff,
+                )
+                .values(status=ScheduleStatus.ACTIVE.value)
+            )
+            if tenant_id is not None:
+                stmt = stmt.where(WorkflowScheduleModel.tenant_id == tenant_id)
+            await session.execute(stmt)
+
+        await self._data_store.execute_in_transaction(_reclaim_abandoned)
+
+        async def _select_candidates(session: AsyncSession) -> list[str]:
+            stmt = select(WorkflowScheduleModel.id).where(
+                WorkflowScheduleModel.status == ScheduleStatus.ACTIVE.value,
                 WorkflowScheduleModel.next_run_at <= dt,
             )
             if tenant_id is not None:
                 stmt = stmt.where(WorkflowScheduleModel.tenant_id == tenant_id)
             stmt = stmt.order_by(WorkflowScheduleModel.next_run_at.asc()).limit(limit)
             result = await session.execute(stmt)
-            return list(result.scalars().all())
+            return [str(row) for row in result.scalars().all()]
 
-        rows = await self._data_store.execute_in_transaction(_action)
-        return [_model_to_schedule(row) for row in rows]
+        candidate_ids = await self._data_store.execute_in_transaction(_select_candidates)
+
+        claimed_rows: list[WorkflowScheduleModel] = []
+        for sched_id in candidate_ids:
+
+            async def _claim_one(session: AsyncSession, sid: str = sched_id) -> WorkflowScheduleModel | None:
+                claim_stmt = (
+                    update(WorkflowScheduleModel)
+                    .where(
+                        WorkflowScheduleModel.id == sid,
+                        WorkflowScheduleModel.status == ScheduleStatus.ACTIVE.value,
+                        WorkflowScheduleModel.next_run_at <= dt,
+                    )
+                    .values(status=ScheduleStatus.TRIGGERING.value, updated_at=datetime.datetime.now(datetime.UTC))
+                )
+                result = cast(CursorResult[Any], await session.execute(claim_stmt))
+                if result.rowcount != 1:
+                    # Another concurrent caller claimed (or otherwise
+                    # changed) this row first — not our win, skip it.
+                    return None
+                return await session.scalar(select(WorkflowScheduleModel).where(WorkflowScheduleModel.id == sid))
+
+            row = await self._data_store.execute_in_transaction(_claim_one)
+            if row is not None:
+                claimed_rows.append(row)
+
+        return [_model_to_schedule(row) for row in claimed_rows]
 
     async def record_schedule_tick(
         self,

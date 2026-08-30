@@ -306,6 +306,153 @@ async def test_schedule_atomic_tick_execution(kernel: Kernel) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_tick_calls_never_double_trigger_same_schedule(kernel: Kernel) -> None:
+    """M5-A5 regression: two scheduler ticks racing the same due schedule at
+    the same instant (two worker processes, or a manual trigger racing the
+    background poll loop) must produce exactly ONE triggered execution, not
+    two. Before this fix, `claim_due_schedules` was a bare SELECT with no
+    claiming step, so both concurrent callers would see the row as
+    `ACTIVE` and both would start a workflow instance for it.
+    """
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    scheduler = wf_engine.scheduler
+    assert scheduler is not None
+
+    await scheduler.create_schedule(
+        name="raced_due_task",
+        definition_id="test_scheduled_def",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        tenant_id="tenant_race",
+    )
+
+    future_time = datetime.now(UTC) + timedelta(seconds=120)
+    concurrency = 6
+    results = await asyncio.gather(
+        *(scheduler.tick(now_dt=future_time, tenant_id="tenant_race") for _ in range(concurrency))
+    )
+
+    total_triggered = sum(len(r) for r in results)
+    assert total_triggered == 1, f"Expected exactly one winner across {concurrency} concurrent ticks, got {results!r}"
+
+    updated = await scheduler.list_schedules(tenant_id="tenant_race")
+    assert len(updated) == 1
+    assert updated[0].run_count == 1, "The schedule's run_count must reflect exactly one execution, not one per racer"
+    assert updated[0].status == ScheduleStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_stale_triggering_schedule_is_reclaimed_after_lease_expiry(kernel: Kernel) -> None:
+    """M5-A5 regression: a schedule abandoned in the transient TRIGGERING
+    state (the scheduler process crashed between claiming it and calling
+    record_schedule_tick) must not be stuck forever — once past the claim
+    lease window, it becomes claimable again."""
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    scheduler = wf_engine.scheduler
+    assert scheduler is not None
+
+    sch = await scheduler.create_schedule(
+        name="abandoned_trigger_task",
+        definition_id="test_scheduled_def",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        tenant_id="tenant_reclaim_sched",
+    )
+
+    from kortex.engines.workflow.persistence import SCHEDULE_CLAIM_LEASE_SECONDS, WorkflowScheduleModel
+    from sqlalchemy import update as sa_update
+
+    stale_updated_at = datetime.now(UTC) - timedelta(seconds=SCHEDULE_CLAIM_LEASE_SECONDS + 30)
+
+    async def _abandon(session: AsyncSession) -> None:
+        await session.execute(
+            sa_update(WorkflowScheduleModel)
+            .where(WorkflowScheduleModel.id == str(sch.id))
+            .values(status=ScheduleStatus.TRIGGERING.value, updated_at=stale_updated_at)
+        )
+
+    storage_engine: StorageEngine = kernel.get_engine("storage")
+    await storage_engine.data.execute_in_transaction(_abandon)
+
+    future_time = datetime.now(UTC) + timedelta(seconds=120)
+    triggered = await scheduler.tick(now_dt=future_time, tenant_id="tenant_reclaim_sched")
+    assert len(triggered) == 1
+    assert triggered[0].id == sch.id
+    assert triggered[0].run_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cron_schedule_respects_configured_timezone(kernel: Kernel) -> None:
+    """M5-A5 regression: a CRON schedule's fields are a local wall-clock
+    specification. "0 9 * * *" with timezone="America/New_York" must
+    compute a next_run_at that is 9am US/Eastern converted to UTC (13:00 or
+    14:00 UTC depending on DST), NOT 9am UTC — the previous implementation
+    accepted and persisted the `timezone` field but never consumed it,
+    silently always computing in UTC.
+    """
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    scheduler = wf_engine.scheduler
+    assert scheduler is not None
+
+    # January: US/Eastern is EST (UTC-5), no DST.
+    winter_now = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
+    sch_winter = await scheduler.create_schedule(
+        name="daily_9am_eastern_winter",
+        definition_id="test_scheduled_def",
+        schedule_type=ScheduleType.CRON,
+        cron_expression="0 9 * * *",
+        timezone="America/New_York",
+        tenant_id="tenant_tz",
+    )
+    # create_schedule always anchors off "now" internally; recompute
+    # deterministically from a fixed base via the scheduler's own helper to
+    # assert the actual conversion, independent of wall-clock test flakiness.
+    next_run = scheduler._compute_next_run(
+        schedule_type=ScheduleType.CRON,
+        cron_expression="0 9 * * *",
+        interval_seconds=None,
+        run_at=None,
+        after_dt=winter_now,
+        timezone="America/New_York",
+    )
+    assert next_run is not None
+    assert (next_run.hour, next_run.minute) == (14, 0), (
+        f"9am EST must be 14:00 UTC, got {next_run.isoformat()}"
+    )
+
+    # July: US/Eastern is EDT (UTC-4), DST in effect — same cron
+    # expression must now compute a DIFFERENT UTC hour, proving DST is
+    # actually applied rather than a fixed offset being hardcoded.
+    summer_now = datetime(2026, 7, 5, 0, 0, tzinfo=UTC)
+    next_run_summer = scheduler._compute_next_run(
+        schedule_type=ScheduleType.CRON,
+        cron_expression="0 9 * * *",
+        interval_seconds=None,
+        run_at=None,
+        after_dt=summer_now,
+        timezone="America/New_York",
+    )
+    assert next_run_summer is not None
+    assert (next_run_summer.hour, next_run_summer.minute) == (13, 0), (
+        f"9am EDT must be 13:00 UTC, got {next_run_summer.isoformat()}"
+    )
+
+    # Sanity: the default (UTC) behavior is completely unchanged.
+    next_run_utc = scheduler._compute_next_run(
+        schedule_type=ScheduleType.CRON,
+        cron_expression="0 9 * * *",
+        interval_seconds=None,
+        run_at=None,
+        after_dt=winter_now,
+        timezone="UTC",
+    )
+    assert next_run_utc is not None
+    assert (next_run_utc.hour, next_run_utc.minute) == (9, 0)
+
+    await scheduler.cancel_schedule(sch_winter.id, tenant_id="tenant_tz")
+
+
+@pytest.mark.asyncio
 async def test_schedule_max_runs_termination(kernel: Kernel) -> None:
     wf_engine: WorkflowEngine = kernel.get_engine("workflow")
     scheduler = wf_engine.scheduler
@@ -397,6 +544,60 @@ async def test_schedule_offline_catchup_recovery(kernel: Kernel) -> None:
     assert recovered[0].id == sch.id
     assert recovered[0].run_count == 1
     assert recovered[0].next_run_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_missed_occurrence_count_is_estimated_not_silently_dropped(kernel: Kernel) -> None:
+    """M5-A5 regression: recovery still only executes one catch-up run (by
+    design — replaying every missed fire after a long outage would itself
+    be a hazard), but how many occurrences were coalesced into that one run
+    must be computable, not silently discarded with no trace. This proves
+    `_estimate_missed_occurrences`'s counting for INTERVAL and CRON
+    schedules directly, and that `hydrate_and_recover_schedules` still
+    performs exactly one catch-up run regardless of the estimate (the
+    existing `test_schedule_offline_catchup_recovery` above already proves
+    the single-catch-up-run behavior end to end)."""
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    scheduler = wf_engine.scheduler
+    assert scheduler is not None
+
+    now = datetime.now(UTC)
+
+    # INTERVAL: a 60s-interval schedule whose next_run_at was 2 hours ago
+    # missed approximately 120 occurrences.
+    interval_sch = await scheduler.create_schedule(
+        name="missed_interval_task",
+        definition_id="test_scheduled_def",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        tenant_id="tenant_missed_count",
+    )
+    interval_sch.next_run_at = now - timedelta(hours=2)
+    missed_interval = scheduler._estimate_missed_occurrences(interval_sch, now)
+    assert 118 <= missed_interval <= 122, f"Expected ~120 missed 60s intervals over 2 hours, got {missed_interval}"
+
+    # CRON: an hourly schedule ("0 * * * *") whose next_run_at is 5 hours
+    # before the current on-the-hour reference point misses 6 occurrences
+    # (03:00, 04:00, 05:00, 06:00, 07:00, and 08:00 itself — the boundary
+    # fire exactly at "now" counts as due/missed too, matching
+    # `claim_due_schedules`'s own `next_run_at <= now` semantics).
+    cron_sch = await scheduler.create_schedule(
+        name="missed_cron_task",
+        definition_id="test_scheduled_def",
+        schedule_type=ScheduleType.CRON,
+        cron_expression="0 * * * *",
+        tenant_id="tenant_missed_count",
+    )
+    base_hour = now.replace(minute=0, second=0, microsecond=0)
+    cron_sch.next_run_at = base_hour - timedelta(hours=5)
+    missed_cron = scheduler._estimate_missed_occurrences(cron_sch, base_hour)
+    assert missed_cron == 6, f"Expected exactly 6 missed hourly fires (inclusive of 'now'), got {missed_cron}"
+
+    # A schedule that is not actually overdue reports at least 1 (the
+    # imminent one), never 0 — 0 would misleadingly suggest nothing to
+    # recover when recovery is about to run a catch-up tick regardless.
+    on_time_missed = scheduler._estimate_missed_occurrences(interval_sch, interval_sch.next_run_at)
+    assert on_time_missed >= 1
 
 
 

@@ -131,6 +131,74 @@ async def test_external_execution_timeout(kernel: Kernel) -> None:
 
 
 @pytest.mark.asyncio
+async def test_external_execution_timeout_participates_in_retry_policy(kernel: Kernel) -> None:
+    """M5-A5 regression: a timeout on one attempt must still consume only
+    one attempt of a configured retry budget and be retried on the next,
+    exactly like any other transient failure — not fail permanently on the
+    very first timeout regardless of `max_attempts`. The first call sleeps
+    past the timeout; the second returns immediately."""
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    executor = wf_engine.external_executor
+    assert executor is not None
+
+    call_count = 0
+
+    async def sometimes_slow_handler() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await asyncio.sleep(1.0)  # exceeds the 0.1s timeout below
+        return "eventually_fast"
+
+    req = ExternalExecutionRequest(
+        tenant_id="tenant_alpha",
+        operation_type="HTTP_CALL",
+        target="https://sometimes-slow.service.com",
+        parameters={"_handler": sometimes_slow_handler},
+        timeout_seconds=0.1,
+        retry_policy=RetryPolicy(max_attempts=3, initial_delay_seconds=0.01, backoff_factor=1.0),
+    )
+
+    record = await executor.execute_operation(req)
+    assert record.status == ExternalExecutionStatus.COMPLETED
+    assert record.output == "eventually_fast"
+    assert record.attempts == 2
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_external_execution_all_attempts_timing_out_reports_timed_out(kernel: Kernel) -> None:
+    """M5-A5 regression: when EVERY attempt times out, the final persisted
+    status/exception must still be TIMED_OUT (not a generic FAILED) so an
+    operator can distinguish "the target never responded" from "the target
+    responded with an error" — even though multiple attempts were made."""
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    executor = wf_engine.external_executor
+    assert executor is not None
+
+    async def always_slow_handler() -> str:
+        await asyncio.sleep(1.0)
+        return "never_gets_here"
+
+    req = ExternalExecutionRequest(
+        tenant_id="tenant_alpha",
+        operation_type="HTTP_CALL",
+        target="https://always-slow.service.com",
+        parameters={"_handler": always_slow_handler},
+        timeout_seconds=0.1,
+        retry_policy=RetryPolicy(max_attempts=2, initial_delay_seconds=0.01, backoff_factor=1.0),
+    )
+
+    with pytest.raises(ExternalExecutionTimeoutError, match="timed out after 2 attempt"):
+        await executor.execute_operation(req)
+
+    saved = await executor.get_execution(req.id, tenant_id="tenant_alpha")
+    assert saved is not None
+    assert saved.status == ExternalExecutionStatus.TIMED_OUT
+    assert saved.attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_external_execution_retries_with_exponential_backoff(kernel: Kernel) -> None:
     wf_engine: WorkflowEngine = kernel.get_engine("workflow")
     executor = wf_engine.external_executor

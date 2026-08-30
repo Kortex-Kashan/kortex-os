@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 from datetime import UTC, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kortex.engines.workflow.exceptions import WorkflowValidationError
 
@@ -124,26 +125,50 @@ def compute_next_cron_run(
     cron_expr: str,
     after_dt: datetime.datetime | None = None,
     max_search_days: int = 366,
+    timezone: str = "UTC",
 ) -> datetime.datetime:
     """Compute the next UTC datetime matching the cron expression strictly after `after_dt`.
 
     Args:
         cron_expr: 5-field cron expression string.
-        after_dt: Base datetime (UTC). Defaults to current UTC time.
+        after_dt: Base datetime (UTC or any timezone-aware value; treated as UTC if naive).
+            Defaults to current UTC time.
         max_search_days: Maximum days to search forward before giving up.
+        timezone: IANA timezone name (e.g. "America/New_York") the cron fields are
+            interpreted against (M5-A5). A cron expression's minute/hour/day-of-month/
+            day-of-week fields are inherently a *local wall-clock* specification —
+            "0 9 * * *" means "9am in this schedule's own timezone", not "9am UTC".
+            Field matching below is performed entirely in `timezone`'s local time; the
+            result is converted back to UTC (the format every caller and persisted
+            `next_run_at` column already expects) only at the very end. Defaults to
+            "UTC", which — since UTC has no DST transitions — reproduces the exact
+            prior UTC-only behavior for every existing caller that doesn't pass this.
 
     Returns:
-        The next matching UTC datetime.
+        The next matching datetime, in UTC.
 
     Raises:
-        WorkflowValidationError: If expression is invalid or no matching time found within horizon.
+        WorkflowValidationError: If expression or timezone is invalid, or no matching
+            time is found within horizon.
     """
     spec = CronScheduleSpec(cron_expr)
-    base = after_dt or datetime.datetime.now(UTC)
-    if base.tzinfo is None:
-        base = base.replace(tzinfo=UTC)
+    base_utc = after_dt or datetime.datetime.now(UTC)
+    if base_utc.tzinfo is None:
+        base_utc = base_utc.replace(tzinfo=UTC)
 
-    # Start searching from the next full minute (seconds and microseconds truncated)
+    try:
+        tz = UTC if timezone in ("UTC", "utc") else ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as err:
+        raise WorkflowValidationError(f"Unknown IANA timezone name: '{timezone}'.") from err
+
+    base = base_utc.astimezone(tz)
+
+    # Start searching from the next full minute (seconds and microseconds
+    # truncated), in the schedule's own local time — cron fields are matched
+    # against local wall-clock components (month/day/weekday/hour/minute)
+    # throughout this loop, so DST transitions are handled the same way any
+    # timezone-aware `datetime` arithmetic handles them (an hour is skipped
+    # or repeated in local time exactly as the zone defines).
     current = base.replace(second=0, microsecond=0) + timedelta(minutes=1)
     end_limit = base + timedelta(days=max_search_days)
 
@@ -152,9 +177,9 @@ def compute_next_cron_run(
         if current.month not in spec.months:
             # Advance to start of next month
             if current.month == 12:
-                current = datetime.datetime(current.year + 1, 1, 1, 0, 0, tzinfo=UTC)
+                current = datetime.datetime(current.year + 1, 1, 1, 0, 0, tzinfo=tz)
             else:
-                current = datetime.datetime(current.year, current.month + 1, 1, 0, 0, tzinfo=UTC)
+                current = datetime.datetime(current.year, current.month + 1, 1, 0, 0, tzinfo=tz)
             continue
 
         # Check day of month & day of week
@@ -189,8 +214,8 @@ def compute_next_cron_run(
             current = current + timedelta(minutes=1)
             continue
 
-        # All matched!
-        return current
+        # All matched! Convert the local wall-clock match back to UTC.
+        return current.astimezone(UTC)
 
     raise WorkflowValidationError(
         f"No matching execution time found for cron expression '{cron_expr}' within {max_search_days} days."

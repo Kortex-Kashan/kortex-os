@@ -204,6 +204,18 @@ class ExternalExecutionManager:
             except Exception:
                 tok_payload = None
 
+        # M5-A5: a timeout is folded into the exact same attempt-counted
+        # retry path as any other failure below, instead of being treated
+        # as unconditionally terminal on the very first occurrence. A
+        # transient network timeout is the single most common transient
+        # failure mode for an external call — permanently failing on attempt
+        # 1 regardless of a caller-configured `max_attempts` defeated the
+        # retry policy's entire purpose for exactly the failure it exists to
+        # absorb. `last_was_timeout` remembers whether the *final* attempt
+        # (the one actually reported) was a timeout, so the terminal status/
+        # error type distinction (TIMED_OUT vs FAILED) is preserved.
+        last_was_timeout = False
+
         for attempt in range(1, max_attempts + 1):
             try:
                 # Enforce execution timeout
@@ -254,37 +266,24 @@ class ExternalExecutionManager:
                 return updated_record or record
 
             except TimeoutError as exc:
-                duration_ms = (time.monotonic() - start_time) * 1000
-                completed_at = datetime.now(UTC)
-                await self._store.update_execution_status(
-                    execution_id=record.id,
-                    status=ExternalExecutionStatus.TIMED_OUT.value,
-                    tenant_id=tid,
-                    error=f"Execution timed out after {request.timeout_seconds:.2f}s",
-                    attempts=attempt,
-                    execution_time_ms=duration_ms,
-                    completed_at=completed_at,
-                    outbox_store=self._outbox_store,
+                last_error = exc
+                last_was_timeout = True
+                logger.warning(
+                    "External operation '%s' timed out on attempt %d/%d (limit %.2fs)",
+                    request.target,
+                    attempt,
+                    max_attempts,
+                    request.timeout_seconds,
                 )
-
-                await self._record_audit(
-                    action="kortex.workflow.external.timed_out",
-                    actor_id=actor,
-                    tenant_id=tid,
-                    resource_id=str(record.id),
-                    context={
-                        "target": request.target,
-                        "timeout_seconds": request.timeout_seconds,
-                        "attempts": attempt,
-                    },
-                )
-
-                raise ExternalExecutionTimeoutError(
-                    f"External operation '{request.target}' timed out after {request.timeout_seconds:.2f} seconds."
-                ) from exc
+                if attempt < max_attempts:
+                    jitter = random.uniform(0.8, 1.2) if policy.jitter else 1.0  # noqa: S311
+                    sleep_time = max(0.01, delay * jitter)
+                    await asyncio.sleep(sleep_time)
+                    delay *= policy.backoff_factor
 
             except Exception as exc:
                 last_error = exc
+                last_was_timeout = False
                 logger.warning(
                     "External operation '%s' failed on attempt %d/%d: %s",
                     request.target,
@@ -298,9 +297,38 @@ class ExternalExecutionManager:
                     await asyncio.sleep(sleep_time)
                     delay *= policy.backoff_factor
 
-        # All attempts failed
+        # All attempts failed (or every attempt timed out)
         duration_ms = (time.monotonic() - start_time) * 1000
         completed_at = datetime.now(UTC)
+
+        if last_was_timeout:
+            err_msg = f"Execution timed out after {request.timeout_seconds:.2f}s"
+            await self._store.update_execution_status(
+                execution_id=record.id,
+                status=ExternalExecutionStatus.TIMED_OUT.value,
+                tenant_id=tid,
+                error=err_msg,
+                attempts=max_attempts,
+                execution_time_ms=duration_ms,
+                completed_at=completed_at,
+                outbox_store=self._outbox_store,
+            )
+            await self._record_audit(
+                action="kortex.workflow.external.timed_out",
+                actor_id=actor,
+                tenant_id=tid,
+                resource_id=str(record.id),
+                context={
+                    "target": request.target,
+                    "timeout_seconds": request.timeout_seconds,
+                    "attempts": max_attempts,
+                },
+            )
+            raise ExternalExecutionTimeoutError(
+                f"External operation '{request.target}' timed out after {max_attempts} attempt(s), "
+                f"each bounded at {request.timeout_seconds:.2f} seconds."
+            ) from last_error
+
         err_msg = str(last_error) if last_error else "Unknown execution error"
 
         await self._store.update_execution_status(

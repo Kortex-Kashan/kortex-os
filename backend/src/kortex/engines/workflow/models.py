@@ -279,6 +279,15 @@ class ScheduleStatus(enum.StrEnum):
     PAUSED = "PAUSED"
     DISABLED = "DISABLED"
     COMPLETED = "COMPLETED"
+    # M5-A5: transient claimed-but-not-yet-ticked state. Set atomically by
+    # `SchedulerStore.claim_due_schedules` (ACTIVE -> TRIGGERING, one winner
+    # per row) so two concurrent scheduler ticks/workers can never both
+    # start a workflow instance for the same due fire. Cleared back to
+    # ACTIVE/COMPLETED by `record_schedule_tick` once the instance has
+    # actually started; a row stuck here past its claim lease (the
+    # scheduler process died mid-tick) is reclaimed back to ACTIVE by the
+    # same `claim_due_schedules` call on a later tick.
+    TRIGGERING = "TRIGGERING"
 
 
 class WorkflowSchedule(BaseModel):
