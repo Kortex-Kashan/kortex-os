@@ -269,6 +269,9 @@ function AuditRecordRow({ record }: { record: AIDecisionAuditRecord }) {
         <span>Latency: {record.latencyMs.toFixed(0)}ms</span>
         <span>Violations: {record.policyViolations.length}</span>
       </div>
+      <div className="text-xs text-muted-foreground">
+        Provider: {record.providerId ?? "unknown"} · Model: {record.modelName ?? "unknown"}
+      </div>
       <div className="text-xs text-muted-foreground font-mono truncate">
         Prompt: {record.promptHash} · Output: {record.outputHash}
       </div>

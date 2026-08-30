@@ -69,6 +69,10 @@ interface RawAuditRecord {
   tenant_id: string;
   user_id?: string | null;
   task_id?: string | null;
+  request_id?: string | null;
+  correlation_id?: string | null;
+  provider_id?: string | null;
+  model_name?: string | null;
   prompt_hash?: string;
   output_hash?: string;
   prompt_tokens?: number;
@@ -76,6 +80,7 @@ interface RawAuditRecord {
   total_tokens?: number;
   latency_ms?: number;
   tool_calls_requested?: Array<{ tool: string; args: string }>;
+  approval_request_id?: string | null;
   policy_violations?: string[];
   created_at: string;
 }
@@ -113,6 +118,10 @@ function toAuditRecord(raw: RawAuditRecord): AIDecisionAuditRecord {
     tenantId: raw.tenant_id,
     userId: raw.user_id ?? null,
     taskId: raw.task_id ?? null,
+    requestId: raw.request_id ?? null,
+    correlationId: raw.correlation_id ?? null,
+    providerId: raw.provider_id ?? null,
+    modelName: raw.model_name ?? null,
     promptHash: raw.prompt_hash ?? "",
     outputHash: raw.output_hash ?? "",
     promptTokens: raw.prompt_tokens ?? 0,
@@ -120,6 +129,7 @@ function toAuditRecord(raw: RawAuditRecord): AIDecisionAuditRecord {
     totalTokens: raw.total_tokens ?? 0,
     latencyMs: raw.latency_ms ?? 0,
     toolCallsRequested: raw.tool_calls_requested ?? [],
+    approvalRequestId: raw.approval_request_id ?? null,
     policyViolations: raw.policy_violations ?? [],
     createdAt: raw.created_at,
   };

@@ -219,4 +219,4 @@ class OllamaProvider(BaseAIProvider):
         )
 
 
-__all__ = ["OllamaProvider", "DEFAULT_OLLAMA_TIMEOUT_SECONDS"]
+__all__ = ["DEFAULT_OLLAMA_TIMEOUT_SECONDS", "OllamaProvider"]

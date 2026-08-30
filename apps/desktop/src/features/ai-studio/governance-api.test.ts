@@ -127,6 +127,10 @@ const rawAuditRecord = {
   tenant_id: "acme",
   user_id: "alice",
   task_id: "task-1",
+  request_id: "req-1",
+  correlation_id: "corr-1",
+  provider_id: "ollama-llama3",
+  model_name: "llama3",
   prompt_hash: "abc123",
   output_hash: "def456",
   prompt_tokens: 100,
@@ -134,6 +138,7 @@ const rawAuditRecord = {
   total_tokens: 300,
   latency_ms: 1200,
   tool_calls_requested: [{ tool: "search", args: '{"q":"x"}' }],
+  approval_request_id: "appr-1",
   policy_violations: ["pii_detected"],
   created_at: "2026-01-01T00:00:00Z",
 };
@@ -149,6 +154,25 @@ describe("queryDecisionAuditRecords", () => {
     expect(r.totalTokens).toBe(300);
     expect(r.policyViolations).toEqual(["pii_detected"]);
     expect(r.toolCallsRequested).toEqual([{ tool: "search", args: '{"q":"x"}' }]);
+    // M6.1-3: provider/model/request/correlation/approval fields must now
+    // survive the snake_case -> camelCase mapping instead of being dropped.
+    expect(r.requestId).toBe("req-1");
+    expect(r.correlationId).toBe("corr-1");
+    expect(r.providerId).toBe("ollama-llama3");
+    expect(r.modelName).toBe("llama3");
+    expect(r.approvalRequestId).toBe("appr-1");
+  });
+
+  it("maps missing provider/model/request/correlation/approval fields to null, not undefined", async () => {
+    const { provider_id, model_name, request_id, correlation_id, approval_request_id, ...withoutNewFields } =
+      rawAuditRecord;
+    invokeCapabilityMock.mockResolvedValueOnce(ok([withoutNewFields]));
+    const [r] = await queryDecisionAuditRecords("acme", 10);
+    expect(r.providerId).toBeNull();
+    expect(r.modelName).toBeNull();
+    expect(r.requestId).toBeNull();
+    expect(r.correlationId).toBeNull();
+    expect(r.approvalRequestId).toBeNull();
   });
 
   it("returns empty array for empty result", async () => {

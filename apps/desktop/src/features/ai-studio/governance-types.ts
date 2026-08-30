@@ -38,6 +38,13 @@ export interface AIDecisionAuditRecord {
   tenantId: string;
   userId: string | null;
   taskId: string | null;
+  requestId: string | null;
+  correlationId: string | null;
+  /** Which registered provider actually served this decision (e.g. "ollama-llama3"). Null for
+   * records predating M6.1-2's real provider, or any generation the provider itself didn't self-report. */
+  providerId: string | null;
+  /** Which model the serving provider used (e.g. "llama3"). Same nullability caveat as providerId. */
+  modelName: string | null;
   promptHash: string;
   outputHash: string;
   promptTokens: number;
@@ -45,6 +52,7 @@ export interface AIDecisionAuditRecord {
   totalTokens: number;
   latencyMs: number;
   toolCallsRequested: Array<{ tool: string; args: string }>;
+  approvalRequestId: string | null;
   policyViolations: string[];
   createdAt: string;
 }
