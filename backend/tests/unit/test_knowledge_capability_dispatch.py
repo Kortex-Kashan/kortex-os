@@ -41,6 +41,7 @@ from argon2 import PasswordHasher
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel
 from kortex.engines.knowledge.engine import KnowledgeEngine
@@ -62,6 +63,10 @@ def _tenant(tmp_path: Path, suffix: str = "") -> str:
 
 def _build_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine, KnowledgeEngine]:
     kernel = Kernel()
+    # M5-A8: explicit isolated in-memory DB — this test's exact-result graph
+    # assertions must never observe a node another test (or a real local
+    # run sharing the machine-wide default) left behind.
+    kernel._db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
     storage_engine = StorageEngine(base_directory=str(tmp_path / "knowledge_dispatch_storage"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     knowledge_engine = KnowledgeEngine()

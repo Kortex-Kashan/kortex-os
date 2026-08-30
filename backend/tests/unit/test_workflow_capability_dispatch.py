@@ -22,6 +22,7 @@ from argon2 import PasswordHasher
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel
 from kortex.engines.security.engine import SecurityEngine
@@ -44,6 +45,12 @@ def _tenant(tmp_path: Path, suffix: str = "") -> str:
 
 def _build_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine, WorkflowEngine]:
     kernel = Kernel()
+    # M5-A8: explicit isolated in-memory DB per test, matching the pattern
+    # used throughout the rest of the suite (e.g. test_workflow_approval_durable.py's
+    # `durable_env` fixture) rather than relying solely on the default's
+    # own pytest auto-isolation — a Kernel() built here must never be able
+    # to see a workflow definition another test (or a real local run) saved.
+    kernel._db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
     storage_engine = StorageEngine(base_directory=str(tmp_path / "workflow_dispatch_storage"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     workflow_engine = WorkflowEngine()

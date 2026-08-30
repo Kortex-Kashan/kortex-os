@@ -20,6 +20,7 @@ import pytest
 from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest, _safe_classification
 from kortex.core.exceptions import CapabilityNotFoundError, KernelStateError, ResourceNotFoundError
 from kortex.core.kernel import Kernel
@@ -49,6 +50,9 @@ def _build_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine
     capability must do so before calling `kernel.boot()` — capability
     registration is only permitted at `CREATED`/`BOOTING`."""
     kernel = Kernel()
+    # M5-A8: explicit isolated in-memory DB, matching the established pattern
+    # in `test_capability_dispatch_adversarial.py`.
+    kernel._db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
     storage_engine = StorageEngine(base_directory=str(tmp_path / "dispatch_storage"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     kernel.register_engine(storage_engine)

@@ -10,6 +10,8 @@ from __future__ import annotations
 import datetime
 import enum
 import logging
+import os
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from sqlalchemy import DateTime, String, func
@@ -58,6 +60,56 @@ class BaseModel(Base):
     )
 
 
+def _default_app_data_dir() -> Path:
+    """Resolve a stable, per-user application-data directory for KORTEX's
+    default local SQLite database.
+
+    Deliberately NOT a path relative to the process's current working
+    directory: a bare `./kortex_local.db` silently resolves to whatever
+    directory the process happened to be launched from, meaning two
+    processes started from different cwds see two unrelated "empty"
+    databases, while two processes started from the *same* cwd (e.g. two
+    test runs, or two app instances) silently share one SQLite file with no
+    coordination. This resolves to the same absolute location for a given
+    user/machine regardless of launch cwd, matching the OS's own convention
+    for where a local-first desktop app should keep its data.
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    elif os.uname().sysname == "Darwin":  # pragma: no cover - platform-specific
+        base = str(Path.home() / "Library" / "Application Support")
+    else:  # pragma: no cover - platform-specific
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "KORTEX"
+
+
+def _default_sqlite_url() -> str:
+    """Compute the default SQLite connection URL used when no explicit
+    `connection_url` (constructor argument or `KORTEX_DATABASE_URL`
+    environment variable) is provided.
+
+    This intentionally still resolves to one fixed, shared location per
+    user/machine (not a fresh path per call) — several existing tests
+    deliberately construct two independent `Kernel()`/`DatabaseEngineManager()`
+    instances with no explicit connection and rely on the *default itself*
+    being the shared thing that proves data survives across an independent
+    "fresh session" (e.g. `test_document_lifecycle_persistence_survives_fresh_session`).
+    What this fixes is narrower: the previous default was relative to the
+    process's current working directory, so unrelated processes/tests
+    launched from different cwds got silently different "shared" stores,
+    and any two launched from the *same* cwd (a common accident, not the
+    deliberate in-test pattern above) silently collided. Callers that need
+    real isolation from every other test or run — the common case — must
+    still pass an explicit `connection_url` (e.g. `sqlite+aiosqlite:///:memory:`
+    or a `tmp_path`-scoped file), exactly as the majority of this suite
+    already does.
+    """
+    data_dir = _default_app_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = (data_dir / "kortex_local.db").as_posix()
+    return f"sqlite+aiosqlite:///{db_path}"
+
+
 class DatabaseEngineManager:
     """Manages SQLAlchemy async database engine connection and session factories.
 
@@ -67,11 +119,11 @@ class DatabaseEngineManager:
 
     def __init__(self, connection_url: Optional[str] = None, dialect: DatabaseDialect = DatabaseDialect.SQLITE) -> None:
         self._dialect = dialect
-        if connection_url:
-            self._url = connection_url
-        else:
-            # Default SQLite local-first file database
-            self._url = "sqlite+aiosqlite:///./kortex_local.db"
+        # Precedence: explicit constructor argument > KORTEX_DATABASE_URL
+        # environment variable > safe computed default. This is the one
+        # place the default is decided; nothing downstream needs to know
+        # which branch was taken.
+        self._url = connection_url or os.environ.get("KORTEX_DATABASE_URL") or _default_sqlite_url()
 
         self._engine: Optional[AsyncEngine] = None
         self._session_factory: Optional[async_sessionmaker[AsyncSession]] = None
