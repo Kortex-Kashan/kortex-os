@@ -39,7 +39,7 @@ class ConnectorPipeline(IConnectorPipeline):
         self,
         registry: IConnectorDriverRegistry,
         rate_limiter: IRateLimiter | None = None,
-        secret_resolver: Callable[[str], Coroutine[Any, Any, str | None]] | None = None,
+        secret_resolver: Callable[[str, str], Coroutine[Any, Any, str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
     ) -> None:
         """Initialize ConnectorPipeline.
@@ -47,7 +47,10 @@ class ConnectorPipeline(IConnectorPipeline):
         Args:
             registry: IConnectorDriverRegistry instance for driver lookup.
             rate_limiter: Optional IRateLimiter instance for rate limiting.
-            secret_resolver: Optional async callable for resolving secret handle to token string.
+            secret_resolver: Optional async callable for resolving a secret handle
+                to a token string, taking ``(secret_handle, tenant_id)``. Tenant
+                is threaded through so a resolved credential can never cross a
+                tenant boundary (M6.0-2).
             diagnostics: Optional ConnectorDiagnostics instance for stage & attempt metric recording.
         """
         self._registry = registry
@@ -143,7 +146,7 @@ class ConnectorPipeline(IConnectorPipeline):
                 )
 
             try:
-                secret_token = await self._secret_resolver(handle)
+                secret_token = await self._secret_resolver(handle, request.tenant_id)
             except Exception:
                 self._safe_record("record_authentication_failure")
                 self._safe_record("record_error_category", "authentication")

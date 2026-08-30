@@ -21,10 +21,13 @@ import pytest
 from kortex.api.kernel_bootstrap import build_and_boot_kernel
 from kortex.core.kernel import KernelState
 from kortex.engines.ai.engine import AIOrchestrationEngine
+from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.connector.models import ActionRequest, ConnectorActionType, ConnectorProfile
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
+from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 
 
@@ -287,5 +290,93 @@ async def test_knowledge_graph_starts_empty_on_production_boot_path() -> None:
         knowledge_engine = kernel.get_engine("knowledge")
         assert isinstance(knowledge_engine, KnowledgeEngine)
         assert knowledge_engine.graph.list_nodes("any-tenant") == []
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_secret_resolver_wired_on_production_boot_path() -> None:
+    """M6.0-2 regression test: prior to this fix, `ConnectorEngine()` was
+    constructed with no `secret_resolver` anywhere on the production boot
+    path (`kernel_bootstrap.py`), so any connector action against a profile
+    with a real `secret_handle` failed with "Secret resolver unavailable."
+    unconditionally — this is the actual bug, proven end-to-end through the
+    real production bootstrap, not a proxy for it: a real secret is
+    provisioned via the real, Kernel-registered `SecurityEngine`, a profile
+    referencing that secret is registered on the real, Kernel-registered
+    `ConnectorEngine`, and a real action is executed.
+    """
+    kernel = await build_and_boot_kernel()
+    try:
+        security_engine = kernel.get_engine("security")
+        assert isinstance(security_engine, SecurityEngine)
+        connector_engine = kernel.get_engine("connector")
+        assert isinstance(connector_engine, ConnectorEngine)
+
+        # Prior to the fix, this resolver is None even after a full boot.
+        assert connector_engine.pipeline._secret_resolver is not None
+
+        connector_engine.register_driver(DummyConnectorDriver())
+
+        secret_handle = "vault:m6-0-2-regression-secret"
+        tenant_id = "tenant-m6-0-2"
+        await security_engine.put_secret(secret_handle, tenant_id, "resolved-plaintext-token")
+
+        profile = ConnectorProfile(
+            profile_id="prof-m6-0-2-regression",
+            name="M6.0-2 Regression Profile",
+            driver_id="connector-dummy",
+            secret_handle=secret_handle,
+        )
+        await connector_engine.profile_manager.register_profile(profile)
+
+        request = ActionRequest(
+            request_id="req-m6-0-2-regression",
+            profile_id="prof-m6-0-2-regression",
+            action_type=ConnectorActionType.FETCH,
+            tenant_id=tenant_id,
+        )
+        result = await connector_engine.execute_action(request)
+
+        assert result.status == "SUCCESS"
+        assert result.error_details is None
+        assert result.response_payload["secret_authenticated"] is True
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_secret_resolver_stays_tenant_scoped_on_production_boot_path() -> None:
+    """A secret provisioned under one tenant must never resolve for a
+    connector profile executed under a different tenant — the specific
+    tenant-safety property the M6.0-2 fix is required to preserve (a
+    single-argument, hardcoded-tenant resolver would not catch this)."""
+    kernel = await build_and_boot_kernel()
+    try:
+        security_engine = kernel.get_engine("security")
+        connector_engine = kernel.get_engine("connector")
+        connector_engine.register_driver(DummyConnectorDriver())
+
+        secret_handle = "vault:m6-0-2-tenant-scoped-secret"
+        await security_engine.put_secret(secret_handle, "tenant-real-owner", "owner-secret-token")
+
+        profile = ConnectorProfile(
+            profile_id="prof-m6-0-2-cross-tenant",
+            name="M6.0-2 Cross-Tenant Profile",
+            driver_id="connector-dummy",
+            secret_handle=secret_handle,
+        )
+        await connector_engine.profile_manager.register_profile(profile)
+
+        request = ActionRequest(
+            request_id="req-m6-0-2-cross-tenant",
+            profile_id="prof-m6-0-2-cross-tenant",
+            action_type=ConnectorActionType.FETCH,
+            tenant_id="tenant-attacker",
+        )
+        result = await connector_engine.execute_action(request)
+
+        assert result.status == "FAILED"
+        assert result.error_details["error"] == "Failed to resolve connector credentials."
     finally:
         await kernel.shutdown()

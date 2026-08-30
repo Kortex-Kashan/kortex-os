@@ -261,7 +261,7 @@ async def test_security_credential_isolation_end_to_end(tmp_path, caplog: pytest
     secret_handle = "vault:live_slack_api_token"
     resolved_secret = "RESOLVED_LIVE_SECRET_TOKEN_999"
 
-    async def mock_secret_resolver(handle: str) -> str:
+    async def mock_secret_resolver(handle: str, tenant_id: str) -> str:
         if handle == secret_handle:
             return resolved_secret
         raise ValueError("Unknown secret handle")

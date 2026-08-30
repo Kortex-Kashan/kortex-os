@@ -90,7 +90,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         profile_manager: ConnectorProfileManager | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
         pipeline: ConnectorPipeline | None = None,
-        secret_resolver: Callable[[str], Awaitable[str]] | None = None,
+        secret_resolver: Callable[[str, str], Awaitable[str]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
         data_store: IDataStore | None = None,
     ) -> None:
@@ -101,7 +101,13 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             profile_manager: Optional ConnectorProfileManager instance.
             rate_limiter: Optional TokenBucketRateLimiter instance.
             pipeline: Optional ConnectorPipeline instance.
-            secret_resolver: Optional credential resolution async callback.
+            secret_resolver: Optional credential resolution async callback, taking
+                ``(secret_handle, tenant_id)`` and returning the resolved secret
+                value. Tenant-scoped so a resolved credential can never cross a
+                tenant boundary. If not supplied here, `initialize()` wires one
+                from the Kernel-registered Security Engine's secret store, the
+                same deferred-wiring pattern already used for Storage Engine
+                dependencies below.
             diagnostics: Optional ConnectorDiagnostics instance.
             data_store: Optional IDataStore instance from Storage Engine for execution history.
         """
@@ -143,7 +149,19 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
 
     @property
     def dependencies(self) -> list[str]:
-        """Prerequisite foundation engines for Kernel boot sequence."""
+        """Prerequisite foundation engines for Kernel boot sequence.
+
+        Security is deliberately NOT declared here even though `initialize()`
+        opportunistically wires a secret resolver from it when present (M6.0-2):
+        `BootEngine.resolve_dependency_order` treats a declared dependency as a
+        hard requirement (boot fails if the named engine isn't registered at
+        all), and several existing, legitimate test/usage patterns construct
+        this engine with Storage but deliberately without Security to exercise
+        Connector Engine in isolation. The real production bootstrap
+        (`kernel_bootstrap.py`) already registers Security before Connector
+        unconditionally, so declaring it here would only break isolated usage
+        without adding any real ordering guarantee production doesn't already have.
+        """
         return ["configuration", "registry", "event", "storage"]
 
     @property
@@ -194,6 +212,27 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                             self._profile_manager._data_store = self._data_store
                 except Exception:
                     self.logger.debug("StorageEngine not resolved from Kernel container; using local fallbacks.")
+
+                # Wire the production secret resolver from the Kernel-registered
+                # Security Engine if the caller didn't already supply one (M6.0-2:
+                # this is the fix for connector actions with a real secret_handle
+                # failing "Secret resolver unavailable." in every prior boot path
+                # — SecurityEngine.get_secret(secret_handle, tenant_id) already
+                # matches this resolver's tenant-scoped (handle, tenant_id)
+                # contract exactly, so it's assigned directly, unwrapped).
+                if self._secret_resolver is None:
+                    try:
+                        security_engine = kernel.container.resolve("engine.security")
+                        if security_engine is not None:
+                            self._secret_resolver = security_engine.get_secret
+                            if self._pipeline._secret_resolver is None:
+                                self._pipeline._secret_resolver = self._secret_resolver
+                    except Exception:
+                        self.logger.debug(
+                            "SecurityEngine not resolved from Kernel container; "
+                            "connector actions with a secret_handle will fail "
+                            "authentication until a secret_resolver is wired."
+                        )
 
             # Register canonical Kernel capabilities
             kernel.register_capability(
