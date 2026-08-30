@@ -200,6 +200,15 @@ function ApprovalCard({
                 <span className="font-mono text-xs truncate">{request.stepId}</span>
               </>
             )}
+            {request.requesterPrincipalId && (
+              <>
+                <span>Requested By</span>
+                <span className="font-mono text-xs truncate">
+                  {request.requesterPrincipalType === "AGENT" ? "AI Agent · " : ""}
+                  {request.requesterPrincipalId}
+                </span>
+              </>
+            )}
             <span>Times Out</span>
             <span>{formatDateTime(request.timeoutAt)}</span>
             <span>Signature Required</span>

@@ -130,7 +130,9 @@ interface RawWorkflowInstance {
 }
 
 /** The hand-built dict every `kortex.workflow.approval.*` handler returns.
- * `context_snapshot` is present only from `get_approval_request`. */
+ * `context_snapshot` is present only from `get_approval_request`.
+ * `requester_principal_id`/`requester_principal_type`/`correlation_id`
+ * (M6.2-3) are present on `create`/`list`/`get` alike. */
 interface RawApprovalRequest {
   id: string;
   tenant_id: string;
@@ -140,6 +142,9 @@ interface RawApprovalRequest {
   state: string;
   timeout_at?: string | null;
   signature_required: boolean;
+  requester_principal_id?: string | null;
+  requester_principal_type?: string | null;
+  correlation_id?: string | null;
   context_snapshot?: Record<string, unknown>;
 }
 
@@ -226,6 +231,9 @@ function toApproval(raw: RawApprovalRequest): ApprovalRequest {
     state: raw.state as ApprovalState,
     timeoutAt: raw.timeout_at ?? null,
     signatureRequired: raw.signature_required,
+    requesterPrincipalId: raw.requester_principal_id ?? null,
+    requesterPrincipalType: raw.requester_principal_type ?? null,
+    correlationId: raw.correlation_id ?? null,
     contextSnapshot: raw.context_snapshot,
   };
 }

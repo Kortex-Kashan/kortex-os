@@ -143,6 +143,9 @@ describe("WorkflowApp tab navigation", () => {
         state: "PENDING",
         timeoutAt: null,
         signatureRequired: false,
+        requesterPrincipalId: null,
+        requesterPrincipalType: null,
+        correlationId: null,
       },
     ]);
 

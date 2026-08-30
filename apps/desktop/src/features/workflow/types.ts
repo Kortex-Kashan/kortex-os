@@ -128,10 +128,17 @@ export interface WorkflowInstance {
  * `contextSnapshot` is only ever populated by `kortex.workflow.approval.get`
  * (single-ticket detail) — `kortex.workflow.approval.list`'s handler
  * (`list_approval_requests`) does not include it in its returned dicts at
- * all. There is no `workflowName`, `requesterPrincipalId`, `createdAt`,
- * `decidedAt`, `deciderPrincipalId`, or `decisionRationale` anywhere on the
- * backend response for this capability family — the previous version of
- * this file invented all of them.
+ * all. There is no `workflowName`, `createdAt`, `decidedAt`,
+ * `deciderPrincipalId`, or `decisionRationale` anywhere on the backend
+ * response for this capability family — the previous version of this file
+ * invented all of them.
+ *
+ * `requesterPrincipalId`/`requesterPrincipalType`/`correlationId` (M6.2-3)
+ * ARE real, present on both `list` and `get`/`create` — unlike the fields
+ * named above, these were added to the backend response specifically so
+ * the UI (and everything else) can attribute a ticket to its real
+ * requester, human or AI. `null` for any ticket created before this field
+ * existed, or by a caller that never supplied a verified principal.
  */
 export interface ApprovalRequest {
   id: string;
@@ -142,6 +149,9 @@ export interface ApprovalRequest {
   state: ApprovalState;
   timeoutAt: string | null;
   signatureRequired: boolean;
+  requesterPrincipalId: string | null;
+  requesterPrincipalType: string | null;
+  correlationId: string | null;
   contextSnapshot?: Record<string, unknown>;
 }
 

@@ -72,6 +72,9 @@ describe("usePendingApprovals", () => {
       state: "PENDING",
       timeoutAt: null,
       signatureRequired: false,
+      requesterPrincipalId: null,
+      requesterPrincipalType: null,
+      correlationId: null,
     };
     listPendingApprovalsMock.mockResolvedValueOnce([approval]);
 

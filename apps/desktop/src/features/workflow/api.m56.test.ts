@@ -179,6 +179,9 @@ const rawApproval = {
   state: "PENDING",
   timeout_at: "2026-01-02T00:00:00Z",
   signature_required: false,
+  requester_principal_id: "kortex-ai-system",
+  requester_principal_type: "AGENT",
+  correlation_id: "task-abc",
 };
 
 describe("listPendingApprovals", () => {
@@ -192,6 +195,19 @@ describe("listPendingApprovals", () => {
     expect(a.state).toBe("PENDING");
     expect(a.timeoutAt).toBe("2026-01-02T00:00:00Z");
     expect(a.signatureRequired).toBe(false);
+    // M6.2-3: requester identity and correlation now survive the mapping.
+    expect(a.requesterPrincipalId).toBe("kortex-ai-system");
+    expect(a.requesterPrincipalType).toBe("AGENT");
+    expect(a.correlationId).toBe("task-abc");
+  });
+
+  it("maps a missing requester/correlation (pre-M6.2 ticket) to null, not undefined", async () => {
+    const { requester_principal_id, requester_principal_type, correlation_id, ...legacyRaw } = rawApproval;
+    invokeCapabilityMock.mockResolvedValueOnce(ok([legacyRaw]));
+    const [a] = await listPendingApprovals();
+    expect(a.requesterPrincipalId).toBeNull();
+    expect(a.requesterPrincipalType).toBeNull();
+    expect(a.correlationId).toBeNull();
   });
 
   it("passes state_filter=PENDING (the real backend parameter name)", async () => {

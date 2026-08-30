@@ -50,6 +50,9 @@ const pendingApproval = {
   state: "PENDING" as const,
   timeoutAt: null,
   signatureRequired: false,
+  requesterPrincipalId: null,
+  requesterPrincipalType: null,
+  correlationId: null,
 };
 
 function renderQueue() {
