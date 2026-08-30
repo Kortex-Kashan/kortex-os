@@ -81,7 +81,12 @@ from kortex.core.idempotency import ClaimResult, IdempotencyStore, sanitize_for_
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.events import SecurityAuthFailureEvent, SecurityAuthSuccessEvent
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError
-from kortex.engines.security.models import ClassificationLevel, PermissionRequirement, TokenPayload
+from kortex.engines.security.models import (
+    ClassificationLevel,
+    PermissionRequirement,
+    SecurityPrincipal,
+    TokenPayload,
+)
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
@@ -285,7 +290,7 @@ class CapabilityDispatcher:
         # 5. Handler Invocation with Timing
         start_time = time.monotonic()
         try:
-            result = await self._invoke_handler(request)
+            result = await self._invoke_handler(request, principal)
             duration_ms = (time.monotonic() - start_time) * 1000
 
             # 6. Idempotency Completion Persistence
@@ -310,7 +315,21 @@ class CapabilityDispatcher:
 
             return result
 
-        except Exception as exc:
+        except BaseException as exc:
+            # M5-A4: `BaseException`, not `Exception` — a client-side timeout
+            # (`asyncio.wait_for` in api/main.py) cancels this coroutine by
+            # throwing `asyncio.CancelledError`, which has inherited from
+            # `BaseException` (not `Exception`) since Python 3.8 specifically
+            # so that ordinary `except Exception` handlers do NOT
+            # accidentally swallow cancellation. That correctly-narrow
+            # default becomes a liability here: without this catching
+            # cancellation too, a timed-out handler never reaches
+            # `record_failed` below, and its idempotency record is stranded
+            # in PROCESSING with no automatic recovery until the staleness
+            # reclaim in `IdempotencyStore.claim_or_get_execution` eventually
+            # ages it out. `raise` at the end still re-raises the exact
+            # original exception (including cancellation) unchanged — this
+            # only adds guaranteed cleanup, it never suppresses anything.
             duration_ms = (time.monotonic() - start_time) * 1000
 
             # 6. Idempotency Failure Persistence
@@ -393,7 +412,9 @@ class CapabilityDispatcher:
         except Exception as audit_exc:
             logger.warning("Failed to record dispatch authentication-failure audit entry: %s", audit_exc)
 
-    async def _invoke_handler(self, request: CapabilityRequest) -> Any:  # noqa: ANN401
+    async def _invoke_handler(
+        self, request: CapabilityRequest, principal: SecurityPrincipal | None
+    ) -> Any:  # noqa: ANN401
         """Resolve and invoke the real handler, awaiting the result only if
         it is actually awaitable.
 
@@ -412,11 +433,36 @@ class CapabilityDispatcher:
         __call__` (which `iscoroutinefunction` misclassifies as sync, since
         it inspects the object itself, not what calling it produces), in
         addition to plain sync and async functions.
+
+        Milestone M5-A1 (identity propagation): `principal` is the
+        already-verified `SecurityPrincipal` this dispatcher resolved in
+        step 1 of `dispatch()` (or `None` for an unauthenticated
+        capability). If the target handler declares a keyword parameter
+        literally named `principal`, that verified identity is injected
+        into the call — never a caller-supplied value from
+        `request.parameters`, which is discarded for that key. This lets
+        sensitive handlers (approval decisions, delegation, AI governance,
+        ...) authorize against a trustworthy identity instead of
+        reconstructing one from caller-controlled request data, without
+        requiring every handler to accept it and without a second,
+        per-engine authorization/identity mechanism. Handlers that do not
+        declare `principal` are entirely unaffected.
         """
         handler = self._kernel._registry_engine._resolve_handler(request.capability_name)
         if handler is None:
             raise RuntimeError(f"Capability '{request.capability_name}' has no registered handler.")
-        result = handler(**request.parameters)
+
+        call_kwargs = dict(request.parameters)
+        try:
+            accepts_principal = "principal" in inspect.signature(handler).parameters
+        except (TypeError, ValueError):
+            # Some callables (e.g. certain builtins/C-extensions) do not support
+            # signature introspection; fail closed on injection, not on dispatch.
+            accepts_principal = False
+        if accepts_principal:
+            call_kwargs["principal"] = principal
+
+        result = handler(**call_kwargs)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -430,7 +476,7 @@ class CapabilityDispatcher:
         status: str,
         duration_ms: float,
         result: Any | None = None,  # noqa: ANN401
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         """Best-effort audit recording of capability execution outcome (Milestone M5.2).
         Captures request_id, correlation_id, duration, status, and scrubbed payload hash."""

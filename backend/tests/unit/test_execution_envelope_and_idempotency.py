@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -454,6 +455,232 @@ async def test_concurrent_processing_collision_rejected_with_conflict(tmp_path: 
 
     # Handler was executed exactly once
     assert spy.call_count == 1
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_fresh_key_claims_never_raise_unhandled_error(tmp_path: Path) -> None:
+    """M5-A4 regression: N callers racing a genuinely NEW idempotency key at
+    the same instant (a double-click, or a client retrying a request whose
+    response it never saw) must resolve deterministically — exactly one
+    CLAIMED execution, the rest a clean `ConcurrentExecutionError` — never an
+    unhandled `InvalidRequestError`/500 from the loser's INSERT colliding
+    with the winner's.
+
+    Unlike `test_concurrent_processing_collision_rejected_with_conflict`
+    above (which deliberately sequences req1 before req2 via `asyncio.sleep`
+    so req1's row already exists — a real but different scenario), this
+    launches every call with `asyncio.gather` and NO artificial ordering, so
+    the actual concurrent-INSERT race is exercised, not simulated.
+    """
+    kernel, storage_engine, security_engine = await _build_authenticated_kernel(tmp_path, "concurrent_fresh_claim")
+
+    spy = _CounterSpy({"result": "done"}, sleep_s=0.05)
+    kernel.register_capability(
+        name="test.race.fresh_claim",
+        description="Raced by many concurrent callers on one brand-new key",
+        provider="test",
+        handler=spy,
+        requires_authentication=True,
+        required_permissions=["race:claim"],
+    )
+    await kernel.boot()
+
+    token = await _seed_user_with_permission(
+        storage_engine.data, security_engine, "tenant-race", "user-race", "race:claim"
+    )
+
+    key = f"fresh-race-key-{uuid.uuid4().hex[:8]}"
+    concurrency = 8
+
+    async def _attempt() -> Any:  # noqa: ANN401
+        request = CapabilityRequest(
+            capability_name="test.race.fresh_claim",
+            idempotency_key=key,
+            session_token=token,
+            context={"resource_tenant_id": "tenant-race"},
+        )
+        return await kernel.invoke_capability(request)
+
+    results = await asyncio.gather(*(_attempt() for _ in range(concurrency)), return_exceptions=True)
+
+    unexpected = [
+        r for r in results if isinstance(r, BaseException) and not isinstance(r, ConcurrentExecutionError)
+    ]
+    assert unexpected == [], f"Unhandled exception(s) from concurrent claim race: {unexpected!r}"
+
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    conflicts = [r for r in results if isinstance(r, ConcurrentExecutionError)]
+
+    # Every one of the 8 concurrent callers resolves to exactly one of two
+    # legitimate outcomes — a `ConcurrentExecutionError` (arrived while the
+    # winner was still mid-flight), or `{"result": "done"}` (arrived after
+    # the winner already completed, and got the deterministic cached
+    # replay — NOT a fresh execution; see the `spy.call_count` assertion
+    # below, which is the actual "no double-execution" proof). Which of the
+    # two a given caller gets depends on exact timing and is not itself
+    # asserted; both are correct.
+    assert len(successes) + len(conflicts) == concurrency
+    assert len(successes) >= 1, "At least one concurrent caller must win the claim"
+    assert all(r == {"result": "done"} for r in successes)
+
+    # The actual "no double-execution" guarantee: regardless of how many
+    # callers observed a success (fresh or replayed), the underlying side
+    # effect ran exactly once.
+    assert spy.call_count == 1
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stale_processing_record_is_reclaimed_after_lease_expiry(tmp_path: Path) -> None:
+    """M5-A4 regression: a PROCESSING record whose original caller vanished
+    (crashed, was killed — no exception handler ever ran to call
+    record_failed) must not block that idempotency key forever. Once older
+    than `STALE_PROCESSING_LEASE_SECONDS`, a fresh caller may reclaim it and
+    actually execute; a record that is merely still within its lease window
+    must NOT be reclaimed out from under a genuinely still-running caller.
+    """
+    kernel, storage_engine, security_engine = await _build_authenticated_kernel(tmp_path, "stale_reclaim")
+
+    spy = _CounterSpy({"result": "reclaimed_done"})
+    kernel.register_capability(
+        name="test.reclaim.stale",
+        description="Reclaimed after its original caller vanished",
+        provider="test",
+        handler=spy,
+        requires_authentication=True,
+        required_permissions=["reclaim:stale"],
+    )
+    await kernel.boot()
+
+    token = await _seed_user_with_permission(
+        storage_engine.data, security_engine, "tenant-reclaim", "user-reclaim", "reclaim:stale"
+    )
+    key = "stale-key-1"
+
+    idemp_store = kernel._dispatcher._resolve_idempotency_store()
+    assert idemp_store is not None
+
+    # Simulate an abandoned claim: a PROCESSING row whose caller never came
+    # back to complete or fail it, well outside the lease window.
+    from kortex.core.idempotency import STALE_PROCESSING_LEASE_SECONDS, IdempotencyRecordModel
+
+    ancient = datetime.now(UTC) - timedelta(seconds=STALE_PROCESSING_LEASE_SECONDS + 60)
+
+    async def _seed_abandoned(session: AsyncSession) -> None:
+        session.add(
+            IdempotencyRecordModel(
+                id=str(uuid.uuid4()),
+                tenant_id="tenant-reclaim",
+                idempotency_key=key,
+                capability_name="test.reclaim.stale",
+                request_id="abandoned-req",
+                correlation_id="abandoned-corr",
+                state=IdempotencyState.PROCESSING.value,
+                created_at=ancient,
+                updated_at=ancient,
+            )
+        )
+
+    await storage_engine.data.execute_in_transaction(_seed_abandoned)
+
+    request = CapabilityRequest(
+        capability_name="test.reclaim.stale",
+        idempotency_key=key,
+        session_token=token,
+        context={"resource_tenant_id": "tenant-reclaim"},
+    )
+    result = await kernel.invoke_capability(request)
+    assert result == {"result": "reclaimed_done"}
+    assert spy.call_count == 1
+
+    # A record still well inside its lease window must NOT be reclaimable —
+    # this is a currently-running (or at least plausibly-running) claim, not
+    # an abandoned one.
+    fresh_key = "not-stale-key-1"
+    recent = datetime.now(UTC) - timedelta(seconds=5)
+
+    async def _seed_fresh_processing(session: AsyncSession) -> None:
+        session.add(
+            IdempotencyRecordModel(
+                id=str(uuid.uuid4()),
+                tenant_id="tenant-reclaim",
+                idempotency_key=fresh_key,
+                capability_name="test.reclaim.stale",
+                request_id="in-flight-req",
+                correlation_id="in-flight-corr",
+                state=IdempotencyState.PROCESSING.value,
+                created_at=recent,
+                updated_at=recent,
+            )
+        )
+
+    await storage_engine.data.execute_in_transaction(_seed_fresh_processing)
+
+    fresh_request = CapabilityRequest(
+        capability_name="test.reclaim.stale",
+        idempotency_key=fresh_key,
+        session_token=token,
+        context={"resource_tenant_id": "tenant-reclaim"},
+    )
+    with pytest.raises(ConcurrentExecutionError):
+        await kernel.invoke_capability(fresh_request)
+    assert spy.call_count == 1  # unchanged: the in-lease record was not touched
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_client_timeout_cancellation_does_not_strand_processing_record(tmp_path: Path) -> None:
+    """M5-A4 regression: when the dispatcher's own coroutine is cancelled
+    mid-handler (the exact effect of `asyncio.wait_for(..., timeout=...)` in
+    `api/main.py`'s request-timeout enforcement — `asyncio.CancelledError`,
+    a `BaseException`, not an `Exception`), the idempotency record must
+    still transition to FAILED, not remain stuck in PROCESSING forever.
+    """
+    kernel, storage_engine, security_engine = await _build_authenticated_kernel(tmp_path, "cancel_no_strand")
+
+    slow_spy = _CounterSpy({"result": "too_late"}, sleep_s=5.0)
+    kernel.register_capability(
+        name="test.cancel.slow",
+        description="Slower than the caller's patience",
+        provider="test",
+        handler=slow_spy,
+        requires_authentication=True,
+        required_permissions=["cancel:slow"],
+    )
+    await kernel.boot()
+
+    token = await _seed_user_with_permission(
+        storage_engine.data, security_engine, "tenant-cancel", "user-cancel", "cancel:slow"
+    )
+    key = "cancel-key-1"
+
+    request = CapabilityRequest(
+        capability_name="test.cancel.slow",
+        idempotency_key=key,
+        session_token=token,
+        context={"resource_tenant_id": "tenant-cancel"},
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(kernel.invoke_capability(request), timeout=0.1)
+
+    # Give the dispatcher's own except-block cleanup a moment to finish
+    # running (it executes as part of unwinding the cancelled task).
+    await asyncio.sleep(0.05)
+
+    idemp_store = kernel._dispatcher._resolve_idempotency_store()
+    assert idemp_store is not None
+    record = await idemp_store.get_record("tenant-cancel", key)
+    assert record is not None
+    # FAILED, not stranded in PROCESSING: `record_failed` ran during the
+    # dispatcher's cancellation cleanup, so a fresh retry can immediately
+    # claim it (proven generically by `test_failed_execution_allows_atomic_retry_claim`)
+    # rather than being permanently blocked behind a claim nobody will ever complete.
+    assert record.state == IdempotencyState.FAILED.value
 
     await kernel.shutdown()
 
