@@ -8,13 +8,20 @@ snapshot integration, Event Engine pub/sub events, and capability dispatching.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
 
 import pytest
+from argon2 import PasswordHasher
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.base_engine import EngineState
+from kortex.core.db import DatabaseEngineManager
+from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel
 from kortex.engines.event.engine import Event
+from kortex.engines.security.engine import SecurityEngine
+from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.models import (
@@ -26,16 +33,24 @@ from kortex.engines.workflow.models import (
     WorkflowStep,
 )
 
+_TEST_MASTER_KEY = b"\xcc" * 32
+_TEST_SIGNING_KEY = b"\xdd" * 32
+
 
 @pytest.mark.asyncio
 async def test_workflow_engine_kernel_integration(tmp_path: Path) -> None:
     """Integration test: Kernel boot with StorageEngine + WorkflowEngine, event tracking, and capability execution."""
     kernel = Kernel()
+    # M5-A8: explicit isolated in-memory DB — this test must never read or
+    # write the shared default local database.
+    kernel._db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
 
     storage_engine = StorageEngine(base_directory=str(tmp_path / "wf_storage"))
+    security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     workflow_engine = WorkflowEngine()
 
     kernel.register_engine(storage_engine)
+    kernel.register_engine(security_engine)
     kernel.register_engine(workflow_engine)
 
     # Boot Kernel runtime
@@ -44,6 +59,39 @@ async def test_workflow_engine_kernel_integration(tmp_path: Path) -> None:
     assert kernel.state.value == "RUNNING"
     assert storage_engine.state == EngineState.RUNNING
     assert workflow_engine.state == EngineState.RUNNING
+
+    # Seed a real SUPERVISOR principal and issue a session token — the
+    # approval decision below (M5-A1/M5-A2) must be authorized against a
+    # genuinely verified principal, not a caller-supplied approver_id alone.
+    hasher = PasswordHasher()
+
+    async def _seed_supervisor(session: AsyncSession) -> None:
+        session.add(
+            RolePermissionRecord(id=str(uuid.uuid4()), role="SUPERVISOR", permission="workflow:approve")
+        )
+        session.add(
+            PrincipalRecord(
+                id=str(uuid.uuid4()),
+                tenant_id="default",
+                principal_id="supervisor_kashan",
+                principal_type="USER",
+                credential_hash=hasher.hash("integration-test-password"),
+                roles=["SUPERVISOR"],
+                attributes={"clearance_level": "INTERNAL"},
+            )
+        )
+
+    await storage_engine.data.execute_in_transaction(_seed_supervisor)
+
+    supervisor_principal = await security_engine.authentication_manager.authenticate(
+        {
+            "principal_type": "USER",
+            "tenant_id": "default",
+            "principal_id": "supervisor_kashan",
+            "password": "integration-test-password",
+        }
+    )
+    supervisor_token = await security_engine.authentication_manager.issue_token(supervisor_principal)
 
     # Verify DI container resolution
     resolved_wf = kernel.container.resolve("engine.workflow")
@@ -99,9 +147,17 @@ async def test_workflow_engine_kernel_integration(tmp_path: Path) -> None:
         decision=ApprovalState.APPROVED,
     )
 
-    approve_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.workflow.instance.approve")
-    assert approve_handler is not None
-    await approve_handler(decision)
+    # Approve via the real Kernel dispatch boundary (not the raw test-only
+    # handler accessor used above for `instance.start`): approval decisions
+    # are exactly the sensitive path M5-A1/M5-A2 harden, so this must be
+    # exercised through actual authenticated dispatch to mean anything.
+    approve_request = CapabilityRequest(
+        capability_name="kortex.workflow.instance.approve",
+        session_token=supervisor_token,
+        parameters={"decision": decision},
+        context={"resource_tenant_id": "default"},
+    )
+    await kernel.invoke_capability(approve_request)
     for _ in range(20):
         if (
             workflow_engine.get_instance(instance.id).state == WorkflowState.COMPLETED

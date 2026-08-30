@@ -397,26 +397,33 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         if dt_from >= dt_until:
             raise WorkflowApprovalError("Delegation valid_from timestamp must precede valid_until timestamp.")
 
-        if principal is not None:
-            if principal.tenant_id != tenant_id:
-                raise AuthorizationDeniedError(
-                    f"Principal tenant '{principal.tenant_id}' does not match delegation tenant '{tenant_id}'."
-                )
-            if (
-                principal.principal_id != delegator_id
-                and "admin" not in principal.roles
-                and "SECURITY_ADMIN" not in principal.roles
-            ):
-                raise AuthorizationDeniedError(
-                    f"Principal '{principal.principal_id}' cannot delegate on behalf of delegator '{delegator_id}'."
-                )
-            has_role = (
-                role in principal.roles or "admin" in principal.roles or "SECURITY_ADMIN" in principal.roles
+        # SECURITY (M5-A2): same fail-closed requirement as `submit_decision` —
+        # a delegation must be authorized against a verified principal, never
+        # created unconditionally just because none was supplied.
+        if principal is None:
+            raise AuthorizationDeniedError(
+                "Authentication required: a role delegation must be created by a "
+                "verified, authenticated principal."
             )
-            if not has_role:
-                raise AuthorizationDeniedError(
-                    f"Delegator '{delegator_id}' does not possess role '{role}' to delegate."
-                )
+        if principal.tenant_id != tenant_id:
+            raise AuthorizationDeniedError(
+                f"Principal tenant '{principal.tenant_id}' does not match delegation tenant '{tenant_id}'."
+            )
+        if (
+            principal.principal_id != delegator_id
+            and "admin" not in principal.roles
+            and "SECURITY_ADMIN" not in principal.roles
+        ):
+            raise AuthorizationDeniedError(
+                f"Principal '{principal.principal_id}' cannot delegate on behalf of delegator '{delegator_id}'."
+            )
+        has_role = (
+            role in principal.roles or "admin" in principal.roles or "SECURITY_ADMIN" in principal.roles
+        )
+        if not has_role:
+            raise AuthorizationDeniedError(
+                f"Delegator '{delegator_id}' does not possess role '{role}' to delegate."
+            )
 
         delegation = ApprovalDelegation(
             id=uuid4(),
@@ -486,57 +493,51 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                 f"Invalid decision state '{decision.decision}'. Must be APPROVED or REJECTED."
             )
 
-        # 2. Resolve & Verify Principal Authorization & Delegation
-        if principal is None and self._security_engine is not None:
-            auth_mgr = getattr(self._security_engine, "_authentication_manager", None) or getattr(
-                self._security_engine, "authentication_manager", None
-            )
-            if auth_mgr is not None and hasattr(auth_mgr, "_load_principal"):
-                try:
-                    snap = await auth_mgr._load_principal(tid, decision.approver_id, "USER")
-                    if snap is not None:
-                        principal = SecurityPrincipal(
-                            principal_id=snap.principal_id,
-                            principal_type=snap.principal_type,
-                            tenant_id=snap.tenant_id,
-                            roles=list(snap.roles),
-                            attributes=dict(snap.attributes),
-                            enabled=snap.enabled,
-                        )
-                except Exception as err:
-                    logger.debug("Could not resolve principal for approver '%s': %s", decision.approver_id, err)
-
-        if principal is not None:
-            if principal.tenant_id != ticket.tenant_id:
-                raise AuthorizationDeniedError(
-                    f"Principal tenant '{principal.tenant_id}' does not match ticket tenant '{ticket.tenant_id}'."
-                )
-            if principal.principal_id != decision.approver_id:
-                raise AuthorizationDeniedError(
-                    f"Approver ID '{decision.approver_id}' does not match "
-                    f"authenticated principal ID '{principal.principal_id}'."
-                )
-
-            # Check direct role
-            has_role = ticket.required_role in principal.roles
-            if not has_role and ticket.required_role:
-                # Check active delegation
-                delegation = await self._store.get_active_delegation(
-                    tenant_id=ticket.tenant_id,
-                    delegatee_id=principal.principal_id,
-                    role=ticket.required_role,
-                    at_time=datetime.datetime.now(UTC),
-                )
-                if delegation is None:
-                    raise AuthorizationDeniedError(
-                        f"Principal '{principal.principal_id}' lacks required role '{ticket.required_role}' "
-                        f"and possesses no active delegation."
-                    )
-        elif ticket.required_role:
+        # 2. Verify Principal Authorization & Delegation
+        #
+        # SECURITY (M5-A2): `principal` must arrive already verified — either
+        # forwarded by the Kernel dispatcher from its own token verification
+        # (`CapabilityDispatcher._invoke_handler`, M5-A1) or supplied directly
+        # by a trusted in-process caller. There is deliberately no fallback
+        # that resolves an identity from `decision.approver_id` (a plain,
+        # caller-controlled string): looking a principal up by that ID with
+        # no credential/token check would let any caller decide as anyone
+        # they name, which is exactly the impersonation this method exists
+        # to prevent. A missing principal fails closed unconditionally, even
+        # when the ticket has no `required_role`, so a decision can never be
+        # recorded against an unverified actor identity.
+        if principal is None:
             raise AuthorizationDeniedError(
-                f"Authentication required: principal must be authenticated to satisfy "
-                f"required role '{ticket.required_role}'."
+                "Authentication required: an approval decision must be submitted by a "
+                "verified, authenticated principal — a caller-supplied approver_id alone "
+                "is not sufficient."
             )
+
+        if principal.tenant_id != ticket.tenant_id:
+            raise AuthorizationDeniedError(
+                f"Principal tenant '{principal.tenant_id}' does not match ticket tenant '{ticket.tenant_id}'."
+            )
+        if principal.principal_id != decision.approver_id:
+            raise AuthorizationDeniedError(
+                f"Approver ID '{decision.approver_id}' does not match "
+                f"authenticated principal ID '{principal.principal_id}'."
+            )
+
+        # Check direct role
+        has_role = ticket.required_role in principal.roles
+        if not has_role and ticket.required_role:
+            # Check active delegation
+            delegation = await self._store.get_active_delegation(
+                tenant_id=ticket.tenant_id,
+                delegatee_id=principal.principal_id,
+                role=ticket.required_role,
+                at_time=datetime.datetime.now(UTC),
+            )
+            if delegation is None:
+                raise AuthorizationDeniedError(
+                    f"Principal '{principal.principal_id}' lacks required role '{ticket.required_role}' "
+                    f"and possesses no active delegation."
+                )
 
         if decision.decided_at.tzinfo is None:
             decision.decided_at = decision.decided_at.replace(tzinfo=UTC)

@@ -1094,11 +1094,20 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         return instance
 
     async def submit_approval_decision(
-        self, decision: ApprovalDecision, tenant_id: str | None = None
+        self,
+        decision: ApprovalDecision,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
     ) -> WorkflowInstance:
-        """Submit an approval decision and resume workflow if approved (legacy capability handler)."""
+        """Submit an approval decision and resume workflow if approved (legacy capability handler).
+
+        `principal` (M5-A1/M5-A2): injected by the Kernel dispatcher from its
+        own verified token, never trusted from caller-supplied parameters.
+        Forwarded to `DurableApprovalManager.submit_decision`, which fails
+        closed if it is absent.
+        """
         tid = tenant_id or decision.tenant_id or "default"
-        ticket = await self._approval_manager.submit_decision(decision, tenant_id=tid)
+        ticket = await self._approval_manager.submit_decision(decision, principal=principal, tenant_id=tid)
         return await self._advance_workflow_after_approval(ticket, decision, tenant_id=tid)
 
     async def create_approval_request(

@@ -428,6 +428,12 @@ async def test_role_authorization_and_delegation_mechanics(
 
     # 10. Expired Delegation Rejection
     now = datetime.now(UTC)
+    director_principal = SecurityPrincipal(
+        principal_id="user_director",
+        principal_type=PrincipalType.USER,
+        tenant_id="tenant_corp",
+        roles=["FINANCE_DIRECTOR"],
+    )
     await durable_env.approval_manager.create_delegation(
         delegator_id="user_director",
         delegatee_id="user_clerk",
@@ -435,6 +441,7 @@ async def test_role_authorization_and_delegation_mechanics(
         valid_from=now - timedelta(days=5),
         valid_until=now - timedelta(days=1),  # Expired
         tenant_id="tenant_corp",
+        principal=director_principal,
     )
     with pytest.raises(AuthorizationDeniedError, match="lacks required role"):
         await durable_env.approval_manager.submit_decision(
@@ -465,6 +472,7 @@ async def test_role_authorization_and_delegation_mechanics(
         valid_from=now - timedelta(hours=1),
         valid_until=now + timedelta(hours=1),  # Currently active
         tenant_id="tenant_corp",
+        principal=director_principal,
     )
     approved_ticket = await durable_env.approval_manager.submit_decision(
         decision, principal=unauthorized_principal, tenant_id="tenant_corp"

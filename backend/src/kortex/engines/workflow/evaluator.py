@@ -71,10 +71,14 @@ class StepEvaluator:
         if step.is_approval_step:
             logger.info("Step '%s' requires human approval.", step.id)
             role = step.required_approval_role or "APPROVAL_ROLE"
+            # M5-A2: the ticket must carry the workflow instance's own tenant,
+            # not the approval manager's "default" fallback — otherwise the
+            # ticket is invisible to (and undecidable by) its owning tenant.
             await self._approval_manager.create_request(
                 instance_id=instance.id,
                 step_id=step.id,
                 required_role=role,
+                tenant_id=instance.tenant_id,
             )
             WorkflowStateMachine.transition(instance, WorkflowState.WAITING)
             return ExecutionResult(
