@@ -731,6 +731,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         initial_context: dict[str, Any] | None = None,
         session_token: dict[str, Any] | None = None,
         tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
     ) -> WorkflowInstance:
         """Instantiate, persist, and start executing a registered workflow definition.
 
@@ -740,14 +741,23 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             session_token: Optional opaque session token blob (matching
                 `TokenPayload`'s own field shape), carried through to every
                 step's capability dispatch via `Kernel.invoke_capability()`.
-            tenant_id: Optional tenant identifier. If omitted, extracted from
-                session_token or defaults to "default".
+            tenant_id: Optional tenant identifier, used only when no
+                authenticated `principal` is present. If omitted, extracted
+                from session_token or defaults to "default".
+            principal: Dispatcher-injected, verified caller identity (M6.0-3).
+                When present, its `tenant_id` is authoritative and both the
+                `tenant_id` parameter and any `tenant_id` embedded in
+                `session_token` are ignored — neither is a trustworthy source
+                of tenant scope once a real identity has been verified.
 
         Returns:
             Instantiated WorkflowInstance object.
         """
-        # Resolve tenant ID
-        tid = tenant_id
+        # Resolve tenant ID — an authenticated principal is always authoritative
+        # over a caller-supplied tenant_id or an embedded session_token claim
+        # (M6.0-3: closing a gap where either could be used to create a
+        # workflow instance inside an arbitrary tenant's namespace).
+        tid = principal.tenant_id if principal is not None else tenant_id
         if not tid and session_token and isinstance(session_token, dict):
             tid = session_token.get("tenant_id")
         tid = tid or "default"
@@ -952,10 +962,15 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
 
     # -- Pause, Resume, Cancel, Approval APIs -------------------------------
 
-    async def pause_workflow(self, instance_id: UUID | str, tenant_id: str | None = None) -> WorkflowInstance:
+    async def pause_workflow(
+        self,
+        instance_id: UUID | str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> WorkflowInstance:
         """Pause a running workflow instance."""
         target_id = UUID(str(instance_id)) if not isinstance(instance_id, UUID) else instance_id
-        instance = await self.get_instance_durable(target_id, tenant_id=tenant_id)
+        instance = await self.get_instance_durable(target_id, tenant_id=tenant_id, principal=principal)
         if instance.state != WorkflowState.RUNNING:
             raise WorkflowStateError(f"Cannot pause workflow in state '{instance.state.value}'.")
 
@@ -970,10 +985,21 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         )
         return instance
 
-    async def resume_workflow(self, instance_id: UUID | str, tenant_id: str | None = None) -> WorkflowInstance:
-        """Resume a paused or approved workflow instance. Terminal states are never resumed."""
+    async def resume_workflow(
+        self,
+        instance_id: UUID | str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> WorkflowInstance:
+        """Resume a paused or approved workflow instance. Terminal states are never resumed.
+
+        `principal`, when present (the normal case for this authenticated
+        capability), is authoritative over `tenant_id` when resolving the
+        target instance — closing a gap where a caller-supplied `tenant_id`
+        could resume another tenant's instance (M6.0-3).
+        """
         target_id = UUID(str(instance_id)) if not isinstance(instance_id, UUID) else instance_id
-        instance = await self.get_instance_durable(target_id, tenant_id=tenant_id)
+        instance = await self.get_instance_durable(target_id, tenant_id=tenant_id, principal=principal)
 
         if instance.state not in (WorkflowState.WAITING, WorkflowState.APPROVED, WorkflowState.RUNNING):
             raise WorkflowStateError(f"Cannot resume workflow in state '{instance.state.value}'.")
@@ -999,11 +1025,19 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         return instance
 
     async def cancel_workflow(
-        self, instance_id: UUID | str, reason: str = "", tenant_id: str | None = None
+        self,
+        instance_id: UUID | str,
+        reason: str = "",
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
     ) -> WorkflowInstance:
-        """Cancel a running or waiting workflow instance. Terminal states cannot be cancelled."""
+        """Cancel a running or waiting workflow instance. Terminal states cannot be cancelled.
+
+        See `resume_workflow` for the `principal`-over-`tenant_id` precedence
+        rule this handler applies (M6.0-3).
+        """
         target_id = UUID(str(instance_id)) if not isinstance(instance_id, UUID) else instance_id
-        instance = await self.get_instance_durable(target_id, tenant_id=tenant_id)
+        instance = await self.get_instance_durable(target_id, tenant_id=tenant_id, principal=principal)
 
         if instance.state in (WorkflowState.COMPLETED, WorkflowState.FAILED, WorkflowState.CANCELLED):
             raise WorkflowStateError(
@@ -1119,10 +1153,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         context_snapshot: dict[str, Any] | None = None,
         signature_required: bool = False,
         tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Create an approval request ticket (kortex.workflow.approval.create capability)."""
-        tid = tenant_id or "default"
+        """Create an approval request ticket (kortex.workflow.approval.create capability).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` — the ticket is always created under the authenticated
+        caller's own tenant, never an arbitrary tenant the caller names
+        (M6.0-3).
+        """
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         req = await self._approval_manager.create_request(
             instance_id=instance_id,
             step_id=step_id,
@@ -1148,10 +1189,15 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         tenant_id: str | None = None,
         role_filter: str | None = None,
         state_filter: str | None = None,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> list[dict[str, Any]]:
-        """List approval request tickets for tenant (kortex.workflow.approval.list capability)."""
-        tid = tenant_id or "default"
+        """List approval request tickets for tenant (kortex.workflow.approval.list capability).
+
+        See `create_approval_request` for the `principal`-over-`tenant_id`
+        precedence rule this handler applies (M6.0-3).
+        """
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         requests: list[ApprovalRequest]
         if hasattr(self._approval_manager, "list_requests"):
             requests = await self._approval_manager.list_requests(
@@ -1180,15 +1226,25 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self,
         request_id: str | UUID,
         tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Get approval request ticket by ID (kortex.workflow.approval.get capability)."""
-        tid = tenant_id or "default"
+        """Get approval request ticket by ID (kortex.workflow.approval.get capability).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` when fetching the ticket; the ticket's own persisted
+        tenant is then independently re-verified against the principal
+        (defense in depth, mirroring `DurableApprovalManager.submit_decision`'s
+        pattern) rather than trusting the store's own filter alone (M6.0-3).
+        """
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         if hasattr(self._approval_manager, "get_request"):
             req = await self._approval_manager.get_request(request_id, tenant_id=tid)
         else:
             req = None
         if req is None:
+            raise ResourceNotFoundError(f"Approval request '{request_id}' not found for tenant '{tid}'.")
+        if principal is not None and req.tenant_id != principal.tenant_id:
             raise ResourceNotFoundError(f"Approval request '{request_id}' not found for tenant '{tid}'.")
         return {
             "id": str(req.id),
@@ -1405,18 +1461,30 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         return instance
 
     async def get_instance_durable(
-        self, instance_id: UUID | str, tenant_id: str | None = None
+        self,
+        instance_id: UUID | str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
     ) -> WorkflowInstance:
-        """Retrieve a WorkflowInstance with read-through to persistent store and tenant isolation."""
+        """Retrieve a WorkflowInstance with read-through to persistent store and tenant isolation.
+
+        `tenant_id` is used only when no authenticated `principal` is present
+        (e.g. an internal, principal-less caller such as
+        `sweep_expired_approvals`). When a `principal` is present, its own
+        `tenant_id` is authoritative and a caller-supplied `tenant_id` is
+        ignored — closing a gap where a mismatched tenant_id could read
+        another tenant's instance (M6.0-3).
+        """
+        tid = principal.tenant_id if principal is not None else tenant_id
         target_id = UUID(str(instance_id)) if not isinstance(instance_id, UUID) else instance_id
         if target_id in self._instances:
             cached_instance = self._instances[target_id]
-            if tenant_id and cached_instance.tenant_id != tenant_id:
+            if tid and cached_instance.tenant_id != tid:
                 raise ResourceNotFoundError(f"Workflow instance '{target_id}' not found.")
             return cached_instance
 
         if self._workflow_store:
-            stored_instance = await self._workflow_store.get_instance(target_id, tenant_id=tenant_id)
+            stored_instance = await self._workflow_store.get_instance(target_id, tenant_id=tid)
             if stored_instance is not None:
                 self._instances[stored_instance.id] = stored_instance
                 return stored_instance
@@ -1430,19 +1498,27 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         return list(self._instances.values())
 
     async def list_instances_durable(
-        self, tenant_id: str | None = None, state: str | None = None
+        self,
+        tenant_id: str | None = None,
+        state: str | None = None,
+        principal: SecurityPrincipal | None = None,
     ) -> list[WorkflowInstance]:
-        """List WorkflowInstance objects from durable storage matching tenant and state filters."""
+        """List WorkflowInstance objects from durable storage matching tenant and state filters.
+
+        See `get_instance_durable` for the `principal`-over-`tenant_id`
+        precedence rule this handler applies (M6.0-3).
+        """
+        tid = principal.tenant_id if principal is not None else tenant_id
         state_filter = WorkflowState(state) if state and state in WorkflowState._value2member_map_ else None
         if self._workflow_store:
-            instances = await self._workflow_store.list_instances(tenant_id=tenant_id, state_filter=state_filter)
+            instances = await self._workflow_store.list_instances(tenant_id=tid, state_filter=state_filter)
             for inst in instances:
                 self._instances[inst.id] = inst
             return instances
         # Fallback to in-memory list
         filtered = list(self._instances.values())
-        if tenant_id:
-            filtered = [i for i in filtered if i.tenant_id == tenant_id]
+        if tid:
+            filtered = [i for i in filtered if i.tenant_id == tid]
         if state_filter:
             filtered = [i for i in filtered if i.state == state_filter]
         return filtered
@@ -1524,12 +1600,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self,
         tenant_id: str | None = None,
         status: str | None = None,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> list[dict[str, Any]]:
-        """List workflow schedules for tenant (kortex.workflow.schedule.list capability)."""
+        """List workflow schedules for tenant (kortex.workflow.schedule.list capability).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` (M6.0-3).
+        """
         if self._scheduler is None:
             return []
-        tid = tenant_id or "default"
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         schedules = await self._scheduler.list_schedules(tenant_id=tid, status=status)
         return [
             {
@@ -1551,12 +1632,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self,
         schedule_id: str,
         tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Get workflow schedule by ID or name (kortex.workflow.schedule.get capability)."""
+        """Get workflow schedule by ID or name (kortex.workflow.schedule.get capability).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` (M6.0-3).
+        """
         if self._scheduler is None:
             raise ScheduleNotFoundError("Scheduler subsystem is not initialized.")
-        tid = tenant_id or "default"
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         try:
             target_uuid = UUID(schedule_id)
             sch = await self._scheduler.get_schedule(target_uuid, tenant_id=tid)
@@ -1728,12 +1814,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self,
         execution_id: str,
         tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Get external execution record by ID (kortex.workflow.external.get capability)."""
+        """Get external execution record by ID (kortex.workflow.external.get capability).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` (M6.0-3).
+        """
         if self._external_executor is None:
             raise ResourceNotFoundError("External execution subsystem is not initialized.")
-        tid = tenant_id or "default"
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         record = await self._external_executor.get_execution(execution_id, tenant_id=tid)
         if record is None:
             raise ResourceNotFoundError(f"External execution '{execution_id}' not found in tenant '{tid}'.")
@@ -1754,12 +1845,17 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         tenant_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
+        principal: SecurityPrincipal | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> list[dict[str, Any]]:
-        """List external execution records for tenant (kortex.workflow.external.list capability)."""
+        """List external execution records for tenant (kortex.workflow.external.list capability).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` (M6.0-3).
+        """
         if self._external_executor is None:
             return []
-        tid = tenant_id or "default"
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
         records = await self._external_executor.list_executions(
             tenant_id=tid, status=status, limit=limit
         )
