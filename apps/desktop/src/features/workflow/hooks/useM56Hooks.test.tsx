@@ -63,7 +63,16 @@ beforeEach(() => {
 
 describe("usePendingApprovals", () => {
   it("starts pending, resolves to approval list on success", async () => {
-    const approval = { requestId: "req-1", workflowName: "Demo", status: "PENDING" };
+    const approval = {
+      id: "req-1",
+      tenantId: "acme",
+      instanceId: null,
+      stepId: null,
+      requiredRole: "admin",
+      state: "PENDING",
+      timeoutAt: null,
+      signatureRequired: false,
+    };
     listPendingApprovalsMock.mockResolvedValueOnce([approval]);
 
     const { result } = renderHook(() => usePendingApprovals(), { wrapper });
@@ -100,12 +109,18 @@ describe("useSubmitApprovalDecision", () => {
     listPendingApprovalsMock.mockResolvedValueOnce([]);
 
     const { result } = renderHook(() => useSubmitApprovalDecision(), { wrapper });
-    await result.current.mutateAsync({ requestId: "req-1", decision: "APPROVED", rationale: "OK" });
+    await result.current.mutateAsync({
+      requestId: "req-1",
+      decision: "APPROVED",
+      approverId: "alice",
+      reason: "OK",
+    });
 
     expect(submitApprovalDecisionMock).toHaveBeenCalledWith({
       requestId: "req-1",
       decision: "APPROVED",
-      rationale: "OK",
+      approverId: "alice",
+      reason: "OK",
     });
   });
 });
@@ -116,7 +131,18 @@ describe("useSubmitApprovalDecision", () => {
 
 describe("useSchedules", () => {
   it("starts pending, resolves to schedule list on success", async () => {
-    const sched = { scheduleId: "sched-1", cronExpression: "0 9 * * *", status: "ACTIVE" };
+    const sched = {
+      id: "sched-1",
+      name: "daily-sync",
+      definitionId: "wf-1",
+      scheduleType: "CRON",
+      cronExpression: "0 9 * * *",
+      intervalSeconds: null,
+      nextRunAt: null,
+      status: "ACTIVE",
+      runCount: 0,
+      tenantId: "acme",
+    };
     listSchedulesMock.mockResolvedValueOnce([sched]);
 
     const { result } = renderHook(() => useSchedules(), { wrapper });
@@ -142,7 +168,17 @@ describe("useSchedules", () => {
 
 describe("useExternalExecutions", () => {
   it("starts pending, resolves to execution list on success", async () => {
-    const exec = { executionId: "exec-1", status: "COMPLETED" };
+    const exec = {
+      id: "exec-1",
+      status: "COMPLETED",
+      target: "kortex.some.capability",
+      output: null,
+      error: null,
+      attempts: 1,
+      executionTimeMs: 12.5,
+      approvalRequestId: null,
+      tenantId: "acme",
+    };
     listExternalExecutionsMock.mockResolvedValueOnce([exec]);
 
     const { result } = renderHook(() => useExternalExecutions(), { wrapper });

@@ -1,5 +1,5 @@
 /**
- * IPC capability wrappers for the Workflow workspace (M5.6).
+ * IPC capability wrappers for the Workflow workspace (M5.6, hardened M5-A6).
  *
  * All calls use the existing generic IPC path:
  *   React → invokeCapability → Tauri invoke_capability → Rust → backend CapabilityDispatcher
@@ -7,6 +7,12 @@
  * No dedicated Tauri commands are introduced. Snake_case backend fields are
  * mapped to camelCase in all `to*` mapper functions — the UI layer never
  * touches raw wire shapes.
+ *
+ * Every `Raw*` interface and every capability's request-parameter names below
+ * were verified directly against the backend handler source
+ * (`backend/src/kortex/engines/workflow/engine.py`) and the domain models it
+ * returns or hand-builds — not assumed. See `./types.ts`'s module docstring
+ * for the full account of what the pre-M5-A6 version of this file got wrong.
  *
  * Sensitive fields (raw step parameters, compensation contexts, credential
  * handles, shell environment variables) are deliberately excluded from all
@@ -17,18 +23,18 @@ import { invokeCapability } from "@/ipc/client";
 import type {
   ApprovalDecisionPayload,
   ApprovalRequest,
-  ApprovalStatus,
+  ApprovalState,
   CreateSchedulePayload,
   DelegationPayload,
   ExternalExecution,
   ExternalExecutionStatus,
   ScheduleStatus,
-  StepRecord,
-  StepStatus,
+  ScheduleType,
   WorkflowDefinition,
   WorkflowInstance,
   WorkflowPriority,
   WorkflowSchedule,
+  WorkflowState,
   WorkflowStatus,
   WorkflowTrigger,
 } from "./types";
@@ -84,18 +90,10 @@ async function invoke(
 
 // ---------------------------------------------------------------------------
 // Raw Wire Shapes
+//
+// Definitions unchanged from the original M5.6 slice — `list_definitions`
+// returns real `WorkflowDefinition` models and this shape already matched.
 // ---------------------------------------------------------------------------
-
-interface RawStep {
-  step_id: string;
-  step_name: string;
-  capability_name?: string | null;
-  status: string;
-  started_at?: string | null;
-  completed_at?: string | null;
-  error_message?: string | null;
-  attempt_number?: number;
-}
 
 interface RawWorkflowStep {
   id: string;
@@ -115,93 +113,69 @@ interface RawWorkflowDefinition {
   steps?: RawWorkflowStep[];
 }
 
+/** The raw `WorkflowInstance` Pydantic model, verbatim — see types.ts. */
 interface RawWorkflowInstance {
-  instance_id: string;
+  id: string;
+  definition_id: string;
+  definition_version: string;
   tenant_id: string;
-  workflow_id: string;
-  workflow_name: string;
-  workflow_version: string;
-  status: string;
-  trigger: string;
-  priority: string;
   current_step_index: number;
-  total_steps: number;
-  steps?: RawStep[];
-  error_message?: string | null;
-  started_at: string;
-  completed_at?: string | null;
-  timeout_seconds: number;
-  correlation_id?: string | null;
+  current_step_id?: string | null;
+  state: string;
+  status: string;
+  trace_id: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
 }
 
+/** The hand-built dict every `kortex.workflow.approval.*` handler returns.
+ * `context_snapshot` is present only from `get_approval_request`. */
 interface RawApprovalRequest {
-  request_id: string;
-  tenant_id: string;
-  instance_id: string;
-  step_id: string;
-  workflow_name?: string;
-  required_role: string;
-  requester_principal_id?: string;
-  status: string;
-  context?: Record<string, unknown>;
-  expires_at?: string | null;
-  created_at: string;
-  decided_at?: string | null;
-  decider_principal_id?: string | null;
-  decision_rationale?: string | null;
-}
-
-interface RawSchedule {
-  schedule_id: string;
-  tenant_id: string;
-  workflow_id: string;
-  workflow_name?: string;
-  cron_expression: string;
-  status: string;
-  next_run_at?: string | null;
-  last_run_at?: string | null;
-  last_run_status?: string | null;
-  run_count?: number;
-  max_runs?: number | null;
-  created_at: string;
-  description?: string;
-}
-
-interface RawExternalExecution {
-  execution_id: string;
+  id: string;
   tenant_id: string;
   instance_id?: string | null;
-  workflow_id?: string | null;
-  executable: string;
-  arguments?: string[];
-  working_directory?: string | null;
+  step_id?: string | null;
+  required_role: string;
+  state: string;
+  timeout_at?: string | null;
+  signature_required: boolean;
+  context_snapshot?: Record<string, unknown>;
+}
+
+/** The hand-built dict every `kortex.workflow.schedule.*` handler returns.
+ * `last_run_at` is present only from `get_schedule`, `run_count` only from
+ * `list_schedules`/`get_schedule` (not `create_schedule`/pause/resume/cancel). */
+interface RawWorkflowSchedule {
+  id: string;
+  name: string;
+  definition_id: string;
+  schedule_type: string;
+  cron_expression?: string | null;
+  interval_seconds?: number | null;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
   status: string;
-  exit_code?: number | null;
-  stdout?: string | null;
-  stderr?: string | null;
-  timeout_seconds?: number;
-  started_at: string;
-  completed_at?: string | null;
+  run_count?: number;
+  tenant_id: string;
+}
+
+/** The hand-built dict every `kortex.workflow.external.*` handler returns. */
+interface RawExternalExecution {
+  id: string;
+  status: string;
+  target: string;
+  output: unknown;
+  error?: string | null;
+  attempts: number;
+  execution_time_ms: number;
   approval_request_id?: string | null;
-  circuit_breaker_open?: boolean;
+  tenant_id: string;
 }
 
 // ---------------------------------------------------------------------------
 // Mapper Functions (snake_case → camelCase)
 // ---------------------------------------------------------------------------
-
-function toStep(raw: RawStep): StepRecord {
-  return {
-    stepId: raw.step_id,
-    stepName: raw.step_name,
-    capabilityName: raw.capability_name ?? null,
-    status: raw.status as StepStatus,
-    startedAt: raw.started_at ?? null,
-    completedAt: raw.completed_at ?? null,
-    errorMessage: raw.error_message ?? null,
-    attemptNumber: raw.attempt_number ?? 1,
-  };
-}
 
 function toDefinitionStep(raw: RawWorkflowStep) {
   return {
@@ -227,80 +201,62 @@ function toDefinition(raw: RawWorkflowDefinition): WorkflowDefinition {
 
 function toInstance(raw: RawWorkflowInstance): WorkflowInstance {
   return {
-    instanceId: raw.instance_id,
+    id: raw.id,
+    definitionId: raw.definition_id,
+    definitionVersion: raw.definition_version,
     tenantId: raw.tenant_id,
-    workflowId: raw.workflow_id,
-    workflowName: raw.workflow_name,
-    workflowVersion: raw.workflow_version,
-    status: raw.status as WorkflowStatus,
-    trigger: raw.trigger as WorkflowTrigger,
-    priority: raw.priority as WorkflowPriority,
     currentStepIndex: raw.current_step_index,
-    totalSteps: raw.total_steps,
-    steps: (raw.steps ?? []).map(toStep),
-    errorMessage: raw.error_message ?? null,
-    startedAt: raw.started_at,
-    completedAt: raw.completed_at ?? null,
-    timeoutSeconds: raw.timeout_seconds,
-    correlationId: raw.correlation_id ?? null,
+    currentStepId: raw.current_step_id ?? null,
+    state: raw.state as WorkflowState,
+    status: raw.status as WorkflowStatus,
+    traceId: raw.trace_id,
+    version: raw.version,
+    createdAt: raw.created_at,
+    updatedAt: raw.updated_at,
   };
 }
 
 function toApproval(raw: RawApprovalRequest): ApprovalRequest {
   return {
-    requestId: raw.request_id,
+    id: raw.id,
     tenantId: raw.tenant_id,
-    instanceId: raw.instance_id,
-    stepId: raw.step_id,
-    workflowName: raw.workflow_name ?? "",
+    instanceId: raw.instance_id ?? null,
+    stepId: raw.step_id ?? null,
     requiredRole: raw.required_role,
-    requesterPrincipalId: raw.requester_principal_id ?? "",
-    status: raw.status as ApprovalStatus,
-    context: raw.context ?? {},
-    expiresAt: raw.expires_at ?? null,
-    createdAt: raw.created_at,
-    decidedAt: raw.decided_at ?? null,
-    deciderPrincipalId: raw.decider_principal_id ?? null,
-    decisionRationale: raw.decision_rationale ?? null,
+    state: raw.state as ApprovalState,
+    timeoutAt: raw.timeout_at ?? null,
+    signatureRequired: raw.signature_required,
+    contextSnapshot: raw.context_snapshot,
   };
 }
 
-function toSchedule(raw: RawSchedule): WorkflowSchedule {
+function toSchedule(raw: RawWorkflowSchedule): WorkflowSchedule {
   return {
-    scheduleId: raw.schedule_id,
-    tenantId: raw.tenant_id,
-    workflowId: raw.workflow_id,
-    workflowName: raw.workflow_name ?? "",
-    cronExpression: raw.cron_expression,
-    status: raw.status as ScheduleStatus,
+    id: raw.id,
+    name: raw.name,
+    definitionId: raw.definition_id,
+    scheduleType: raw.schedule_type as ScheduleType,
+    cronExpression: raw.cron_expression ?? null,
+    intervalSeconds: raw.interval_seconds ?? null,
     nextRunAt: raw.next_run_at ?? null,
-    lastRunAt: raw.last_run_at ?? null,
-    lastRunStatus: raw.last_run_status ?? null,
+    lastRunAt: raw.last_run_at,
+    status: raw.status as ScheduleStatus,
     runCount: raw.run_count ?? 0,
-    maxRuns: raw.max_runs ?? null,
-    createdAt: raw.created_at,
-    description: raw.description ?? "",
+    tenantId: raw.tenant_id,
   };
 }
 
 function toExternalExecution(raw: RawExternalExecution): ExternalExecution {
   return {
-    executionId: raw.execution_id,
-    tenantId: raw.tenant_id,
-    instanceId: raw.instance_id ?? null,
-    workflowId: raw.workflow_id ?? null,
-    executable: raw.executable,
-    arguments: raw.arguments ?? [],
-    workingDirectory: raw.working_directory ?? null,
+    id: raw.id,
     status: raw.status as ExternalExecutionStatus,
-    exitCode: raw.exit_code ?? null,
-    stdout: raw.stdout ?? null,
-    stderr: raw.stderr ?? null,
-    timeoutSeconds: raw.timeout_seconds ?? 30,
-    startedAt: raw.started_at,
-    completedAt: raw.completed_at ?? null,
+    target: raw.target,
+    output: raw.output ?? null,
+    error: raw.error ?? null,
+    attempts: raw.attempts,
+    executionTimeMs: raw.execution_time_ms,
     approvalRequestId: raw.approval_request_id ?? null,
-    circuitBreakerOpen: raw.circuit_breaker_open ?? false,
+    tenantId: raw.tenant_id,
   };
 }
 
@@ -315,26 +271,29 @@ export async function listWorkflowDefinitions(): Promise<WorkflowDefinition[]> {
 }
 
 export async function startWorkflowInstance(
-  workflowId: string,
-  context: Record<string, unknown> = {},
+  definitionId: string,
+  initialContext: Record<string, unknown> = {},
 ): Promise<WorkflowInstance> {
-  const raw = await invoke("kortex.workflow.instance.start", { workflow_id: workflowId, context });
+  const raw = await invoke("kortex.workflow.instance.start", {
+    definition_id: definitionId,
+    initial_context: initialContext,
+  });
   return toInstance(raw as RawWorkflowInstance);
 }
 
 // ---------------------------------------------------------------------------
 // Instance API (M5.1)
+//
+// `list_instances_durable(tenant_id, state)` has no `limit` and no
+// `workflow_id`/`status` filter parameters — those were invented. The only
+// supported filter is `state` (a `WorkflowState`, not `WorkflowStatus`).
 // ---------------------------------------------------------------------------
 
 export async function listWorkflowInstances(filters?: {
-  workflowId?: string;
-  status?: string;
-  limit?: number;
+  state?: WorkflowState;
 }): Promise<WorkflowInstance[]> {
   const raw = await invoke("kortex.workflow.instance.list", {
-    workflow_id: filters?.workflowId ?? null,
-    status: filters?.status ?? null,
-    limit: filters?.limit ?? 50,
+    state: filters?.state ?? null,
   });
   const arr = Array.isArray(raw) ? raw : [];
   return (arr as RawWorkflowInstance[]).map(toInstance);
@@ -361,7 +320,7 @@ export async function resumeWorkflowInstance(instanceId: string): Promise<void> 
 // ---------------------------------------------------------------------------
 
 export async function listPendingApprovals(): Promise<ApprovalRequest[]> {
-  const raw = await invoke("kortex.workflow.approval.list", { status: "PENDING" });
+  const raw = await invoke("kortex.workflow.approval.list", { state_filter: "PENDING" });
   const arr = Array.isArray(raw) ? raw : [];
   return (arr as RawApprovalRequest[]).map(toApproval);
 }
@@ -371,19 +330,31 @@ export async function getApprovalRequest(requestId: string): Promise<ApprovalReq
   return toApproval(raw as RawApprovalRequest);
 }
 
+/**
+ * `decide_approval_request` requires `approver_id` (the deciding operator's
+ * own principal ID — the backend rejects a mismatch against the
+ * dispatcher-verified caller, M5-A2) and reads `reason`, not `rationale`.
+ */
 export async function submitApprovalDecision(payload: ApprovalDecisionPayload): Promise<void> {
   await invoke("kortex.workflow.approval.decide", {
     request_id: payload.requestId,
     decision: payload.decision,
-    rationale: payload.rationale,
+    approver_id: payload.approverId,
+    reason: payload.reason,
   });
 }
 
+/**
+ * `delegate_approval_role(delegator_id, delegatee_id, role, valid_from,
+ * valid_until, ...)` — a time-bounded role grant, not a per-ticket action.
+ */
 export async function delegateApproval(payload: DelegationPayload): Promise<void> {
   await invoke("kortex.workflow.approval.delegate", {
-    request_id: payload.requestId,
-    delegate_to_principal_id: payload.delegateToPrincipalId,
-    reason: payload.reason,
+    delegator_id: payload.delegatorId,
+    delegatee_id: payload.delegateeId,
+    role: payload.role,
+    valid_from: payload.validFrom,
+    valid_until: payload.validUntil,
   });
 }
 
@@ -394,22 +365,30 @@ export async function delegateApproval(payload: DelegationPayload): Promise<void
 export async function listSchedules(): Promise<WorkflowSchedule[]> {
   const raw = await invoke("kortex.workflow.schedule.list");
   const arr = Array.isArray(raw) ? raw : [];
-  return (arr as RawSchedule[]).map(toSchedule);
+  return (arr as RawWorkflowSchedule[]).map(toSchedule);
 }
 
 export async function getSchedule(scheduleId: string): Promise<WorkflowSchedule> {
   const raw = await invoke("kortex.workflow.schedule.get", { schedule_id: scheduleId });
-  return toSchedule(raw as RawSchedule);
+  return toSchedule(raw as RawWorkflowSchedule);
 }
 
+/**
+ * `create_schedule(name, definition_id, schedule_type="INTERVAL", ...)` —
+ * `name` and `definitionId` are required with no backend default.
+ */
 export async function createSchedule(payload: CreateSchedulePayload): Promise<WorkflowSchedule> {
   const raw = await invoke("kortex.workflow.schedule.create", {
-    workflow_id: payload.workflowId,
-    cron_expression: payload.cronExpression,
-    description: payload.description,
-    max_runs: payload.maxRuns,
+    name: payload.name,
+    definition_id: payload.definitionId,
+    schedule_type: payload.scheduleType,
+    cron_expression: payload.cronExpression ?? null,
+    interval_seconds: payload.intervalSeconds ?? null,
+    run_at: payload.runAt ?? null,
+    max_runs: payload.maxRuns ?? null,
+    timezone: payload.timezone ?? "UTC",
   });
-  return toSchedule(raw as RawSchedule);
+  return toSchedule(raw as RawWorkflowSchedule);
 }
 
 export async function pauseSchedule(scheduleId: string): Promise<void> {
@@ -433,12 +412,10 @@ export async function triggerScheduleNow(scheduleId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function listExternalExecutions(filters?: {
-  instanceId?: string;
-  status?: string;
+  status?: ExternalExecutionStatus;
   limit?: number;
 }): Promise<ExternalExecution[]> {
   const raw = await invoke("kortex.workflow.external.list", {
-    instance_id: filters?.instanceId ?? null,
     status: filters?.status ?? null,
     limit: filters?.limit ?? 50,
   });
@@ -449,4 +426,11 @@ export async function listExternalExecutions(filters?: {
 export async function getExternalExecution(executionId: string): Promise<ExternalExecution> {
   const raw = await invoke("kortex.workflow.external.get", { execution_id: executionId });
   return toExternalExecution(raw as RawExternalExecution);
+}
+
+/** `kortex.workflow.external.cancel` — fully implemented server-side
+ * (`cancel_external_execution`) but the M5.6 UI never exposed a control for
+ * it at all (M5-A7). */
+export async function cancelExternalExecution(executionId: string): Promise<void> {
+  await invoke("kortex.workflow.external.cancel", { execution_id: executionId });
 }

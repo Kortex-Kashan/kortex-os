@@ -40,6 +40,20 @@ vi.mock("../api", async () => {
   };
 });
 
+// Stub useAuth so ApprovalQueue (which reads the current principal to submit
+// decisions/delegations as, M5-A2) works without a real AuthProvider in
+// these tab-navigation-focused tests.
+vi.mock("@/auth/AuthProvider", () => ({
+  useAuth: () => ({
+    state: {
+      status: "AUTHENTICATED",
+      identity: { tenantId: "acme", principalId: "alice", principalType: "USER", roles: [] },
+    },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+}));
+
 import { WorkflowApp } from "./WorkflowApp";
 
 function renderApp() {
@@ -121,20 +135,14 @@ describe("WorkflowApp tab navigation", () => {
   it("shows pending approval badge count when approvals exist", async () => {
     listPendingApprovalsMock.mockResolvedValue([
       {
-        requestId: "req-1",
-        workflowName: "Demo",
-        status: "PENDING",
-        requiredRole: "admin",
-        requesterPrincipalId: "alice",
+        id: "req-1",
+        tenantId: "acme",
         instanceId: "inst-1",
         stepId: "s1",
-        tenantId: "acme",
-        context: {},
-        expiresAt: null,
-        createdAt: "2026-01-01T00:00:00Z",
-        decidedAt: null,
-        deciderPrincipalId: null,
-        decisionRationale: null,
+        requiredRole: "admin",
+        state: "PENDING",
+        timeoutAt: null,
+        signatureRequired: false,
       },
     ]);
 

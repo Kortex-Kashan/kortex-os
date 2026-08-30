@@ -5,7 +5,7 @@ import {
   submitApprovalDecision,
   WorkflowAccessDeniedError,
 } from "../api";
-import type { ApprovalDecision } from "../types";
+import type { ApprovalDecisionPayload, DelegationPayload } from "../types";
 
 export const APPROVALS_QUERY_KEY = ["workflow", "approvals", "pending"] as const;
 
@@ -27,34 +27,19 @@ export function usePendingApprovals() {
 export function useSubmitApprovalDecision() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      requestId,
-      decision,
-      rationale,
-    }: {
-      requestId: string;
-      decision: ApprovalDecision;
-      rationale: string;
-    }) => submitApprovalDecision({ requestId, decision, rationale }),
+    mutationFn: (payload: ApprovalDecisionPayload) => submitApprovalDecision(payload),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: APPROVALS_QUERY_KEY });
     },
   });
 }
 
-/** Delegates an approval request to another principal. */
+/** Delegates an approval's required role to another principal for a
+ * time-bounded window. */
 export function useDelegateApproval() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      requestId,
-      delegateToPrincipalId,
-      reason,
-    }: {
-      requestId: string;
-      delegateToPrincipalId: string;
-      reason: string;
-    }) => delegateApproval({ requestId, delegateToPrincipalId, reason }),
+    mutationFn: (payload: DelegationPayload) => delegateApproval(payload),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: APPROVALS_QUERY_KEY });
     },

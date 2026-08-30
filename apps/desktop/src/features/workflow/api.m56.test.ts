@@ -1,9 +1,15 @@
 /**
  * M5.6 — Workflow Instance, Approval, Schedule, and External Execution API tests.
  *
- * Tests snake_case→camelCase mapping and error dispatch for all new
- * M5.6 IPC capability wrappers. Complements api.test.ts which covers
- * the existing listWorkflowDefinitions.
+ * Hardened M5-A6: every fixture below is the ACTUAL backend response shape
+ * (the real `WorkflowInstance` model fields, or the exact hand-built dict
+ * each approval/schedule/external-execution capability handler returns —
+ * verified against `backend/src/kortex/engines/workflow/engine.py`), not
+ * an invented shape the frontend happened to expect. The pre-M5-A6 version
+ * of this file's fixtures were authored to match the frontend's own wrong
+ * `Raw*` interfaces, which is exactly why the mismatch shipped undetected —
+ * this file's tests passed while asserting a contract that did not exist in
+ * production.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +21,7 @@ vi.mock("@/ipc/client", () => ({
 }));
 
 import {
+  cancelExternalExecution,
   cancelSchedule,
   cancelWorkflowInstance,
   createSchedule,
@@ -61,37 +68,22 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Shared fixtures
+// Shared fixtures — the real WorkflowInstance model, verbatim
 // ---------------------------------------------------------------------------
 
 const rawInstance = {
-  instance_id: "inst-1",
+  id: "inst-1",
+  definition_id: "wf-1",
+  definition_version: "1.0.0",
   tenant_id: "acme",
-  workflow_id: "wf-1",
-  workflow_name: "Demo",
-  workflow_version: "1.0",
-  status: "RUNNING",
-  trigger: "MANUAL",
-  priority: "NORMAL",
   current_step_index: 0,
-  total_steps: 2,
-  steps: [
-    {
-      step_id: "s1",
-      step_name: "Step 1",
-      capability_name: "cap.do",
-      status: "RUNNING",
-      started_at: "2026-01-01T00:00:00Z",
-      completed_at: null,
-      error_message: null,
-      attempt_number: 1,
-    },
-  ],
-  error_message: null,
-  started_at: "2026-01-01T00:00:00Z",
-  completed_at: null,
-  timeout_seconds: 300,
-  correlation_id: null,
+  current_step_id: "step_a",
+  state: "RUNNING",
+  status: "RUNNING",
+  trace_id: "trace-1",
+  version: 1,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
 };
 
 // ---------------------------------------------------------------------------
@@ -99,25 +91,27 @@ const rawInstance = {
 // ---------------------------------------------------------------------------
 
 describe("listWorkflowInstances", () => {
-  it("maps snake_case instance list to camelCase WorkflowInstance[]", async () => {
+  it("maps the real WorkflowInstance model to camelCase", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok([rawInstance]));
     const instances = await listWorkflowInstances();
     expect(instances).toHaveLength(1);
     const inst = instances[0];
-    expect(inst.instanceId).toBe("inst-1");
-    expect(inst.workflowName).toBe("Demo");
+    expect(inst.id).toBe("inst-1");
+    expect(inst.definitionId).toBe("wf-1");
     expect(inst.currentStepIndex).toBe(0);
-    expect(inst.steps[0].stepId).toBe("s1");
-    expect(inst.steps[0].capabilityName).toBe("cap.do");
+    expect(inst.currentStepId).toBe("step_a");
+    expect(inst.state).toBe("RUNNING");
+    expect(inst.status).toBe("RUNNING");
+    expect(inst.traceId).toBe("trace-1");
   });
 
-  it("passes workflowId and status filters as snake_case parameters", async () => {
+  it("passes the state filter as the only supported snake_case parameter", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok([]));
-    await listWorkflowInstances({ workflowId: "wf-1", status: "RUNNING" });
+    await listWorkflowInstances({ state: "RUNNING" });
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         capabilityName: "kortex.workflow.instance.list",
-        parameters: expect.objectContaining({ workflow_id: "wf-1", status: "RUNNING" }),
+        parameters: expect.objectContaining({ state: "RUNNING" }),
       }),
     );
   });
@@ -132,7 +126,7 @@ describe("getWorkflowInstance", () => {
   it("calls instance.get with instance_id and maps result", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok({ ...rawInstance, status: "COMPLETED" }));
     const inst = await getWorkflowInstance("inst-1");
-    expect(inst.instanceId).toBe("inst-1");
+    expect(inst.id).toBe("inst-1");
     expect(inst.status).toBe("COMPLETED");
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -157,60 +151,56 @@ describe("cancelWorkflowInstance", () => {
 });
 
 describe("startWorkflowInstance", () => {
-  it("calls instance.start and maps the returned instance", async () => {
-    invokeCapabilityMock.mockResolvedValueOnce(
-      ok({ ...rawInstance, instance_id: "inst-new", status: "PENDING" }),
-    );
+  it("calls instance.start with definition_id/initial_context and maps the returned instance", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(ok({ ...rawInstance, id: "inst-new", status: "PENDING" }));
     const inst = await startWorkflowInstance("wf-1", { ctx: true });
-    expect(inst.instanceId).toBe("inst-new");
+    expect(inst.id).toBe("inst-new");
     expect(inst.status).toBe("PENDING");
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
-      expect.objectContaining({ capabilityName: "kortex.workflow.instance.start" }),
+      expect.objectContaining({
+        capabilityName: "kortex.workflow.instance.start",
+        parameters: expect.objectContaining({ definition_id: "wf-1", initial_context: { ctx: true } }),
+      }),
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// Approval API
+// Approval API — exact hand-built dicts from create_approval_request /
+// list_approval_requests / get_approval_request / decide_approval_request
 // ---------------------------------------------------------------------------
 
 const rawApproval = {
-  request_id: "req-1",
+  id: "req-1",
   tenant_id: "acme",
   instance_id: "inst-1",
   step_id: "s2",
-  workflow_name: "Demo",
   required_role: "admin",
-  requester_principal_id: "alice",
-  status: "PENDING",
-  context: { risk: "low" },
-  expires_at: "2026-01-02T00:00:00Z",
-  created_at: "2026-01-01T00:00:00Z",
-  decided_at: null,
-  decider_principal_id: null,
-  decision_rationale: null,
+  state: "PENDING",
+  timeout_at: "2026-01-02T00:00:00Z",
+  signature_required: false,
 };
 
 describe("listPendingApprovals", () => {
-  it("maps approval snake_case to camelCase ApprovalRequest[]", async () => {
+  it("maps the real approval dict shape to camelCase ApprovalRequest[]", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok([rawApproval]));
     const approvals = await listPendingApprovals();
     expect(approvals).toHaveLength(1);
     const a = approvals[0];
-    expect(a.requestId).toBe("req-1");
+    expect(a.id).toBe("req-1");
     expect(a.requiredRole).toBe("admin");
-    expect(a.requesterPrincipalId).toBe("alice");
-    expect(a.context).toEqual({ risk: "low" });
-    expect(a.expiresAt).toBe("2026-01-02T00:00:00Z");
+    expect(a.state).toBe("PENDING");
+    expect(a.timeoutAt).toBe("2026-01-02T00:00:00Z");
+    expect(a.signatureRequired).toBe(false);
   });
 
-  it("passes status=PENDING filter in parameters", async () => {
+  it("passes state_filter=PENDING (the real backend parameter name)", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok([]));
     await listPendingApprovals();
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         capabilityName: "kortex.workflow.approval.list",
-        parameters: expect.objectContaining({ status: "PENDING" }),
+        parameters: expect.objectContaining({ state_filter: "PENDING" }),
       }),
     );
   });
@@ -222,16 +212,22 @@ describe("listPendingApprovals", () => {
 });
 
 describe("submitApprovalDecision", () => {
-  it("calls approval.decide with snake_case params", async () => {
+  it("calls approval.decide with approver_id/reason (the real backend parameter names)", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok(null));
-    await submitApprovalDecision({ requestId: "req-1", decision: "APPROVED", rationale: "LGTM" });
+    await submitApprovalDecision({
+      requestId: "req-1",
+      decision: "APPROVED",
+      approverId: "alice",
+      reason: "LGTM",
+    });
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         capabilityName: "kortex.workflow.approval.decide",
         parameters: expect.objectContaining({
           request_id: "req-1",
           decision: "APPROVED",
-          rationale: "LGTM",
+          approver_id: "alice",
+          reason: "LGTM",
         }),
       }),
     );
@@ -239,16 +235,24 @@ describe("submitApprovalDecision", () => {
 });
 
 describe("delegateApproval", () => {
-  it("calls approval.delegate with snake_case params", async () => {
+  it("calls approval.delegate with delegator_id/delegatee_id/role/valid_from/valid_until", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok(null));
-    await delegateApproval({ requestId: "req-1", delegateToPrincipalId: "bob", reason: "OOO" });
+    await delegateApproval({
+      delegatorId: "alice",
+      delegateeId: "bob",
+      role: "admin",
+      validFrom: "2026-01-01T00:00:00Z",
+      validUntil: "2026-01-02T00:00:00Z",
+    });
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         capabilityName: "kortex.workflow.approval.delegate",
         parameters: expect.objectContaining({
-          request_id: "req-1",
-          delegate_to_principal_id: "bob",
-          reason: "OOO",
+          delegator_id: "alice",
+          delegatee_id: "bob",
+          role: "admin",
+          valid_from: "2026-01-01T00:00:00Z",
+          valid_until: "2026-01-02T00:00:00Z",
         }),
       }),
     );
@@ -256,56 +260,55 @@ describe("delegateApproval", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Schedule API
+// Schedule API — exact hand-built dicts from create_schedule / list_schedules
+// / get_schedule / pause / resume / cancel
 // ---------------------------------------------------------------------------
 
 const rawSchedule = {
-  schedule_id: "sched-1",
-  tenant_id: "acme",
-  workflow_id: "wf-1",
-  workflow_name: "Demo",
+  id: "sched-1",
+  name: "daily-sync",
+  definition_id: "wf-1",
+  schedule_type: "CRON",
   cron_expression: "0 9 * * *",
-  status: "ACTIVE",
+  interval_seconds: null,
   next_run_at: "2026-01-02T09:00:00Z",
-  last_run_at: null,
-  last_run_status: null,
+  status: "ACTIVE",
   run_count: 0,
-  max_runs: 10,
-  created_at: "2026-01-01T00:00:00Z",
-  description: "Daily job",
+  tenant_id: "acme",
 };
 
 describe("listSchedules", () => {
-  it("maps schedule snake_case to camelCase WorkflowSchedule[]", async () => {
+  it("maps the real schedule dict shape to camelCase WorkflowSchedule[]", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok([rawSchedule]));
     const scheds = await listSchedules();
     expect(scheds).toHaveLength(1);
     const s = scheds[0];
-    expect(s.scheduleId).toBe("sched-1");
+    expect(s.id).toBe("sched-1");
+    expect(s.name).toBe("daily-sync");
+    expect(s.definitionId).toBe("wf-1");
     expect(s.cronExpression).toBe("0 9 * * *");
     expect(s.nextRunAt).toBe("2026-01-02T09:00:00Z");
-    expect(s.maxRuns).toBe(10);
-    expect(s.description).toBe("Daily job");
   });
 });
 
 describe("createSchedule", () => {
-  it("calls schedule.create with correct snake_case params and maps result", async () => {
-    invokeCapabilityMock.mockResolvedValueOnce(
-      ok({ ...rawSchedule, schedule_id: "sched-2" }),
-    );
+  it("calls schedule.create with name/definition_id (both required by the real backend) and maps result", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(ok({ ...rawSchedule, id: "sched-2" }));
     const s = await createSchedule({
-      workflowId: "wf-1",
+      name: "daily-sync",
+      definitionId: "wf-1",
+      scheduleType: "CRON",
       cronExpression: "0 9 * * *",
-      description: "Daily job",
       maxRuns: 10,
     });
-    expect(s.scheduleId).toBe("sched-2");
+    expect(s.id).toBe("sched-2");
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         capabilityName: "kortex.workflow.schedule.create",
         parameters: expect.objectContaining({
-          workflow_id: "wf-1",
+          name: "daily-sync",
+          definition_id: "wf-1",
+          schedule_type: "CRON",
           cron_expression: "0 9 * * *",
           max_runs: 10,
         }),
@@ -320,55 +323,64 @@ describe("schedule mutation operations", () => {
     ["resumeSchedule", resumeSchedule, "kortex.workflow.schedule.resume"],
     ["cancelSchedule", cancelSchedule, "kortex.workflow.schedule.cancel"],
     ["triggerScheduleNow", triggerScheduleNow, "kortex.workflow.schedule.trigger"],
-  ])("%s calls the %s capability", async (_name, fn, cap) => {
+  ])("%s calls the %s capability with schedule_id", async (_name, fn, cap) => {
     invokeCapabilityMock.mockResolvedValueOnce(ok(null));
     await fn("sched-1");
     expect(invokeCapabilityMock).toHaveBeenCalledWith(
-      expect.objectContaining({ capabilityName: cap }),
+      expect.objectContaining({
+        capabilityName: cap,
+        parameters: expect.objectContaining({ schedule_id: "sched-1" }),
+      }),
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// External Execution API
+// External Execution API — exact hand-built dicts from execute_external_operation
+// / get_external_execution / list_external_executions / cancel_external_execution
 // ---------------------------------------------------------------------------
 
 const rawExec = {
-  execution_id: "exec-1",
-  tenant_id: "acme",
-  instance_id: "inst-1",
-  workflow_id: "wf-1",
-  executable: "/usr/bin/python3",
-  arguments: ["script.py", "--mode", "safe"],
-  working_directory: "/app",
+  id: "exec-1",
   status: "COMPLETED",
-  exit_code: 0,
-  stdout: "done\n",
-  stderr: null,
-  timeout_seconds: 30,
-  started_at: "2026-01-01T00:00:00Z",
-  completed_at: "2026-01-01T00:00:05Z",
+  target: "kortex.some.capability",
+  output: { ok: true },
+  error: null,
+  attempts: 1,
+  execution_time_ms: 42.5,
   approval_request_id: "req-1",
-  circuit_breaker_open: false,
+  tenant_id: "acme",
 };
 
 describe("listExternalExecutions", () => {
-  it("maps external execution snake_case to camelCase ExternalExecution[]", async () => {
+  it("maps the real external-execution dict shape to camelCase", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(ok([rawExec]));
     const execs = await listExternalExecutions();
     expect(execs).toHaveLength(1);
     const e = execs[0];
-    expect(e.executionId).toBe("exec-1");
-    expect(e.executable).toBe("/usr/bin/python3");
-    expect(e.arguments).toEqual(["script.py", "--mode", "safe"]);
-    expect(e.exitCode).toBe(0);
-    expect(e.circuitBreakerOpen).toBe(false);
+    expect(e.id).toBe("exec-1");
+    expect(e.target).toBe("kortex.some.capability");
+    expect(e.output).toEqual({ ok: true });
+    expect(e.attempts).toBe(1);
+    expect(e.executionTimeMs).toBe(42.5);
     expect(e.approvalRequestId).toBe("req-1");
-    expect(e.completedAt).toBe("2026-01-01T00:00:05Z");
   });
 
   it("throws WorkflowAccessDeniedError on PERMISSION_DENIED", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(fail("PERMISSION_DENIED", "no"));
     await expect(listExternalExecutions()).rejects.toBeInstanceOf(WorkflowAccessDeniedError);
+  });
+});
+
+describe("cancelExternalExecution", () => {
+  it("calls external.cancel with execution_id", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(ok(null));
+    await cancelExternalExecution("exec-1");
+    expect(invokeCapabilityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityName: "kortex.workflow.external.cancel",
+        parameters: expect.objectContaining({ execution_id: "exec-1" }),
+      }),
+    );
   });
 });
