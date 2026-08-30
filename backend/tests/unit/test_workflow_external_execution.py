@@ -284,9 +284,91 @@ async def test_external_execution_requires_approval_gates(kernel: Kernel) -> Non
 
 
 @pytest.mark.asyncio
-async def test_external_execution_tenant_isolation(kernel: Kernel) -> None:
-    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
-    executor = wf_engine.external_executor
+async def test_external_execution_tenant_isolation(tmp_path: Path) -> None:
+    """M6.0-4: `_dispatch_target` no longer has a fallback that fabricates
+    success for a target that isn't a registered capability — so, unlike
+    before, this test needs `cap.alpha`/`cap.beta` to be REAL, registered
+    Kernel capabilities. Capability registration is only permitted before
+    `Kernel.boot()` completes, so this builds its own kernel (mirroring the
+    shared `kernel` fixture above) rather than reusing the already-booted one,
+    registering two trivial no-op capabilities first. This is a genuinely
+    stronger test than before: it now proves tenant isolation on execution
+    records produced by a *real* capability dispatch, not a fabricated result.
+    """
+    db_file = tmp_path / f"test_ext_iso_{uuid4().hex[:8]}.db"
+    db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_file}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+
+    k = Kernel()
+    k._db_manager = db_manager
+    storage_engine = StorageEngine(base_directory=str(tmp_path / f"storage_ext_iso_{uuid4().hex[:8]}"))
+    security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
+    workflow_engine = WorkflowEngine()
+    k.register_engine(storage_engine)
+    k.register_engine(security_engine)
+    k.register_engine(workflow_engine)
+
+    async def _noop_capability(**kwargs: Any) -> dict[str, Any]:
+        return {"status": "SUCCESS"}
+
+    k.register_capability(
+        name="cap.alpha",
+        description="Test-only no-op capability for tenant isolation verification.",
+        provider="workflow",
+        handler=_noop_capability,
+        required_permissions=["workflow:execute"],
+    )
+    k.register_capability(
+        name="cap.beta",
+        description="Test-only no-op capability for tenant isolation verification.",
+        provider="workflow",
+        handler=_noop_capability,
+        required_permissions=["workflow:execute"],
+    )
+
+    await k.boot()
+
+    hasher = PasswordHasher()
+
+    async def _seed_rbac(session: AsyncSession) -> None:
+        session.add(RolePermissionRecord(id=str(uuid4()), role="EXT_ISO_ROLE", permission="workflow:execute"))
+        session.add(
+            PrincipalRecord(
+                id=str(uuid4()),
+                tenant_id="tenant_alpha",
+                principal_id="user_ext_iso_alpha",
+                principal_type="USER",
+                credential_hash=hasher.hash("pass-alpha"),
+                roles=["EXT_ISO_ROLE"],
+                attributes={"clearance_level": "RESTRICTED"},
+            )
+        )
+        session.add(
+            PrincipalRecord(
+                id=str(uuid4()),
+                tenant_id="tenant_beta",
+                principal_id="user_ext_iso_beta",
+                principal_type="USER",
+                credential_hash=hasher.hash("pass-beta"),
+                roles=["EXT_ISO_ROLE"],
+                attributes={"clearance_level": "RESTRICTED"},
+            )
+        )
+        await session.flush()
+
+    await storage_engine.data.execute_in_transaction(_seed_rbac)
+
+    auth_alpha = await security_engine.authentication_manager.authenticate(
+        {"principal_type": "USER", "tenant_id": "tenant_alpha", "principal_id": "user_ext_iso_alpha", "password": "pass-alpha"}
+    )
+    token_alpha = await security_engine.authentication_manager.issue_token(auth_alpha)
+    auth_beta = await security_engine.authentication_manager.authenticate(
+        {"principal_type": "USER", "tenant_id": "tenant_beta", "principal_id": "user_ext_iso_beta", "password": "pass-beta"}
+    )
+    token_beta = await security_engine.authentication_manager.issue_token(auth_beta)
+
+    executor = workflow_engine.external_executor
     assert executor is not None
 
     req_a = ExternalExecutionRequest(
@@ -300,8 +382,10 @@ async def test_external_execution_tenant_isolation(kernel: Kernel) -> None:
         target="cap.beta",
     )
 
-    rec_a = await executor.execute_operation(req_a)
-    rec_b = await executor.execute_operation(req_b)
+    rec_a = await executor.execute_operation(req_a, session_token=token_alpha)
+    rec_b = await executor.execute_operation(req_b, session_token=token_beta)
+    assert rec_a.status == ExternalExecutionStatus.COMPLETED
+    assert rec_b.status == ExternalExecutionStatus.COMPLETED
 
     # Listing isolation
     list_a = await executor.list_executions(tenant_id="tenant_alpha")
@@ -315,6 +399,112 @@ async def test_external_execution_tenant_isolation(kernel: Kernel) -> None:
     # Get isolation
     assert await executor.get_execution(rec_a.id, tenant_id="tenant_beta") is None
     assert await executor.get_execution(rec_b.id, tenant_id="tenant_alpha") is None
+
+    await k.shutdown()
+    await db_manager.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_external_execution_dispatches_real_registered_capability(tmp_path: Path) -> None:
+    """M6.0-4 new coverage: a target naming a real, registered capability is
+    genuinely invoked — the one scenario the pre-fix suite never exercised at
+    all (the "real capability dispatch" branch was dead code)."""
+    db_file = tmp_path / f"test_ext_real_cap_{uuid4().hex[:8]}.db"
+    db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_file}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+
+    k = Kernel()
+    k._db_manager = db_manager
+    storage_engine = StorageEngine(base_directory=str(tmp_path / f"storage_ext_real_cap_{uuid4().hex[:8]}"))
+    security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
+    workflow_engine = WorkflowEngine()
+    k.register_engine(storage_engine)
+    k.register_engine(security_engine)
+    k.register_engine(workflow_engine)
+
+    invocation_log: list[dict[str, Any]] = []
+
+    async def _recording_capability(**kwargs: Any) -> dict[str, Any]:
+        invocation_log.append(kwargs)
+        return {"status": "SUCCESS", "echo": kwargs}
+
+    k.register_capability(
+        name="cap.real-dispatch-target",
+        description="Test-only capability proving real dispatch, not fabricated success.",
+        provider="workflow",
+        handler=_recording_capability,
+        required_permissions=["workflow:execute"],
+    )
+    await k.boot()
+
+    try:
+        hasher = PasswordHasher()
+
+        async def _seed_rbac(session: AsyncSession) -> None:
+            session.add(RolePermissionRecord(id=str(uuid4()), role="EXT_REAL_CAP_ROLE", permission="workflow:execute"))
+            session.add(
+                PrincipalRecord(
+                    id=str(uuid4()),
+                    tenant_id="tenant_alpha",
+                    principal_id="user_ext_real_cap",
+                    principal_type="USER",
+                    credential_hash=hasher.hash("pass-alpha"),
+                    roles=["EXT_REAL_CAP_ROLE"],
+                    attributes={"clearance_level": "RESTRICTED"},
+                )
+            )
+            await session.flush()
+
+        await storage_engine.data.execute_in_transaction(_seed_rbac)
+        auth = await security_engine.authentication_manager.authenticate(
+            {"principal_type": "USER", "tenant_id": "tenant_alpha", "principal_id": "user_ext_real_cap", "password": "pass-alpha"}
+        )
+        token = await security_engine.authentication_manager.issue_token(auth)
+
+        executor = workflow_engine.external_executor
+        assert executor is not None
+
+        req = ExternalExecutionRequest(
+            tenant_id="tenant_alpha",
+            operation_type="CAPABILITY",
+            target="cap.real-dispatch-target",
+            parameters={"marker": "m6-0-4-real-dispatch"},
+        )
+        rec = await executor.execute_operation(req, session_token=token)
+
+        assert rec.status == ExternalExecutionStatus.COMPLETED
+        assert len(invocation_log) == 1
+        assert invocation_log[0]["marker"] == "m6-0-4-real-dispatch"
+        assert rec.output == {"status": "SUCCESS", "echo": {"marker": "m6-0-4-real-dispatch"}}
+    finally:
+        await k.shutdown()
+        await db_manager.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_external_execution_unresolvable_target_fails_closed(kernel: Kernel) -> None:
+    """M6.0-4 regression test: an unresolvable target (neither a `_handler`
+    callable nor a registered capability) must fail, never fabricate
+    `{"status": "SUCCESS"}` as it did before this fix."""
+    wf_engine: WorkflowEngine = kernel.get_engine("workflow")
+    executor = wf_engine.external_executor
+    assert executor is not None
+
+    req = ExternalExecutionRequest(
+        tenant_id="tenant_alpha",
+        operation_type="CAPABILITY",
+        target="cap.does-not-exist-anywhere",
+        retry_policy=RetryPolicy(max_attempts=1),
+    )
+
+    with pytest.raises(ExternalExecutionError):
+        await executor.execute_operation(req)
+
+    records = await executor.list_executions(tenant_id="tenant_alpha")
+    matching = [r for r in records if r.target == "cap.does-not-exist-anywhere"]
+    assert len(matching) == 1
+    assert matching[0].status == ExternalExecutionStatus.FAILED
 
 
 @pytest.mark.asyncio

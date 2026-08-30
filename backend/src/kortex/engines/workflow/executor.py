@@ -367,7 +367,21 @@ class ExternalExecutionManager:
         idempotency_key: str | None = None,
         correlation_id: str | None = None,
     ) -> Any:  # noqa: ANN401
-        """Dispatch target operation through Kernel capability boundary or registered engine."""
+        """Dispatch target operation through Kernel capability boundary or registered engine.
+
+        M6.0-4: this previously had a third branch that fabricated
+        `{"status": "SUCCESS", "target": target}` for any target that wasn't
+        a test-only `_handler` callable and didn't pass an existence guard —
+        that guard called `has_capability` on the registry engine, a method
+        that does not exist anywhere in this codebase, so it always evaluated
+        false and the "real capability dispatch" branch below was dead code.
+        In practice, every non-`_handler` target silently reported success
+        with zero I/O. The fix is to always attempt real dispatch through the
+        Kernel once a kernel is bound, and let `Kernel.invoke_capability`'s
+        own `CapabilityNotFoundError` (already caught and retried like any
+        other failure by this method's caller) surface an unresolvable
+        target as a real failure instead of a fabricated success.
+        """
         # 1. Direct handler callable in parameters (useful for local integrations or testing)
         if "_handler" in parameters and callable(parameters["_handler"]):
             fn = parameters["_handler"]
@@ -380,21 +394,23 @@ class ExternalExecutionManager:
                 return await res
             return res
 
-        # 2. Kernel capability dispatch boundary
+        # 2. Kernel capability dispatch boundary — always attempted; an
+        # unresolvable target raises `CapabilityNotFoundError` rather than
+        # being silently treated as success.
         if self._kernel is not None:
-            reg = getattr(self._kernel, "_registry_engine", None)
-            if reg is not None and hasattr(reg, "has_capability") and reg.has_capability(target):
-                cap_req = CapabilityRequest(
-                    capability_name=target,
-                    session_token=session_token,
-                    parameters=parameters,
-                    context={"resource_tenant_id": tenant_id},
-                    idempotency_key=idempotency_key,
-                    correlation_id=correlation_id or str(uuid4()),
-                )
-                return await self._kernel.invoke_capability(cap_req)
+            cap_req = CapabilityRequest(
+                capability_name=target,
+                session_token=session_token,
+                parameters=parameters,
+                context={"resource_tenant_id": tenant_id},
+                idempotency_key=idempotency_key,
+                correlation_id=correlation_id or str(uuid4()),
+            )
+            return await self._kernel.invoke_capability(cap_req)
 
-        return {"status": "SUCCESS", "target": target}
+        raise ExternalExecutionError(
+            f"Cannot dispatch external execution target '{target}': no Kernel is bound to resolve it."
+        )
 
 
     async def get_execution(
