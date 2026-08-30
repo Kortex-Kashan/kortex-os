@@ -24,6 +24,8 @@ import os
 from kortex.core.kernel import Kernel
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter
+from kortex.engines.ai.ollama_provider import OllamaProvider
+from kortex.engines.configuration.engine import SystemSettings
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
@@ -103,11 +105,29 @@ async def build_and_boot_kernel() -> Kernel:
     # assemble a production engine that would fall back to a non-durable
     # in-memory conversation store or a tool-execution port that bypasses
     # Kernel/Security authorization — the same production-wiring guarantee
-    # already relied on for every other engine registered above. No AI
-    # provider is registered here: none exists yet anywhere in `backend/src`
-    # outside test fixtures, so `kortex.ai.provider.list`/
-    # `kortex.ai.model.list` honestly report empty rather than fabricating one.
-    ai_bootstrap = KernelProductionBootstrap(AIEngineRuntimeConfig(environment="production"))
+    # already relied on for every other engine registered above.
+    #
+    # M6.1-2: a real `OllamaProvider` is now registered, sourced from
+    # `SystemSettings.ollama_url`/`ollama_default_model` (already declared,
+    # env-prefixed `KORTEX_`, previously read by nothing anywhere in
+    # `backend/src`). `SystemSettings` is instantiated directly rather than
+    # through a `ConfigurationEngine` instance, since no `ConfigurationEngine`
+    # is registered on this production boot path today and adding one is a
+    # broader, unrelated change to the boot sequence this milestone doesn't
+    # require — `SystemSettings` is a plain `pydantic_settings.BaseSettings`
+    # that reads the same env vars either way. Registered unconditionally,
+    # matching every other engine above: if Ollama isn't actually running,
+    # `health_check()`/the circuit breaker reveal that at call time, not at
+    # boot time — `kortex.ai.provider.list`/`kortex.ai.model.list` now report
+    # this one real provider instead of fabricating or omitting it.
+    ai_config = AIEngineRuntimeConfig(environment="production")
+    system_settings = SystemSettings()
+    ollama_provider = OllamaProvider(
+        base_url=system_settings.ollama_url,
+        model_name=system_settings.ollama_default_model,
+        timeout_seconds=max(1.0, ai_config.default_generation_timeout_seconds - 5.0),
+    )
+    ai_bootstrap = KernelProductionBootstrap(ai_config)
     ai_engine = ai_bootstrap.create_ai_engine(
         # `KernelBridgeAdapter.__init__` structurally requires
         # `invoke_capability(request: object)`, which `Kernel.invoke_capability`
@@ -117,6 +137,7 @@ async def build_and_boot_kernel() -> Kernel:
         # (`bridge.py::invoke_capability`), so this is safe in practice.
         kernel_bridge=KernelBridgeAdapter(kernel),  # type: ignore[arg-type]
         data_store=RelationalDataStore(kernel.db),
+        custom_providers=[ollama_provider],
         registered_engines=list(kernel.get_all_engines().keys()),
     )
     kernel.register_engine(ai_engine)

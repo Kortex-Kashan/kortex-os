@@ -178,13 +178,31 @@ async def test_ai_model_list_capability_registers_on_production_boot_path() -> N
 
 
 @pytest.mark.asyncio
-async def test_ai_provider_and_model_registries_start_empty_on_production_boot_path() -> None:
+async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_path() -> None:
+    """M6.1-2: unlike Connector/Workflow/Marketplace's genuinely empty starting
+    registries, the AI Engine now registers one real `OllamaProvider`, sourced
+    from `SystemSettings.ollama_url`/`ollama_default_model` -- this is not
+    fabricated demo data, it is the production boot path's own real,
+    unconditional wiring (whether or not an actual Ollama instance is
+    reachable at boot time; reachability is a `health_check()`/circuit-
+    breaker concern, not a registration-time one)."""
     kernel = await build_and_boot_kernel()
     try:
         ai_engine = kernel.get_engine("ai")
         assert isinstance(ai_engine, AIOrchestrationEngine)
-        assert ai_engine.list_providers() == []
-        assert ai_engine.list_models() == []
+
+        providers = ai_engine.list_providers()
+        assert len(providers) == 1
+        assert providers[0].provider_id == "ollama-llama3"
+        assert providers[0].vendor == "ollama"
+        assert providers[0].endpoint_type == "local_host"
+        assert providers[0].url == "http://localhost:11434"
+        assert providers[0].credential_requirement == "none"
+
+        models = ai_engine.list_models()
+        assert len(models) == 1
+        assert models[0].model_id == "llama3"
+        assert models[0].provider_id == "ollama-llama3"
     finally:
         await kernel.shutdown()
 

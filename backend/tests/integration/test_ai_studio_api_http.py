@@ -170,9 +170,15 @@ async def test_authenticated_without_permission_returns_403(
 
 @pytest.mark.parametrize("capability_name", ["kortex.ai.provider.list", "kortex.ai.model.list"])
 @pytest.mark.asyncio
-async def test_authenticated_with_permission_returns_200_and_empty_registry(
+async def test_authenticated_with_permission_returns_200_and_real_registry(
     kernel: Kernel, client: httpx.AsyncClient, capability_name: str
 ) -> None:
+    """M6.1-2: the production boot path now registers one real `OllamaProvider`
+    unconditionally, so this registry is no longer empty -- see
+    `test_kernel_bootstrap.py::test_ai_provider_registry_has_real_ollama_provider_on_production_boot_path`
+    for the direct, non-HTTP assertion of its exact contents. This test's own
+    job is unchanged: prove the real HTTP path returns 200/SUCCESS for an
+    authorized caller, whatever the registry currently holds."""
     storage = kernel.get_engine("storage")
     assert isinstance(storage, StorageEngine)
     tenant_id = _tenant()
@@ -185,4 +191,4 @@ async def test_authenticated_with_permission_returns_200_and_empty_registry(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "SUCCESS"
-    assert body["payload"]["result"] == []
+    assert len(body["payload"]["result"]) == 1

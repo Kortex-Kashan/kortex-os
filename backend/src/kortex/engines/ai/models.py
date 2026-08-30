@@ -145,6 +145,11 @@ class LLMResponse(BaseModel):
     `AIStorageWriteFailedEvent` is emitted separately so the durability gap
     is observable without forcing the caller to lose an already-generated
     answer.
+
+    `provider_id`/`model_name` (M6.1-2): identify which registered provider
+    and model actually served this response. Additive and optional —
+    `ai_decision_records` already carries nullable columns for both, but
+    nothing populated them before a real provider existed to report them.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -155,6 +160,8 @@ class LLMResponse(BaseModel):
     token_usage: dict[str, int] = Field(default_factory=dict)
     execution_time_ms: float = 0.0
     degraded: bool = False
+    provider_id: str | None = None
+    model_name: str | None = None
 
 
 class TokenUsage(BaseModel):

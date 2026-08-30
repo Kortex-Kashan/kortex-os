@@ -844,6 +844,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     request_id=request.request_id,
                     token_usage=usage,
                     latency_ms=response.execution_time_ms,
+                    # M6.1-2: read whatever the serving provider self-reported
+                    # on its own response (None for providers that don't set
+                    # these, unchanged from prior behavior).
+                    provider_id=response.provider_id,
+                    model_name=response.model_name,
                 )
 
                 return response
