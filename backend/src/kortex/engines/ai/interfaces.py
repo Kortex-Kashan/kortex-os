@@ -156,8 +156,14 @@ class IAIOrchestrationEngine(Protocol):
         request: LLMRequest,
         routing_context: RoutingContext | None = None,
         timeout_seconds: float | None = None,
+        principal: Any = None,
     ) -> LLMResponse:
-        """Generate an AI response for the given request."""
+        """Generate an AI response for the given request.
+
+        `principal` is typed `Any`, not `SecurityPrincipal`, because
+        `kortex.engines.security` is a hard, AST-enforced forbidden import
+        for this module — see `engine.py::generate_response`.
+        """
         ...
 
     async def orchestrate_agent(

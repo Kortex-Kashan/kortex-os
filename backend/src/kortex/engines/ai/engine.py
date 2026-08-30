@@ -696,8 +696,30 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         request: LLMRequest,
         routing_context: RoutingContext | None = None,
         timeout_seconds: float | None = None,
+        principal: Any = None,
     ) -> LLMResponse:
-        """Generate an AI text response with context composition, routing, history tracking, and global timeout."""
+        """Generate an AI text response with context composition, routing, history tracking, and global timeout.
+
+        `principal` (M6.1-1): the Kernel dispatcher injects its own
+        verified identity into any handler parameter literally named
+        `principal` (`core/dispatch.py`'s `_invoke_handler`), regardless of
+        this parameter's declared type — typed here as `Any`, not
+        `SecurityPrincipal`, because `kortex.engines.security` is a hard,
+        AST-enforced forbidden import for this module (see
+        `test_ai_engine.py::test_m8_files_quarantine_forbidden_imports`).
+        Only `.tenant_id` is read, duck-typed, never imported.
+
+        Before this fix, tenant scope for governance, quota, persistence,
+        and audit came entirely from the caller-constructed
+        `request.tenant_id` field, with nothing cross-checking it against
+        the authenticated caller's real tenant — the same class of gap
+        M6.0-3 closed on 12 Workflow Engine handlers. When a verified
+        `principal` is present, its `tenant_id` is authoritative: the
+        request is corrected to it before anything below reads
+        `request.tenant_id`, so every existing line of this method (already
+        governance/quota/persistence/audit-tested) is unaffected by this
+        fix without further changes.
+        """
         effective_timeout = (
             timeout_seconds
             if timeout_seconds is not None
@@ -706,6 +728,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         start_time = time.perf_counter()
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
+
+        if principal is not None:
+            principal_tenant_id = getattr(principal, "tenant_id", None)
+            require_identifier(principal_tenant_id, "principal.tenant_id")
+            if principal_tenant_id != request.tenant_id:
+                request = request.model_copy(update={"tenant_id": principal_tenant_id})
 
         async with self._throttler.acquire_generation_slot(request.tenant_id):
             # 1. Emit generation started event
