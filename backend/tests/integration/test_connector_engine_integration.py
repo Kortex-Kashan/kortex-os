@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kortex.core.base_engine import EngineState
+from kortex.core.db import DatabaseEngineManager
 from kortex.core.exceptions import KernelBootError
 from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
@@ -560,8 +561,20 @@ from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
 
 @pytest.mark.asyncio
 async def test_idatastore_profile_persistence_and_query(tmp_path) -> None:
-    """13. Test durable ConnectorProfile persistence via Storage Engine IDataStore."""
+    """13. Test durable ConnectorProfile persistence via Storage Engine IDataStore.
+
+    Uses its own tmp_path-scoped `DatabaseEngineManager` rather than
+    `Kernel()`'s default (a shared, gitignored `./kortex_local.db` file,
+    per the documented M3 known-gap) -- the default previously left this
+    test reading/writing a persistent table from prior runs, which surfaced
+    as a spurious `no such column` failure the moment the schema gained a
+    new column (M6.3-1's `tenant_id`) that a stale on-disk table predates.
+    """
     kernel = Kernel()
+    db_manager = DatabaseEngineManager(
+        connection_url=f"sqlite+aiosqlite:///{tmp_path}/idatastore_prof.db"
+    )
+    kernel._db_manager = db_manager
     storage_engine = StorageEngine(base_directory=str(tmp_path / "idatastore_prof_storage"))
     connector_engine = ConnectorEngine()
 

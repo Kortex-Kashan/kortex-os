@@ -64,11 +64,22 @@ class DriverMetadata(BaseModel):
 
 
 class ConnectorProfile(BaseModel):
-    """Declarative channel configuration profile decoupling driver implementation from settings."""
+    """Declarative channel configuration profile decoupling driver implementation from settings.
+
+    `tenant_id` (M6.3-1): every profile is owned by exactly one tenant.
+    `profile_id` remains the sole, globally-unique persistence key (no schema
+    restructuring) — ownership is enforced by verifying `tenant_id` matches
+    the caller's authenticated tenant after resolution, the same
+    fetch-then-verify pattern already used elsewhere in KORTEX (e.g.
+    `WorkflowEngine.get_approval_request`'s defense-in-depth re-check).
+    Defaults to `"default"` so every pre-M6.3 profile construction remains
+    source-compatible.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     profile_id: str
+    tenant_id: str = "default"
     name: str
     driver_id: str
     secret_handle: str | None = None
@@ -141,6 +152,7 @@ class ConnectorProfileModel(SQLAlchemyBaseModel):
 
     __tablename__ = "connector_profiles"
 
+    tenant_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     driver_id: Mapped[str] = mapped_column(String(255), nullable=False)
     secret_handle: Mapped[str | None] = mapped_column(String(255), nullable=True)

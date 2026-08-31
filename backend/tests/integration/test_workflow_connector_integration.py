@@ -310,6 +310,7 @@ async def test_e2e_workflow_to_connector_http_execution(tmp_path) -> None:
     connector_engine.register_driver(http_driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-e2e-1",
         name="E2E Test Profile",
         driver_id="connector-http-rest",
@@ -452,6 +453,7 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-amp-def-1",
         name="Amplification Default Profile",
         driver_id="connector-http-rest",
@@ -565,6 +567,7 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-mult-1",
         name="Mult Profile",
         driver_id="connector-http-rest",
@@ -580,6 +583,14 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
         action_type=ConnectorActionType.FETCH,
         payload={"url": "http://api.example.com/mult503"},
         options={"granted_permissions": ["kortex.connector.action.execute"]},
+        # M6.3-1: this test's own `strict_connector_handler` wrapper calls
+        # `connector_engine.execute_action` directly (bypassing Kernel
+        # dispatch, so no `principal` is ever injected into it) -- unlike
+        # every other test in this file, which reaches `execute_action`
+        # through real dispatch and gets a principal-corrected tenant
+        # regardless of what this field says. Must match the profile's own
+        # `tenant_id` for the no-principal fallback path to resolve it.
+        tenant_id=tenant_id,
     )
     step = WorkflowStep(
         id="step_mult",
@@ -784,6 +795,7 @@ async def test_connector_pipeline_execution_and_rate_limiting(tmp_path) -> None:
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-pipeline-1",
         name="Pipeline Profile",
         driver_id="connector-http-rest",
@@ -845,6 +857,7 @@ async def test_http_success_propagates_to_step_output(tmp_path) -> None:
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-succ-1",
         name="Success Profile",
         driver_id="connector-http-rest",
@@ -909,6 +922,7 @@ async def test_http_failure_propagates_to_step_failure(tmp_path) -> None:
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-fail-1",
         name="Fail Profile",
         driver_id="connector-http-rest",
@@ -974,6 +988,7 @@ async def test_rbac_capability_permission_denied_before_network(tmp_path) -> Non
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-rbac-1",
         name="RBAC Profile",
         driver_id="connector-http-rest",
@@ -1054,6 +1069,7 @@ async def test_secret_token_isolation_across_context_logs_and_events(tmp_path, c
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-secret-1",
         name="Secret Profile",
         driver_id="connector-http-rest",
@@ -1154,6 +1170,7 @@ async def test_response_header_sanitization(tmp_path) -> None:
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-hdr-san-1",
         name="Header San Profile",
         driver_id="connector-http-rest",
@@ -1267,6 +1284,7 @@ async def test_idempotency_key_header_propagation(tmp_path) -> None:
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-idem-1",
         name="Idempotency Profile",
         driver_id="connector-http-rest",
@@ -1338,6 +1356,7 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-cancel-1",
         name="Cancel Profile",
         driver_id="connector-http-rest",
@@ -1491,6 +1510,7 @@ async def test_failed_connector_step_participates_in_compensation_stack(tmp_path
     connector_engine.register_driver(driver)
 
     profile = ConnectorProfile(
+        tenant_id=tenant_id,
         profile_id="prof-comp-1",
         name="Comp Profile",
         driver_id="connector-http-rest",

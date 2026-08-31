@@ -53,8 +53,13 @@ class IBaseConnectorDriver(Protocol):
 class IConnectorEngine(Protocol):
     """Primary facade interface exposed by the Connector Engine."""
 
-    async def execute_action(self, request: ActionRequest) -> ActionResult:
-        """Execute action request through configured Connector Profile and Driver."""
+    async def execute_action(self, request: ActionRequest, principal: Any = None) -> ActionResult:
+        """Execute action request through configured Connector Profile and Driver.
+
+        `principal` (M6.3-1), when supplied by the Kernel dispatcher, is
+        authoritative over `request.tenant_id` — never trusted-as-is from a
+        caller-controlled request.
+        """
         ...
 
     def register_driver(self, driver: IBaseConnectorDriver) -> None:
@@ -65,8 +70,10 @@ class IConnectorEngine(Protocol):
         """Return list of metadata for all registered connector drivers."""
         ...
 
-    async def get_profile(self, profile_id: str) -> ConnectorProfile:
-        """Retrieve Connector Profile by profile ID."""
+    async def get_profile(
+        self, profile_id: str, tenant_id: str | None = None, principal: Any = None
+    ) -> ConnectorProfile:
+        """Retrieve Connector Profile by profile ID, tenant-scoped (M6.3-1)."""
         ...
 
 
@@ -114,16 +121,16 @@ class IRateLimiter(Protocol):
 class IConnectorProfileManager(Protocol):
     """Interface for registering and resolving Connector Profiles."""
 
-    async def get_profile(self, profile_id: str) -> ConnectorProfile:
-        """Retrieve Connector Profile by profile ID."""
+    async def get_profile(self, profile_id: str, tenant_id: str | None = None) -> ConnectorProfile:
+        """Retrieve Connector Profile by profile ID, tenant-scoped when `tenant_id` is supplied (M6.3-1)."""
         ...
 
     async def register_profile(self, profile: ConnectorProfile) -> None:
         """Register or update a Connector Profile."""
         ...
 
-    async def list_profiles(self) -> list[ConnectorProfile]:
-        """Return all registered Connector Profiles."""
+    async def list_profiles(self, tenant_id: str | None = None) -> list[ConnectorProfile]:
+        """Return registered Connector Profiles, tenant-scoped when `tenant_id` is supplied (M6.3-1)."""
         ...
 
 

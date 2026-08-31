@@ -762,7 +762,9 @@ class _AlwaysSucceedsDriver(BaseConnectorDriver):
         return True
 
 
-async def _build_connector_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, SecurityEngine, ConnectorEngine]:
+async def _build_connector_kernel(
+    tmp_path: Path, tenant_id: str
+) -> tuple[Kernel, StorageEngine, SecurityEngine, ConnectorEngine]:
     kernel = Kernel()
     db_file = tmp_path / f"adv_conn_{uuid.uuid4().hex[:8]}.db"
     kernel._db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_file}")
@@ -776,7 +778,12 @@ async def _build_connector_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine
 
     driver = _AlwaysSucceedsDriver()
     connector_engine.register_driver(driver)
-    profile = ConnectorProfile(profile_id="adv-profile", name="Adv Profile", driver_id="adv-dummy-driver")
+    # M6.3-1: the profile must be registered under the same tenant the test's
+    # own principal will authenticate as, or `execute_action`'s new
+    # principal-derived tenant scoping treats it as not found.
+    profile = ConnectorProfile(
+        profile_id="adv-profile", tenant_id=tenant_id, name="Adv Profile", driver_id="adv-dummy-driver"
+    )
     await connector_engine.profile_manager.register_profile(profile)
     return kernel, storage_engine, security_engine, connector_engine
 
@@ -809,8 +816,8 @@ async def test_kernel_authorized_connector_forged_permissions_denied_by_connecto
     """Kernel RBAC allows (principal has connector:execute); Connector's own
     check is given a present-but-wrong `granted_permissions` list. Connector
     independently denies despite Kernel already having allowed dispatch."""
-    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path)
     tenant_id = _tenant(tmp_path, "-o1")
+    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path, tenant_id)
     role = f"role-{tenant_id}"
     await _grant_role_permission(storage_engine.data, role, "connector:execute")
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[role])
@@ -825,8 +832,8 @@ async def test_kernel_denied_connector_forged_permissions_never_reaches_connecto
     """Kernel RBAC denies (principal lacks connector:execute); Connector's
     own check is forged to CLAIM the correct permission. Kernel denies
     before Connector's handler — and therefore Connector's check — ever runs."""
-    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path)
     tenant_id = _tenant(tmp_path, "-o2")
+    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path, tenant_id)
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[])  # no connector:execute
     token = await _issue_token(security_engine, tenant_id, "principal-1")
 
@@ -838,8 +845,8 @@ async def test_kernel_denied_connector_forged_permissions_never_reaches_connecto
 
 @pytest.mark.asyncio
 async def test_mismatched_permission_set_denied_by_connector(tmp_path: Path) -> None:
-    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path)
     tenant_id = _tenant(tmp_path, "-o3")
+    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path, tenant_id)
     role = f"role-{tenant_id}"
     await _grant_role_permission(storage_engine.data, role, "connector:execute")
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[role])
@@ -851,8 +858,8 @@ async def test_mismatched_permission_set_denied_by_connector(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_empty_permission_list_denied_by_connector(tmp_path: Path) -> None:
-    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path)
     tenant_id = _tenant(tmp_path, "-o4")
+    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path, tenant_id)
     role = f"role-{tenant_id}"
     await _grant_role_permission(storage_engine.data, role, "connector:execute")
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[role])
@@ -872,8 +879,8 @@ async def test_malformed_type_permission_set_silently_skips_connector_check(tmp_
     independently required and enforced `connector:execute`), but it means
     Connector's "defense-in-depth" contributes nothing unless the caller
     happens to supply a list/set/tuple."""
-    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path)
     tenant_id = _tenant(tmp_path, "-o5")
+    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path, tenant_id)
     role = f"role-{tenant_id}"
     await _grant_role_permission(storage_engine.data, role, "connector:execute")
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[role])
@@ -890,8 +897,8 @@ async def test_missing_permission_key_silently_skips_connector_check(tmp_path: P
     """Same discovery as above, but for the key being absent entirely
     (the realistic production shape — nothing in this codebase's production
     call paths populates `options.granted_permissions` today)."""
-    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path)
     tenant_id = _tenant(tmp_path, "-o6")
+    kernel, storage_engine, security_engine, _connector = await _build_connector_kernel(tmp_path, tenant_id)
     role = f"role-{tenant_id}"
     await _grant_role_permission(storage_engine.data, role, "connector:execute")
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[role])

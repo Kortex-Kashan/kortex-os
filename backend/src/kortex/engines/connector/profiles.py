@@ -128,6 +128,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
                     options_str = json.dumps(updated_profile.options) if updated_profile.options else None
 
                     if model is not None:
+                        model.tenant_id = updated_profile.tenant_id
                         model.name = updated_profile.name
                         model.driver_id = updated_profile.driver_id
                         model.secret_handle = updated_profile.secret_handle
@@ -138,6 +139,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
                     else:
                         model = ConnectorProfileModel(
                             id=profile_id,
+                            tenant_id=updated_profile.tenant_id,
                             name=updated_profile.name,
                             driver_id=updated_profile.driver_id,
                             secret_handle=updated_profile.secret_handle,
@@ -164,35 +166,47 @@ class ConnectorProfileManager(IConnectorProfileManager):
                 except Exception:
                     pass  # Resilience: continue on cache failure
 
-    async def get_profile(self, profile_id: str) -> ConnectorProfile:
+    async def get_profile(self, profile_id: str, tenant_id: str | None = None) -> ConnectorProfile:
         """Retrieve Connector Profile by profile ID across CacheStore, DataStore, and local state.
 
         Args:
             profile_id: Identifier string of target profile.
+            tenant_id: When supplied (M6.3-1), the resolved profile's own
+                `tenant_id` must match exactly, or the profile is treated as
+                not found — never distinguishing "wrong tenant" from
+                "doesn't exist" (enumeration resistance, mirroring the same
+                masking pattern already used for cross-tenant approval
+                lookups elsewhere in KORTEX). Callers that omit `tenant_id`
+                get the pre-M6.3, unscoped lookup — reserved for trusted
+                internal callers that have already verified ownership
+                themselves; every Kernel-capability-facing caller must
+                supply it.
 
         Returns:
             ConnectorProfile instance.
 
         Raises:
             ConnectorValidationError: If profile_id is empty or whitespace.
-            ConnectorProfileNotFoundError: If profile is not registered.
+            ConnectorProfileNotFoundError: If profile is not registered, or
+                registered under a different tenant than `tenant_id`.
         """
         if not profile_id or not profile_id.strip():
             raise ConnectorValidationError("profile_id cannot be empty or whitespace.")
 
         pid = profile_id.strip()
+        resolved: ConnectorProfile | None = None
 
         # 1. Check ICacheStore
-        if self._cache_store is not None:
+        if resolved is None and self._cache_store is not None:
             try:
                 cached = await self._cache_store.get(self._get_cache_key(pid))
                 if isinstance(cached, dict):
-                    return ConnectorProfile.model_validate(cached)
+                    resolved = ConnectorProfile.model_validate(cached)
             except Exception:
                 pass  # Fall through on cache error
 
         # 2. Check IDataStore
-        if self._data_store is not None:
+        if resolved is None and self._data_store is not None:
             async def _read_from_db(session: AsyncSession) -> ConnectorProfile | None:
                 stmt = select(ConnectorProfileModel).where(ConnectorProfileModel.id == pid)
                 res = await session.execute(stmt)
@@ -201,6 +215,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
                     opts = json.loads(model.options_json) if model.options_json else {}
                     return ConnectorProfile(
                         profile_id=model.id,
+                        tenant_id=model.tenant_id,
                         name=model.name,
                         driver_id=model.driver_id,
                         secret_handle=model.secret_handle,
@@ -216,17 +231,27 @@ class ConnectorProfileManager(IConnectorProfileManager):
             try:
                 db_profile = await self._data_store.execute_in_transaction(_read_from_db)
                 if db_profile is not None:
+                    resolved = db_profile
                     # Update local state cache
                     async with self._lock:
                         self._profiles[pid] = db_profile
-                    return db_profile
             except Exception:
                 pass
 
         # 3. Check local in-memory fallback
-        async with self._lock:
-            if pid in self._profiles:
-                return self._profiles[pid]
+        if resolved is None:
+            async with self._lock:
+                resolved = self._profiles.get(pid)
+
+        # Tenant ownership check (M6.3-1) -- applied uniformly regardless of
+        # which resolution path above actually found the profile, and
+        # fails exactly like "not found" so a caller can never distinguish
+        # "wrong tenant" from "no such profile" (enumeration resistance).
+        if resolved is not None and tenant_id is not None and resolved.tenant_id != tenant_id:
+            resolved = None
+
+        if resolved is not None:
+            return resolved
 
         raise ConnectorProfileNotFoundError(
             f"Connector Profile '{pid}' not found.",
@@ -234,13 +259,17 @@ class ConnectorProfileManager(IConnectorProfileManager):
         )
 
     async def list_profiles(
-        self, driver_id: str | None = None, active_only: bool = False
+        self, driver_id: str | None = None, active_only: bool = False, tenant_id: str | None = None
     ) -> list[ConnectorProfile]:
         """Return all registered Connector Profiles from Storage Engine or local state.
 
         Args:
             driver_id: Optional driver ID filter string.
             active_only: If True, returns only profiles where is_active is True.
+            tenant_id: When supplied (M6.3-1), only profiles owned by this
+                tenant are returned. Omitted for trusted internal callers
+                that have already scoped themselves; every Kernel-capability-
+                facing caller must supply it.
 
         Returns:
             List of matching ConnectorProfile instances.
@@ -259,6 +288,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
                     results.append(
                         ConnectorProfile(
                             profile_id=m.id,
+                            tenant_id=m.tenant_id,
                             name=m.name,
                             driver_id=m.driver_id,
                             secret_handle=m.secret_handle,
@@ -280,6 +310,9 @@ class ConnectorProfileManager(IConnectorProfileManager):
         if not profiles:
             async with self._lock:
                 profiles = list(self._profiles.values())
+
+        if tenant_id is not None:
+            profiles = [p for p in profiles if p.tenant_id == tenant_id]
 
         if driver_id is not None:
             target_driver = driver_id.strip()

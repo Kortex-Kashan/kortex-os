@@ -73,6 +73,7 @@ from kortex.engines.connector.pipeline import ConnectorPipeline
 from kortex.engines.connector.profiles import ConnectorProfileManager
 from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
 from kortex.engines.connector.registry import ConnectorDriverRegistry
+from kortex.engines.security.models import SecurityPrincipal
 from kortex.engines.storage.interfaces import IDataStore
 
 if TYPE_CHECKING:
@@ -345,8 +346,26 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         except Exception:
             self.logger.warning("Failed to record connector cancellation metric.")
 
-    async def execute_action(self, request: ActionRequest) -> ActionResult:
-        """Execute an action against an external driver via profile and pipeline."""
+    async def execute_action(
+        self, request: ActionRequest, principal: SecurityPrincipal | None = None
+    ) -> ActionResult:
+        """Execute an action against an external driver via profile and pipeline.
+
+        `principal` (M6.3-1): the Kernel dispatcher injects its own verified
+        identity into any handler parameter literally named `principal`.
+        Before this fix, `request.tenant_id` was trusted as-is from
+        caller-supplied data with no cross-check against the authenticated
+        caller's real tenant, and `ConnectorProfileManager.get_profile` had
+        no tenant scoping at all -- a caller holding the coarse
+        `connector:execute` permission could reach any tenant's connector
+        profile and secret by supplying that tenant's `profile_id`. When a
+        verified `principal` is present, its `tenant_id` is authoritative:
+        the request is corrected to it before profile resolution or
+        pipeline execution ever reads `request.tenant_id`.
+        """
+        if principal is not None and principal.tenant_id != request.tenant_id:
+            request = request.model_copy(update={"tenant_id": principal.tenant_id})
+
         start_time = time.perf_counter()
         is_success = False
         resolved_driver_id: str | None = None
@@ -392,8 +411,10 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             )
             await self._publish_event(started_evt)
 
-            # 2. Resolve profile
-            profile = await self._profile_manager.get_profile(request.profile_id)
+            # 2. Resolve profile, tenant-scoped (M6.3-1)
+            profile = await self._profile_manager.get_profile(
+                request.profile_id, tenant_id=request.tenant_id
+            )
             resolved_driver_id = profile.driver_id
 
             # 3. Execute action through pipeline
@@ -487,10 +508,21 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
         return self._registry.list_drivers()
 
-    async def get_profile(self, profile_id: str) -> ConnectorProfile:
-        """Retrieve a connector profile by ID."""
+    async def get_profile(
+        self,
+        profile_id: str,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> ConnectorProfile:
+        """Retrieve a connector profile by ID, tenant-scoped (M6.3-1).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` -- the same precedence rule used throughout KORTEX since
+        M6.0-3.
+        """
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
-        return await self._profile_manager.get_profile(profile_id)
+        tid = principal.tenant_id if principal is not None else tenant_id
+        return await self._profile_manager.get_profile(profile_id, tenant_id=tid)
 
     # -- Internal Helper Methods --------------------------------------------
 

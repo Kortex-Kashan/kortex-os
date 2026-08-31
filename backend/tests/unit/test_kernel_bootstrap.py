@@ -23,6 +23,7 @@ from kortex.core.kernel import KernelState
 from kortex.engines.ai.engine import AIOrchestrationEngine
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError
 from kortex.engines.connector.models import ActionRequest, ConnectorActionType, ConnectorProfile
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
@@ -342,6 +343,7 @@ async def test_connector_secret_resolver_wired_on_production_boot_path() -> None
 
         profile = ConnectorProfile(
             profile_id="prof-m6-0-2-regression",
+            tenant_id=tenant_id,
             name="M6.0-2 Regression Profile",
             driver_id="connector-dummy",
             secret_handle=secret_handle,
@@ -368,7 +370,16 @@ async def test_connector_secret_resolver_stays_tenant_scoped_on_production_boot_
     """A secret provisioned under one tenant must never resolve for a
     connector profile executed under a different tenant — the specific
     tenant-safety property the M6.0-2 fix is required to preserve (a
-    single-argument, hardcoded-tenant resolver would not catch this)."""
+    single-argument, hardcoded-tenant resolver would not catch this).
+
+    M6.3-1 closes this even earlier than M6.0-2 did: the profile itself is
+    now tenant-scoped (`prof-m6-0-2-cross-tenant` genuinely belongs to
+    `tenant-real-owner`, the same tenant that owns the secret it
+    references), so an attacker-claimed `tenant_id="tenant-attacker"`
+    request now fails at profile resolution — it can no longer even
+    discover the profile exists — rather than reaching secret resolution
+    and failing there. Both are fail-closed; this is strictly stronger.
+    """
     kernel = await build_and_boot_kernel()
     try:
         security_engine = kernel.get_engine("security")
@@ -380,6 +391,7 @@ async def test_connector_secret_resolver_stays_tenant_scoped_on_production_boot_
 
         profile = ConnectorProfile(
             profile_id="prof-m6-0-2-cross-tenant",
+            tenant_id="tenant-real-owner",
             name="M6.0-2 Cross-Tenant Profile",
             driver_id="connector-dummy",
             secret_handle=secret_handle,
@@ -392,9 +404,8 @@ async def test_connector_secret_resolver_stays_tenant_scoped_on_production_boot_
             action_type=ConnectorActionType.FETCH,
             tenant_id="tenant-attacker",
         )
-        result = await connector_engine.execute_action(request)
 
-        assert result.status == "FAILED"
-        assert result.error_details["error"] == "Failed to resolve connector credentials."
+        with pytest.raises(ConnectorProfileNotFoundError):
+            await connector_engine.execute_action(request)
     finally:
         await kernel.shutdown()
