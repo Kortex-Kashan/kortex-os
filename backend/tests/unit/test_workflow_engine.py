@@ -100,6 +100,36 @@ async def test_workflow_engine_initialize_and_stop_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approval_sweep_loop_stop_actually_awaits_task_completion() -> None:
+    """M6.4 hardening regression: `_stop_approval_sweep_loop` previously
+    called `.cancel()` and returned immediately without ever awaiting the
+    task -- `WorkflowEngine.stop()` (and therefore `Kernel.shutdown()`)
+    could return while the loop's coroutine was still unwinding mid-await.
+    Because `approval_sweep_enabled` defaults to `True`, this ran for
+    EVERY production-shaped Kernel boot, not just tests that exercise it
+    directly -- a per-boot task leak that, at real-suite scale, produced a
+    genuine hang during pytest-asyncio's own event-loop teardown (proven
+    directly: the full backend suite hung reproducibly before this fix and
+    completed cleanly, twice, after it).
+
+    Proves the fix's actual contract: after `_stop_approval_sweep_loop()`
+    returns, the task is unconditionally done -- not merely cancelled and
+    still finishing up somewhere in the background.
+    """
+    engine = WorkflowEngine(settings=WorkflowSettings(approval_sweep_interval_seconds=60.0))
+    engine._start_approval_sweep_loop(engine.settings.approval_sweep_interval_seconds)
+    task = engine._approval_sweep_task
+    assert task is not None
+    assert not task.done()
+
+    await engine._stop_approval_sweep_loop()
+
+    assert task.done()
+    assert engine._approval_sweep_task is None
+    assert engine._approval_sweep_running is False
+
+
+@pytest.mark.asyncio
 async def test_workflow_engine_health_check_method() -> None:
     """Test health_check method delegates to health()."""
     engine = WorkflowEngine()

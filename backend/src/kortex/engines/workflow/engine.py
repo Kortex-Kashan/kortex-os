@@ -490,7 +490,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             self._scheduler.stop_background_loop()
 
         # Stop approval-expiry sweep daemon
-        self._stop_approval_sweep_loop()
+        await self._stop_approval_sweep_loop()
 
         # Cancel any active running background execution tasks cleanly
         tasks_to_cancel = [task for task in self._running_tasks.values() if not task.done()]
@@ -1572,13 +1572,37 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self._approval_sweep_task = asyncio.create_task(self._approval_sweep_loop(poll_interval_seconds))
         self.logger.info("Approval-expiry sweep daemon started (poll: %.2fs).", poll_interval_seconds)
 
-    def _stop_approval_sweep_loop(self) -> None:
-        """Stop the background approval-expiry sweep polling task."""
+    async def _stop_approval_sweep_loop(self) -> None:
+        """Stop the background approval-expiry sweep polling task.
+
+        M6.4 hardening: requesting cancellation is not the same as the task
+        actually having stopped. The original version called `.cancel()`
+        and returned immediately, without ever awaiting the task -- `stop()`
+        (and therefore `Kernel.shutdown()`) could return while the sweep
+        loop's coroutine was still unwinding mid-await (e.g. inside an
+        in-flight `aiosqlite` call), racing the subsequent DB-connection
+        teardown. Because `approval_sweep_enabled` defaults to `True`, this
+        task now starts for every production-shaped Kernel boot (any test
+        or process using `kernel_bootstrap.build_and_boot_kernel()`), not
+        just the small number of tests that exercise it directly -- a
+        latent per-boot leak here compounds across a real test run.
+        Mirrors the exact cancel-then-await pattern already used just below
+        for `self._running_tasks`, with a bounded `wait_for` as a last-
+        resort safety net rather than risking an unbounded hang if the
+        task's current await point genuinely never responds to cancellation.
+        """
         self._approval_sweep_running = False
-        if self._approval_sweep_task is not None:
-            self._approval_sweep_task.cancel()
-            self._approval_sweep_task = None
-            self.logger.info("Approval-expiry sweep daemon stopped.")
+        task, self._approval_sweep_task = self._approval_sweep_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5.0)
+            except TimeoutError:
+                self.logger.warning(
+                    "Approval-expiry sweep daemon did not stop within 5s of cancellation -- "
+                    "abandoning it rather than blocking shutdown."
+                )
+        self.logger.info("Approval-expiry sweep daemon stopped.")
 
     async def _approval_sweep_loop(self, poll_interval: float) -> None:
         """Continuous background approval-expiry sweep tick loop."""
