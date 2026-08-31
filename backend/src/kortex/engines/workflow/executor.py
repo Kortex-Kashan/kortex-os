@@ -9,6 +9,8 @@ human approval checkpoints, and full transactional outbox lineage.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import random
 import time
@@ -101,6 +103,24 @@ class ExternalExecutionManager:
 
     # -- Primary External Execution APIs --------------------------------------
 
+    @staticmethod
+    def _compute_action_fingerprint(target: str, operation_type: str, parameters: dict[str, Any]) -> str:
+        """Stable hash binding an approval decision to the exact operation it
+        gates (M6.3-3) -- re-verified before a durable APPROVED decision is
+        ever allowed to resume execution, mirroring the identical pattern
+        already used for the AI's own tool-invocation approvals
+        (`AIOrchestrationEngine._action_fingerprint`, M6.2)."""
+        payload = json.dumps(
+            {
+                "target": target,
+                "operation_type": operation_type,
+                "parameters": sanitize_for_persistence(parameters),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     async def execute_operation(
         self,
         request: ExternalExecutionRequest,
@@ -111,15 +131,26 @@ class ExternalExecutionManager:
         tid = principal.tenant_id if principal is not None else request.tenant_id
         actor = principal.principal_id if principal is not None else request.created_by
         now = datetime.now(UTC)
+        policy_json = json.dumps(request.retry_policy.model_dump()) if request.retry_policy else None
 
         # 1. Human Approval Governance Gate
-        approval_ticket_id: UUID | None = None
         if request.requires_approval:
+            approval_ticket_id: UUID | None = None
             if self._approval_manager is not None:
+                action_fingerprint = self._compute_action_fingerprint(
+                    request.target, request.operation_type, request.parameters
+                )
                 appr_ticket = await self._approval_manager.create_request(
                     required_role=request.required_approval_role or "",
                     tenant_id=tid,
-                    context_snapshot=request.parameters,
+                    context_snapshot={
+                        "action": "external_execution",
+                        "execution_id": str(request.id),
+                        "target": request.target,
+                    },
+                    principal=principal,
+                    correlation_id=request.correlation_id,
+                    action_fingerprint=action_fingerprint,
                 )
                 approval_ticket_id = appr_ticket.id
 
@@ -143,6 +174,8 @@ class ExternalExecutionManager:
                 parameters=request.parameters,
                 tenant_id=tid,
                 outbox_store=self._outbox_store,
+                timeout_seconds=request.timeout_seconds,
+                retry_policy_json=policy_json,
             )
 
             await self._record_audit(
@@ -165,16 +198,55 @@ class ExternalExecutionManager:
             )
             return record
 
-        # 2. Initialize Running Execution Record
-        record = ExternalExecutionRecord(
-            id=request.id,
-            request_id=request.id,
+        # 2. No approval gate: dispatch immediately under this same execution id.
+        return await self._run_dispatch_and_record(
+            execution_id=request.id,
             tenant_id=tid,
-            operation_type=request.operation_type,
+            actor=actor,
             target=request.target,
-            status=ExternalExecutionStatus.RUNNING,
+            operation_type=request.operation_type,
+            parameters=request.parameters,
+            timeout_seconds=request.timeout_seconds,
+            retry_policy=request.retry_policy,
+            retry_policy_json=policy_json,
             idempotency_key=request.idempotency_key,
             correlation_id=request.correlation_id,
+            session_token=session_token,
+        )
+
+    async def _run_dispatch_and_record(
+        self,
+        execution_id: UUID,
+        tenant_id: str,
+        actor: str,
+        target: str,
+        operation_type: str,
+        parameters: dict[str, Any],
+        timeout_seconds: float,
+        retry_policy: RetryPolicy | None,
+        retry_policy_json: str | None,
+        idempotency_key: str | None,
+        correlation_id: str | None,
+        session_token: TokenPayload | dict[str, Any] | None = None,
+    ) -> ExternalExecutionRecord:
+        """Persist a RUNNING record and run the retry/timeout/dispatch loop.
+
+        Reused by both `execute_operation`'s immediate (no-approval) path and
+        the resume-after-approval path (M6.3-3) -- both write to the SAME
+        `execution_id`, so a resumed execution updates its own original
+        record in place (WAITING_APPROVAL -> RUNNING -> terminal) rather than
+        creating an orphaned second row.
+        """
+        now = datetime.now(UTC)
+        record = ExternalExecutionRecord(
+            id=execution_id,
+            request_id=execution_id,
+            tenant_id=tenant_id,
+            operation_type=operation_type,
+            target=target,
+            status=ExternalExecutionStatus.RUNNING,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
             approval_request_id=None,
             created_by=actor,
             created_at=now,
@@ -182,13 +254,15 @@ class ExternalExecutionManager:
         )
         await self._store.save_execution(
             record=record,
-            parameters=request.parameters,
-            tenant_id=tid,
+            parameters=parameters,
+            tenant_id=tenant_id,
             outbox_store=self._outbox_store,
+            timeout_seconds=timeout_seconds,
+            retry_policy_json=retry_policy_json,
         )
 
         # 3. Execution Dispatch with Retries and Timeout
-        policy = request.retry_policy or RetryPolicy(max_attempts=1)
+        policy = retry_policy or RetryPolicy(max_attempts=1)
         max_attempts = max(1, policy.max_attempts)
         delay = policy.initial_delay_seconds
         last_error: Exception | None = None
@@ -219,14 +293,14 @@ class ExternalExecutionManager:
         for attempt in range(1, max_attempts + 1):
             try:
                 # Enforce execution timeout
-                async with asyncio.timeout(request.timeout_seconds):
+                async with asyncio.timeout(timeout_seconds):
                     result_output = await self._dispatch_target(
-                        target=request.target,
-                        parameters=request.parameters,
-                        tenant_id=tid,
+                        target=target,
+                        parameters=parameters,
+                        tenant_id=tenant_id,
                         session_token=tok_payload,
-                        idempotency_key=request.idempotency_key,
-                        correlation_id=request.correlation_id,
+                        idempotency_key=idempotency_key,
+                        correlation_id=correlation_id,
                     )
 
                 # Success
@@ -235,7 +309,7 @@ class ExternalExecutionManager:
                 updated_record = await self._store.update_execution_status(
                     execution_id=record.id,
                     status=ExternalExecutionStatus.COMPLETED.value,
-                    tenant_id=tid,
+                    tenant_id=tenant_id,
                     output=result_output,
                     attempts=attempt,
                     execution_time_ms=duration_ms,
@@ -246,10 +320,10 @@ class ExternalExecutionManager:
                 await self._record_audit(
                     action="kortex.workflow.external.completed",
                     actor_id=actor,
-                    tenant_id=tid,
+                    tenant_id=tenant_id,
                     resource_id=str(record.id),
                     context={
-                        "target": request.target,
+                        "target": target,
                         "attempts": attempt,
                         "duration_ms": duration_ms,
                         "status": "COMPLETED",
@@ -258,7 +332,7 @@ class ExternalExecutionManager:
 
                 logger.info(
                     "External operation '%s' completed successfully in %.2fms (Attempt: %d/%d)",
-                    request.target,
+                    target,
                     duration_ms,
                     attempt,
                     max_attempts,
@@ -270,10 +344,10 @@ class ExternalExecutionManager:
                 last_was_timeout = True
                 logger.warning(
                     "External operation '%s' timed out on attempt %d/%d (limit %.2fs)",
-                    request.target,
+                    target,
                     attempt,
                     max_attempts,
-                    request.timeout_seconds,
+                    timeout_seconds,
                 )
                 if attempt < max_attempts:
                     jitter = random.uniform(0.8, 1.2) if policy.jitter else 1.0  # noqa: S311
@@ -286,7 +360,7 @@ class ExternalExecutionManager:
                 last_was_timeout = False
                 logger.warning(
                     "External operation '%s' failed on attempt %d/%d: %s",
-                    request.target,
+                    target,
                     attempt,
                     max_attempts,
                     exc,
@@ -302,11 +376,11 @@ class ExternalExecutionManager:
         completed_at = datetime.now(UTC)
 
         if last_was_timeout:
-            err_msg = f"Execution timed out after {request.timeout_seconds:.2f}s"
+            err_msg = f"Execution timed out after {timeout_seconds:.2f}s"
             await self._store.update_execution_status(
                 execution_id=record.id,
                 status=ExternalExecutionStatus.TIMED_OUT.value,
-                tenant_id=tid,
+                tenant_id=tenant_id,
                 error=err_msg,
                 attempts=max_attempts,
                 execution_time_ms=duration_ms,
@@ -316,17 +390,17 @@ class ExternalExecutionManager:
             await self._record_audit(
                 action="kortex.workflow.external.timed_out",
                 actor_id=actor,
-                tenant_id=tid,
+                tenant_id=tenant_id,
                 resource_id=str(record.id),
                 context={
-                    "target": request.target,
-                    "timeout_seconds": request.timeout_seconds,
+                    "target": target,
+                    "timeout_seconds": timeout_seconds,
                     "attempts": max_attempts,
                 },
             )
             raise ExternalExecutionTimeoutError(
-                f"External operation '{request.target}' timed out after {max_attempts} attempt(s), "
-                f"each bounded at {request.timeout_seconds:.2f} seconds."
+                f"External operation '{target}' timed out after {max_attempts} attempt(s), "
+                f"each bounded at {timeout_seconds:.2f} seconds."
             ) from last_error
 
         err_msg = str(last_error) if last_error else "Unknown execution error"
@@ -334,7 +408,7 @@ class ExternalExecutionManager:
         await self._store.update_execution_status(
             execution_id=record.id,
             status=ExternalExecutionStatus.FAILED.value,
-            tenant_id=tid,
+            tenant_id=tenant_id,
             error=err_msg,
             attempts=max_attempts,
             execution_time_ms=duration_ms,
@@ -345,17 +419,17 @@ class ExternalExecutionManager:
         await self._record_audit(
             action="kortex.workflow.external.failed",
             actor_id=actor,
-            tenant_id=tid,
+            tenant_id=tenant_id,
             resource_id=str(record.id),
             context={
-                "target": request.target,
+                "target": target,
                 "error": err_msg[:500],
                 "attempts": max_attempts,
             },
         )
 
         raise ExternalExecutionError(
-            f"External operation '{request.target}' failed after {max_attempts} attempts: {err_msg}"
+            f"External operation '{target}' failed after {max_attempts} attempts: {err_msg}"
         ) from last_error
 
     async def _dispatch_target(
@@ -469,3 +543,100 @@ class ExternalExecutionManager:
 
         logger.info("Cancelled external execution '%s' in tenant '%s'", execution_id, tid)
         return updated
+
+    # -- Approval Resume Event Handler (M6.3-3) --------------------------------
+
+    async def on_approval_decided(self, event: Any) -> None:  # noqa: ANN401
+        """React to a durable approval decision for an external-execution ticket.
+
+        Subscribed to the generic `workflow.approval.decided` event (published
+        unconditionally by `WorkflowEngine.decide_approval_request`), mirroring
+        `AIOrchestrationEngine._on_approval_decided` (M6.2-4). Filters on the
+        ticket's own `context_snapshot["action"] == "external_execution"`
+        marker so every other (human workflow-step / AI tool-invocation)
+        decision is ignored.
+
+        Fails closed on every ambiguity: execution not found, wrong status
+        (already resumed/cancelled by a prior delivery -- idempotent no-op),
+        missing dispatch context, or a mismatched action fingerprint all
+        result in the paused execution being left alone or cancelled --
+        never resumed on uncertain grounds.
+        """
+        try:
+            payload = getattr(event, "payload", None)
+            if not isinstance(payload, dict):
+                return
+            context_snapshot = payload.get("context_snapshot")
+            if not isinstance(context_snapshot, dict) or context_snapshot.get("action") != "external_execution":
+                return
+
+            execution_id = context_snapshot.get("execution_id")
+            tid = payload.get("tenant_id")
+            decision = payload.get("decision")
+            if not execution_id or not tid:
+                return
+
+            rec = await self._store.get_execution(execution_id, tenant_id=tid)
+            if rec is None or rec.status != ExternalExecutionStatus.WAITING_APPROVAL:
+                # Already resumed/cancelled by a prior delivery of this
+                # event, or the execution never reached this pause state --
+                # idempotent no-op either way.
+                return
+
+            if decision != "APPROVED":
+                # REJECTED (or any other terminal, non-approved decision):
+                # the paused execution must never dispatch the operation it
+                # was paused on.
+                await self.cancel_execution(execution_id, tenant_id=tid)
+                return
+
+            ctx = await self._store.get_dispatch_context(execution_id, tenant_id=tid)
+            if ctx is None:
+                logger.error(
+                    "Refusing to resume external execution '%s': dispatch context missing.",
+                    execution_id,
+                )
+                await self.cancel_execution(execution_id, tenant_id=tid)
+                return
+
+            stored_fingerprint = payload.get("action_fingerprint")
+            actual_fingerprint = self._compute_action_fingerprint(
+                ctx["target"], ctx["operation_type"], ctx["parameters"]
+            )
+            if stored_fingerprint and stored_fingerprint != actual_fingerprint:
+                logger.error(
+                    "Refusing to resume external execution '%s': approved action fingerprint does not "
+                    "match the execution's current dispatch context (approve-one/execute-another "
+                    "attempt or stale approval).",
+                    execution_id,
+                )
+                await self.cancel_execution(execution_id, tenant_id=tid)
+                return
+
+            retry_policy = RetryPolicy(**ctx["retry_policy"]) if ctx["retry_policy"] else None
+            retry_policy_json = json.dumps(ctx["retry_policy"]) if ctx["retry_policy"] else None
+            session_token = payload.get("decider_session_token")
+
+            try:
+                await self._run_dispatch_and_record(
+                    execution_id=UUID(str(execution_id)),
+                    tenant_id=tid,
+                    actor=ctx["created_by"],
+                    target=ctx["target"],
+                    operation_type=ctx["operation_type"],
+                    parameters=ctx["parameters"],
+                    timeout_seconds=ctx["timeout_seconds"],
+                    retry_policy=retry_policy,
+                    retry_policy_json=retry_policy_json,
+                    idempotency_key=ctx["idempotency_key"],
+                    correlation_id=ctx["correlation_id"],
+                    session_token=session_token,
+                )
+            except (ExternalExecutionError, ExternalExecutionTimeoutError):
+                # Already recorded as FAILED/TIMED_OUT with a full audit
+                # trail by `_run_dispatch_and_record` itself -- the event
+                # handler must not propagate the exception back to the
+                # Event Engine's synchronous dispatch loop.
+                pass
+        except Exception as exc:
+            logger.error("Failed to process approval decision event for external execution: %s", exc, exc_info=True)

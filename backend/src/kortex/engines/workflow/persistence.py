@@ -271,6 +271,8 @@ class ExternalExecutionModel(BaseModel):
     execution_time_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=30.0)
+    retry_policy_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     approval_request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="SYSTEM")
     completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -647,8 +649,16 @@ def _execution_to_model(
     record: ExternalExecutionRecord,
     parameters: dict[str, Any] | None = None,
     tenant_id: str = "default",
+    timeout_seconds: float | None = None,
+    retry_policy_json: str | None = None,
 ) -> ExternalExecutionModel:
-    """Convert ExternalExecutionRecord domain model to ExternalExecutionModel ORM row."""
+    """Convert ExternalExecutionRecord domain model to ExternalExecutionModel ORM row.
+
+    `timeout_seconds`/`retry_policy_json` (M6.3-3) capture enough of the
+    original dispatch request to faithfully re-invoke it on resume after a
+    durable approval decision -- the domain model does not carry them
+    itself, so they are threaded through here only.
+    """
     tid = record.tenant_id or tenant_id
     status_val = (
         record.status.value
@@ -674,6 +684,8 @@ def _execution_to_model(
         approval_request_id=str(record.approval_request_id) if record.approval_request_id else None,
         created_by=record.created_by,
         completed_at=record.completed_at,
+        timeout_seconds=timeout_seconds if timeout_seconds is not None else 30.0,
+        retry_policy_json=retry_policy_json,
     )
 
 
@@ -1833,10 +1845,18 @@ class ExternalExecutionStore:
         parameters: dict[str, Any] | None = None,
         tenant_id: str = "default",
         outbox_store: OutboxStore | None = None,
+        timeout_seconds: float | None = None,
+        retry_policy_json: str | None = None,
     ) -> None:
         """Persist a new ExternalExecutionRecord and optionally stage event in transactional outbox."""
         tid = record.tenant_id or tenant_id
-        model = _execution_to_model(record, parameters=parameters, tenant_id=tid)
+        model = _execution_to_model(
+            record,
+            parameters=parameters,
+            tenant_id=tid,
+            timeout_seconds=timeout_seconds,
+            retry_policy_json=retry_policy_json,
+        )
 
         async def _action(session: AsyncSession) -> None:
             existing = await session.scalar(
@@ -1872,6 +1892,40 @@ class ExternalExecutionStore:
             await session.flush()
 
         await self._data_store.execute_in_transaction(_action)
+
+    async def get_dispatch_context(
+        self, execution_id: UUID | str, tenant_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return the persisted target/parameters/timeout/retry-policy needed
+        to re-invoke an execution's dispatch (M6.3-3, resume-after-approval).
+
+        `ExternalExecutionRecord` (the domain model) does not itself carry
+        `parameters`/`timeout_seconds`/`retry_policy` -- they are stored only
+        on the ORM row. This is the read-back counterpart to the
+        `parameters`/`timeout_seconds`/`retry_policy_json` arguments
+        `save_execution` already accepts.
+        """
+        e_id = str(execution_id)
+
+        async def _action(session: AsyncSession) -> ExternalExecutionModel | None:
+            stmt = select(ExternalExecutionModel).where(ExternalExecutionModel.id == e_id)
+            if tenant_id is not None:
+                stmt = stmt.where(ExternalExecutionModel.tenant_id == tenant_id)
+            return await session.scalar(stmt)
+
+        row = await self._data_store.execute_in_transaction(_action)
+        if row is None:
+            return None
+        return {
+            "target": row.target,
+            "operation_type": row.operation_type,
+            "parameters": json.loads(row.parameters_json) if row.parameters_json else {},
+            "timeout_seconds": row.timeout_seconds,
+            "retry_policy": json.loads(row.retry_policy_json) if row.retry_policy_json else None,
+            "idempotency_key": row.idempotency_key,
+            "correlation_id": row.correlation_id,
+            "created_by": row.created_by,
+        }
 
     async def get_execution(
         self, execution_id: UUID | str, tenant_id: str | None = None

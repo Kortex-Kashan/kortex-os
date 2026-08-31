@@ -347,7 +347,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             self.logger.warning("Failed to record connector cancellation metric.")
 
     async def execute_action(
-        self, request: ActionRequest, principal: SecurityPrincipal | None = None
+        self, request: ActionRequest | dict[str, Any], principal: SecurityPrincipal | None = None
     ) -> ActionResult:
         """Execute an action against an external driver via profile and pipeline.
 
@@ -362,7 +362,19 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         verified `principal` is present, its `tenant_id` is authoritative:
         the request is corrected to it before profile resolution or
         pipeline execution ever reads `request.tenant_id`.
+
+        M6.3-3: `request` may arrive as a plain `dict` rather than a real
+        `ActionRequest` instance when this capability is invoked via
+        `ExternalExecutionManager`'s durable resume-after-approval path --
+        `CapabilityDispatcher._invoke_handler` passes `request.parameters`
+        through to the handler via `**kwargs` with no dict-to-pydantic
+        coercion, and a resumed execution's parameters necessarily come back
+        from JSON persistence (`ExternalExecutionStore.get_dispatch_context`)
+        as plain dicts, never the original in-memory object. Coerced here so
+        both the live and resumed dispatch paths behave identically.
         """
+        if isinstance(request, dict):
+            request = ActionRequest(**request)
         if principal is not None and principal.tenant_id != request.tenant_id:
             request = request.model_copy(update={"tenant_id": principal.tenant_id})
 

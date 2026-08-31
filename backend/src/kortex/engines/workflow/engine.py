@@ -234,6 +234,18 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 )
                 self.logger.info("WorkflowEngine wired to ExternalExecutionManager backed by StorageEngine.data.")
 
+                # M6.3-3: react to durable approval decisions for external-
+                # execution tickets so an approved/rejected/expired decision
+                # actually resumes or cancels the paused execution -- mirrors
+                # `AIOrchestrationEngine`'s identical subscription for its
+                # own tool-invocation tickets (M6.2-4).
+                if hasattr(kernel, "subscribe_event"):
+                    kernel.subscribe_event(
+                        topic="workflow.approval.decided",
+                        handler=self._external_executor.on_approval_decided,
+                        subscriber_name=f"{self.name}.external_executor",
+                    )
+
             # Register Kernel capabilities
             kernel.register_capability(
                 name="kortex.workflow.instance.start",
@@ -1290,7 +1302,6 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Submit a decision for an approval ticket (kortex.workflow.approval.decide capability)."""
-        tid = tenant_id or "default"
         dec_state: ApprovalState
         if isinstance(decision, ApprovalState):
             dec_state = decision
@@ -1299,15 +1310,16 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         else:
             raise WorkflowValidationError(f"Invalid approval decision state: '{decision}'.")
 
+        sec_eng = None
+        if self._kernel:
+            try:
+                sec_eng = self._kernel.get_engine("security")
+            except Exception as err:
+                self.logger.debug("Security engine lookup in decide_approval_request: %s", err)
+
         # Resolve principal from session_token if not directly provided
         if principal is None and "session_token" in kwargs:
             raw_token = kwargs["session_token"]
-            sec_eng = None
-            if self._kernel:
-                try:
-                    sec_eng = self._kernel.get_engine("security")
-                except Exception as err:
-                    self.logger.debug("Security engine lookup in decide_approval_request: %s", err)
             if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
                 try:
                     from kortex.engines.security.models import TokenPayload
@@ -1323,6 +1335,14 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                         principal = await sec_eng.authentication_manager.verify_token(tok)
                 except Exception as err:
                     self.logger.debug("Could not verify session token in decide_approval_request: %s", err)
+
+        # D7 hardening: the decider's own verified identity is authoritative
+        # over any caller-supplied `tenant_id` -- mirrors the tenant-
+        # correction pattern used throughout M6.0-M6.3 (e.g.
+        # `ConnectorEngine.execute_action`). A caller cannot decide a ticket
+        # into a tenant other than their own by simply passing a different
+        # `tenant_id` argument.
+        tid = principal.tenant_id if principal is not None else (tenant_id or "default")
 
         decision_obj = ApprovalDecision(
             request_id=UUID(str(request_id)),
@@ -1343,14 +1363,33 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         if updated_ticket.instance_id:
             await self._advance_workflow_after_approval(updated_ticket, decision_obj, tenant_id=tid)
 
+        # M6.3-3: mint a fresh session token for the already-verified deciding
+        # principal so a subscriber resuming execution off this event (e.g.
+        # `ExternalExecutionManager._on_approval_decided`) can dispatch the
+        # underlying capability with real, authenticated identity instead of
+        # forging one. Safe because `principal` was itself just verified via
+        # a real `verify_token`/direct-injection call above in this same
+        # request -- the identical precondition used by the `api/main.py`
+        # login flow's own `issue_token` call. Best-effort: a minting failure
+        # must never block the approval decision itself from completing.
+        decider_session_token: dict[str, Any] | None = None
+        if principal is not None and sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
+            try:
+                minted = await sec_eng.authentication_manager.issue_token(principal)
+                decider_session_token = minted.model_dump() if hasattr(minted, "model_dump") else minted
+            except Exception as err:
+                self.logger.warning("Failed to mint decider session token for approval resume event: %s", err)
+
         # M6.2-4: publish unconditionally, regardless of whether this ticket
         # is linked to a workflow instance -- an AI-originated ticket
         # (`context_snapshot["action"] == "ai_tool_invocation"`) never has
         # one, since the AI's tool-invocation path never goes through
         # WorkflowEngine instances at all. This is a plain, generic domain
         # event; the Workflow Engine has no AI-specific knowledge of who (if
-        # anyone) is subscribed to it -- `AIOrchestrationEngine` reacts to it
-        # independently (see `engine.py`'s `_on_approval_decided`).
+        # anyone) is subscribed to it -- `AIOrchestrationEngine` and
+        # `ExternalExecutionManager` each react to it independently (see
+        # `engine.py`'s `_on_approval_decided` and `executor.py`'s
+        # `_on_approval_decided`).
         await self._publish_event(
             "workflow.approval.decided",
             {
@@ -1360,6 +1399,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 "correlation_id": updated_ticket.correlation_id,
                 "action_fingerprint": updated_ticket.action_fingerprint,
                 "context_snapshot": updated_ticket.context_snapshot,
+                "decider_session_token": decider_session_token,
             },
         )
 
