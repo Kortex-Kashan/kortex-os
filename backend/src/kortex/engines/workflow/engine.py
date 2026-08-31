@@ -438,6 +438,14 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         except Exception as e:
             self.logger.error("Error during workflow startup hydration: %s", e, exc_info=True)
 
+        # M6.3-4: reconcile external executions stranded mid-dispatch by a
+        # prior crash/restart -- see `ExternalExecutionManager.recover_stranded_executions`.
+        if self._external_executor is not None:
+            try:
+                await self._external_executor.recover_stranded_executions()
+            except Exception as e:
+                self.logger.error("Error during external execution recovery scan: %s", e, exc_info=True)
+
         # Scheduler hydration and background polling daemon
         if self._scheduler is not None:
             try:

@@ -256,7 +256,17 @@ class ExternalExecutionModel(BaseModel):
     __tablename__ = "external_executions"
     __table_args__ = (
         Index("ix_external_executions_tenant_status", "tenant_id", "status"),
-        Index("ix_external_executions_idempotency", "tenant_id", "idempotency_key"),
+        # M6.3-4: a real DB-level uniqueness guarantee against duplicate
+        # execution requests, not merely an application-level lookup-before-
+        # create (which is still done first, in
+        # `ExternalExecutionManager.execute_operation`, to short-circuit the
+        # common case without hitting the DB's conflict path). Rows with a
+        # NULL `idempotency_key` are exempt from the constraint under
+        # standard SQL NULL-distinctness semantics (every NULL is treated as
+        # distinct from every other), which is exactly the desired behavior:
+        # only callers who actually opt in to idempotency by supplying a key
+        # are protected.
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_external_executions_tenant_idempotency"),
     )
 
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
@@ -1956,6 +1966,52 @@ class ExternalExecutionStore:
             if status_filter:
                 stmt = stmt.where(ExternalExecutionModel.status == status_filter)
             stmt = stmt.order_by(ExternalExecutionModel.created_at.desc()).limit(limit)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [_model_to_execution(row) for row in rows]
+
+    async def get_execution_by_idempotency_key(
+        self, tenant_id: str, idempotency_key: str
+    ) -> ExternalExecutionRecord | None:
+        """Look up a prior execution by its caller-supplied idempotency key (M6.3-4).
+
+        Used by `ExternalExecutionManager.execute_operation` to detect a
+        genuine duplicate request *before* creating a new record or
+        re-entering the approval gate -- a retried request with the same key
+        returns the original outcome instead of executing (or re-queuing for
+        approval) a second time.
+        """
+        async def _action(session: AsyncSession) -> ExternalExecutionModel | None:
+            stmt = select(ExternalExecutionModel).where(
+                ExternalExecutionModel.tenant_id == tenant_id,
+                ExternalExecutionModel.idempotency_key == idempotency_key,
+            )
+            return await session.scalar(stmt)
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return _model_to_execution(row) if row else None
+
+    async def get_stranded_executions(self, tenant_id: str | None = None) -> list[ExternalExecutionRecord]:
+        """Retrieve external executions left in the non-terminal RUNNING state (M6.3-4).
+
+        Mirrors `WorkflowStore.get_unfinalized_instances`'s recovery-scan
+        shape. Scoped to RUNNING only -- a WAITING_APPROVAL row is already
+        safe to leave untouched on restart (nothing dispatches it until a
+        real approval decision event arrives; the ticket itself is
+        separately durable via `DurableApprovalManager`). A RUNNING row,
+        by contrast, was interrupted mid-dispatch by the crash/restart and
+        must never be silently auto-resumed -- the external side effect it
+        was making may or may not have already landed, so blindly re-running
+        it risks a real duplicate action against the external system.
+        """
+        async def _action(session: AsyncSession) -> list[ExternalExecutionModel]:
+            stmt = select(ExternalExecutionModel).where(
+                ExternalExecutionModel.status == ExternalExecutionStatus.RUNNING.value
+            )
+            if tenant_id:
+                stmt = stmt.where(ExternalExecutionModel.tenant_id == tenant_id)
             result = await session.execute(stmt)
             return list(result.scalars().all())
 

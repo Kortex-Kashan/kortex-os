@@ -133,6 +133,27 @@ class ExternalExecutionManager:
         now = datetime.now(UTC)
         policy_json = json.dumps(request.retry_policy.model_dump()) if request.retry_policy else None
 
+        # 0. Idempotency Replay Guard (M6.3-4): a retried request carrying the
+        # same caller-supplied idempotency key returns the ORIGINAL outcome
+        # instead of executing (or re-queuing for approval) a second time.
+        # Checked before the approval gate too -- a duplicate of an
+        # already-waiting-for-approval request must not create a second
+        # ticket. This is a lookup-before-create fast path; the DB-level
+        # `UniqueConstraint` on `(tenant_id, idempotency_key)` is the actual
+        # enforcement backstop against a genuine race between two concurrent
+        # first-time requests sharing a key.
+        if request.idempotency_key is not None:
+            existing = await self._store.get_execution_by_idempotency_key(tid, request.idempotency_key)
+            if existing is not None:
+                logger.info(
+                    "Idempotent replay: returning existing execution '%s' for key '%s' (Tenant: '%s') "
+                    "instead of re-executing.",
+                    existing.id,
+                    request.idempotency_key,
+                    tid,
+                )
+                return existing
+
         # 1. Human Approval Governance Gate
         if request.requires_approval:
             approval_ticket_id: UUID | None = None
@@ -543,6 +564,59 @@ class ExternalExecutionManager:
 
         logger.info("Cancelled external execution '%s' in tenant '%s'", execution_id, tid)
         return updated
+
+    # -- Boot Recovery (M6.3-4) ------------------------------------------------
+
+    async def recover_stranded_executions(self, tenant_id: str | None = None) -> list[ExternalExecutionRecord]:
+        """Reconcile external executions stranded in RUNNING by a process crash/restart.
+
+        Mirrors `WorkflowEngine.hydrate_and_recover`'s startup recovery scan.
+        A RUNNING row was interrupted mid-dispatch -- whether its external
+        side effect actually landed before the interruption is unknown, so
+        it is never blindly auto-resumed (that could duplicate a real-world
+        action against the external system). Instead it is deterministically
+        failed closed, surfacing a clear, actionable error; a caller that
+        needs the operation to genuinely complete can safely resubmit using
+        the same `idempotency_key`, which either replays the stranded
+        record's own now-terminal outcome or -- if the underlying system
+        never actually received the call -- executes it for the first time.
+
+        WAITING_APPROVAL rows are intentionally left untouched here: nothing
+        dispatches them until a real `workflow.approval.decided` event
+        arrives, and the ticket itself is independently durable.
+        """
+        stranded = await self._store.get_stranded_executions(tenant_id=tenant_id)
+        recovered: list[ExternalExecutionRecord] = []
+        for rec in stranded:
+            updated = await self._store.update_execution_status(
+                execution_id=rec.id,
+                status=ExternalExecutionStatus.FAILED.value,
+                tenant_id=rec.tenant_id,
+                error=(
+                    "Execution was interrupted by a process restart while RUNNING and was not "
+                    "automatically resumed to avoid a duplicate side effect on the external system. "
+                    "Resubmit with the same idempotency_key to safely retry."
+                ),
+                attempts=rec.attempts,
+                execution_time_ms=rec.execution_time_ms,
+                completed_at=datetime.now(UTC),
+                outbox_store=self._outbox_store,
+            )
+            if updated is not None:
+                recovered.append(updated)
+                await self._record_audit(
+                    action="kortex.workflow.external.recovery_failed",
+                    actor_id="SYSTEM",
+                    tenant_id=rec.tenant_id,
+                    resource_id=str(rec.id),
+                    context={"target": rec.target, "reason": "stranded_running_on_boot"},
+                )
+                logger.warning(
+                    "Reconciled stranded RUNNING external execution '%s' (Tenant: '%s') to FAILED on boot recovery.",
+                    rec.id,
+                    rec.tenant_id,
+                )
+        return recovered
 
     # -- Approval Resume Event Handler (M6.3-3) --------------------------------
 
