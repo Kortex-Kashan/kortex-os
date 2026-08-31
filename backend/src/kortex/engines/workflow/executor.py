@@ -531,8 +531,19 @@ class ExternalExecutionManager:
         execution_id: UUID | str,
         tenant_id: str = "default",
         principal: SecurityPrincipal | None = None,
+        reason: str | None = None,
     ) -> ExternalExecutionRecord:
-        """Cancel a pending or waiting external execution."""
+        """Cancel a pending or waiting external execution.
+
+        `reason` (M6.4-3), when supplied, is recorded in the cancellation
+        audit context so the trail distinguishes WHY the execution was
+        cancelled (e.g. an approval ticket's actual `"REJECTED"` vs
+        `"EXPIRED"` decision) without requiring a join back to the
+        approval-ticket table to find out. Optional and defaults to `None`
+        for the pre-existing, directly-caller-invoked cancellation path
+        (`kortex.workflow.external.cancel`), which has no such decision to
+        report.
+        """
         tid = principal.tenant_id if principal is not None else tenant_id
         actor = principal.principal_id if principal is not None else "SYSTEM"
 
@@ -560,7 +571,7 @@ class ExternalExecutionManager:
             actor_id=actor,
             tenant_id=tid,
             resource_id=str(execution_id),
-            context={"target": rec.target},
+            context={"target": rec.target, "reason": reason},
         )
 
         logger.info("Cancelled external execution '%s' in tenant '%s'", execution_id, tid)
@@ -659,10 +670,12 @@ class ExternalExecutionManager:
                 return
 
             if decision != "APPROVED":
-                # REJECTED (or any other terminal, non-approved decision):
-                # the paused execution must never dispatch the operation it
-                # was paused on.
-                await self.cancel_execution(execution_id, tenant_id=tid)
+                # REJECTED (or any other terminal, non-approved decision,
+                # e.g. EXPIRED): the paused execution must never dispatch
+                # the operation it was paused on. `decision` (M6.4-3) is
+                # recorded in the cancellation audit context so the trail
+                # distinguishes a human REJECTED from a timed-out EXPIRED.
+                await self.cancel_execution(execution_id, tenant_id=tid, reason=decision)
                 return
 
             ctx = await self._store.get_dispatch_context(execution_id, tenant_id=tid)
@@ -671,7 +684,7 @@ class ExternalExecutionManager:
                     "Refusing to resume external execution '%s': dispatch context missing.",
                     execution_id,
                 )
-                await self.cancel_execution(execution_id, tenant_id=tid)
+                await self.cancel_execution(execution_id, tenant_id=tid, reason="dispatch_context_missing")
                 return
 
             stored_fingerprint = payload.get("action_fingerprint")
@@ -685,7 +698,7 @@ class ExternalExecutionManager:
                     "attempt or stale approval).",
                     execution_id,
                 )
-                await self.cancel_execution(execution_id, tenant_id=tid)
+                await self.cancel_execution(execution_id, tenant_id=tid, reason="fingerprint_mismatch")
                 return
 
             retry_policy = RetryPolicy(**ctx["retry_policy"]) if ctx["retry_policy"] else None

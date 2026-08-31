@@ -872,6 +872,70 @@ async def test_approval_decided_rejected_cancels_paused_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approval_decided_expired_cancels_paused_task() -> None:
+    """M6.4-3: an EXPIRED decision (an approval ticket that timed out with
+    no human ever deciding it) takes the identical non-APPROVED branch as
+    REJECTED -- no special-cased `if decision == "EXPIRED"` handling exists
+    or is needed, since the existing `decision != "APPROVED"` check already
+    covers it correctly."""
+    engine, task, paused = await _paused_engine_and_result()
+
+    event = _decided_event(tenant_id=task.tenant_id, decision="EXPIRED", task_id=task.task_id)
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_expired_never_resumes_task() -> None:
+    """Adversarial: an EXPIRED decision must never take the resume path --
+    the paused task's proposed tool calls must never actually execute."""
+    engine, task, paused = await _paused_engine_and_result()
+
+    event = _decided_event(tenant_id=task.tenant_id, decision="EXPIRED", task_id=task.task_id)
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status != AgentStatus.COMPLETED
+    assert record.status != AgentStatus.RESUMING
+    assert record.status == AgentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_duplicate_expired_event_is_harmless() -> None:
+    """Delivering the same EXPIRED decision event twice must cancel the
+    task exactly once -- the second delivery is an idempotent no-op because
+    the task has already left PAUSED_FOR_APPROVAL."""
+    engine, task, paused = await _paused_engine_and_result()
+
+    event = _decided_event(tenant_id=task.tenant_id, decision="EXPIRED", task_id=task.task_id)
+    await engine._on_approval_decided(event)
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_expired_event_with_wrong_tenant_id_does_not_cancel_task() -> None:
+    """Adversarial: a forged/wrong tenant_id in the event payload must not
+    reach across tenant boundaries to cancel a task belonging to a
+    different tenant -- the tenant-scoped task lookup simply finds nothing."""
+    engine, task, paused = await _paused_engine_and_result()
+
+    event = _decided_event(tenant_id="a-completely-different-tenant", decision="EXPIRED", task_id=task.task_id)
+    await engine._on_approval_decided(event)
+
+    record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
+    assert record is not None
+    assert record.status == AgentStatus.PAUSED_FOR_APPROVAL
+
+
+@pytest.mark.asyncio
 async def test_approval_decided_fingerprint_mismatch_refuses_resume_and_cancels() -> None:
     """SECURITY: an APPROVED decision whose stored fingerprint does not
     match the task's actual pending tool calls (approve-one/execute-another,
