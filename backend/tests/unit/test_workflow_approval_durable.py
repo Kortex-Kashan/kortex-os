@@ -39,6 +39,7 @@ import http
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -134,6 +135,71 @@ async def durable_env(tmp_path: Path) -> AsyncGenerator[ApprovalTestEnvironment,
     kernel._db_manager = db_manager
 
     storage_dir = tmp_path / f"storage_appr_{uuid4().hex[:8]}"
+    storage_engine = StorageEngine(base_directory=str(storage_dir))
+    security_engine = SecurityEngine(
+        master_key=_TEST_MASTER_KEY,
+        signing_private_key=_TEST_SIGNING_KEY,
+    )
+
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(security_engine)
+    await kernel.boot()
+
+    data_store = storage_engine.data
+    approval_store = ApprovalStore(data_store)
+    outbox_store = OutboxStore(data_store)
+    local_crypto = LocalCrypto()
+
+    approval_manager = DurableApprovalManager(
+        data_store=data_store,
+        security_engine=security_engine,
+        outbox_store=outbox_store,
+    )
+
+    env = ApprovalTestEnvironment(
+        kernel=kernel,
+        db_manager=db_manager,
+        data_store=data_store,
+        approval_store=approval_store,
+        outbox_store=outbox_store,
+        approval_manager=approval_manager,
+        security_engine=security_engine,
+        local_crypto=local_crypto,
+    )
+    yield env
+
+    await kernel.shutdown()
+    if db_manager._engine:
+        await db_manager._engine.dispose()
+
+
+@pytest.fixture
+async def file_backed_durable_env(tmp_path: Path) -> AsyncGenerator[ApprovalTestEnvironment, None]:
+    """M6.4-1: a file-backed (not `:memory:`) ApprovalTestEnvironment,
+    needed specifically for the genuine-concurrency race tests below.
+
+    `sqlite+aiosqlite:///:memory:` gives every session its own private,
+    disconnected in-memory database unless pooled onto a single shared
+    connection (SQLAlchemy's `StaticPool`), and two `AsyncSession`s that
+    share one physical DBAPI connection cannot each hold an independent,
+    truly-concurrent transaction -- interleaving `asyncio.gather`ed writers
+    against it produced results inconsistent with either writer's own view
+    of what it had done (confirmed by manual reproduction while diagnosing
+    this exact test). A real file-backed SQLite database, with each
+    `execute_in_transaction` call getting a genuine, independently-lockable
+    connection -- the same setup every M6.3 real-concurrency integration
+    test already uses -- resolves this: exactly one concurrent writer wins,
+    consistently, across repeated runs.
+    """
+    db_path = (tmp_path / f"kortex_appr_concurrent_{uuid4().hex[:8]}.db").as_posix()
+    db_manager = DatabaseEngineManager(f"sqlite+aiosqlite:///{db_path}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+
+    kernel = Kernel()
+    kernel._db_manager = db_manager
+
+    storage_dir = tmp_path / f"storage_appr_concurrent_{uuid4().hex[:8]}"
     storage_engine = StorageEngine(base_directory=str(storage_dir))
     security_engine = SecurityEngine(
         master_key=_TEST_MASTER_KEY,
@@ -610,6 +676,247 @@ async def test_expiration_sweep_and_events(durable_env: ApprovalTestEnvironment)
     pending_events = await durable_env.outbox_store.get_pending_events(tenant_id="tenant_exp")
     topics = [e.topic for e in pending_events]
     assert "workflow.approval.expired" in topics
+
+
+# ============================================================================
+# M6.4-1: Expiry Propagation via workflow.approval.decided
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_sweep_publishes_decided_event_with_expired_decision(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """A live `workflow.approval.decided` event, decision=EXPIRED, is
+    published on the SAME topic/contract as a human APPROVED/REJECTED
+    decision -- not the separate, never-delivered `workflow.approval.expired`
+    outbox event. Every value comes from the ticket's own persisted record."""
+    manager = DurableApprovalManager(
+        data_store=durable_env.data_store,
+        security_engine=durable_env.security_engine,
+        outbox_store=durable_env.outbox_store,
+        event_engine=durable_env.kernel.get_engine("event"),
+    )
+    ticket = await manager.create_request(
+        required_role="MANAGER",
+        tenant_id="tenant_exp_evt",
+        timeout_seconds=-10,
+        correlation_id="corr-expiry-1",
+        context_snapshot={"action": "external_execution", "execution_id": "exec-42"},
+    )
+
+    received: list[Any] = []
+    durable_env.kernel.subscribe_event(
+        "workflow.approval.decided", lambda event: received.append(event), subscriber_name="test-spy"
+    )
+
+    expired_list = await manager.sweep_expired_requests(tenant_id="tenant_exp_evt")
+    assert len(expired_list) == 1
+
+    assert len(received) == 1
+    payload = received[0].payload
+    assert payload["request_id"] == str(ticket.id)
+    assert payload["tenant_id"] == "tenant_exp_evt"
+    assert payload["decision"] == "EXPIRED"
+    assert payload["correlation_id"] == "corr-expiry-1"
+    assert payload["context_snapshot"]["execution_id"] == "exec-42"
+    # No human decider exists at sweep time -- no token to mint, none to leak.
+    assert "decider_session_token" not in payload
+
+
+@pytest.mark.asyncio
+async def test_sweep_with_no_event_engine_does_not_raise(durable_env: ApprovalTestEnvironment) -> None:
+    """`durable_env.approval_manager` is constructed WITHOUT an event_engine
+    (the pre-existing fixture default) -- the sweep must still work exactly
+    as before, silently skipping publication rather than erroring."""
+    ticket = await durable_env.approval_manager.create_request(
+        required_role="MANAGER", tenant_id="tenant_no_evt", timeout_seconds=-10
+    )
+    expired_list = await durable_env.approval_manager.sweep_expired_requests(tenant_id="tenant_no_evt")
+    assert len(expired_list) == 1
+    assert expired_list[0].id == ticket.id
+
+
+@pytest.mark.asyncio
+async def test_duplicate_sweep_does_not_republish_for_already_expired_ticket(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """A second sweep call over the same (now-EXPIRED) ticket must not
+    publish a second event -- `atomic_expire_request`'s state==PENDING
+    guard means the ticket is simply absent from the second sweep's result."""
+    manager = DurableApprovalManager(
+        data_store=durable_env.data_store,
+        security_engine=durable_env.security_engine,
+        outbox_store=durable_env.outbox_store,
+        event_engine=durable_env.kernel.get_engine("event"),
+    )
+    await manager.create_request(required_role="MANAGER", tenant_id="tenant_dup_sweep", timeout_seconds=-10)
+
+    received: list[Any] = []
+    durable_env.kernel.subscribe_event(
+        "workflow.approval.decided", lambda event: received.append(event), subscriber_name="test-spy"
+    )
+
+    first = await manager.sweep_expired_requests(tenant_id="tenant_dup_sweep")
+    second = await manager.sweep_expired_requests(tenant_id="tenant_dup_sweep")
+
+    assert len(first) == 1
+    assert len(second) == 0
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sweep_workers_expire_and_publish_exactly_once(
+    file_backed_durable_env: ApprovalTestEnvironment,
+) -> None:
+    """Two 'workers' racing to sweep the same expired ticket concurrently
+    must transition it exactly once and publish exactly one event -- proven
+    against the real DB-level atomic UPDATE-WHERE-status guard, not an
+    application-level lock. Uses `file_backed_durable_env` (not `:memory:`)
+    for genuine, independently-lockable concurrent transactions -- see that
+    fixture's docstring."""
+    env = file_backed_durable_env
+    manager = DurableApprovalManager(
+        data_store=env.data_store,
+        security_engine=env.security_engine,
+        outbox_store=env.outbox_store,
+        event_engine=env.kernel.get_engine("event"),
+    )
+    await manager.create_request(required_role="MANAGER", tenant_id="tenant_concurrent_sweep", timeout_seconds=-10)
+
+    received: list[Any] = []
+    env.kernel.subscribe_event(
+        "workflow.approval.decided", lambda event: received.append(event), subscriber_name="test-spy"
+    )
+
+    results = await asyncio.gather(
+        manager.sweep_expired_requests(tenant_id="tenant_concurrent_sweep"),
+        manager.sweep_expired_requests(tenant_id="tenant_concurrent_sweep"),
+    )
+    total_expired = sum(len(r) for r in results)
+    assert total_expired == 1
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+async def test_approve_wins_race_against_expire_no_event_published_for_loser(
+    durable_env: ApprovalTestEnvironment,
+) -> None:
+    """The reverse ordering of the existing
+    `test_adversarial_expiration_race_and_hydration_idempotency` case: a
+    ticket is decided (APPROVED) first, then a sweep attempts to expire the
+    same, already-timed-out ticket. The sweep must find nothing to expire
+    and must not publish a second, conflicting EXPIRED event for a ticket
+    that already has a real decision."""
+    manager = DurableApprovalManager(
+        data_store=durable_env.data_store,
+        security_engine=durable_env.security_engine,
+        outbox_store=durable_env.outbox_store,
+        event_engine=durable_env.kernel.get_engine("event"),
+    )
+    approver = SecurityPrincipal(
+        principal_id="mgr_1",
+        principal_type=PrincipalType.USER,
+        tenant_id="tenant_race2",
+        roles=["MANAGER"],
+    )
+    ticket = await manager.create_request(
+        required_role="MANAGER", tenant_id="tenant_race2", timeout_seconds=-5
+    )
+
+    received: list[Any] = []
+    durable_env.kernel.subscribe_event(
+        "workflow.approval.decided", lambda event: received.append(event), subscriber_name="test-spy"
+    )
+
+    decision = ApprovalDecision(
+        request_id=ticket.id, tenant_id="tenant_race2", approver_id="mgr_1", decision=ApprovalState.APPROVED
+    )
+    decided = await manager.submit_decision(decision, principal=approver, tenant_id="tenant_race2")
+    assert decided.state == ApprovalState.APPROVED
+
+    expired_list = await manager.sweep_expired_requests(tenant_id="tenant_race2")
+    assert expired_list == []
+
+    # submit_decision's own outbox staging aside, no EXPIRED event was
+    # published by the losing sweep -- only the (unrelated) fact that no
+    # spy-visible event fired from the sweep call itself.
+    assert all(e.payload.get("decision") != "EXPIRED" for e in received)
+
+
+async def _run_true_concurrent_decide_vs_expire(
+    env: ApprovalTestEnvironment, tenant_id: str, decision_state: ApprovalState
+) -> None:
+    """Shared driver for the two true-concurrency decide-vs-expire tests
+    below: `asyncio.gather` genuinely interleaves `submit_decision` and
+    `sweep_expired_requests` against the same already-timed-out ticket, so
+    both can pass their own initial PENDING check before either's atomic
+    UPDATE actually runs -- exactly the window `atomic_submit_decision` and
+    `atomic_expire_request`'s conditional-UPDATE fix (M6.4-1) must close.
+    Exactly one of the two must win; the ticket's final persisted state must
+    match whichever one did, never a corrupted mix of both. Takes a
+    `file_backed_durable_env` (not `:memory:`) -- see that fixture's
+    docstring for why genuine concurrency needs a real file-backed DB."""
+    manager = DurableApprovalManager(
+        data_store=env.data_store,
+        security_engine=env.security_engine,
+        outbox_store=env.outbox_store,
+        event_engine=env.kernel.get_engine("event"),
+    )
+    approver = SecurityPrincipal(
+        principal_id="mgr_concurrent", principal_type=PrincipalType.USER, tenant_id=tenant_id, roles=["MANAGER"]
+    )
+    ticket = await manager.create_request(required_role="MANAGER", tenant_id=tenant_id, timeout_seconds=-5)
+    decision = ApprovalDecision(
+        request_id=ticket.id, tenant_id=tenant_id, approver_id="mgr_concurrent", decision=decision_state
+    )
+
+    async def _try_decide() -> ApprovalRequest | None:
+        try:
+            return await manager.submit_decision(decision, principal=approver, tenant_id=tenant_id)
+        except ApprovalConflictError:
+            return None
+
+    decide_result, expire_result = await asyncio.gather(
+        _try_decide(), manager.sweep_expired_requests(tenant_id=tenant_id)
+    )
+
+    final = await manager.get_request(ticket.id, tenant_id=tenant_id)
+    assert final is not None
+
+    if decide_result is not None:
+        # Decide won the race: the ticket carries the real decision, and
+        # the concurrent sweep found nothing left to expire.
+        assert final.state == decision_state
+        assert expire_result == []
+    else:
+        # Expire won the race: the ticket is EXPIRED, and the concurrent
+        # decision was refused rather than silently corrupting it back.
+        assert final.state == ApprovalState.EXPIRED
+        assert len(expire_result) == 1
+        assert expire_result[0].id == ticket.id
+
+    # Whichever side won, exactly one outcome is true -- the two must be
+    # mutually exclusive, never both.
+    assert (decide_result is not None) != (len(expire_result) == 1)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_vs_expire_exactly_one_wins(
+    file_backed_durable_env: ApprovalTestEnvironment,
+) -> None:
+    await _run_true_concurrent_decide_vs_expire(
+        file_backed_durable_env, "tenant_race_approve_expire", ApprovalState.APPROVED
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reject_vs_expire_exactly_one_wins(
+    file_backed_durable_env: ApprovalTestEnvironment,
+) -> None:
+    await _run_true_concurrent_decide_vs_expire(
+        file_backed_durable_env, "tenant_race_reject_expire", ApprovalState.REJECTED
+    )
 
 
 # ============================================================================

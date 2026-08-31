@@ -736,4 +736,43 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                     tid,
                 )
 
+                # M6.4-1: publish on the SAME topic/contract as a human
+                # APPROVED/REJECTED decision (`WorkflowEngine
+                # .decide_approval_request`), rather than the separate,
+                # never-delivered `workflow.approval.expired` outbox event
+                # `atomic_expire_request` already stages (M6.3 planning
+                # audit: `OutboxStore.dispatch_pending` has no production
+                # caller anywhere in this codebase, so that outbox event is
+                # dead on arrival regardless of this change). Both existing
+                # subscribers (`AIOrchestrationEngine._on_approval_decided`,
+                # `ExternalExecutionManager.on_approval_decided`) already
+                # treat any `decision != "APPROVED"` as a cancellation, with
+                # no `"REJECTED"`-specific check -- so EXPIRED is handled
+                # correctly by them with zero subscriber-side changes.
+                # Every value below is read from the ticket's own persisted,
+                # already-tenant-scoped record -- there is no caller/
+                # principal at sweep time to (mis)trust instead, and
+                # `decider_session_token` is deliberately omitted: no human
+                # decider exists for an expiry, so there is no token to mint
+                # (and, per M6.4-0, this event is also relayed externally --
+                # omitting a token here needs no redaction to already be safe).
+                if self._event_engine is not None:
+                    try:
+                        await self._event_engine.publish(
+                            topic="workflow.approval.decided",
+                            payload={
+                                "request_id": str(expired_ticket.id),
+                                "tenant_id": tid,
+                                "decision": ApprovalState.EXPIRED.value,
+                                "correlation_id": expired_ticket.correlation_id,
+                                "action_fingerprint": expired_ticket.action_fingerprint,
+                                "context_snapshot": expired_ticket.context_snapshot,
+                            },
+                            sender="workflow.approval",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to publish expiry decision event for ticket '%s': %s", req.id, exc
+                        )
+
         return expired_results

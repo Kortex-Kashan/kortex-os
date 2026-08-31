@@ -1446,7 +1446,19 @@ class ApprovalStore:
         tenant_id: str,
         outbox_store: OutboxStore | None = None,
     ) -> ApprovalRequest:
-        """Atomically transition ticket state, insert decision record, and stage outbox event."""
+        """Atomically transition ticket state, insert decision record, and stage outbox event.
+
+        M6.4-1: step 2's ticket-state transition is a real conditional
+        `UPDATE ... WHERE state = 'PENDING'`, not an ORM-attribute mutation
+        left for `flush()` to translate into a plain UPDATE-by-primary-key.
+        The initial SELECT below still exists to produce the exact,
+        existing not-found/already-decided error messages on the common
+        (non-racing) path; the conditional UPDATE is what actually closes
+        the race window between that read and the write -- see
+        `atomic_expire_request`'s docstring for the concurrency test that
+        proved the old shape unsafe against a genuine decide-vs-expire (or
+        decide-vs-decide) collision.
+        """
         r_id = str(decision.request_id)
         dec_val = decision.decision.value if isinstance(decision.decision, ApprovalState) else str(decision.decision)
 
@@ -1466,9 +1478,26 @@ class ApprovalStore:
                     f"Approval request ticket '{r_id}' is already in state '{ticket.state}'."
                 )
 
-            # 2. Update state to decision
-            ticket.state = dec_val
-            ticket.updated_at = datetime.datetime.now(datetime.UTC)
+            # 2. Atomically transition state, re-checking PENDING at write
+            # time -- closes the race window between the read above and
+            # this write.
+            now = datetime.datetime.now(datetime.UTC)
+            stmt = (
+                update(ApprovalRequestModel)
+                .where(
+                    ApprovalRequestModel.id == r_id,
+                    ApprovalRequestModel.tenant_id == tenant_id,
+                    ApprovalRequestModel.state == "PENDING",
+                )
+                .values(state=dec_val, updated_at=now)
+            )
+            res = cast(CursorResult[Any], await session.execute(stmt))
+            if res.rowcount == 0:
+                raise ApprovalConflictError(
+                    f"Approval request ticket '{r_id}' was concurrently decided or expired "
+                    f"by another operation."
+                )
+            await session.refresh(ticket)
 
             # 3. Insert decision record
             dec_model = _decision_to_model(decision, tenant_id=tenant_id)
@@ -1506,21 +1535,51 @@ class ApprovalStore:
         tenant_id: str,
         outbox_store: OutboxStore | None = None,
     ) -> ApprovalRequest | None:
-        """Atomically transition a pending ticket to EXPIRED and stage outbox event."""
+        """Atomically transition a pending ticket to EXPIRED and stage outbox event.
+
+        M6.4-1 adversarial concurrency testing (`asyncio.gather`-driven
+        concurrent sweeps of the same ticket) proved the previous
+        SELECT-then-mutate-then-flush shape here was NOT actually atomic
+        against a genuinely concurrent caller: the WHERE clause guarding
+        `state == "PENDING"` was only ever evaluated by the SELECT, while
+        the UPDATE the ORM's flush() later emits is keyed solely by primary
+        key, with no re-check of the current `state` column value at write
+        time -- two concurrent sessions that both SELECT before either
+        commits can both successfully flush a transition. Rewritten as a
+        single, real conditional `UPDATE ... WHERE state = 'PENDING'`
+        (`rowcount == 0` means this call lost the race), mirroring the
+        identical, already-established pattern in
+        `AIAgentTaskStore.claim_task_for_resumption`
+        (`kortex/engines/ai/persistence.py`).
+        """
         r_id = str(request_id)
 
         async def _action(session: AsyncSession) -> ApprovalRequestModel | None:
-            ticket = await session.scalar(
-                select(ApprovalRequestModel).where(
+            now = datetime.datetime.now(datetime.UTC)
+            stmt = (
+                update(ApprovalRequestModel)
+                .where(
                     ApprovalRequestModel.id == r_id,
                     ApprovalRequestModel.tenant_id == tenant_id,
                     ApprovalRequestModel.state == "PENDING",
                 )
+                .values(state="EXPIRED", updated_at=now)
+            )
+            res = cast(CursorResult[Any], await session.execute(stmt))
+            if res.rowcount == 0:
+                # Either the ticket doesn't exist, or a concurrent winner
+                # (another expiry sweep, or a real decision) already moved
+                # it out of PENDING first -- this call did not win the race.
+                return None
+
+            ticket = await session.scalar(
+                select(ApprovalRequestModel).where(
+                    ApprovalRequestModel.id == r_id,
+                    ApprovalRequestModel.tenant_id == tenant_id,
+                )
             )
             if ticket is None:
                 return None
-            ticket.state = "EXPIRED"
-            ticket.updated_at = datetime.datetime.now(datetime.UTC)
 
             if outbox_store is not None:
                 outbox_store.stage_event_in_session(
