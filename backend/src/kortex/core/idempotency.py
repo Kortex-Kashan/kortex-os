@@ -49,6 +49,15 @@ SENSITIVE_KEY_NAMES: set[str] = {
     "private_key",
     "access_token",
     "refresh_token",
+    # M6.4-0: the freshly-minted session token `WorkflowEngine
+    # .decide_approval_request` embeds in the `workflow.approval.decided`
+    # event payload (`decider_session_token`) so the internal resume
+    # subscribers (`AIOrchestrationEngine`, `ExternalExecutionManager`) can
+    # dispatch with real authenticated identity. That in-process event is
+    # also relayed verbatim to every same-tenant WebSocket client by
+    # `api/main.py`'s `/events/stream` -- this key must be caught by the
+    # exact same sanitizer already applied to that relay's outbound payload.
+    "decider_session_token",
 }
 
 

@@ -37,6 +37,7 @@ from kortex.api.kernel_bootstrap import build_and_boot_kernel
 from kortex.api.schemas import IpcCapabilityRequest, IpcError, IpcResultEnvelope
 from kortex.api.token_codec import decode_token, encode_token
 from kortex.core.dispatch import CapabilityRequest
+from kortex.core.idempotency import sanitize_for_persistence
 from kortex.core.kernel import Kernel
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.models import SecurityPrincipal
@@ -311,6 +312,19 @@ async def events_stream(websocket: WebSocket, topic: str = "*") -> None:
     every authenticated subscriber of a matching topic — see the M3 final
     report's Known Limitations for what a complete fix would require
     (a schema change to `Event` itself, out of scope for this adapter).
+
+    M6.4-0: this relay is externally-broadcast-to-any-same-tenant-client
+    surface, distinct in trust level from the internal, in-process
+    subscribers (`AIOrchestrationEngine`, `ExternalExecutionManager`) that
+    receive the same `Event` object directly from the Event Engine. A
+    domain event may legitimately carry a field only those internal
+    subscribers should ever see (e.g. `workflow.approval.decided`'s
+    `decider_session_token`, a live, usable session token minted for the
+    deciding principal so a resume subscriber can dispatch with real
+    authenticated identity). `sanitize_for_persistence` is applied to the
+    outbound payload below, returning a redacted COPY -- it never mutates
+    `event.payload` itself, so this has no effect on the other subscribers
+    sharing the same `Event` object within one `publish_event` call.
     """
     authorization = websocket.headers.get("authorization")
     session_token_blob = _extract_bearer(authorization)
@@ -358,7 +372,7 @@ async def events_stream(websocket: WebSocket, topic: str = "*") -> None:
                 {
                     "eventId": event.id,
                     "topic": event.topic,
-                    "payload": _jsonable(event.payload),
+                    "payload": _jsonable(sanitize_for_persistence(event.payload)),
                     "correlationId": event.trace_id,
                     "timestampUtc": event.timestamp.isoformat(),
                 }

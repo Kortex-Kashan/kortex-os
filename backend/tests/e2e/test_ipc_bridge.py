@@ -304,3 +304,134 @@ class TestEventStream:
             )
             received = ws.receive_json()
             assert received["payload"]["thing_id"] == "should-arrive"
+
+
+class TestApprovalDecisionEventRedaction:
+    """M6.4-0: `WorkflowEngine.decide_approval_request` mints a live,
+    fully-usable session token for the deciding principal and embeds it in
+    the `workflow.approval.decided` event payload (`decider_session_token`)
+    so the internal resume subscribers (`AIOrchestrationEngine`,
+    `ExternalExecutionManager`) can dispatch with real authenticated
+    identity. That same event was being relayed VERBATIM by `/events/stream`
+    to every authenticated same-tenant WebSocket client -- not just the
+    approver -- a live session-token leak. These tests prove the fix at the
+    real HTTP/WS boundary: the token never reaches the wire, for any
+    same-tenant subscriber, while the rest of the payload (needed by any
+    legitimate UI observer) is unaffected.
+    """
+
+    def test_decider_session_token_is_redacted_from_relayed_event(self, client: Any) -> None:
+        kernel = client.app.state.kernel
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, kernel.get_engine("storage").data, tenant_id, "grace", [])
+        token = _login(client, tenant_id, "grace")
+
+        with client.websocket_connect(
+            "/events/stream?topic=workflow.approval.decided",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as ws:
+            client.portal.call(
+                kernel.publish_event,
+                "workflow.approval.decided",
+                {
+                    "request_id": str(uuid.uuid4()),
+                    "tenant_id": tenant_id,
+                    "decision": "APPROVED",
+                    "correlation_id": "corr-123",
+                    "action_fingerprint": "deadbeef",
+                    "context_snapshot": {"action": "external_execution", "execution_id": "exec-1"},
+                    "decider_session_token": {
+                        "principal_id": "approver_bob",
+                        "signature": "should-never-be-visible-on-the-wire",
+                    },
+                },
+            )
+            received = ws.receive_json()
+            assert received["topic"] == "workflow.approval.decided"
+            # The token is gone -- redacted to None, not merely renamed or hidden.
+            assert received["payload"]["decider_session_token"] is None
+            # Everything a legitimate UI observer needs is still present.
+            assert received["payload"]["decision"] == "APPROVED"
+            assert received["payload"]["correlation_id"] == "corr-123"
+            assert received["payload"]["action_fingerprint"] == "deadbeef"
+            assert received["payload"]["context_snapshot"]["execution_id"] == "exec-1"
+
+    def test_another_same_tenant_user_cannot_obtain_decider_session_token(self, client: Any) -> None:
+        """Not just the approver -- ANY authenticated same-tenant user
+        connected to the stream must never see the token, since the relay
+        has no per-subscriber scoping beyond tenant match."""
+        kernel = client.app.state.kernel
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, kernel.get_engine("storage").data, tenant_id, "heidi", [])
+        # A low-privilege bystander in the same tenant, unrelated to the ticket.
+        bystander_token = _login(client, tenant_id, "heidi")
+
+        with client.websocket_connect(
+            "/events/stream?topic=workflow.approval.decided",
+            headers={"Authorization": f"Bearer {bystander_token}"},
+        ) as ws:
+            client.portal.call(
+                kernel.publish_event,
+                "workflow.approval.decided",
+                {
+                    "request_id": str(uuid.uuid4()),
+                    "tenant_id": tenant_id,
+                    "decision": "APPROVED",
+                    "decider_session_token": {"principal_id": "approver_someone_else", "secret": "leak-me-not"},
+                },
+            )
+            received = ws.receive_json()
+            assert received["payload"]["decider_session_token"] is None
+
+    def test_cross_tenant_user_does_not_receive_approval_decided_event_at_all(self, client: Any) -> None:
+        kernel = client.app.state.kernel
+        tenant_a = f"tenant-a-{uuid.uuid4().hex[:8]}"
+        tenant_b = f"tenant-b-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, kernel.get_engine("storage").data, tenant_a, "ivan", [])
+        token = _login(client, tenant_a, "ivan")
+
+        with client.websocket_connect(
+            "/events/stream?topic=workflow.approval.decided",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as ws:
+            client.portal.call(
+                kernel.publish_event,
+                "workflow.approval.decided",
+                {
+                    "request_id": str(uuid.uuid4()),
+                    "tenant_id": tenant_b,
+                    "decision": "APPROVED",
+                    "decider_session_token": {"principal_id": "approver", "secret": "tenant-b-secret"},
+                },
+            )
+            client.portal.call(
+                kernel.publish_event,
+                "workflow.approval.decided",
+                {"request_id": str(uuid.uuid4()), "tenant_id": tenant_a, "decision": "REJECTED"},
+            )
+            # Only the tenant-A event arrives; the tenant-B event (which
+            # would have carried a real token) never reaches this socket.
+            received = ws.receive_json()
+            assert received["payload"]["tenant_id"] == tenant_a
+            assert received["payload"]["decision"] == "REJECTED"
+
+    def test_other_event_topics_are_unaffected_by_redaction(self, client: Any) -> None:
+        """The sanitizer only nulls known-sensitive key names -- an
+        unrelated event's ordinary fields must pass through unchanged."""
+        kernel = client.app.state.kernel
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, kernel.get_engine("storage").data, tenant_id, "judy", [])
+        token = _login(client, tenant_id, "judy")
+
+        with client.websocket_connect(
+            "/events/stream?topic=kortex.event.test.thing.created",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as ws:
+            client.portal.call(
+                kernel.publish_event,
+                "kortex.event.test.thing.created",
+                {"tenant_id": tenant_id, "thing_id": "abc", "note": "ordinary field"},
+            )
+            received = ws.receive_json()
+            assert received["payload"]["thing_id"] == "abc"
+            assert received["payload"]["note"] == "ordinary field"
