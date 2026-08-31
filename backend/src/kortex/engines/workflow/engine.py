@@ -87,6 +87,8 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self._kernel: Kernel | None = None
         self._running_tasks: dict[UUID, asyncio.Task[Any]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._approval_sweep_task: asyncio.Task[None] | None = None
+        self._approval_sweep_running = False
         self._metrics: dict[str, Any] = {
             "workflows_started": 0,
             "workflows_completed": 0,
@@ -457,6 +459,14 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             except Exception as e:
                 self.logger.error("Error during scheduler startup hydration: %s", e, exc_info=True)
 
+        # M6.4-2: background approval-expiry sweep daemon. Deliberately its
+        # own independent loop, not gated behind `scheduler_enabled` (see
+        # `WorkflowSettings.approval_sweep_enabled`'s docstring) -- an
+        # approval that times out while the server is running must
+        # eventually propagate without anyone manually invoking the sweep.
+        if self._settings.approval_sweep_enabled:
+            self._start_approval_sweep_loop(self._settings.approval_sweep_interval_seconds)
+
     async def stop(self) -> None:
         """Gracefully shut down engine tasks and cancel active execution jobs."""
         if self._state in (EngineState.STOPPED, EngineState.UNINITIALIZED):
@@ -468,6 +478,9 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         # Stop scheduler background worker
         if self._scheduler is not None:
             self._scheduler.stop_background_loop()
+
+        # Stop approval-expiry sweep daemon
+        self._stop_approval_sweep_loop()
 
         # Cancel any active running background execution tasks cleanly
         tasks_to_cancel = [task for task in self._running_tasks.values() if not task.done()]
@@ -1524,6 +1537,49 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 except Exception as e:
                     self.logger.error("Failed to fail expired workflow '%s': %s", ticket.instance_id, e)
         return expired_tickets
+
+    # -- Approval-Expiry Background Sweep Daemon (M6.4-2) ---------------------
+    #
+    # `sweep_expired_requests`/`sweep_expired_approvals` were fully
+    # implemented (M5.3/M6.4-1) but had no production trigger anywhere --
+    # their only callers in the entire repository were unit tests. A
+    # timed-out approval ticket would never actually transition to EXPIRED,
+    # let alone propagate, unless something called one of those methods.
+    # This is a small, self-contained polling task mirroring
+    # `DurableWorkflowScheduler`'s own `start_background_loop`/
+    # `stop_background_loop`/`_poll_loop` shape exactly -- deliberately its
+    # own loop rather than piggybacked onto that scheduler, since the
+    # scheduler is gated behind `scheduler_enabled` (default False, and
+    # semantically about an unrelated feature: CRON/interval workflow
+    # schedules) -- coupling approval-expiry propagation to that flag would
+    # silently disable it in the common case.
+
+    def _start_approval_sweep_loop(self, poll_interval_seconds: float) -> None:
+        """Start the background approval-expiry sweep polling task."""
+        if self._approval_sweep_task is not None and not self._approval_sweep_task.done():
+            return
+        self._approval_sweep_running = True
+        self._approval_sweep_task = asyncio.create_task(self._approval_sweep_loop(poll_interval_seconds))
+        self.logger.info("Approval-expiry sweep daemon started (poll: %.2fs).", poll_interval_seconds)
+
+    def _stop_approval_sweep_loop(self) -> None:
+        """Stop the background approval-expiry sweep polling task."""
+        self._approval_sweep_running = False
+        if self._approval_sweep_task is not None:
+            self._approval_sweep_task.cancel()
+            self._approval_sweep_task = None
+            self.logger.info("Approval-expiry sweep daemon stopped.")
+
+    async def _approval_sweep_loop(self, poll_interval: float) -> None:
+        """Continuous background approval-expiry sweep tick loop."""
+        while self._approval_sweep_running:
+            try:
+                await self.sweep_expired_approvals()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self.logger.error("Error in approval-expiry sweep daemon loop: %s", exc)
+            await asyncio.sleep(poll_interval)
 
     async def execute_workflow(
         self,

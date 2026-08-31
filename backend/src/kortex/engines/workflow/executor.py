@@ -164,6 +164,7 @@ class ExternalExecutionManager:
                 appr_ticket = await self._approval_manager.create_request(
                     required_role=request.required_approval_role or "",
                     tenant_id=tid,
+                    timeout_seconds=request.approval_timeout_seconds,
                     context_snapshot={
                         "action": "external_execution",
                         "execution_id": str(request.id),

@@ -272,6 +272,19 @@ class WorkflowSettings(BaseModel):
     metrics_enabled: bool = Field(default=True, description="Enable metrics collection")
     scheduler_enabled: bool = Field(default=False, description="Enable background scheduler daemon")
     scheduler_poll_interval_seconds: float = Field(default=1.0, ge=0.1, description="Scheduler polling interval")
+    # M6.4-2: deliberately independent of `scheduler_enabled` (which
+    # defaults to False and gates the unrelated CRON/interval workflow-
+    # schedule feature) -- coupling approval-expiry propagation to that
+    # flag would silently disable it in every deployment that hasn't
+    # opted into CRON scheduling for other reasons. Defaults enabled so a
+    # timed-out approval ticket always eventually propagates without
+    # requiring any additional configuration.
+    approval_sweep_enabled: bool = Field(
+        default=True, description="Enable the background approval-expiry sweep loop"
+    )
+    approval_sweep_interval_seconds: float = Field(
+        default=30.0, ge=0.1, description="Approval-expiry sweep polling interval"
+    )
 
 
 
@@ -371,6 +384,16 @@ class ExternalExecutionRequest(BaseModel):
     retry_policy: RetryPolicy | None = Field(default=None, description="Custom retry policy")
     requires_approval: bool = Field(default=False, description="Whether human approval is required prior to execution")
     required_approval_role: str | None = Field(default=None, description="Role authorized to approve if required")
+    approval_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "M6.4-2: optional expiry timeout (seconds) for the approval ticket created when "
+            "requires_approval=True. None (the default) preserves the pre-M6.4 behavior of an "
+            "approval ticket that never expires -- opting in is required to make a request's "
+            "approval gate subject to the expiry sweep at all."
+        ),
+    )
     idempotency_key: str | None = Field(default=None, description="Caller-supplied idempotency key")
     correlation_id: str | None = Field(default=None, description="Trace correlation ID")
     created_by: str = Field(default="SYSTEM", description="Principal ID initiating the request")
