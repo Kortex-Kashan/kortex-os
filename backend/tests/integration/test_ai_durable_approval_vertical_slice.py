@@ -23,6 +23,7 @@ real SQLite persistence), real AIOrchestrationEngine production wiring
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.engine import WorkflowEngine
+from kortex.engines.workflow.models import WorkflowSettings
 
 _TEST_MASTER_KEY = b"\xcc" * 32
 _TEST_SIGNING_KEY = b"\xdd" * 32
@@ -111,7 +113,12 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, Any]]:
 
     storage_engine = StorageEngine(base_directory=str(tmp_path / f"storage_vslice_{uuid4().hex[:8]}"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
-    workflow_engine = WorkflowEngine()
+    # M6.4: a fast sweep interval so the expiry test below doesn't need to
+    # wait anywhere near a real-world approval-timeout duration -- harmless
+    # for every other test in this file (just more frequent no-op ticks).
+    workflow_engine = WorkflowEngine(
+        settings=WorkflowSettings(approval_sweep_enabled=True, approval_sweep_interval_seconds=0.5)
+    )
     kernel.register_engine(storage_engine)
     kernel.register_engine(security_engine)
     kernel.register_engine(workflow_engine)
@@ -334,3 +341,72 @@ async def test_rejected_decision_cancels_paused_task_without_executing(kernel_en
     record = await ai_engine.agent_orchestrator.get_task(task.task_id, _TENANT)
     assert record is not None
     assert record.status.value == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_expired_ticket_cancels_paused_task_via_real_production_daemon(
+    kernel_env: tuple[Kernel, Any],
+) -> None:
+    """M6.4 hardening, end-to-end: an AI-originated approval ticket now
+    genuinely receives a timeout (previously `DurableAIApprovalPolicy`
+    never forwarded one at all, so an AI ticket could never become
+    eligible for the expiry sweep regardless of M6.4's propagation work).
+    This proves the full, real chain -- real timeout on ticket creation,
+    real background sweep daemon (no manual sweep call anywhere in this
+    test), real `workflow.approval.decided` EXPIRED event, real
+    `AIOrchestrationEngine._on_approval_decided` cancellation -- with a
+    short timeout poked onto the real policy instance purely to keep the
+    test fast (no production configuration surface exists yet to set this
+    per-call; the real default is 86400s, proven separately in
+    `test_ai_governance.py`)."""
+    kernel, ai_engine = kernel_env
+
+    # Test-only: shrink the real, already-wired default timeout so this
+    # test doesn't need to wait 24 hours. No other behavior is touched.
+    ai_engine.agent_orchestrator._approval_policy._approval_timeout_seconds = 1  # noqa: SLF001
+
+    task = AgentTask(
+        task_id="vslice-task-expiry",
+        tenant_id=_TENANT,
+        user_id="user-does-not-matter",
+        conversation_id="conv-vslice-expiry",
+        goal="Apply a mutation to widget-1",
+    )
+
+    paused = await ai_engine.orchestrate_agent(task)
+    assert paused.status.value == "PAUSED_FOR_APPROVAL"
+
+    human_token = await _human_token(kernel)
+    list_result = await kernel.invoke_capability(
+        CapabilityRequest(
+            capability_name="kortex.workflow.approval.list",
+            session_token=human_token,
+            parameters={"tenant_id": _TENANT},
+            context={"resource_tenant_id": _TENANT},
+        )
+    )
+    ticket = next(t for t in list_result if t["correlation_id"] == task.task_id)
+    assert ticket["timeout_at"] is not None
+
+    await asyncio.sleep(3.0)
+
+    get_result = await kernel.invoke_capability(
+        CapabilityRequest(
+            capability_name="kortex.workflow.approval.get",
+            session_token=human_token,
+            parameters={"request_id": ticket["id"], "tenant_id": _TENANT},
+            context={"resource_tenant_id": _TENANT},
+        )
+    )
+    assert get_result["state"] == "EXPIRED"
+
+    record = await ai_engine.agent_orchestrator.get_task(task.task_id, _TENANT)
+    assert record is not None
+    assert record.status.value == "CANCELLED"
+    # No execution occurred -- the mutating tool's own tool_results never
+    # show a completed call.
+    assert all(
+        result.status.value != "SUCCESS"
+        for step in record.steps
+        for result in step.tool_results
+    )

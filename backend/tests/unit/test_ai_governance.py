@@ -311,6 +311,7 @@ class _RecordingApprovalBridge:
         context=None,
         correlation_id=None,
         action_fingerprint=None,
+        timeout_seconds=None,
     ):
         self.calls.append(
             {
@@ -321,6 +322,7 @@ class _RecordingApprovalBridge:
                 "context": context,
                 "correlation_id": correlation_id,
                 "action_fingerprint": action_fingerprint,
+                "timeout_seconds": timeout_seconds,
             }
         )
         return object()
@@ -372,6 +374,79 @@ async def test_durable_ai_approval_policy_never_sets_instance_id_and_threads_cor
     assert recorded["correlation_id"] == "task_fingerprint_1"
     assert isinstance(recorded["action_fingerprint"], str)
     assert len(recorded["action_fingerprint"]) == 64  # sha256 hex digest
+
+
+@pytest.mark.asyncio
+async def test_durable_ai_approval_policy_forwards_a_real_default_timeout() -> None:
+    """M6.4 hardening: before this fix, `DurableAIApprovalPolicy` never
+    forwarded ANY `timeout_seconds` to the approval bridge -- an
+    AI-originated ticket could never become eligible for the expiry sweep
+    at all (`get_expired_pending_requests` only selects rows with
+    `timeout_at IS NOT NULL`), regardless of whether expiry propagation
+    itself worked correctly. Proves a real, non-None default is now
+    forwarded without requiring any explicit configuration at the call
+    site."""
+    reg = ToolRegistry()
+    reg.register_tool(
+        ToolDefinition(
+            name="transfer_funds",
+            description="desc",
+            canonical_capability="kortex.finance.transfer",
+            parameters_schema={"type": "object"},
+            is_mutation=True,
+        )
+    )
+    bridge = _RecordingApprovalBridge()
+    approval_policy = DurableAIApprovalPolicy(tool_registry=reg, approval_manager=bridge)
+
+    task = AgentTask(
+        task_id="task_timeout_default",
+        tenant_id="tenant_alpha",
+        user_id="user_1",
+        conversation_id="conv_1",
+        goal="Transfer funds to vendor",
+        require_human_approval_for_mutations=True,
+    )
+    calls = [ToolCall(call_id="call_1", tool_name="transfer_funds", arguments={"amount": 5000})]
+
+    await approval_policy.requires_approval(task, calls)
+
+    assert bridge.calls[0]["timeout_seconds"] == 86400
+
+
+@pytest.mark.asyncio
+async def test_durable_ai_approval_policy_honors_explicit_timeout_override() -> None:
+    """A caller-supplied `approval_timeout_seconds` (including an explicit
+    `None`, opting back out of expiry entirely) is forwarded as-is, not
+    silently overridden by the default."""
+    reg = ToolRegistry()
+    reg.register_tool(
+        ToolDefinition(
+            name="transfer_funds",
+            description="desc",
+            canonical_capability="kortex.finance.transfer",
+            parameters_schema={"type": "object"},
+            is_mutation=True,
+        )
+    )
+    bridge = _RecordingApprovalBridge()
+    approval_policy = DurableAIApprovalPolicy(
+        tool_registry=reg, approval_manager=bridge, approval_timeout_seconds=60
+    )
+
+    task = AgentTask(
+        task_id="task_timeout_override",
+        tenant_id="tenant_alpha",
+        user_id="user_1",
+        conversation_id="conv_1",
+        goal="Transfer funds to vendor",
+        require_human_approval_for_mutations=True,
+    )
+    calls = [ToolCall(call_id="call_1", tool_name="transfer_funds", arguments={"amount": 5000})]
+
+    await approval_policy.requires_approval(task, calls)
+
+    assert bridge.calls[0]["timeout_seconds"] == 60
 
 
 @pytest.mark.asyncio

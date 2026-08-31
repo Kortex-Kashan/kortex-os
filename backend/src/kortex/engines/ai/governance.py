@@ -65,6 +65,7 @@ class IDurableApprovalBridge(Protocol):
         context: dict[str, Any] | None = None,
         correlation_id: str | None = None,
         action_fingerprint: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> object: ...
 
 
@@ -340,10 +341,22 @@ class DurableAIApprovalPolicy(IApprovalPolicy):
         tool_registry: ToolRegistry | None = None,
         policy_provider: IPolicyProvider | None = None,
         approval_manager: IDurableApprovalBridge | None = None,
+        approval_timeout_seconds: int | None = 86400,
     ) -> None:
         self._tool_registry = tool_registry
         self._policy_provider = policy_provider
         self._approval_manager = approval_manager
+        # M6.4 hardening: without a real timeout, an AI-originated ticket
+        # was never eligible for the expiry sweep at all -- it would sit
+        # PENDING (and the paused AgentTask alongside it) forever if no
+        # human ever decided it. Defaults to the same 24h value
+        # `WorkflowSettings.approval_timeout_seconds` already declares as
+        # the platform's intended default approval window (that field is
+        # itself unused elsewhere -- reusing its value here, not its wiring,
+        # since this policy has no reference to a WorkflowEngine's settings
+        # object). `None` still opts a caller out entirely, matching the
+        # pre-M6.4 behavior, if ever genuinely wanted.
+        self._approval_timeout_seconds = approval_timeout_seconds
 
     async def requires_approval(
         self,
@@ -424,6 +437,7 @@ class DurableAIApprovalPolicy(IApprovalPolicy):
                     },
                     correlation_id=task.task_id,
                     action_fingerprint=action_fingerprint,
+                    timeout_seconds=self._approval_timeout_seconds,
                 )
             except Exception as exc:
                 logger.error("Failed to stage durable approval request for task '%s': %s", task.task_id, exc)
@@ -456,6 +470,7 @@ class KernelDurableApprovalBridge:
         context: dict[str, Any] | None = None,
         correlation_id: str | None = None,
         action_fingerprint: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> object:
         """Create a durable approval ticket, attributed to the AI system principal.
 
@@ -464,6 +479,13 @@ class KernelDurableApprovalBridge:
         `WorkflowEngine.create_approval_request` -- never from any value
         this method supplies -- so a compromised or misbehaving caller of
         this bridge cannot forge a different requester or tenant.
+
+        `timeout_seconds` (M6.4 hardening): the `kortex.workflow.approval.create`
+        capability already fully supports it -- this bridge simply never
+        forwarded it, so an AI-originated ticket could never actually reach
+        `DurableApprovalManager.sweep_expired_requests`'s eligibility filter
+        (`timeout_at IS NOT NULL`), regardless of M6.4's expiry-propagation
+        work. `DurableAIApprovalPolicy` supplies a real default.
         """
         session_token = await self._ai_identity.get_session_token(tenant_id)
         return await self._kernel_bridge.invoke_capability(
@@ -475,6 +497,7 @@ class KernelDurableApprovalBridge:
                 "context_snapshot": context or {},
                 "correlation_id": correlation_id,
                 "action_fingerprint": action_fingerprint,
+                "timeout_seconds": timeout_seconds,
             },
             tenant_id=tenant_id,
             session_token=session_token,
