@@ -2077,6 +2077,34 @@ class ExternalExecutionStore:
         rows = await self._data_store.execute_in_transaction(_action)
         return [_model_to_execution(row) for row in rows]
 
+    async def get_waiting_approval_executions(self, tenant_id: str | None = None) -> list[ExternalExecutionRecord]:
+        """Retrieve external executions parked in WAITING_APPROVAL (M6.4-4).
+
+        `get_stranded_executions`'s own docstring is still correct as far
+        as it goes: a WAITING_APPROVAL row is safe from unauthorized/
+        premature resume, since nothing dispatches it without a real
+        `workflow.approval.decided` event. M6.4-4 closes a narrower,
+        additional gap: that event has no delivery guarantee (the Event
+        Engine's `publish` is a direct, synchronous, in-process call with
+        no retry or outbox backing) -- if the process crashes between a
+        ticket's DB transition and the event actually reaching this
+        execution's subscriber, the execution stays WAITING_APPROVAL
+        forever even though its ticket has already reached a real terminal
+        state. This query is the read side of that boot-time reconciliation
+        (`ExternalExecutionManager.reconcile_stranded_waiting_approvals`).
+        """
+        async def _action(session: AsyncSession) -> list[ExternalExecutionModel]:
+            stmt = select(ExternalExecutionModel).where(
+                ExternalExecutionModel.status == ExternalExecutionStatus.WAITING_APPROVAL.value
+            )
+            if tenant_id:
+                stmt = stmt.where(ExternalExecutionModel.tenant_id == tenant_id)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [_model_to_execution(row) for row in rows]
+
     async def update_execution_status(
         self,
         execution_id: UUID | str,

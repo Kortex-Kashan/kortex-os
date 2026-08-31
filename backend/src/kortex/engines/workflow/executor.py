@@ -593,9 +593,14 @@ class ExternalExecutionManager:
         record's own now-terminal outcome or -- if the underlying system
         never actually received the call -- executes it for the first time.
 
-        WAITING_APPROVAL rows are intentionally left untouched here: nothing
+        WAITING_APPROVAL rows are intentionally left untouched HERE: nothing
         dispatches them until a real `workflow.approval.decided` event
-        arrives, and the ticket itself is independently durable.
+        arrives, and the ticket itself is independently durable. They get
+        their own, separate reconciliation pass --
+        `reconcile_stranded_waiting_approvals` (M6.4-4) -- since the
+        question for a WAITING_APPROVAL row is different (did its already-
+        durable ticket resolve to a terminal state whose event never
+        arrived?), not "was a side effect possibly already in flight?".
         """
         stranded = await self._store.get_stranded_executions(tenant_id=tenant_id)
         recovered: list[ExternalExecutionRecord] = []
@@ -629,6 +634,113 @@ class ExternalExecutionManager:
                     rec.tenant_id,
                 )
         return recovered
+
+    async def reconcile_stranded_waiting_approvals(
+        self, tenant_id: str | None = None
+    ) -> list[ExternalExecutionRecord]:
+        """Reconcile WAITING_APPROVAL executions whose ticket already
+        resolved while the event that should have propagated it never
+        arrived (M6.4-4).
+
+        The Event Engine's `publish` is a direct, synchronous, in-process
+        call with no retry and no outbox/queue backing it -- if the process
+        crashes between an approval ticket's DB transition (APPROVED/
+        REJECTED/EXPIRED) and `on_approval_decided` actually running, or if
+        the event fires but the handler never completes before the crash,
+        the execution is left parked in WAITING_APPROVAL even though its
+        ticket has already reached a real terminal state.
+
+        Fails closed on every ambiguity, exactly like `on_approval_decided`
+        itself:
+        - Ticket missing entirely: cancelled (reason="ticket_missing") --
+          nothing to safely wait on.
+        - Ticket REJECTED or EXPIRED: cancelled (reason=ticket.state) --
+          identical outcome `on_approval_decided` would have produced had
+          the event actually arrived.
+        - Ticket still PENDING: left untouched -- genuinely still waiting,
+          nothing wrong.
+        - Ticket APPROVED: deliberately NEVER auto-resumed here, even
+          though that would be a "safe" resume in isolation (nothing was
+          ever dispatched) -- boot-time recovery is not the place to
+          re-introduce an automatic resume decision. Logged for operator
+          visibility; the ticket and execution both remain inspectable and
+          resolvable (a fresh, real `workflow.approval.decided` redelivery
+          -- e.g. an operator re-submitting the decision -- still works,
+          since `on_approval_decided`'s own idempotency guard only blocks a
+          *second* delivery after the execution has actually left
+          WAITING_APPROVAL).
+        """
+        waiting = await self._store.get_waiting_approval_executions(tenant_id=tenant_id)
+        reconciled: list[ExternalExecutionRecord] = []
+        for rec in waiting:
+            if rec.approval_request_id is None:
+                logger.error(
+                    "Execution '%s' (Tenant: '%s') is WAITING_APPROVAL with no approval_request_id -- "
+                    "malformed state, cancelling rather than guessing.",
+                    rec.id,
+                    rec.tenant_id,
+                )
+                cancelled = await self._safe_cancel_for_reconciliation(rec, "malformed_context")
+                if cancelled is not None:
+                    reconciled.append(cancelled)
+                continue
+
+            ticket = None
+            if self._approval_manager is not None:
+                try:
+                    ticket = await self._approval_manager.get_request(
+                        rec.approval_request_id, tenant_id=rec.tenant_id
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to look up approval ticket '%s' for execution '%s' during boot "
+                        "reconciliation: %s",
+                        rec.approval_request_id,
+                        rec.id,
+                        exc,
+                    )
+
+            if ticket is None:
+                cancelled = await self._safe_cancel_for_reconciliation(rec, "ticket_missing")
+                if cancelled is not None:
+                    reconciled.append(cancelled)
+                continue
+
+            ticket_state = ticket.state.value if hasattr(ticket.state, "value") else str(ticket.state)
+            if ticket_state in ("REJECTED", "EXPIRED"):
+                cancelled = await self._safe_cancel_for_reconciliation(rec, ticket_state)
+                if cancelled is not None:
+                    reconciled.append(cancelled)
+            elif ticket_state == "APPROVED":
+                logger.warning(
+                    "Execution '%s' (Tenant: '%s') is WAITING_APPROVAL but its ticket '%s' is already "
+                    "APPROVED -- the resume event was likely lost to a crash. Not auto-resuming on boot; "
+                    "resolve manually (e.g. re-submit the decision) or investigate.",
+                    rec.id,
+                    rec.tenant_id,
+                    rec.approval_request_id,
+                )
+            # PENDING: genuinely still waiting -- nothing to reconcile.
+        return reconciled
+
+    async def _safe_cancel_for_reconciliation(
+        self, rec: ExternalExecutionRecord, reason: str
+    ) -> ExternalExecutionRecord | None:
+        """Best-effort `cancel_execution` wrapper for the reconciliation scan
+        above -- a single execution's cancellation failing (e.g. it was
+        concurrently resumed/cancelled by a real, late-arriving event
+        between the scan's read and this call) must not abort the rest of
+        the boot-time scan."""
+        try:
+            return await self.cancel_execution(rec.id, tenant_id=rec.tenant_id, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "Failed to reconcile stranded WAITING_APPROVAL execution '%s' (Tenant: '%s'): %s",
+                rec.id,
+                rec.tenant_id,
+                exc,
+            )
+            return None
 
     # -- Approval Resume Event Handler (M6.3-3) --------------------------------
 

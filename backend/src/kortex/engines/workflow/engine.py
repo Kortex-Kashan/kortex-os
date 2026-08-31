@@ -448,6 +448,16 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             except Exception as e:
                 self.logger.error("Error during external execution recovery scan: %s", e, exc_info=True)
 
+            # M6.4-4: reconcile WAITING_APPROVAL executions whose ticket
+            # already resolved while the propagating event was lost to a
+            # crash -- see `ExternalExecutionManager.reconcile_stranded_waiting_approvals`.
+            try:
+                await self._external_executor.reconcile_stranded_waiting_approvals()
+            except Exception as e:
+                self.logger.error(
+                    "Error during stranded waiting-approval reconciliation scan: %s", e, exc_info=True
+                )
+
         # Scheduler hydration and background polling daemon
         if self._scheduler is not None:
             try:
