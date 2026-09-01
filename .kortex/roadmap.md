@@ -52,10 +52,10 @@
 
 ## Phase 6: Pilot Business Modules
 
-**Status**: Planned
+**Status**: In Progress
 
-- [ ] Module base contract
-- [ ] Finance Module (Invoices, POs, Salary Sheets)
+- [x] Module base contract (`kortex.core.base_module.BaseModule` — minimal lifecycle contract, a sibling to `BaseEngine`, proven in production by `FinanceModule` below; the full platform-scale contract in `docs/architecture/business_module_architecture.md` — packaging, DAG dependency resolution, IoC container, dynamic discovery, upgrade/rollback — remains deferred, not required for a pilot module to function)
+- [x] Finance Module — first pilot business module complete (`kortex.finance.invoice.create`/`.get`: real Kernel capability dispatch, `IDataStore` persistence, principal-derived tenant isolation, RBAC, production boot registration — see `docs/architecture/finance_module_pilot_implementation_report.md`). Purchase Orders and Salary Sheets are future Finance-domain expansion, not required for this pilot's completion, and remain unauthorized pending separate planning.
 - [ ] HR & Payroll Module (Attendance, Leave, Payroll)
 - [ ] Operations Module (Vehicle Tracking, Incidents)
 
