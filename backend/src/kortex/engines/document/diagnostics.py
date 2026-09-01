@@ -115,6 +115,7 @@ class DocumentDiagnostics(IEngineDiagnostics):
             "kortex.document.adapter.register",
             "kortex.document.adapter.list",
             "kortex.document.template.list",
+            "kortex.document.profile.list",  # M7.4-W2
         ]
 
 
