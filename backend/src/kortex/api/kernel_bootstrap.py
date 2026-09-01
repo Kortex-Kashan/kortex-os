@@ -35,6 +35,7 @@ from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConne
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
+from kortex.modules.finance.module import FinanceModule
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
 from kortex.engines.security.models import PrincipalType
@@ -222,6 +223,21 @@ async def build_and_boot_kernel() -> Kernel:
     # during `initialize()` (see `KnowledgeEngine.initialize`), requiring
     # Storage to already be registered, which it is, above.
     kernel.register_engine(KnowledgeEngine())
+
+    # Phase 6 / Finance-pilot planning pass: Finance Business Module (first
+    # pilot module under the new BaseModule foundation). No constructor
+    # arguments — it resolves Storage Engine's IDataStore via
+    # `kernel.get_engine("storage")` during `initialize()`, the same
+    # deferred-wiring pattern every engine above already establishes.
+    # `FinanceModule` is not a `BaseEngine` subclass (`BaseModule` is a
+    # deliberate sibling abstraction — see `core/base_module.py`); it
+    # registers here via the same `kernel.register_engine()` call every
+    # engine uses because `Kernel.register_engine`/`BootEngine.boot_system`
+    # are proven, by direct inspection, to be pure duck-typed dispatch over
+    # `.dependencies`/`.initialize`/`.start`/`.stop`/`.state` with no
+    # `isinstance(..., BaseEngine)` check anywhere — no Kernel modification
+    # was needed or made to support this.
+    kernel.register_engine(FinanceModule())
 
     await kernel.boot()
 
