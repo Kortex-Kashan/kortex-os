@@ -37,6 +37,7 @@ from kortex.engines.ai.events import (
     AISecurityDeniedEvent,
     AISecurityValidationFailedEvent,
     AIStorageWriteFailedEvent,
+    AIToolCompletedEvent,
     AIToolDeniedEvent,
     AIToolFailedEvent,
     AIToolInvokedEvent,
@@ -501,6 +502,39 @@ class AITelemetryEmitter:
             request_id=request_id,
             tenant_id=tenant_id,
             tool_name=tool_name,
+        )
+        await self._safe_publish(event)
+
+    async def emit_tool_completed(
+        self,
+        tenant_id: str,
+        tool_name: str,
+        request_id: str,
+        latency_ms: float = 0.0,
+    ) -> None:
+        """Emit tool completed (successful) event (M7.6-W3).
+
+        Mirrors `emit_tool_failed`/`emit_tool_denied`'s exact structure --
+        diagnostics + exporter counter + domain event -- closing the
+        asymmetry where a successful invocation's already-computed latency
+        was recorded only via a direct `AIDiagnostics.record_tool_invocation`
+        call at the `engine.py` call site, bypassing this emitter (and
+        therefore its domain event and exporter counter) entirely.
+        """
+        if self._diagnostics:
+            self._diagnostics.record_tool_invocation(
+                status="SUCCESS",
+                latency_ms=latency_ms,
+            )
+
+        if self._exporter:
+            self._exporter.record_counter("ai.tool.completed", 1, {"tool_name": tool_name})
+
+        event = AIToolCompletedEvent(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            tool_name=tool_name,
+            execution_time_ms=latency_ms,
         )
         await self._safe_publish(event)
 

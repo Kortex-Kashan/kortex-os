@@ -1159,8 +1159,15 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             latency_ms = (time.perf_counter() - start_time) * 1000.0
 
             if result.status.value == "SUCCESS":
-                self._diagnostics.record_tool_invocation(
-                    status="SUCCESS",
+                # M7.6-W3: previously called `self._diagnostics.record_tool_invocation`
+                # directly, bypassing `AITelemetryEmitter` -- unlike the DENIED/
+                # failed branches below, a successful completion published no
+                # domain event and incremented no exporter counter. Now
+                # symmetric with `emit_tool_failed`/`emit_tool_denied`.
+                await self._telemetry.emit_tool_completed(
+                    tenant_id=tenant_id,
+                    tool_name=tool_call.tool_name,
+                    request_id=tool_call.call_id,
                     latency_ms=latency_ms,
                 )
             elif result.status.value == "DENIED":
