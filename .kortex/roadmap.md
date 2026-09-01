@@ -70,3 +70,16 @@
 - [ ] Update Engine
 - [ ] Docker production builds
 - [ ] Desktop installers (Tauri .msi / .exe / .dmg)
+
+## Application Completion track — M7.1: Local Runtime Completion
+
+**Status**: Completed
+
+**Numbering note (not yet reconciled into this file's own Phase 6/7 sequence above)**: this work was commissioned and tracked as "Phase 7 — KORTEX Running / Application Completion," milestone M7.1, in a separate planning/implementation session — a distinct numbering track from this roadmap's own Phase 6/Phase 7 above, exactly as the M5.1–M6.4 workflow/AI-governance track already is (see `CHANGELOG.md`'s `[Unreleased]` entry). That external "Phase 7" is *not* the same thing as this file's "Phase 7: Production Hardening" — its remaining milestones (AI Studio Conversational Completion, Connector/Marketplace/Document write-paths, the first pilot business module) map more closely to this file's Phase 4-6 in intent. Reconciling this file's phase numbering with that external track is a documentation decision for the project owner, not made unilaterally here — recorded factually below in the meantime.
+
+- [x] Sidecar process supervision actually spawns and monitors the backend (`apps/desktop/src-tauri/src/backend_process.rs`, `sidecar.rs`) — previously `SidecarSupervision::Disabled` unconditionally; a normal desktop launch no longer requires a human to start the backend by hand first.
+- [x] Persistent master/signing key material (`apps/desktop/src-tauri/src/secure_keys.rs`, OS keyring-backed) — previously ephemeral per-process, invalidating every session/secret on each restart.
+- [x] Bounded backend-startup readiness polling with a clear, recoverable failure state (`apps/desktop/src/auth/backendReadiness.ts`, `BackendUnavailableScreen.tsx`) — previously a single connection attempt with no retry.
+- [x] First-run tenant/administrator bootstrap, fail-closed after first use, concurrency-safe (`kortex.security.bootstrap.create_admin` — `backend/src/kortex/engines/security/{auth,engine}.py`; `apps/desktop/src/auth/BootstrapScreen.tsx`) — previously no path existed for a user to create the first account on an empty install.
+- [x] Cold-start acceptance test: fresh database → backend boot → first-run detection → bootstrap → authenticate → restart → persisted state remains valid (`backend/tests/e2e/test_m71_cold_start.py`).
+- See `docs/architecture/m7.1_implementation_report.md` for the full certification report.
