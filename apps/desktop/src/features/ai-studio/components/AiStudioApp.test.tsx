@@ -2,14 +2,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listAiProvidersMock, listAiModelsMock } = vi.hoisted(() => ({
+const { listAiProvidersMock, listAiModelsMock, getConversationHistoryMock } = vi.hoisted(() => ({
   listAiProvidersMock: vi.fn(),
   listAiModelsMock: vi.fn(),
+  getConversationHistoryMock: vi.fn(),
 }));
 
 vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
   return { ...actual, listAiProviders: listAiProvidersMock, listAiModels: listAiModelsMock };
+});
+
+vi.mock("../chat-api", async () => {
+  const actual = await vi.importActual<typeof import("../chat-api")>("../chat-api");
+  return { ...actual, getConversationHistory: getConversationHistoryMock };
 });
 
 // Stub useAuth so AiStudioApp (which reads tenantId for the Governance tab) works
@@ -29,6 +35,8 @@ import { AiStudioApp } from "./AiStudioApp";
 beforeEach(() => {
   listAiProvidersMock.mockReset();
   listAiModelsMock.mockReset();
+  getConversationHistoryMock.mockReset();
+  window.localStorage.clear();
 });
 
 function renderAiStudioApp() {
@@ -173,5 +181,18 @@ describe("AiStudioApp", () => {
 
     expect(await screen.findByText("Updated Ollama")).toBeInTheDocument();
     expect(listAiProvidersMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("M7.2: switches to the Chat tab and mounts a real conversational surface", async () => {
+    listAiProvidersMock.mockResolvedValueOnce([]);
+    listAiModelsMock.mockResolvedValueOnce([]);
+    getConversationHistoryMock.mockResolvedValueOnce([]);
+
+    renderAiStudioApp();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+
+    expect(await screen.findByText("No messages yet. Say hello to get started.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message")).toBeInTheDocument();
   });
 });

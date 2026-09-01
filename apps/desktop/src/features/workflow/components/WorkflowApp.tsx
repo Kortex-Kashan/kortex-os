@@ -13,6 +13,7 @@
 
 import { useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -49,8 +50,16 @@ const TABS: { id: TabId; label: string }[] = [
 // Main shell
 // ---------------------------------------------------------------------------
 
+const TAB_IDS: readonly TabId[] = ["definitions", "instances", "approvals", "schedules", "executions"];
+
+function isTabId(value: string | null): value is TabId {
+  return TAB_IDS.includes(value as TabId);
+}
+
 export function WorkflowApp() {
-  const [activeTab, setActiveTab] = useState<TabId>("definitions");
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const [activeTab, setActiveTab] = useState<TabId>(isTabId(requestedTab) ? requestedTab : "definitions");
 
   return (
     <div className="space-y-4">

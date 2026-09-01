@@ -150,4 +150,19 @@ describe("ApprovalQueue", () => {
     expect(call.role).toBe("admin");
     expect(new Date(call.validUntil).getTime()).toBeGreaterThan(new Date(call.validFrom).getTime());
   });
+
+  it("M7.2: labels an AI-originated ticket distinctly from a human-requested one", async () => {
+    listPendingApprovalsMock.mockResolvedValue([
+      {
+        ...pendingApproval,
+        id: "req-agent-1",
+        requesterPrincipalId: "kortex-ai-system",
+        requesterPrincipalType: "AGENT" as const,
+      },
+    ]);
+    renderQueue();
+
+    await waitFor(() => expect(screen.getByText(/req-agent-1/)).toBeDefined());
+    expect(screen.getByText(/AI Agent · kortex-ai-system/)).toBeDefined();
+  });
 });

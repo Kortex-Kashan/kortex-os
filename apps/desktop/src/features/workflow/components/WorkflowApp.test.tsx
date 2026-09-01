@@ -1,13 +1,32 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listWorkflowDefinitionsMock } = vi.hoisted(() => ({ listWorkflowDefinitionsMock: vi.fn() }));
+const { listWorkflowDefinitionsMock, listPendingApprovalsMock } = vi.hoisted(() => ({
+  listWorkflowDefinitionsMock: vi.fn(),
+  listPendingApprovalsMock: vi.fn(),
+}));
 
 vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
-  return { ...actual, listWorkflowDefinitions: listWorkflowDefinitionsMock };
+  return {
+    ...actual,
+    listWorkflowDefinitions: listWorkflowDefinitionsMock,
+    listPendingApprovals: listPendingApprovalsMock,
+  };
 });
+
+vi.mock("@/auth/AuthProvider", () => ({
+  useAuth: () => ({
+    state: {
+      status: "AUTHENTICATED",
+      identity: { tenantId: "acme", principalId: "alice", principalType: "USER", roles: ["ADMIN"] },
+    },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+}));
 
 import { WorkflowAccessDeniedError, WorkflowRequestError } from "../api";
 import type { WorkflowDefinition } from "../types";
@@ -15,13 +34,17 @@ import { WorkflowApp } from "./WorkflowApp";
 
 beforeEach(() => {
   listWorkflowDefinitionsMock.mockReset();
+  listPendingApprovalsMock.mockReset();
+  listPendingApprovalsMock.mockResolvedValue([]);
 });
 
-function renderWorkflowApp() {
+function renderWorkflowApp(initialEntries: string[] = ["/workflows"]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <WorkflowApp />
+      <MemoryRouter initialEntries={initialEntries}>
+        <WorkflowApp />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -152,5 +175,23 @@ describe("WorkflowApp", () => {
 
     expect(await screen.findByText("Other Workflow")).toBeInTheDocument();
     expect(listWorkflowDefinitionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("M7.2: deep-links straight to the Approvals tab via a ?tab= query param", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp(["/workflows?tab=approvals"]);
+
+    expect(screen.getByRole("tab", { name: "Approvals" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Definitions" })).toHaveAttribute("aria-selected", "false");
+    expect(await screen.findByLabelText("Pending Approvals")).toBeInTheDocument();
+  });
+
+  it("M7.2: ignores an unrecognized ?tab= value and falls back to Definitions", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp(["/workflows?tab=not-a-real-tab"]);
+
+    expect(screen.getByRole("tab", { name: "Definitions" })).toHaveAttribute("aria-selected", "true");
   });
 });
