@@ -23,6 +23,14 @@ synchronous capability call with no multi-step state machine or
 approval gate, and this module's business logic is hand-coded Python
 (the same pattern every existing engine already uses), not a declarative
 recipe RecipeEngine would compile.
+
+Known registration-metadata limitation: this module is registered via
+`kernel.register_engine()` in `kernel_bootstrap.py`, which is a deliberate
+reuse of the existing Kernel registration mechanism, not an implication
+that `FinanceModule` is an Engine -- see `kortex.core.base_module`'s own
+module docstring for the full disclosure of the resulting Registry/IoC
+metadata mislabeling ("KORTEX Finance Engine" / `engine.finance`) and why
+it is recorded as a future follow-up rather than fixed in this slice.
 """
 
 from __future__ import annotations

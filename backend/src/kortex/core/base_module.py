@@ -16,9 +16,12 @@ proven lifecycle *shape* by design (there is no evidence a business module
 needs a different lifecycle mechanism than the one already proven for 21
 system engines).
 
-Scope of this first implementation (M7.4/roadmap Phase 6 "Module base
-contract", minimal-boundary decision recorded in the Finance-pilot planning
-pass preceding this commit): only the lifecycle states needed to prove one
+Scope of this first implementation (`.kortex/roadmap.md` Phase 6 "Module
+base contract", minimal-boundary decision recorded in the Finance-pilot
+planning/boundary passes preceding this commit -- NOT part of M7.4, which
+was the unrelated Document Engine <-> AI Studio Integration milestone and
+explicitly listed Phase 6 pilot business modules as out of scope in its own
+implementation report): only the lifecycle states needed to prove one
 capability-registering, Kernel-dispatched module -- construction ->
 initialized/loaded -> active -> stopped. `business_module_architecture.md`
 §3's full 7-state machine (`Unloaded -> Installed -> Loaded -> Active ->
@@ -32,6 +35,34 @@ boot_system` are pure duck-typed dispatch over `.dependencies`/
 check anywhere) is the module's path to `ACTIVE` for this slice, mirroring
 every existing engine's own boot path rather than building package
 discovery/loading machinery this milestone does not need.
+
+KNOWN LIMITATION (Finance Module certification pass, recorded rather than
+silently presented as architecturally correct): reusing
+`kernel.register_engine()` for a `BaseModule` registrant is a deliberate,
+pragmatic reuse of the existing Kernel registration mechanism for this
+first pilot module -- it works because `Kernel.register_engine`/
+`BootEngine.boot_system` are pure duck-typed dispatch (see above), but it
+has a real side effect this pass did not originally disclose:
+`Kernel.register_engine` (`core/kernel.py`) unconditionally sets the
+Registry Engine's resource description to
+`f"KORTEX {name.title()} Engine"` and stores the instance in the IoC
+container under the key `f"engine.{name}"`. For `FinanceModule` this means
+Registry/diagnostics metadata currently reads "KORTEX Finance Engine" and
+the IoC key is `engine.finance` -- both textually mislabel a `BaseModule`
+as an "Engine". This does NOT mean `FinanceModule` *is* an Engine (the
+class hierarchy, lifecycle contract, and `ModuleState` above remain
+entirely distinct from `BaseEngine`/`EngineState`) -- it is purely a
+cosmetic/diagnostic metadata artifact of the registration pathway chosen
+for this minimal slice, with no functional consequence (capability
+dispatch, tenant isolation, and RBAC are all unaffected).
+`RegistryEngine` already has an unused `register_module()`/
+`RegistryCategory.MODULE` pair that would register a module under
+correct, distinct metadata (`registry/engine.py`) -- deliberately NOT
+wired up in this or the correction pass that documented this limitation:
+doing so would require a new `Kernel.register_module()` convenience
+method, which is out of scope for a minimal pilot slice and a
+certification-correction pass alike. Recorded here as an explicit,
+disclosed architectural follow-up for a future pass, not fixed now.
 """
 
 from __future__ import annotations
