@@ -22,4 +22,19 @@ class FinanceInvoiceValidationError(FinanceModuleError):
     """Raised when invoice creation input fails validation."""
 
 
-__all__ = ["FinanceInvoiceValidationError", "FinanceModuleError"]
+class FinanceInvoiceNotFoundError(FinanceModuleError):
+    """Raised when a requested invoice is not found.
+
+    Raised identically whether the `invoice_id` genuinely does not exist or
+    exists under a different tenant -- mirrors `ConnectorProfileManager.
+    get_profile`'s established enumeration-resistance convention
+    (`kortex.engines.connector.profiles`, M6.3-1): a caller can never
+    distinguish "wrong tenant" from "no such invoice" from this error alone.
+    """
+
+
+__all__ = [
+    "FinanceInvoiceNotFoundError",
+    "FinanceInvoiceValidationError",
+    "FinanceModuleError",
+]

@@ -113,3 +113,19 @@ All 22 criteria from the implementation boundary's Final Acceptance Gate are sat
 ### 17. Final Status
 
 See the final chat response.
+
+---
+
+## Addendum: Gate-3-Next-Unit — `kortex.finance.invoice.get`
+
+Incremental extension of the certified pilot above (baseline `683caa8`), authorized by the Gate 3 next-unit decision pass following certification. This addendum records only what changed; sections 1–17 above describe the original create-only pilot as certified and are not rewritten.
+
+**Capability added**: `kortex.finance.invoice.get(invoice_id: str) -> FinanceInvoice`, registered in `FinanceModule.initialize()` (`backend/src/kortex/modules/finance/module.py`) alongside the existing `.create` registration. Closes the minimum observable create → retrieve loop — it does not constitute a full Finance business process; `.list`/`.update`/`.delete`/`.publish`, Purchase Orders, Salary Sheets, and all accounting/customer/payment concerns remain unimplemented, exactly as before.
+
+**Permission added**: `finance:invoice:read`, enforced via the existing `required_permissions` RBAC mechanism — independent of `finance:invoice:write` (a principal with only one of the two can perform only that one operation).
+
+**Tenant-isolation behavior**: `tenant_id` is derived exclusively from the verified `principal.tenant_id`, identically to `.create`; there is no caller-supplied `tenant_id` parameter. `FinanceInvoiceManager.get_invoice` (`backend/src/kortex/modules/finance/manager.py`) constrains the persistence query on both `invoice_id` and `tenant_id` in a single `WHERE` clause, so a cross-tenant request and a genuinely nonexistent `invoice_id` are indistinguishable at the query level — both raise the same `FinanceInvoiceNotFoundError` (`backend/src/kortex/modules/finance/exceptions.py`), mirroring `ConnectorProfileManager.get_profile`'s established enumeration-resistance convention (`kortex.engines.connector.profiles`, M6.3-1).
+
+**Tests**: 5 new integration tests added to `backend/tests/integration/test_finance_invoice_capability.py`, all dispatched through the real Kernel `CapabilityDispatcher` (never a direct `FinanceModule.get_invoice()` call) — same-tenant create→get success with field-level verification, cross-tenant denial via `FinanceInvoiceNotFoundError`, nonexistent-invoice denial via the same error, unauthenticated denial, and authenticated-without-`finance:invoice:read` denial. `backend/tests/unit/test_kernel_bootstrap.py`'s existing production-boot-path test was updated (not replaced) to assert both registered capabilities and both capabilities' descriptors/permissions.
+
+**Explicitly deferred Finance capabilities** (unchanged from the original pilot boundary — none added by this unit): `invoice.list`, `invoice.update`, `invoice.delete`, `invoice.publish`, Purchase Orders, Salary Sheets, customers, payments, taxes, accounting ledger, Finance UI, AI tool exposure. The known `engine.finance` / `"KORTEX Finance Engine"` registration-metadata limitation (§6, §15 above) is untouched by this unit.

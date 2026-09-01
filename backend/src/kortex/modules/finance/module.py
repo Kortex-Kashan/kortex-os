@@ -7,15 +7,17 @@ Invoice, created in `DRAFT` state, dispatched through the real Kernel
 `IDataStore` abstraction. See the Finance-pilot planning pass preceding
 this commit for the full boundary this implementation follows exactly.
 
-Deliberately implements exactly one capability
-(`kortex.finance.invoice.create`) and nothing else -- no
-`invoice.get`/`.list`/`.update`/`.delete`/`.publish`, no Purchase Orders,
-Salary Sheets, customers, payments, taxes, or accounting ledger. See
-module-level "Explicitly Out of Scope" accounting in the implementation
-report for the full list of deferred `business_module_architecture.md`
-platform-scale concerns (packaging, signing, Marketplace distribution,
-DAG dependency resolution, IoC container, dynamic discovery, upgrade/
-rollback) this module does not build.
+Implements exactly two capabilities: `kortex.finance.invoice.create` and
+`kortex.finance.invoice.get` (Gate-3-next-unit pass, extending the
+certified create-only pilot to close the minimum observable create ->
+retrieve loop) -- and nothing else. No `.list`/`.update`/`.delete`/
+`.publish`, no Purchase Orders, Salary Sheets, customers, payments,
+taxes, or accounting ledger. See module-level "Explicitly Out of Scope"
+accounting in the implementation report for the full list of deferred
+`business_module_architecture.md` platform-scale concerns (packaging,
+signing, Marketplace distribution, DAG dependency resolution, IoC
+container, dynamic discovery, upgrade/rollback) this module does not
+build.
 
 Dependencies are exactly `["storage", "security"]` -- Workflow and
 RecipeEngine are not required: creating one DRAFT invoice is a single,
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
 
 _REGISTERED_CAPABILITIES: List[str] = [
     "kortex.finance.invoice.create",
+    "kortex.finance.invoice.get",
 ]
 
 
@@ -98,6 +101,14 @@ class FinanceModule(BaseModule):
                 provider=self.name,
                 handler=self.create_invoice,
                 required_permissions=["finance:invoice:write"],
+            )
+
+            kernel.register_capability(
+                name="kortex.finance.invoice.get",
+                description="Retrieve one of the caller's own invoices by ID.",
+                provider=self.name,
+                handler=self.get_invoice,
+                required_permissions=["finance:invoice:read"],
             )
 
             self._set_state(ModuleState.ACTIVE)
@@ -157,6 +168,28 @@ class FinanceModule(BaseModule):
 
         assert self._invoice_manager is not None
         return await self._invoice_manager.create_invoice(request, tenant_id=principal.tenant_id)
+
+    async def get_invoice(
+        self,
+        invoice_id: str,
+        principal: SecurityPrincipal | None = None,
+    ) -> FinanceInvoice:
+        """Backs the `kortex.finance.invoice.get` capability.
+
+        Same tenant-authority rule as `create_invoice`: ownership is
+        derived exclusively from `principal.tenant_id`, never from a
+        caller-supplied value (there is no `tenant_id` parameter to
+        accept in the first place). A request for an `invoice_id` that
+        does not exist, or that belongs to a different tenant, raises
+        `FinanceInvoiceNotFoundError` identically in both cases -- see
+        that exception's own docstring.
+        """
+        self.ensure_state(ModuleState.ACTIVE)
+        if principal is None:
+            raise KortexError("kortex.finance.invoice.get requires a verified principal; none was provided.")
+
+        assert self._invoice_manager is not None
+        return await self._invoice_manager.get_invoice(invoice_id, tenant_id=principal.tenant_id)
 
     # -- Common Diagnostics (structurally matches IEngineDiagnostics) ------
 

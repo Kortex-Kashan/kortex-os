@@ -61,21 +61,28 @@ async def test_connector_engine_registers_on_production_boot_path() -> None:
 async def test_finance_module_registers_on_production_boot_path() -> None:
     """Finance-pilot planning pass: `FinanceModule` (a `BaseModule`, not a
     `BaseEngine` subclass) reaches `ModuleState.ACTIVE` and registers
-    `kortex.finance.invoice.create` via the real production boot path,
-    through the same `kernel.register_engine()` call every `BaseEngine`
-    uses -- proving no Kernel modification was needed for a duck-typed
-    registrant."""
+    `kortex.finance.invoice.create`/`.get` via the real production boot
+    path, through the same `kernel.register_engine()` call every
+    `BaseEngine` uses -- proving no Kernel modification was needed for a
+    duck-typed registrant."""
     kernel = await build_and_boot_kernel()
     try:
         assert kernel.state == KernelState.RUNNING
         finance_module = kernel.get_engine("finance")
         assert isinstance(finance_module, FinanceModule)
         assert finance_module.state == ModuleState.ACTIVE
-        assert finance_module.capabilities() == ["kortex.finance.invoice.create"]
+        assert finance_module.capabilities() == [
+            "kortex.finance.invoice.create",
+            "kortex.finance.invoice.get",
+        ]
 
-        descriptor = kernel.get_capability("kortex.finance.invoice.create")
-        assert descriptor.provider == "finance"
-        assert descriptor.required_permissions == ["finance:invoice:write"]
+        create_descriptor = kernel.get_capability("kortex.finance.invoice.create")
+        assert create_descriptor.provider == "finance"
+        assert create_descriptor.required_permissions == ["finance:invoice:write"]
+
+        get_descriptor = kernel.get_capability("kortex.finance.invoice.get")
+        assert get_descriptor.provider == "finance"
+        assert get_descriptor.required_permissions == ["finance:invoice:read"]
     finally:
         await kernel.shutdown()
 

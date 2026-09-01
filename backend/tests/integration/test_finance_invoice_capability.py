@@ -1,5 +1,5 @@
-"""Finance-pilot planning pass: integration coverage for
-`kortex.finance.invoice.create` through the real Kernel dispatch chain.
+"""Integration coverage for `kortex.finance.invoice.create` and
+`kortex.finance.invoice.get` through the real Kernel dispatch chain.
 
 Mirrors the established M6.3-M7.6 harness pattern
 (`_tenant`/`_build_kernel`/`_boot_kernel`/`_seed_principal`/
@@ -10,10 +10,11 @@ isolation_dispatch.py`) -- real, unmodified Storage + Security Engines, real
 `CapabilityDispatcher` (`kernel.invoke_capability`), never a direct Python
 method call.
 
-Per the implementation boundary: no `invoice.get`/`.list` capability is
-built or needed here -- tenant ownership is verified by direct `IDataStore`
-inspection of the persisted row after `create` dispatches, exactly as the
-boundary pass specified.
+`invoice.get` was added by the Gate-3-next-unit pass following the
+certified create-only pilot, closing the minimum observable create ->
+retrieve loop (`kortex.finance.invoice.get`, `finance:invoice:read`) --
+`.list`/`.update`/`.delete`/`.publish` remain out of scope, unchanged from
+the original boundary.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from kortex.engines.security.exceptions import AuthenticationError, Authorizatio
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord, TokenPayload
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.storage.interfaces import IDataStore
+from kortex.modules.finance.exceptions import FinanceInvoiceNotFoundError
 from kortex.modules.finance.module import FinanceModule
 from kortex.modules.finance.persistence import FinanceInvoiceRow
 
@@ -121,6 +123,17 @@ async def _authorized_token(
 ) -> TokenPayload:
     await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[_TEST_ROLE])
     await _grant_role_permission(storage_engine.data, _TEST_ROLE, "finance:invoice:write")
+    return await _issue_token(security_engine, tenant_id, "principal-1")
+
+
+async def _authorized_read_write_token(
+    storage_engine: StorageEngine, security_engine: SecurityEngine, tenant_id: str
+) -> TokenPayload:
+    """Same as `_authorized_token` but also grants `finance:invoice:read`,
+    for tests that need a single principal able to both create and get."""
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[_TEST_ROLE])
+    await _grant_role_permission(storage_engine.data, _TEST_ROLE, "finance:invoice:write")
+    await _grant_role_permission(storage_engine.data, _TEST_ROLE, "finance:invoice:read")
     return await _issue_token(security_engine, tenant_id, "principal-1")
 
 
@@ -271,3 +284,131 @@ async def test_invalid_invoice_input_fails_through_existing_validation(tmp_path:
     )
     with pytest.raises(Exception):  # Pydantic ValidationError, surfaced generically -- no new error path
         await kernel.invoke_capability(request)
+
+
+# -- Gate-3-next-unit pass: `kortex.finance.invoice.get` ---------------------
+
+
+@pytest.mark.asyncio
+async def test_invoice_get_dispatches_through_real_kernel_after_create(tmp_path: Path) -> None:
+    """Same-tenant create -> get, both through real Kernel dispatch --
+    proves the minimum observable create -> retrieve loop and that the
+    returned data corresponds exactly to the persisted invoice."""
+    kernel, storage_engine, security_engine, _finance = await _boot_kernel(tmp_path)
+
+    tenant_id = _tenant(tmp_path)
+    token = await _authorized_read_write_token(storage_engine, security_engine, tenant_id)
+
+    create_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.create",
+        session_token=token,
+        parameters={"request": _create_request(customer_name="Acme Corp")},
+        context={"resource_tenant_id": tenant_id},
+    )
+    created = await kernel.invoke_capability(create_request)
+
+    get_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.get",
+        session_token=token,
+        parameters={"invoice_id": created.invoice_id},
+        context={"resource_tenant_id": tenant_id},
+    )
+    fetched = await kernel.invoke_capability(get_request)
+
+    assert fetched.invoice_id == created.invoice_id
+    assert fetched.tenant_id == tenant_id
+    assert fetched.customer_name == "Acme Corp"
+    assert fetched.amount == Decimal("1500.00")
+    assert fetched.currency == "USD"
+    assert fetched.status.value == "DRAFT"
+
+
+@pytest.mark.asyncio
+async def test_invoice_get_cannot_retrieve_another_tenants_invoice(tmp_path: Path) -> None:
+    """Cross-tenant get fails closed and does not disclose that the invoice
+    exists under a different tenant -- the same `FinanceInvoiceNotFoundError`
+    a genuinely nonexistent `invoice_id` would raise."""
+    kernel, storage_engine, security_engine, _finance = await _boot_kernel(tmp_path)
+
+    tenant_a = _tenant(tmp_path, "-a")
+    tenant_b = _tenant(tmp_path, "-b")
+    token_a = await _authorized_read_write_token(storage_engine, security_engine, tenant_a)
+    token_b = await _authorized_read_write_token(storage_engine, security_engine, tenant_b)
+
+    create_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.create",
+        session_token=token_a,
+        parameters={"request": _create_request(customer_name="Tenant A Customer")},
+        context={"resource_tenant_id": tenant_a},
+    )
+    created = await kernel.invoke_capability(create_request)
+
+    get_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.get",
+        session_token=token_b,
+        parameters={"invoice_id": created.invoice_id},
+        context={"resource_tenant_id": tenant_b},
+    )
+    with pytest.raises(FinanceInvoiceNotFoundError):
+        await kernel.invoke_capability(get_request)
+
+
+@pytest.mark.asyncio
+async def test_invoice_get_nonexistent_invoice_raises_not_found(tmp_path: Path) -> None:
+    """A genuinely nonexistent `invoice_id` raises the same
+    `FinanceInvoiceNotFoundError` as the cross-tenant case above --
+    proving the two are indistinguishable to a caller."""
+    kernel, storage_engine, security_engine, _finance = await _boot_kernel(tmp_path)
+
+    tenant_id = _tenant(tmp_path)
+    token = await _authorized_read_write_token(storage_engine, security_engine, tenant_id)
+
+    get_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.get",
+        session_token=token,
+        parameters={"invoice_id": str(uuid.uuid4())},
+        context={"resource_tenant_id": tenant_id},
+    )
+    with pytest.raises(FinanceInvoiceNotFoundError):
+        await kernel.invoke_capability(get_request)
+
+
+@pytest.mark.asyncio
+async def test_get_no_token_is_denied_authentication(tmp_path: Path) -> None:
+    kernel, _storage, _security, _finance = await _boot_kernel(tmp_path)
+
+    request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.get",
+        session_token=None,
+        parameters={"invoice_id": str(uuid.uuid4())},
+    )
+    with pytest.raises(AuthenticationError):
+        await kernel.invoke_capability(request)
+
+
+@pytest.mark.asyncio
+async def test_get_authenticated_without_finance_invoice_read_permission_is_denied(tmp_path: Path) -> None:
+    """A principal with `finance:invoice:write` but not `finance:invoice:read`
+    can create an invoice but is denied retrieving it -- the two permissions
+    are independent, not implied by each other."""
+    kernel, storage_engine, security_engine, _finance = await _boot_kernel(tmp_path)
+
+    tenant_id = _tenant(tmp_path)
+    token = await _authorized_token(storage_engine, security_engine, tenant_id)  # write only
+
+    create_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.create",
+        session_token=token,
+        parameters={"request": _create_request()},
+        context={"resource_tenant_id": tenant_id},
+    )
+    created = await kernel.invoke_capability(create_request)
+
+    get_request = CapabilityRequest(
+        capability_name="kortex.finance.invoice.get",
+        session_token=token,
+        parameters={"invoice_id": created.invoice_id},
+        context={"resource_tenant_id": tenant_id},
+    )
+    with pytest.raises(AuthorizationDeniedError):
+        await kernel.invoke_capability(get_request)
