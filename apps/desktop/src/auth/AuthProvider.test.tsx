@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { IpcResultEnvelope } from "@/ipc/client";
 
@@ -15,6 +15,8 @@ const {
   loadCachedIdentityMock,
   saveCachedIdentityMock,
   clearCachedIdentityMock,
+  waitForBackendReadyMock,
+  bootstrapFirstAdminMock,
 } = vi.hoisted(() => ({
   hasStoredSessionMock: vi.fn(),
   clearStoredSessionMock: vi.fn(),
@@ -24,6 +26,8 @@ const {
   loadCachedIdentityMock: vi.fn(),
   saveCachedIdentityMock: vi.fn(),
   clearCachedIdentityMock: vi.fn(),
+  waitForBackendReadyMock: vi.fn(),
+  bootstrapFirstAdminMock: vi.fn(),
 }));
 
 vi.mock("@/ipc/session", () => ({
@@ -41,6 +45,14 @@ vi.mock("./identityCache", () => ({
   loadCachedIdentity: loadCachedIdentityMock,
   saveCachedIdentity: saveCachedIdentityMock,
   clearCachedIdentity: clearCachedIdentityMock,
+}));
+
+vi.mock("./backendReadiness", () => ({
+  waitForBackendReady: waitForBackendReadyMock,
+}));
+
+vi.mock("./bootstrapCapability", () => ({
+  bootstrapFirstAdmin: bootstrapFirstAdminMock,
 }));
 
 const IDENTITY: AuthIdentity = { principalId: "alice", principalType: "USER", tenantId: "acme", roles: ["reader"] };
@@ -67,10 +79,20 @@ function Probe() {
         {auth.state.status === "AUTHENTICATED" ? auth.state.identity?.principalId ?? "none" : ""}
       </p>
       <p data-testid="error">{auth.state.status === "AUTHENTICATION_ERROR" ? auth.state.message : ""}</p>
+      <p data-testid="bootstrap-error">{auth.state.status === "BOOTSTRAP_ERROR" ? auth.state.message : ""}</p>
+      <p data-testid="attempt">
+        {auth.state.status === "STARTING" ? `${auth.state.attempt}/${auth.state.maxAttempts}` : ""}
+      </p>
       <button onClick={() => void auth.login({ tenantId: "acme", principalId: "alice", password: "x" })}>
         Login
       </button>
       <button onClick={() => void auth.logout()}>Logout</button>
+      <button
+        onClick={() => void auth.bootstrap({ tenantId: "acme", principalId: "alice", password: "a-strong-password" })}
+      >
+        Bootstrap
+      </button>
+      <button onClick={() => auth.retryConnection()}>RetryConnection</button>
       <button onClick={() => auth.reportIpcResult(envelope({ httpStatus: 401 }))}>Report401</button>
       <button onClick={() => auth.reportIpcResult(envelope({ httpStatus: 403 }))}>Report403</button>
     </div>
@@ -85,17 +107,71 @@ function renderAuth() {
   );
 }
 
+beforeEach(() => {
+  // Default: backend immediately ready, already bootstrapped — preserves
+  // every pre-M7.1 test's expectations about the OLD single-step
+  // hasStoredSession/checkStoredSession flow. Individual tests override
+  // this to exercise the STARTING/BOOTSTRAP_REQUIRED/BACKEND_UNAVAILABLE
+  // paths this mock now sits in front of.
+  waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: false });
+});
+
 afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("AuthProvider startup", () => {
-  it("starts in CHECKING before the session check resolves", () => {
-    hasStoredSessionMock.mockReturnValue(new Promise(() => {})); // never resolves
+describe("AuthProvider startup — backend readiness (M7.1)", () => {
+  it("starts in CHECKING before backend readiness resolves", () => {
+    waitForBackendReadyMock.mockReturnValue(new Promise(() => {})); // never resolves
     renderAuth();
     expect(screen.getByTestId("status")).toHaveTextContent("CHECKING");
   });
 
+  it("moves to STARTING with live attempt progress while readiness is still being polled", async () => {
+    waitForBackendReadyMock.mockImplementation(
+      (options: { onAttempt?: (attempt: number, maxAttempts: number) => void }) =>
+        new Promise(() => {
+          options.onAttempt?.(3, 8);
+        }),
+    );
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("STARTING"));
+    expect(screen.getByTestId("attempt")).toHaveTextContent("3/8");
+  });
+
+  it("resolves to BACKEND_UNAVAILABLE, never calling hasStoredSession, when readiness never succeeds", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: false });
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BACKEND_UNAVAILABLE"));
+    expect(hasStoredSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves to BOOTSTRAP_REQUIRED when the backend reports no principal exists yet", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: true });
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_REQUIRED"));
+    expect(hasStoredSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("retryConnection() re-runs the readiness poll from a BACKEND_UNAVAILABLE state", async () => {
+    waitForBackendReadyMock.mockResolvedValueOnce({ ready: false });
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BACKEND_UNAVAILABLE"));
+    expect(waitForBackendReadyMock).toHaveBeenCalledTimes(1);
+
+    waitForBackendReadyMock.mockResolvedValueOnce({ ready: true, bootstrapRequired: false });
+    hasStoredSessionMock.mockResolvedValue(false);
+    await act(async () => screen.getByText("RetryConnection").click());
+
+    expect(waitForBackendReadyMock).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED"));
+  });
+});
+
+describe("AuthProvider startup — session resolution (pre-M7.1 behavior, now gated behind readiness)", () => {
   it("resolves to UNAUTHENTICATED when no session is stored, without ever calling the backend", async () => {
     hasStoredSessionMock.mockResolvedValue(false);
     renderAuth();
@@ -124,7 +200,7 @@ describe("AuthProvider startup", () => {
     expect(clearCachedIdentityMock).toHaveBeenCalledTimes(1);
   });
 
-  it("fails closed to UNAUTHENTICATED, never stuck in CHECKING, if the Tauri IPC bridge itself rejects", async () => {
+  it("fails closed to UNAUTHENTICATED, never stuck in a startup state, if the Tauri IPC bridge itself rejects", async () => {
     hasStoredSessionMock.mockRejectedValue(new Error("window.__TAURI_INTERNALS__ is undefined"));
     renderAuth();
 
@@ -132,13 +208,94 @@ describe("AuthProvider startup", () => {
     expect(checkStoredSessionMock).not.toHaveBeenCalled();
   });
 
-  it("resolves to BACKEND_UNAVAILABLE without clearing the session when the backend can't be reached", async () => {
+  it("resolves to BACKEND_UNAVAILABLE without clearing the session when the backend can't be reached mid-session-check", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
     checkStoredSessionMock.mockResolvedValue("BACKEND_UNAVAILABLE");
     renderAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BACKEND_UNAVAILABLE"));
     expect(clearStoredSessionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("bootstrap (M7.1)", () => {
+  it("moves through BOOTSTRAPPING then reuses login() to reach AUTHENTICATED on success", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: true });
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_REQUIRED"));
+
+    let resolveBootstrap!: (value: unknown) => void;
+    bootstrapFirstAdminMock.mockReturnValueOnce(new Promise((resolve) => (resolveBootstrap = resolve)));
+
+    act(() => screen.getByText("Bootstrap").click());
+    expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAPPING");
+
+    loginMock.mockResolvedValueOnce({ ok: true, identity: IDENTITY });
+    await act(async () => resolveBootstrap({ ok: true }));
+
+    expect(loginMock).toHaveBeenCalledWith({ tenantId: "acme", principalId: "alice", password: "a-strong-password" });
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED"));
+  });
+
+  it("moves to BOOTSTRAP_ERROR on a validation failure, surfacing the message", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: true });
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_REQUIRED"));
+
+    bootstrapFirstAdminMock.mockResolvedValueOnce({
+      ok: false,
+      kind: "VALIDATION_FAILED",
+      message: "Password must be at least 8 characters.",
+    });
+    await act(async () => screen.getByText("Bootstrap").click());
+
+    expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_ERROR");
+    expect(screen.getByTestId("bootstrap-error")).toHaveTextContent("Password must be at least 8 characters.");
+    expect(loginMock).not.toHaveBeenCalled();
+  });
+
+  it("moves to BOOTSTRAP_ERROR when the system was already bootstrapped concurrently", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: true });
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_REQUIRED"));
+
+    bootstrapFirstAdminMock.mockResolvedValueOnce({
+      ok: false,
+      kind: "ALREADY_BOOTSTRAPPED",
+      message: "Bootstrap is no longer available: an administrator already exists.",
+    });
+    await act(async () => screen.getByText("Bootstrap").click());
+
+    expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_ERROR");
+  });
+
+  it("moves to BACKEND_UNAVAILABLE if bootstrap reports the backend is unreachable", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: true });
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_REQUIRED"));
+
+    bootstrapFirstAdminMock.mockResolvedValueOnce({ ok: false, kind: "BACKEND_UNAVAILABLE", message: "unreachable" });
+    await act(async () => screen.getByText("Bootstrap").click());
+
+    expect(screen.getByTestId("status")).toHaveTextContent("BACKEND_UNAVAILABLE");
+  });
+
+  it("prevents a duplicate submission while a bootstrap is already in flight", async () => {
+    waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: true });
+    renderAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BOOTSTRAP_REQUIRED"));
+
+    let resolveBootstrap!: (value: unknown) => void;
+    bootstrapFirstAdminMock.mockReturnValueOnce(new Promise((resolve) => (resolveBootstrap = resolve)));
+
+    act(() => {
+      screen.getByText("Bootstrap").click();
+      screen.getByText("Bootstrap").click();
+      screen.getByText("Bootstrap").click();
+    });
+
+    expect(bootstrapFirstAdminMock).toHaveBeenCalledTimes(1);
+    await act(async () => resolveBootstrap({ ok: false, kind: "VALIDATION_FAILED", message: "x" }));
   });
 });
 

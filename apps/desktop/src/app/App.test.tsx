@@ -13,9 +13,25 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 
+// M7.1: `AuthProvider`'s startup effect now gates the whole session check
+// behind a real (bounded-retry) `get_system_health` poll first
+// (`backendReadiness.ts`) — every test below must answer that command with
+// a well-formed, immediately-healthy `SystemHealthOutcome`, or it falls
+// through to `invokeMock`'s unmocked-command behavior (a malformed
+// response whose `.ok` is `undefined`), and the real ~19s bounded backoff
+// runs to exhaustion before `findBy*` ever sees anything, timing out.
+function healthyResponse() {
+  return Promise.resolve({ ok: true, statusCode: 200, body: { bootstrap_required: false } });
+}
+
 describe("App", () => {
   it("renders the login screen, never the shell, when no session is stored", async () => {
-    invokeMock.mockResolvedValue(false);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_system_health") {
+        return healthyResponse();
+      }
+      return Promise.resolve(false);
+    });
 
     render(<App />);
 
@@ -25,6 +41,9 @@ describe("App", () => {
 
   it("renders the desktop shell with its workspace empty state once a stored session validates", async () => {
     invokeMock.mockImplementation((command: string) => {
+      if (command === "get_system_health") {
+        return healthyResponse();
+      }
       if (command === "has_session") {
         return Promise.resolve(true);
       }
