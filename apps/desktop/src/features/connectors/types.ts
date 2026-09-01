@@ -32,3 +32,32 @@ export interface ConnectorDriver {
   homepage: string | null;
   license: string;
 }
+
+/**
+ * Mirrors `kortex.engines.connector.models.ConnectorProfile` field-for-field
+ * (M7.3) — deliberately omits `secretHandle`: a tenant's connections view
+ * has no legitimate need to render even the opaque handle string, and the
+ * resolved secret value is never returned by any capability this feature
+ * calls (`kortex.connector.profile.*`/`kortex.security.secret.put` — see
+ * `api.ts`'s own docstrings).
+ */
+export interface ConnectorProfile {
+  profileId: string;
+  name: string;
+  driverId: string;
+  isActive: boolean;
+  rateLimitPerSec: number;
+  maxRetries: number;
+}
+
+/** Payload for `registerConnectorProfile` — creates or updates a profile.
+ * `credential`, when provided, is written via a separate
+ * `kortex.security.secret.put` call under a handle derived from
+ * `profileId`, never included in the profile payload itself (the two are
+ * genuinely separate capabilities/engines, matching the backend design). */
+export interface CreateConnectionPayload {
+  profileId: string;
+  name: string;
+  driverId: string;
+  credential?: string;
+}
