@@ -237,6 +237,9 @@ async def build_and_boot_kernel() -> Kernel:
     # M7.4-W3: register the Document Engine AI tools.
     register_document_ai_tools(ai_engine.tool_registry)
 
+    # M7.5-W3: register the Knowledge Engine AI tool.
+    register_knowledge_ai_tools(ai_engine.tool_registry)
+
     return kernel
 
 
@@ -256,6 +259,25 @@ def register_production_connector_drivers(connector_engine: ConnectorEngine) -> 
     for driver in (DummyConnectorDriver(), HttpRestConnectorDriver()):
         if driver.metadata.driver_id not in already_registered:
             connector_engine.register_driver(driver)
+
+
+def _register_tool_if_absent(tool_registry: ToolRegistry, tool: ToolDefinition) -> None:
+    """Idempotently register one AI tool (M7.5 hygiene extraction).
+
+    `ToolRegistry.register_tool` raises `ToolValidationError` on a duplicate
+    name, so every `register_<engine>_ai_tools` function already needed this
+    exact `if not tool_registry.has_tool(...): tool_registry.register_tool(...)`
+    guard -- by M7.5 this pattern had been copy-pasted five times across
+    `register_connector_ai_tools`/`register_document_ai_tools` with no shared
+    helper. Extracted here, at the point the third engine's tools are added,
+    per the M7.5 planning report's own finding (§1/§6/§17 Q3) that this was
+    real, evidence-justified debt worth closing opportunistically rather than
+    a speculative refactor. Deliberately minimal: only the guard is shared,
+    not tool construction itself, so each engine's registration function
+    keeps full, independent control over its own tools' shape and rationale.
+    """
+    if not tool_registry.has_tool(tool.name):
+        tool_registry.register_tool(tool)
 
 
 def register_connector_ai_tools(tool_registry: ToolRegistry) -> None:
@@ -294,82 +316,82 @@ def register_connector_ai_tools(tool_registry: ToolRegistry) -> None:
     a duplicate name, so this is a no-op on a registry that already holds
     these tools.
     """
-    if not tool_registry.has_tool("connector_read_status"):
-        tool_registry.register_tool(
-            ToolDefinition(
-                name="connector_read_status",
-                description=(
-                    "Fetch read-only status information from a connected external "
-                    "service via its connector profile. Safe, no side effects, "
-                    "never requires approval."
-                ),
-                canonical_capability="kortex.connector.action.execute",
-                parameters_schema={
-                    "type": "object",
-                    "properties": {
-                        "request": {
-                            "type": "object",
-                            "properties": {
-                                "request_id": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "A unique identifier you generate for this request.",
-                                },
-                                "profile_id": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "The connector profile to read from.",
-                                },
-                                "action_type": {"type": "string", "const": "FETCH"},
-                                "payload": {"type": "object"},
+    _register_tool_if_absent(
+        tool_registry,
+        ToolDefinition(
+            name="connector_read_status",
+            description=(
+                "Fetch read-only status information from a connected external "
+                "service via its connector profile. Safe, no side effects, "
+                "never requires approval."
+            ),
+            canonical_capability="kortex.connector.action.execute",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "request": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "A unique identifier you generate for this request.",
                             },
-                            "required": ["request_id", "profile_id", "action_type"],
-                        },
-                    },
-                    "required": ["request"],
-                },
-                is_mutation=False,
-                timeout_seconds=30.0,
-            )
-        )
-    if not tool_registry.has_tool("connector_send_action"):
-        tool_registry.register_tool(
-            ToolDefinition(
-                name="connector_send_action",
-                description=(
-                    "Send a mutating action to an external service via its connector "
-                    "profile. This changes state on the external service and always "
-                    "requires human approval before it executes."
-                ),
-                canonical_capability="kortex.connector.action.execute",
-                parameters_schema={
-                    "type": "object",
-                    "properties": {
-                        "request": {
-                            "type": "object",
-                            "properties": {
-                                "request_id": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "A unique identifier you generate for this request.",
-                                },
-                                "profile_id": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "The connector profile to send the action to.",
-                                },
-                                "action_type": {"type": "string", "const": "SEND"},
-                                "payload": {"type": "object"},
+                            "profile_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "The connector profile to read from.",
                             },
-                            "required": ["request_id", "profile_id", "action_type"],
+                            "action_type": {"type": "string", "const": "FETCH"},
+                            "payload": {"type": "object"},
                         },
+                        "required": ["request_id", "profile_id", "action_type"],
                     },
-                    "required": ["request"],
                 },
-                is_mutation=True,
-                timeout_seconds=30.0,
-            )
-        )
+                "required": ["request"],
+            },
+            is_mutation=False,
+            timeout_seconds=30.0,
+        ),
+    )
+    _register_tool_if_absent(
+        tool_registry,
+        ToolDefinition(
+            name="connector_send_action",
+            description=(
+                "Send a mutating action to an external service via its connector "
+                "profile. This changes state on the external service and always "
+                "requires human approval before it executes."
+            ),
+            canonical_capability="kortex.connector.action.execute",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "request": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "A unique identifier you generate for this request.",
+                            },
+                            "profile_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "The connector profile to send the action to.",
+                            },
+                            "action_type": {"type": "string", "const": "SEND"},
+                            "payload": {"type": "object"},
+                        },
+                        "required": ["request_id", "profile_id", "action_type"],
+                    },
+                },
+                "required": ["request"],
+            },
+            is_mutation=True,
+            timeout_seconds=30.0,
+        ),
+    )
 
 
 def register_document_ai_tools(tool_registry: ToolRegistry) -> None:
@@ -424,66 +446,162 @@ def register_document_ai_tools(tool_registry: ToolRegistry) -> None:
     a duplicate name, so this is a no-op on a registry that already holds
     these tools.
     """
-    if not tool_registry.has_tool("document_list_templates"):
-        tool_registry.register_tool(
-            ToolDefinition(
-                name="document_list_templates",
-                description=(
-                    "List the document templates available for generating a document. "
-                    "Read-only, no side effects, never requires approval."
-                ),
-                canonical_capability="kortex.document.template.list",
-                parameters_schema={"type": "object", "properties": {}},
-                is_mutation=False,
-                timeout_seconds=30.0,
-            )
-        )
-    if not tool_registry.has_tool("document_generate"):
-        tool_registry.register_tool(
-            ToolDefinition(
-                name="document_generate",
-                description=(
-                    "Generate a document by executing a Document Operation Profile. "
-                    "This creates real output and always requires human approval "
-                    "before it executes."
-                ),
-                canonical_capability="kortex.document.operation.execute",
-                parameters_schema={
-                    "type": "object",
-                    "properties": {
-                        "profile_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "The operation profile to execute.",
-                        },
-                        "request": {
-                            "type": "object",
-                            "properties": {
-                                "request_id": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "A unique identifier you generate for this request.",
-                                },
-                                "profile_id": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "Must match the top-level profile_id.",
-                                },
-                                "binding_context": {
-                                    "type": "object",
-                                    "properties": {
-                                        "context_id": {"type": "string", "minLength": 1},
-                                        "data": {"type": "object"},
-                                    },
-                                    "required": ["context_id"],
-                                },
-                            },
-                            "required": ["request_id", "profile_id"],
-                        },
+    _register_tool_if_absent(
+        tool_registry,
+        ToolDefinition(
+            name="document_list_templates",
+            description=(
+                "List the document templates available for generating a document. "
+                "Read-only, no side effects, never requires approval."
+            ),
+            canonical_capability="kortex.document.template.list",
+            parameters_schema={"type": "object", "properties": {}},
+            is_mutation=False,
+            timeout_seconds=30.0,
+        ),
+    )
+    _register_tool_if_absent(
+        tool_registry,
+        ToolDefinition(
+            name="document_generate",
+            description=(
+                "Generate a document by executing a Document Operation Profile. "
+                "This creates real output and always requires human approval "
+                "before it executes."
+            ),
+            canonical_capability="kortex.document.operation.execute",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "profile_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The operation profile to execute.",
                     },
-                    "required": ["profile_id", "request"],
+                    "request": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "A unique identifier you generate for this request.",
+                            },
+                            "profile_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "Must match the top-level profile_id.",
+                            },
+                            "binding_context": {
+                                "type": "object",
+                                "properties": {
+                                    "context_id": {"type": "string", "minLength": 1},
+                                    "data": {"type": "object"},
+                                },
+                                "required": ["context_id"],
+                            },
+                        },
+                        "required": ["request_id", "profile_id"],
+                    },
                 },
-                is_mutation=True,
-                timeout_seconds=60.0,
-            )
-        )
+                "required": ["profile_id", "request"],
+            },
+            is_mutation=True,
+            timeout_seconds=60.0,
+        ),
+    )
+
+
+def register_knowledge_ai_tools(tool_registry: ToolRegistry) -> None:
+    """Register the M7.5 Knowledge Engine AI tool into an AI Engine's `ToolRegistry`.
+
+    One tool, deliberately narrower than the M7.3/M7.4 read+mutation pairs:
+    `knowledge_search` (`kortex.knowledge.query.search`, `is_mutation=False`,
+    no approval). The M7.5 planning report (§9/§17 Q1) found no product
+    evidence -- no acceptance scenario, desktop feature, or prior planning
+    artifact -- for an AI-triggered mutation (indexing a source, loading a
+    pack) yet, and the master implementation prompt's own scope guardrails
+    ("Do NOT automatically add mutation tools... unless the repository
+    evidence and explicit milestone scope require them") agree. A
+    mutation-class Knowledge tool remains an explicit open question for a
+    future milestone, not silently added or silently foreclosed here.
+
+    `knowledge_search`'s schema mirrors `search(self, query: KnowledgeQuery,
+    principal=None)`'s real single-parameter signature -- the arguments dict
+    a tool call produces must contain a `query` key to land on that
+    parameter, the same `handler(**parameters)` splatting rule the connector
+    and document tools' schemas already conform to.
+
+    Tenant isolation (M7.5-W1, security-critical -- see the planning report
+    §10): the schema deliberately does NOT expose `tenant_id` as a tool
+    parameter at all, so the LLM has no way to even attempt supplying one.
+    `KnowledgeQuery.tenant_id` gained a `"default"` fallback value (M7.5-W3,
+    `models.py`, mirroring `document.models.BindingContext.tenant_id`'s
+    identical precedent) specifically so construction from a dict that omits
+    it succeeds; `KnowledgeEngine.search`'s own M7.5-W1 fix then
+    unconditionally overrides whatever value is present with the
+    Kernel-verified `principal.tenant_id` before the query ever reaches
+    `KnowledgeSearchEngine`. The fallback value is never actually read by
+    search logic on the real dispatch path -- it exists only so the model
+    stays constructible without a tenant_id, not as a trust boundary of its
+    own.
+
+    Also intentionally excluded from the schema: `filters` (spec-reserved,
+    unimplemented, no evidence any implementation reads it -- exposing it to
+    the LLM would suggest a capability that does not exist),
+    `entity_types`/`trust_states`/`as_of` (all have safe model defaults;
+    `trust_states` in particular defaults to excluding unverified
+    `SOURCE_EVIDENCE`/`AI_CANDIDATE` content, a default this tool preserves
+    rather than giving the LLM a lever to loosen with no evidenced need).
+    `max_results` is included as the one optional field, since bounding
+    result size is directly useful for the content-security concern M7.5-W5
+    identified (a knowledge search can return substantially more text than a
+    connector response) -- on top of, not instead of, the existing generic
+    `ToolResult.to_context_entry` truncation backstop every tool already
+    relies on (M7.3/M7.4's identical, unmodified mitigation; no new
+    Knowledge-specific truncation or scrubbing was added, per the master
+    prompt's own instruction not to invent one without an actual gap).
+
+    Idempotent via the shared `_register_tool_if_absent` helper.
+    """
+    _register_tool_if_absent(
+        tool_registry,
+        ToolDefinition(
+            name="knowledge_search",
+            description=(
+                "Search the tenant's indexed knowledge base (documents, sources, "
+                "and graph entities already ingested) to ground an answer in the "
+                "tenant's own knowledge. Read-only, no side effects, never "
+                "requires approval."
+            ),
+            canonical_capability="kortex.knowledge.query.search",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "object",
+                        "properties": {
+                            "query_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "A unique identifier you generate for this request.",
+                            },
+                            "query_text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "The natural-language or keyword search text.",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional cap on the number of results returned.",
+                            },
+                        },
+                        "required": ["query_id", "query_text"],
+                    },
+                },
+                "required": ["query"],
+            },
+            is_mutation=False,
+            timeout_seconds=30.0,
+        ),
+    )
