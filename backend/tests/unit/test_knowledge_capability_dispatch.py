@@ -15,21 +15,22 @@ Unlike Document's pre-seeded registries, the Knowledge Graph genuinely
 starts empty (no reference nodes are auto-loaded) — the empty-registry
 success case here is an honest empty result, not a limitation of the test.
 
-`kortex.knowledge.query.search` (already registered by an earlier
-milestone) is deliberately NOT exercised as a working capability here.
-`test_search_capability_is_broken_over_the_real_dict_based_ipc_path` below
-documents a real, pre-existing defect discovered while auditing this
-capability for Slice 4.7: its handler (`KnowledgeEngine.search`) expects a
-live `KnowledgeQuery` object, but `CapabilityDispatcher._invoke_handler`
-only ever delivers plain, JSON-deserialized dicts as `**parameters` —
+`kortex.knowledge.query.search` was, until M7.2, NOT exercised as a working
+capability here: its handler (`KnowledgeEngine.search`) expects a live
+`KnowledgeQuery` object, but `CapabilityDispatcher._invoke_handler` used to
+deliver plain, JSON-deserialized dicts as `**parameters` unmodified —
 confirmed to raise `AttributeError` for every real (non-Python-object)
-caller, including the desktop's own `invokeCapability()` path. Fixing
-`search()` itself would mean modifying already-shipped `KnowledgeEngine`
-internals, out of scope for this slice (see the M7 preflight AskUserQuestion
-decision) — this is reported as an out-of-scope finding, not silently
-patched. `kortex.knowledge.graph.list` (Slice 4.7, new) exists specifically
-so the desktop has a working, primitive-parameter entity-discovery path
-that does not depend on fixing `search`."""
+caller, including the desktop's own `invokeCapability()` path. Reported as
+an out-of-scope finding at the time (see the M7 preflight AskUserQuestion
+decision) rather than silently patched. M7.2 fixed the actual root cause at
+the dispatch boundary (`core.dispatch._coerce_model_parameters` now coerces
+a caller-supplied dict into the handler's own declared Pydantic type, for
+every capability, not just this one) while implementing the AI Studio
+conversational capabilities, which had the identical defect —
+`test_search_capability_now_works_over_the_real_dict_based_ipc_path` below
+is this file's own regression coverage for that fix. `kortex.knowledge.
+graph.list` (Slice 4.7) remains a working, primitive-parameter
+entity-discovery path regardless."""
 
 from __future__ import annotations
 
@@ -166,22 +167,25 @@ async def test_authenticated_without_knowledge_read_permission_is_denied_authori
 
 
 @pytest.mark.asyncio
-async def test_search_capability_is_broken_over_the_real_dict_based_ipc_path(tmp_path: Path) -> None:
-    """Documents a real, pre-existing defect (Slice 4.7 preflight finding,
-    reported and not silently patched): `kortex.knowledge.query.search`'s
-    handler (`KnowledgeEngine.search`) expects a live `KnowledgeQuery`
-    object and immediately does attribute access on it
-    (`query.tenant_id`). `CapabilityDispatcher._invoke_handler` calls
-    every handler as `handler(**request.parameters)`, and `parameters`
-    is always plain, JSON-deserialized data in every real caller
-    (Tauri/Rust IPC, the FastAPI HTTP boundary, or this test's own dict
-    below) — never a live Python object. The one place this capability
-    *does* "work" is a same-process Python call that hand-constructs a
-    real `KnowledgeQuery` and passes it directly, which is not how any
-    real IPC caller can invoke a capability, so it proves nothing about
-    the capability's real usability. If a future change fixes this
-    (e.g. a coercion wrapper), this test should start failing here as
-    a signal to replace it with a real success-path test."""
+async def test_search_capability_now_works_over_the_real_dict_based_ipc_path(tmp_path: Path) -> None:
+    """Was `test_search_capability_is_broken_over_the_real_dict_based_ipc_path`
+    (Slice 4.7 preflight finding): `kortex.knowledge.query.search`'s handler
+    (`KnowledgeEngine.search`) expects a live `KnowledgeQuery` object and
+    immediately does attribute access on it (`query.tenant_id`), but every
+    real caller (Tauri/Rust IPC, the FastAPI HTTP boundary, or this test's
+    own dict below) delivers plain, JSON-deserialized data — never a live
+    Python object — so this capability was provably unusable outside a
+    same-process test that hand-constructs the object itself.
+
+    M7.2 fixed the actual root cause (`core.dispatch._coerce_model_parameters`,
+    not this engine): the dispatcher now coerces a caller-supplied dict into
+    the real Pydantic model type a handler's own signature declares, for
+    every capability, not just this one. This test's own prior docstring
+    explicitly anticipated exactly this: "If a future change fixes this
+    (e.g. a coercion wrapper), this test should start failing here as a
+    signal to replace it with a real success-path test" — this is that
+    replacement. The empty-registry result here is an honest empty result
+    (no node was seeded for this fresh tenant), not a limitation of the fix."""
     kernel, storage_engine, security_engine, _knowledge = await _boot_kernel(tmp_path)
 
     tenant_id = _tenant(tmp_path)
@@ -199,8 +203,10 @@ async def test_search_capability_is_broken_over_the_real_dict_based_ipc_path(tmp
         context={"resource_tenant_id": tenant_id},
     )
 
-    with pytest.raises(AttributeError):
-        await kernel.invoke_capability(request)
+    result = await kernel.invoke_capability(request)
+
+    assert result.query_id == raw_query["query_id"]
+    assert result.matching_nodes == []
 
 
 @pytest.mark.asyncio
