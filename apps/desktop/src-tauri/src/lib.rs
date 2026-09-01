@@ -1,30 +1,39 @@
-// Sidecar configuration injection is intentionally deferred: no backend
-// binary/path exists yet (packaging tool choice and the M3 backend entry
-// point are both still open). This module wires the supervision *state*
-// and the lifecycle hooks that will use it once a real `SidecarConfig` is
-// supplied by a later slice — see `sidecar.rs` module docs.
+// Sidecar process supervision (`sidecar.rs`) and the M7.1 code that
+// actually spawns and supervises the real backend process with it
+// (`backend_process.rs`, `secure_keys.rs`) — see each module's own docs.
 //
 // Kept crate-private (`mod`, not `pub mod`): nothing outside this crate
-// needs it — `sidecar.rs`'s tests are unit tests in the same compilation
+// needs it — every module's tests are unit tests in the same compilation
 // unit, not a separate integration-test crate, so they don't require
 // public visibility either.
+mod backend_process;
+mod secure_keys;
 mod sidecar;
 
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
-// transport contract and scope boundary (notably: talks to an
-// already-running backend at a configured loopback URL; does not itself
-// spawn that backend — see `ipc.rs`'s module doc for why that remains
-// out of scope here).
+// transport contract. `ipc.rs` talks to the backend at a configured
+// loopback URL; it does not itself spawn that backend — `backend_process.rs`
+// is what does, as of M7.1.
 mod events;
 mod ipc;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use events::EventRelayState;
 use ipc::{IpcClientState, KeyringTokenStore};
 use sidecar::SidecarSupervision;
 use tauri::Manager;
+
+/// Set (by the window-close/exit handlers below) *before* they call
+/// `SidecarSupervision::shutdown` — read by `backend_process`'s monitor
+/// loop to distinguish an intentional shutdown from an unexpected crash,
+/// since both make the sidecar's `is_running()` return `false`. Managed as
+/// Tauri app state, mirroring `EventRelayState`'s own `Arc`-wrapped
+/// convention, so both the `.setup()`-spawned monitor task and the
+/// window-event closures below can reach the identical shared flag.
+type ShutdownIntentFlag = Arc<AtomicBool>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,8 +47,17 @@ pub fn run() {
         ])
         .setup(|app| {
             app.manage(Mutex::new(SidecarSupervision::Disabled));
+            app.manage(ShutdownIntentFlag::new(AtomicBool::new(false)));
             app.manage(Arc::new(IpcClientState::new(Arc::new(KeyringTokenStore))));
             app.manage(Arc::new(EventRelayState::default()));
+
+            // M7.1: resolve the real backend command and spawn it —
+            // replaces the permanently-`Disabled` supervision state this
+            // app shipped with through M1.2–M6. Never fails app startup:
+            // see `backend_process::spawn_and_monitor`'s own docs for the
+            // non-fatal degradation if spawning isn't possible.
+            backend_process::spawn_and_monitor(app.handle().clone());
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -54,6 +72,10 @@ pub fn run() {
             // done by the time this handler returns.
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let app_handle = window.app_handle();
+                // Set BEFORE shutdown() — see `ShutdownIntentFlag`'s doc.
+                if let Some(flag) = app_handle.try_state::<ShutdownIntentFlag>() {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 if let Some(state) = app_handle.try_state::<Mutex<SidecarSupervision>>() {
                     if let Ok(mut supervision) = state.lock() {
                         supervision.shutdown();
@@ -75,6 +97,9 @@ pub fn run() {
             // `SidecarSupervision::shutdown` is idempotent, so running it
             // here even after `CloseRequested` already ran is harmless.
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(flag) = app_handle.try_state::<ShutdownIntentFlag>() {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 if let Some(state) = app_handle.try_state::<Mutex<SidecarSupervision>>() {
                     if let Ok(mut supervision) = state.lock() {
                         supervision.shutdown();

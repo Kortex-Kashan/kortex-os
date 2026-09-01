@@ -4,17 +4,22 @@
 //! process. It intentionally knows nothing about what that child process
 //! is (no HTTP/health-check assumptions, no backend-specific protocol) —
 //! the caller supplies the command to run via [`SidecarConfig`]. Readiness
-//! probing and IPC are out of scope here and belong to later slices.
+//! probing and IPC remain out of scope here (see `ipc.rs`) — this module
+//! is process supervision only.
 //!
-//! **Sidecar configuration injection is intentionally deferred.** Nothing
-//! in this M1.2 slice constructs a real [`SidecarConfig`] pointing at an
-//! actual backend binary — see [`SidecarSupervision::Disabled`]. Backend
-//! packaging (PyInstaller vs. Nuitka vs. other — still an open ADR item)
-//! and the resulting on-disk path resolution are M3-and-later concerns;
-//! this module only needs to work correctly once *some* command is
-//! supplied, whatever it turns out to be.
+//! **Milestone M7.1**: `backend_process.rs` is the first real caller —
+//! it resolves an actual `SidecarConfig` (a Python interpreter running
+//! `uvicorn kortex.api.main:app` in dev/source-checkout builds, or a future
+//! frozen binary via `KORTEX_BACKEND_COMMAND`) and wires `lib.rs`'s
+//! `SidecarSupervision` app state to `Active` for the whole of a normal
+//! app session, replacing the permanently-`Disabled` state this module
+//! shipped with through M1.2–M6. Packaging (PyInstaller vs. Nuitka vs. a
+//! frozen binary — still an open ADR item) remains explicitly out of
+//! scope for this module and for M7.1 generally; see `backend_process.rs`'s
+//! own module docs for exactly what is and isn't decided here.
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -22,22 +27,13 @@ use std::time::{Duration, Instant};
 /// applied when the supervised child exits unexpectedly.
 #[derive(Debug, Clone, Copy)]
 pub struct RestartPolicy {
-    // M1.2 intentionally exposes these fields for M3 sidecar wiring; no
-    // real backend binary exists yet, so they are only read by the
-    // (currently unreachable) restart bookkeeping below.
-    #[allow(dead_code)]
     pub max_attempts: u32,
-    #[allow(dead_code)]
     pub initial_backoff: Duration,
-    #[allow(dead_code)]
     pub backoff_multiplier: u32,
 }
 
 impl RestartPolicy {
     /// The ratified policy: max 3 attempts, 100ms/200ms/400ms backoff.
-    // M1.2 intentionally exposes this constructor for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     fn ratified() -> Self {
         Self {
             max_attempts: 3,
@@ -47,9 +43,6 @@ impl RestartPolicy {
     }
 
     /// Backoff delay before restart attempt `attempt` (1-based).
-    // M1.2 intentionally exposes this calculation for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     fn backoff_for_attempt(&self, attempt: u32) -> Duration {
         let exponent = attempt.saturating_sub(1);
         let multiplier = self.backoff_multiplier.saturating_pow(exponent);
@@ -57,9 +50,6 @@ impl RestartPolicy {
     }
 
     /// Whether restart attempt `attempt` (1-based) is still permitted.
-    // M1.2 intentionally exposes this predicate for M3 sidecar wiring; no
-    // real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     fn should_retry(&self, attempt: u32) -> bool {
         attempt <= self.max_attempts
     }
@@ -69,39 +59,41 @@ impl RestartPolicy {
 ///
 /// The concrete program/binary is supplied by the caller — this module
 /// makes no assumption about which backend it is supervising.
+/// `working_directory`/`env_vars` (M7.1) let the caller fully specify the
+/// child's process environment — needed in practice: the dev-parity
+/// invocation `backend_process.rs` resolves needs both a working directory
+/// under `backend/` and `PYTHONPATH`/persistent-key environment variables,
+/// neither of which the M1.2-era `program`/`args` pair alone could express.
 #[derive(Debug, Clone)]
 pub struct SidecarConfig {
-    // M1.2 intentionally exposes these fields for M3 sidecar wiring; no
-    // real backend binary exists yet, so they are only read by the
-    // (currently unreachable) spawn/restart path below.
-    #[allow(dead_code)]
     pub program: String,
-    #[allow(dead_code)]
     pub args: Vec<String>,
-    #[allow(dead_code)]
     pub restart_policy: RestartPolicy,
     pub graceful_shutdown_timeout: Duration,
+    pub working_directory: Option<PathBuf>,
+    pub env_vars: Vec<(String, String)>,
 }
 
 impl SidecarConfig {
     /// Builds a config with the architecture-mandated restart policy
-    /// (max 3 attempts, 100ms/200ms/400ms exponential backoff) and the
+    /// (max 3 attempts, 100ms/200ms/400ms exponential backoff), the
     /// ratified 30 second graceful-shutdown grace period (`phase3_desktop_
-    /// architecture.md` §6.4, citing `platform_runtime.md` §9).
+    /// architecture.md` §6.4, citing `platform_runtime.md` §9), no working
+    /// directory override (inherits the parent process's), and no extra
+    /// environment variables — both set explicitly by the caller when
+    /// needed (see `backend_process.rs`).
     ///
     /// `program`/`args` are supplied by the caller — this constructor does
     /// not resolve or assume a backend binary path; that resolution is
-    /// deferred to whichever later milestone supplies a real sidecar
-    /// (packaging tool choice is still an open ADR item).
-    // M1.2 intentionally exposes this constructor for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
+    /// `backend_process.rs`'s job.
     pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             program: program.into(),
             args,
             restart_policy: RestartPolicy::ratified(),
             graceful_shutdown_timeout: Duration::from_secs(30),
+            working_directory: None,
+            env_vars: Vec::new(),
         }
     }
 }
@@ -114,25 +106,15 @@ impl SidecarConfig {
 /// abstraction with a single internal consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidecarState {
-    // M1.2 intentionally exposes these lifecycle variants for M3 sidecar
-    // wiring; no real backend binary exists yet, so they are only
-    // constructed by the (currently unreachable) spawn/restart path below.
-    #[allow(dead_code)]
     NotStarted,
-    #[allow(dead_code)]
     Running,
-    #[allow(dead_code)]
     Restarting,
     ShuttingDown,
     Terminated,
-    #[allow(dead_code)]
     Failed,
 }
 
 impl SidecarState {
-    // M1.2 intentionally exposes this transition for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     fn after_spawn_succeeded(self) -> Self {
         match self {
             SidecarState::NotStarted | SidecarState::Restarting => SidecarState::Running,
@@ -140,9 +122,6 @@ impl SidecarState {
         }
     }
 
-    // M1.2 intentionally exposes this transition for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     fn after_unexpected_exit(self) -> Self {
         match self {
             SidecarState::Running | SidecarState::Restarting => SidecarState::Restarting,
@@ -150,9 +129,6 @@ impl SidecarState {
         }
     }
 
-    // M1.2 intentionally exposes this transition for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     fn after_restarts_exhausted(self) -> Self {
         match self {
             SidecarState::Restarting => SidecarState::Failed,
@@ -177,10 +153,6 @@ impl SidecarState {
 }
 
 /// Outcome of handling an unexpected sidecar exit.
-// M1.2 intentionally exposes this type for M3 sidecar wiring; no real
-// backend binary exists yet, so it is only produced by the (currently
-// unreachable) restart path below.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum SidecarOutcome {
     /// Caller should wait `backoff` and then call [`SidecarManager::restart`].
@@ -199,17 +171,10 @@ pub struct SidecarManager {
     config: SidecarConfig,
     child: Option<Child>,
     state: SidecarState,
-    // M1.2 intentionally exposes this counter for M3 sidecar wiring; no
-    // real backend binary exists yet, so it is only read by the
-    // (currently unreachable) restart path below.
-    #[allow(dead_code)]
     restart_count: u32,
 }
 
 impl SidecarManager {
-    // M1.2 intentionally exposes this constructor for M3 sidecar wiring;
-    // no real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     pub fn new(config: SidecarConfig) -> Self {
         Self {
             config,
@@ -220,17 +185,22 @@ impl SidecarManager {
     }
 
     /// Spawns the configured child process. Stdin is piped so a graceful
-    /// shutdown can signal the child by closing it (EOF).
-    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
-    // real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
+    /// shutdown can signal the child by closing it (EOF). `working_directory`/
+    /// `env_vars` (M7.1) are applied when present; an absent working
+    /// directory inherits the parent process's, matching `Command`'s own
+    /// default and preserving every pre-M7.1 test in this module unchanged.
     pub fn spawn(&mut self) -> std::io::Result<()> {
-        let child = Command::new(&self.config.program)
+        let mut command = Command::new(&self.config.program);
+        command
             .args(&self.config.args)
+            .envs(self.config.env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(dir) = &self.config.working_directory {
+            command.current_dir(dir);
+        }
+        let child = command.spawn()?;
 
         self.child = Some(child);
         self.state = self.state.after_spawn_succeeded();
@@ -239,9 +209,6 @@ impl SidecarManager {
 
     /// Returns true if the child is still running. Reaps the child handle
     /// if it has exited.
-    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
-    // real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     pub fn is_running(&mut self) -> std::io::Result<bool> {
         match self.child.as_mut() {
             None => Ok(false),
@@ -259,9 +226,6 @@ impl SidecarManager {
     /// the restart counter and reports whether/how long to wait before the
     /// caller should invoke [`SidecarManager::restart`]. Does not sleep or
     /// spawn itself, keeping this logic synchronous and side-effect-free.
-    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
-    // real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     pub fn handle_unexpected_exit(&mut self) -> SidecarOutcome {
         self.state = self.state.after_unexpected_exit();
         self.restart_count += 1;
@@ -282,9 +246,6 @@ impl SidecarManager {
 
     /// Re-spawns the child after a restart decision from
     /// [`SidecarManager::handle_unexpected_exit`].
-    // M1.2 intentionally exposes this operation for M3 sidecar wiring; no
-    // real backend binary exists yet, so it is unused until M3.
-    #[allow(dead_code)]
     pub fn restart(&mut self) -> std::io::Result<()> {
         self.spawn()
     }
@@ -355,22 +316,22 @@ impl Drop for SidecarManager {
     }
 }
 
-/// Explicit sidecar supervision state, meant to be registered as Tauri
-/// managed app state (see `lib.rs`).
+/// Explicit sidecar supervision state, registered as Tauri managed app
+/// state (see `lib.rs`).
 ///
 /// `Disabled` and "a `SidecarManager` exists but has no child running yet"
 /// are deliberately different states — collapsing them into a single
 /// `Option<SidecarManager>` would make "supervision is turned off"
 /// indistinguishable from "supervision exists but hasn't started", which
-/// is not the same fact. For the whole of this M1.2 slice the app state is
-/// always `Disabled`: sidecar configuration injection is intentionally
-/// deferred (see module docs) until a real backend binary/path exists.
+/// is not the same fact. As of Milestone M7.1, `lib.rs` starts this state
+/// as `Disabled` only for the brief window before `backend_process::
+/// spawn_and_monitor` resolves a real `SidecarConfig` and spawns it —
+/// after which it is `Active` for the remainder of a normal app session.
+/// `Disabled` remains the permanent state only when sidecar resolution or
+/// spawning itself fails (see that function's own docs for why that is a
+/// deliberately non-fatal degradation, not a crash).
 pub enum SidecarSupervision {
     Disabled,
-    // M1.2 intentionally exposes this variant for M3 sidecar wiring; no
-    // real backend binary exists yet, so app state is always `Disabled`
-    // and this variant is never constructed until M3.
-    #[allow(dead_code)]
     Active(SidecarManager),
 }
 
@@ -610,5 +571,57 @@ mod tests {
             .expect("graceful_shutdown failed");
 
         assert!(!manager.is_running().expect("is_running failed"));
+    }
+
+    // --- M7.1: working_directory / env_vars are actually applied on spawn ---
+
+    #[test]
+    fn spawn_passes_configured_env_vars_to_the_child_process() {
+        let (program, args) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/C".to_string(), "echo %KORTEX_TEST_VAR%".to_string()])
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), "echo $KORTEX_TEST_VAR".to_string()])
+        };
+        let mut config = SidecarConfig::new(program, args);
+        config.env_vars = vec![("KORTEX_TEST_VAR".to_string(), "kortex-value-123".to_string())];
+        let mut manager = SidecarManager::new(config);
+        manager.spawn().expect("failed to spawn test process");
+
+        let child = manager.child.take().expect("child should exist after spawn");
+        let output = child.wait_with_output().expect("failed to wait for child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("kortex-value-123"), "stdout was: {stdout:?}");
+    }
+
+    #[test]
+    fn spawn_applies_the_configured_working_directory() {
+        let target_dir = std::env::temp_dir();
+        let (program, args) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/C".to_string(), "cd".to_string()])
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), "pwd".to_string()])
+        };
+        let mut config = SidecarConfig::new(program, args);
+        config.working_directory = Some(target_dir.clone());
+        let mut manager = SidecarManager::new(config);
+        manager.spawn().expect("failed to spawn test process");
+
+        let child = manager.child.take().expect("child should exist after spawn");
+        let output = child.wait_with_output().expect("failed to wait for child");
+        let printed_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+
+        assert_eq!(
+            printed_dir.canonicalize().expect("printed dir should exist"),
+            target_dir.canonicalize().expect("target dir should exist"),
+        );
+    }
+
+    #[test]
+    fn default_config_has_no_working_directory_or_extra_env_vars() {
+        // Preserves every pre-M7.1 spawn behavior for a caller that never
+        // sets the two new fields.
+        let config = test_config();
+        assert!(config.working_directory.is_none());
+        assert!(config.env_vars.is_empty());
     }
 }
