@@ -139,3 +139,14 @@
 - [x] Canonical AI vertical-slice tests (`backend/tests/integration/test_ai_knowledge_tool_invocation.py`): immediate read dispatch with conversation-history recording, cross-tenant isolation proven through the real AI path, and large-result truncation.
 - [x] Adversarial tenant-isolation coverage (`backend/tests/unit/test_knowledge_tenant_isolation_dispatch.py`): same-tenant success and cross-tenant fail-closed for all five hardened capabilities.
 - See `docs/architecture/m7.5_knowledge_engine_ai_integration_implementation_report.md` for the full certification report.
+
+## Application Completion track — M7.6: AI Execution Control Plane Hardening
+
+**Status**: Completed
+
+- [x] Closed a tenant-concurrency-control gap on the AI approval-resume path: `AIOrchestrationEngine._on_approval_decided` — the only path that resumes an approved AI-originated mutation in production — now acquires the same `TenantConcurrencyThrottler` agent slot the synchronous `orchestrate_agent`/`resume_agent` entry points already enforce, closing an asymmetry that let every mutating AI tool's approval-resume traffic (Connector's `connector_send_action`, Document's `document_generate`) bypass the per-tenant concurrent-agent-workflow cap.
+- [x] A saturated tenant's approval-resume now defers safely (task stays `PAUSED_FOR_APPROVAL`, the already-durable approval decision is never lost, a later redelivery can still resume it) rather than silently bypassing the cap — proven by 8 new adversarial tests covering acquisition, release-on-success, release-on-failure, exactly-once acquisition, saturated-tenant deferral, cross-tenant independence, zero acquisition on rejection, and duplicate-event idempotency.
+- [x] Closed the AI-tool-registration test-coverage gap the M7.5 planning report flagged: Document and Knowledge AI tools now have the same boot-time registration and idempotency test coverage Connector tools already had.
+- [x] Closed a telemetry asymmetry: a successful AI tool invocation now publishes a domain event (`AIToolCompletedEvent`) and increments an exporter counter, matching `emit_tool_failed`/`emit_tool_denied`'s existing behavior — previously a successful completion's already-computed latency was recorded only into internal diagnostics, invisible to telemetry subscribers/exporters.
+- [x] No new throttling mechanism, no AI tool consolidation, no desktop change, no Marketplace/business-module/RecipeEngine work — the existing `TenantConcurrencyThrottler` remains the sole, unmodified, authoritative tenant-concurrency mechanism, now applied uniformly.
+- See `docs/architecture/m7.6_ai_execution_control_plane_hardening_implementation_report.md` for the full certification report.
