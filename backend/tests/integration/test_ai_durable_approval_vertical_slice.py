@@ -298,6 +298,18 @@ async def test_full_governed_ai_action_vertical_slice(kernel_env: tuple[Kernel, 
     assert record.steps[-2].tool_results[0].status.value == "SUCCESS"
     assert record.steps[-2].tool_results[0].output == {"status": "SUCCESS", "target": "widget-1"}
 
+    # 7. M7.2: the automatic server-side resume (driven entirely by the
+    # `workflow.approval.decided` event, with no desktop action in between)
+    # must also have recorded the resolved turn into durable conversation
+    # history -- proving a chat surface built on `orchestrate_agent` can
+    # recover this exact turn via `kortex.ai.conversation.history.get`
+    # after a restart, through the real event chain, not just a direct
+    # `resume_agent` call.
+    history = await ai_engine.get_conversation_history(_TENANT, "conv-vslice-1")
+    assert len(history) == 1
+    assert history[0].user_content == "Apply a mutation to widget-1"
+    assert history[0].assistant_content == "Mutation applied."
+
 
 @pytest.mark.asyncio
 async def test_rejected_decision_cancels_paused_task_without_executing(kernel_env: tuple[Kernel, Any]) -> None:
@@ -341,6 +353,11 @@ async def test_rejected_decision_cancels_paused_task_without_executing(kernel_en
     record = await ai_engine.agent_orchestrator.get_task(task.task_id, _TENANT)
     assert record is not None
     assert record.status.value == "CANCELLED"
+
+    # M7.2: a rejected task never resolved to anything -- there is no
+    # response to show as a conversation turn, so none must be recorded.
+    history = await ai_engine.get_conversation_history(_TENANT, "conv-vslice-2")
+    assert history == []
 
 
 @pytest.mark.asyncio

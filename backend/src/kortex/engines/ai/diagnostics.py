@@ -34,6 +34,7 @@ CANONICAL_CAPABILITIES: list[str] = [
     "kortex.ai.agent.orchestrate",
     "kortex.ai.agent.resume",
     "kortex.ai.tool.invoke",
+    "kortex.ai.conversation.history.get",
     "kortex.ai.provider.register",
     "kortex.ai.provider.list",
     "kortex.ai.model.list",

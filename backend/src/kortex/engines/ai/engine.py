@@ -68,6 +68,7 @@ from kortex.engines.ai.interfaces import (
 )
 from kortex.engines.ai.memory import (
     AIMemoryManager,
+    ConversationTurn,
     InMemoryConversationStore,
     require_identifier,
     sanitize_context_content,
@@ -562,6 +563,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 security_classification="INTERNAL",
             )
             kernel.register_capability(
+                name="kortex.ai.conversation.history.get",
+                description="Retrieve durable conversation turns for a conversation",
+                provider=self.name,
+                handler=self.get_conversation_history,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
                 name="kortex.ai.provider.register",
                 description="Register an AI provider with the engine registry",
                 provider=self.name,
@@ -985,6 +994,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     latency_ms=latency_ms,
                     status=result.status.value,
                 )
+                result = await self._record_agent_conversation_turn(task, result)
                 return result
 
             except Exception as exc:
@@ -1040,6 +1050,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     latency_ms=latency_ms,
                     status=result.status.value,
                 )
+                result = await self._record_agent_conversation_turn(task, result)
                 return result
 
             except Exception as exc:
@@ -1182,6 +1193,72 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
             self.logger.warning("Tool invocation failed: %s", exc)
             raise
+
+    async def get_conversation_history(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        offset: int = 0,
+        principal: Any = None,
+    ) -> list[ConversationTurn]:
+        """Return the durable conversation turns for `conversation_id` (M7.2).
+
+        A thin, read-only wrapper over the existing `AIMemoryManager` /
+        `IConversationStore` -- no new persistence subsystem. `principal`
+        (same tenant-correction pattern as `invoke_tool`/`generate_response`):
+        a caller-supplied `tenant_id` is never authoritative once a verified
+        principal is available.
+        """
+        if principal is not None:
+            principal_tenant_id = getattr(principal, "tenant_id", None)
+            require_identifier(principal_tenant_id, "principal.tenant_id")
+            tenant_id = principal_tenant_id
+
+        return await self._memory_manager.get_turns(tenant_id, conversation_id, offset=offset)
+
+    async def _record_agent_conversation_turn(
+        self, task: AgentTask, result: AgentExecutionResult
+    ) -> AgentExecutionResult:
+        """Record a completed agent turn into the same durable conversation
+        history `generate_response` already writes to (M7.2), so a chat
+        surface built on `orchestrate_agent`/`resume_agent` can recover its
+        transcript via `get_conversation_history` after a restart -- exactly
+        as a plain generated turn already can. Only terminal outcomes with a
+        `final_response` are recorded; `PAUSED_FOR_APPROVAL` (and the
+        transient `RUNNING`/`RESUMING`) are deliberately skipped -- there is
+        nothing resolved yet to show as a turn.
+        """
+        if result.status in (AgentStatus.PAUSED_FOR_APPROVAL, AgentStatus.RUNNING, AgentStatus.RESUMING):
+            return result
+        if result.final_response is None:
+            return result
+
+        synthetic_request = LLMRequest(
+            request_id=f"{task.task_id}:{result.total_steps}",
+            tenant_id=task.tenant_id,
+            user_id=task.user_id,
+            conversation_id=task.conversation_id,
+            prompt=task.goal,
+        )
+        synthetic_response = LLMResponse(
+            request_id=synthetic_request.request_id,
+            text_content=result.final_response,
+        )
+        try:
+            await self._memory_manager.append_history(
+                tenant_id=task.tenant_id,
+                conversation_id=task.conversation_id,
+                request=synthetic_request,
+                response=synthetic_response,
+            )
+        except ConversationStoreError as exc:
+            self.logger.critical(
+                "Conversation history write failed after agent task '%s' completed: %s",
+                task.task_id,
+                exc,
+            )
+            result = result.model_copy(update={"degraded": True})
+        return result
 
     # -- AI Governance Capability Handlers (M5.5) ----------------------------
 
@@ -1421,11 +1498,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     )
                     await self._agent_orchestrator.cancel_task(task_id, tenant_id)
                     return
-                await self._agent_orchestrator.resume_task(
+                resumed_result = await self._agent_orchestrator.resume_task(
                     task=record.task,
                     resume_token=record.resume_token,
                     approved_tool_calls=record.pending_tool_calls,
                 )
+                await self._record_agent_conversation_turn(record.task, resumed_result)
             else:
                 # REJECTED (or any other terminal, non-approved decision):
                 # the paused task must never execute the calls it was
