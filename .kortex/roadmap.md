@@ -95,3 +95,16 @@
 - [x] New `Textarea` design-system primitive (`design-system/components/textarea.tsx`).
 - [x] Conversation-recovery-after-restart acceptance test (`backend/tests/e2e/test_m72_conversational_recovery.py`), plus the approval/rejection flows proven end-to-end through the real event-driven auto-resume chain (`backend/tests/integration/test_ai_durable_approval_vertical_slice.py`).
 - See `docs/architecture/m7.2_implementation_report.md` for the full certification report.
+
+## Application Completion track — M7.3: AI Studio ↔ Connector Engine Integration
+
+**Status**: Completed
+
+- [x] Production connector drivers (`connector-dummy`, `connector-http-rest`) now register automatically at boot (`kortex.api.kernel_bootstrap.register_production_connector_drivers`) — previously driver registration was a public API nothing in production ever called, so the registry was always empty at runtime.
+- [x] Two governed AI tools (`connector_read_status`, `connector_send_action`) registered into the AI Engine's `ToolRegistry` at boot (`register_connector_ai_tools`) — the first tools ever registered anywhere in the platform, proving an AI Studio agent can reach the existing Connector Engine through the existing, unmodified `AIToolInvoker` → `KernelToolExecutionPort` → `CapabilityDispatcher` chain, with the mutating tool gated by the existing `DurableAIApprovalPolicy`/Workflow Approval Queue — no second approval mechanism.
+- [x] Connector profile lifecycle capabilities (`kortex.connector.profile.register`/`.list`/`.delete`) wrapping the already-existing `ConnectorProfileManager`, tenant-scoped identically to the pre-existing `execute_action`/`get_profile` pattern (M6.3-1) — previously only `profile.get` was exposed, with no authorized way to create, list, or delete a connection.
+- [x] Credential provisioning capability (`kortex.security.secret.put`, new `security:secret:write` permission) wrapping the already-existing `SecretStore.put_secret` — previously used only internally for the AI system's own credential — and now firing `SecuritySecretModifiedEvent`, whose class existed since before this milestone but had never been published by any code path.
+- [x] Desktop "Connections" tab (`apps/desktop/src/features/connectors/components/ConnectionsTab.tsx`) extending the existing Connectors app — create/list/delete a connection, write-only credential entry never re-displayed after save.
+- [x] Canonical vertical-slice tests proving the AI-tool-to-Connector-Engine path end to end (`backend/tests/integration/test_ai_connector_tool_invocation.py`): immediate read dispatch, approval-gated mutation with real resume, rejection, cross-tenant isolation, and duplicate-approval-event idempotency (proves the *pre-existing*, general `AgentOrchestrator` resume-CAS mechanism already prevents a double dispatch — no connector-specific fix was needed).
+- [x] Two pre-existing tests fixed as a direct consequence of production driver auto-registration correctly overturning their "registry starts empty" assumption (`test_kernel_bootstrap.py`, `test_connector_api_http.py`).
+- See `docs/architecture/m7.3_connector_integration_implementation_report.md` for the full certification report.
