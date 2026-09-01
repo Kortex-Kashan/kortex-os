@@ -53,6 +53,7 @@ from kortex.engines.ai.exceptions import (
     AIProviderTimeoutError,
     ConversationStoreError,
     NoRoutableProviderError,
+    TenantQuotaExceededError,
 )
 from kortex.engines.ai.governance import (
     AIGovernanceManager,
@@ -1464,6 +1465,27 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         Fails closed: any ambiguity (task not found, wrong status, missing
         or mismatched action fingerprint) results in the paused task being
         left alone or cancelled — never resumed on uncertain grounds.
+
+        Tenant concurrency (M7.6-W1): this is the *only* path that resumes
+        an approved AI-originated mutation in production (a human decision
+        always arrives here, asynchronously, via this event — never through
+        the synchronous `resume_agent` API). Before this fix, the resumed
+        `resume_task` call below was not wrapped in
+        `self._throttler.acquire_agent_slot(...)`, unlike both synchronous
+        entry points (`orchestrate_agent`, `resume_agent`), which already
+        wrap their own `resume_task`/`run_task` calls in it — a real,
+        verified asymmetry (M7.6 planning report §8): every mutating AI
+        tool's approval-resume traffic bypassed the same per-tenant
+        concurrent-agent-workflow cap the rest of the control plane
+        enforces. Fixed by wrapping only the APPROVED branch's `resume_task`
+        call (not the whole handler, which would incorrectly also gate the
+        REJECTED branch's `cancel_task` -- rejection must never consume a
+        slot) in the same, single, authoritative `TenantConcurrencyThrottler`
+        already owned by this engine -- no second throttling mechanism.
+        `AgentOrchestrator` itself has no throttler awareness (confirmed via
+        Graphify: zero `uses` edge to `TenantConcurrencyThrottler`), so this
+        is the correct, lowest layer that closes the gap without risking a
+        double acquisition against `resume_agent`'s own wrapping.
         """
         try:
             payload = getattr(event, "payload", None)
@@ -1498,12 +1520,39 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     )
                     await self._agent_orchestrator.cancel_task(task_id, tenant_id)
                     return
-                resumed_result = await self._agent_orchestrator.resume_task(
-                    task=record.task,
-                    resume_token=record.resume_token,
-                    approved_tool_calls=record.pending_tool_calls,
-                )
-                await self._record_agent_conversation_turn(record.task, resumed_result)
+                try:
+                    async with self._throttler.acquire_agent_slot(tenant_id):
+                        resumed_result = await self._agent_orchestrator.resume_task(
+                            task=record.task,
+                            resume_token=record.resume_token,
+                            approved_tool_calls=record.pending_tool_calls,
+                        )
+                        await self._record_agent_conversation_turn(record.task, resumed_result)
+                except TenantQuotaExceededError:
+                    # The tenant is already at its concurrent-agent-workflow cap
+                    # (`acquire_agent_slot` fails fast, it never waits/queues --
+                    # see throttling.py). Unlike orchestrate_agent/resume_agent
+                    # (synchronous callers that can surface this to a retrying
+                    # caller), this is an asynchronous event handler with no
+                    # caller to return an error to. The approval decision itself
+                    # is already durably recorded by the Workflow Engine (this
+                    # handler neither created nor consumes it) -- deliberately
+                    # leave the task PAUSED_FOR_APPROVAL rather than cancel a
+                    # validly-approved action. Safe under this handler's own
+                    # pre-existing idempotency guarantee above (a no-op once the
+                    # task is no longer PAUSED_FOR_APPROVAL): a later redelivery
+                    # or operator-triggered replay of this exact event can still
+                    # resume it once a slot frees up, with zero risk of double
+                    # execution.
+                    self.logger.warning(
+                        "Deferring resume of agent task '%s' for tenant '%s': tenant "
+                        "concurrent-agent-workflow limit reached. The approval decision "
+                        "remains durably recorded; task stays PAUSED_FOR_APPROVAL for a "
+                        "later retry.",
+                        task_id,
+                        tenant_id,
+                    )
+                    return
             else:
                 # REJECTED (or any other terminal, non-approved decision):
                 # the paused task must never execute the calls it was
