@@ -234,6 +234,9 @@ async def build_and_boot_kernel() -> Kernel:
     # M7.3-W4: register the reference connector AI tools.
     register_connector_ai_tools(ai_engine.tool_registry)
 
+    # M7.4-W3: register the Document Engine AI tools.
+    register_document_ai_tools(ai_engine.tool_registry)
+
     return kernel
 
 
@@ -365,5 +368,122 @@ def register_connector_ai_tools(tool_registry: ToolRegistry) -> None:
                 },
                 is_mutation=True,
                 timeout_seconds=30.0,
+            )
+        )
+
+
+def register_document_ai_tools(tool_registry: ToolRegistry) -> None:
+    """Register the M7.4 Document Engine AI tools into an AI Engine's `ToolRegistry`.
+
+    Two tools, directly mirroring `register_connector_ai_tools`'s M7.3 shape:
+    a read tool (`document_list_templates`, `kortex.document.template.list`,
+    zero parameters -- the underlying handler takes none) and a mutation
+    tool (`document_generate`, `kortex.document.operation.execute`,
+    `is_mutation=True` -- gated by the same, unmodified
+    `DurableAIApprovalPolicy`/Workflow Approval Queue chain M7.3 already
+    proved is fully engine-agnostic).
+
+    `document_generate`'s schema mirrors `execute_profile(self, profile_id:
+    str, request: OperationRequest, principal=None)`'s real two-parameter
+    signature exactly -- a *different* shape from either connector tool's
+    single-`request`-parameter pattern, deliberately not assumed uniform
+    (see the M7.4 planning report §7 item 5, which explicitly flags this as
+    the mistake M7.3 made and had to correct mid-implementation). `payload`
+    (the actual document-generation input data, e.g. invoice line items) is
+    intentionally left open-shaped (`{"type": "object"}`) inside
+    `binding_context.data`, since its real shape depends on whichever
+    template the targeted profile requires and cannot be statically known
+    here -- identical reasoning to the connector tools' own open `payload`
+    field.
+
+    Content-security note (M7.4-W5, planning report §15 T4): `execute_profile`
+    returns an `OperationResult` whose `output_bytes` field genuinely can
+    carry the full generated document content (it is the same bytes
+    `DocumentStorageBinder` also persists to object storage under
+    `OperationResult.storage_key` -- the two are redundant, not
+    alternatives). `KernelToolExecutionPort`/`AIToolInvoker` (existing,
+    generic, unmodified) pass a capability's raw return value through
+    unchanged for every tool, by design -- there is no per-tool
+    output-shaping hook to selectively drop `output_bytes` without either
+    changing `execute_profile`'s own return contract for every caller (not
+    just AI) or adding a platform-wide per-tool transformation layer, both
+    out of this milestone's narrow scope. The actual, existing control that
+    bounds this is the same one that already bounds every other
+    capability's potentially-large output: `ToolResult.to_context_entry`'s
+    generic `MAX_TOOL_OUTPUT_CHARS`/`max_tool_result_bytes` hard truncation
+    -- not a new mitigation invented for this tool, the same backstop the
+    connector tools already rely on. This is a real, accepted limitation
+    (a large document's content is truncated into conversation history
+    rather than replaced with a clean reference), not a solved problem --
+    see the M7.4 implementation report's Known Limitations for the
+    follow-up (a `document.result.get`-by-reference pattern, or trimming
+    `OperationResult` fields specifically on the AI path) this milestone
+    deliberately does not build.
+
+    Idempotent: `ToolRegistry.register_tool` raises `ToolValidationError` on
+    a duplicate name, so this is a no-op on a registry that already holds
+    these tools.
+    """
+    if not tool_registry.has_tool("document_list_templates"):
+        tool_registry.register_tool(
+            ToolDefinition(
+                name="document_list_templates",
+                description=(
+                    "List the document templates available for generating a document. "
+                    "Read-only, no side effects, never requires approval."
+                ),
+                canonical_capability="kortex.document.template.list",
+                parameters_schema={"type": "object", "properties": {}},
+                is_mutation=False,
+                timeout_seconds=30.0,
+            )
+        )
+    if not tool_registry.has_tool("document_generate"):
+        tool_registry.register_tool(
+            ToolDefinition(
+                name="document_generate",
+                description=(
+                    "Generate a document by executing a Document Operation Profile. "
+                    "This creates real output and always requires human approval "
+                    "before it executes."
+                ),
+                canonical_capability="kortex.document.operation.execute",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "profile_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "The operation profile to execute.",
+                        },
+                        "request": {
+                            "type": "object",
+                            "properties": {
+                                "request_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "A unique identifier you generate for this request.",
+                                },
+                                "profile_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Must match the top-level profile_id.",
+                                },
+                                "binding_context": {
+                                    "type": "object",
+                                    "properties": {
+                                        "context_id": {"type": "string", "minLength": 1},
+                                        "data": {"type": "object"},
+                                    },
+                                    "required": ["context_id"],
+                                },
+                            },
+                            "required": ["request_id", "profile_id"],
+                        },
+                    },
+                    "required": ["profile_id", "request"],
+                },
+                is_mutation=True,
+                timeout_seconds=60.0,
             )
         )
