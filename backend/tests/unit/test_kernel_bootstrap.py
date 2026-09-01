@@ -21,6 +21,8 @@ import pytest
 from kortex.api.kernel_bootstrap import (
     build_and_boot_kernel,
     register_connector_ai_tools,
+    register_document_ai_tools,
+    register_knowledge_ai_tools,
     register_production_connector_drivers,
 )
 from kortex.core.kernel import KernelState
@@ -135,6 +137,82 @@ async def test_connector_ai_tool_registration_is_idempotent() -> None:
         register_connector_ai_tools(ai_engine.tool_registry)
         assert ai_engine.tool_registry.has_tool("connector_read_status")
         assert ai_engine.tool_registry.has_tool("connector_send_action")
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_document_ai_tools_register_on_production_boot_path() -> None:
+    """M7.4-W3: the Document Engine AI tools are registered in the AI
+    Engine's ToolRegistry automatically on the real boot path. Mirrors
+    `test_connector_ai_tools_register_on_production_boot_path` -- this
+    coverage never existed for the Document tools until M7.6-W2 closed the
+    gap the M7.5 planning report's own AI-tool-surface investigation
+    flagged."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        assert isinstance(ai_engine, AIOrchestrationEngine)
+        assert ai_engine.tool_registry.has_tool("document_list_templates")
+        assert ai_engine.tool_registry.has_tool("document_generate")
+        list_tool = ai_engine.tool_registry.get_tool("document_list_templates")
+        generate_tool = ai_engine.tool_registry.get_tool("document_generate")
+        assert list_tool.is_mutation is False
+        assert generate_tool.is_mutation is True
+        assert list_tool.canonical_capability == "kortex.document.template.list"
+        assert generate_tool.canonical_capability == "kortex.document.operation.execute"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_document_ai_tool_registration_is_idempotent() -> None:
+    """M7.6-W2: calling `register_document_ai_tools` twice against the same,
+    already-populated registry must not raise `ToolValidationError` for a
+    duplicate tool name -- the same guarantee `test_connector_ai_tool_
+    registration_is_idempotent` already proves for the Connector tools,
+    now proven for Document too."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        register_document_ai_tools(ai_engine.tool_registry)
+        assert ai_engine.tool_registry.has_tool("document_list_templates")
+        assert ai_engine.tool_registry.has_tool("document_generate")
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_ai_tool_registers_on_production_boot_path() -> None:
+    """M7.5-W3: the Knowledge Engine AI tool is registered in the AI
+    Engine's ToolRegistry automatically on the real boot path. Mirrors
+    `test_connector_ai_tools_register_on_production_boot_path` -- this
+    coverage never existed for the Knowledge tool until M7.6-W2 closed the
+    gap."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        assert isinstance(ai_engine, AIOrchestrationEngine)
+        assert ai_engine.tool_registry.has_tool("knowledge_search")
+        search_tool = ai_engine.tool_registry.get_tool("knowledge_search")
+        assert search_tool.is_mutation is False
+        assert search_tool.canonical_capability == "kortex.knowledge.query.search"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_ai_tool_registration_is_idempotent() -> None:
+    """M7.6-W2: calling `register_knowledge_ai_tools` twice against the
+    same, already-populated registry must not raise `ToolValidationError`
+    for a duplicate tool name -- the same guarantee `test_connector_ai_tool_
+    registration_is_idempotent` already proves for the Connector tools, now
+    proven for Knowledge too."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        register_knowledge_ai_tools(ai_engine.tool_registry)
+        assert ai_engine.tool_registry.has_tool("knowledge_search")
     finally:
         await kernel.shutdown()
 
