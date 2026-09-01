@@ -264,6 +264,27 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 handler=self.get_profile,
                 required_permissions=["connector:read"],
             )
+            kernel.register_capability(
+                name="kortex.connector.profile.register",
+                description="Create or update a tenant-scoped connector profile (M7.3)",
+                provider=self.name,
+                handler=self.register_profile,
+                required_permissions=["connector:write"],
+            )
+            kernel.register_capability(
+                name="kortex.connector.profile.list",
+                description="List connector profiles owned by the caller's tenant (M7.3)",
+                provider=self.name,
+                handler=self.list_profiles,
+                required_permissions=["connector:read"],
+            )
+            kernel.register_capability(
+                name="kortex.connector.profile.delete",
+                description="Delete a tenant-scoped connector profile (M7.3)",
+                provider=self.name,
+                handler=self.delete_profile,
+                required_permissions=["connector:write"],
+            )
 
             self._set_state(EngineState.READY)
             self.logger.info("Connector Engine initialized successfully.")
@@ -535,6 +556,80 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
         tid = principal.tenant_id if principal is not None else tenant_id
         return await self._profile_manager.get_profile(profile_id, tenant_id=tid)
+
+    async def register_profile(
+        self,
+        profile: ConnectorProfile | dict[str, Any],
+        principal: SecurityPrincipal | None = None,
+    ) -> ConnectorProfile:
+        """Create or update a tenant-scoped connector profile (M7.3).
+
+        Mirrors `execute_action`/`get_profile`'s principal-authoritative
+        tenant binding (M6.3-1): a caller-supplied `tenant_id` on the
+        submitted profile is never trusted once a verified `principal` is
+        present -- it is always overwritten with `principal.tenant_id`
+        before the profile is persisted, so a caller cannot register (or
+        silently take over) a profile under another tenant's id.
+
+        `profile` may arrive as a plain `dict` when this capability is
+        reached through the real dispatch boundary (the Kernel dispatcher's
+        M7.2 dict-coercion fix already handles this generically, but the
+        explicit branch mirrors `execute_action`'s own defensive coercion
+        for the direct, non-dispatch call path used by tests).
+
+        Rejects a `driver_id` that is not currently registered -- a profile
+        referencing a nonexistent driver would otherwise register
+        successfully and only fail much later, at execution time, inside
+        `ConnectorPipeline`'s dispatch stage.
+        """
+        if isinstance(profile, dict):
+            profile = ConnectorProfile(**profile)
+        if principal is not None:
+            profile = profile.model_copy(update={"tenant_id": principal.tenant_id})
+
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        self._registry.get_driver_by_id(profile.driver_id)
+        await self._profile_manager.register_profile(profile)
+        return profile
+
+    async def list_profiles(
+        self,
+        driver_id: str | None = None,
+        active_only: bool = False,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> list[ConnectorProfile]:
+        """List connector profiles scoped to the caller's tenant (M7.3).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` -- identical precedence to `get_profile`/`execute_action`.
+        """
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        tid = principal.tenant_id if principal is not None else tenant_id
+        return await self._profile_manager.list_profiles(
+            driver_id=driver_id, active_only=active_only, tenant_id=tid
+        )
+
+    async def delete_profile(
+        self,
+        profile_id: str,
+        principal: SecurityPrincipal | None = None,
+    ) -> bool:
+        """Delete a tenant-scoped connector profile (M7.3).
+
+        `ConnectorProfileManager.delete_profile` deletes by `profile_id`
+        alone with no tenant check -- it never needed one before this
+        capability existed, since every prior caller was already trusted and
+        tenant-scoped upstream. Ownership is verified first via the
+        already-tenant-scoped, enumeration-resistant `get_profile` (M6.3-1),
+        which raises `ConnectorProfileNotFoundError` -- masked identically to
+        a genuinely nonexistent profile -- if the caller's tenant does not
+        own it. Deletion is only ever attempted after that check passes.
+        """
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        tid = principal.tenant_id if principal is not None else None
+        await self._profile_manager.get_profile(profile_id, tenant_id=tid)
+        return await self._profile_manager.delete_profile(profile_id)
 
     # -- Internal Helper Methods --------------------------------------------
 
