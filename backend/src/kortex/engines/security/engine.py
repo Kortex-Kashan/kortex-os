@@ -72,19 +72,26 @@ _SECRET_GET_CAPABILITY = "kortex.security.secret.get"
 _AUTH_AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate"
 _ACCESS_AUTHORIZE_CAPABILITY = "kortex.security.access.authorize"
 _SIGNATURE_VERIFY_CAPABILITY = "kortex.security.signature.verify"
+_BOOTSTRAP_CREATE_ADMIN_CAPABILITY = "kortex.security.bootstrap.create_admin"
 
-# Canonical capability registration list, per Security Engine spec S15.
+# The single role granted to the first, bootstrap-created administrator.
+_BOOTSTRAP_ADMIN_ROLE = "admin"
+
+# Canonical capability registration list, per Security Engine spec S15, plus
+# the M7.1 first-run bootstrap capability.
 _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
     (_AUTH_AUTHENTICATE_CAPABILITY, "Authenticate a caller identity."),
     (_ACCESS_AUTHORIZE_CAPABILITY, "Authorize a caller's requested capability."),
     (_SECRET_GET_CAPABILITY, "Resolve a secret handle to its plaintext value."),
     (_SIGNATURE_VERIFY_CAPABILITY, "Verify a cryptographic signature."),
+    (_BOOTSTRAP_CREATE_ADMIN_CAPABILITY, "Create the first tenant administrator on a fresh install."),
 ]
 
 # RBAC permission requirements per capability. `kortex.security.auth.authenticate`
-# is deliberately absent: it is the bootstrap-exempt capability
-# (`requires_authentication=False`), so no RBAC permission requirement applies to
-# it.
+# and `kortex.security.bootstrap.create_admin` are deliberately absent: both are
+# bootstrap-exempt capabilities (`requires_authentication=False`), so no RBAC
+# permission requirement applies to either — each instead fails closed via its
+# own handler logic (wrong credentials / bootstrap already closed).
 _CANONICAL_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
     _ACCESS_AUTHORIZE_CAPABILITY: ["security:read"],
     _SECRET_GET_CAPABILITY: ["security:read"],
@@ -151,6 +158,15 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         self._authentication_manager: Optional[AuthenticationManager] = None
         self._authorization_engine: Optional[AuthorizationEngine] = None
         self._audit_manager: Optional[AuditManager] = None
+        # M7.1: bound `Kernel.list_capabilities` method only (never the full
+        # `Kernel` instance) — the narrowest capture that lets
+        # `bootstrap_create_admin` discover the union of every currently
+        # registered capability's `required_permissions` at call time, so
+        # the first bootstrap-created administrator is granted a working
+        # permission set without hand-maintaining a duplicate list here that
+        # would silently drift out of sync with every other engine's own
+        # capability registrations.
+        self._list_capabilities: Optional[Callable[[], List[Any]]] = None
         self._verification_service: VerificationService = VerificationService(crypto_provider=self._crypto_provider)
         self._registered_capabilities: List[str] = []
         self._metrics: Dict[str, Any] = {
@@ -232,6 +248,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
             self._authentication_manager = self._build_authentication_manager(kernel)
             self._authorization_engine = self._build_authorization_engine(kernel)
             self._audit_manager = self._build_audit_manager(kernel)
+            self._list_capabilities = kernel.list_capabilities
 
             for capability_name, description in _CANONICAL_CAPABILITIES:
                 requires_authentication = True
@@ -253,6 +270,12 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                 elif capability_name == _SIGNATURE_VERIFY_CAPABILITY:
                     handler = self._verify_signature_capability_handler
                     capability_description = f"{description} Cryptographic verification (Milestone M6)."
+                elif capability_name == _BOOTSTRAP_CREATE_ADMIN_CAPABILITY:
+                    handler = self.bootstrap_create_admin
+                    capability_description = f"{description} Fail-closed after first use (Milestone M7.1)."
+                    # The second (and still deliberately narrow) bootstrap
+                    # exception: reachable before any session token exists.
+                    requires_authentication = False
                 else:
                     handler = self._make_not_implemented_handler(capability_name)
                     capability_description = f"{description} NOT IMPLEMENTED."
@@ -425,6 +448,80 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
             return self._verification_service.verify_signature(data_bytes, sig_obj)
         except Exception:
             return False
+
+    async def bootstrap_create_admin(
+        self,
+        tenant_id: str,
+        principal_id: str,
+        password: str,
+    ) -> Dict[str, Any]:
+        """Capability handler for `kortex.security.bootstrap.create_admin` (M7.1).
+
+        Creates the very first tenant/administrator on a fresh install (see
+        `AuthenticationManager.bootstrap_first_admin` for the fail-closed,
+        concurrency-safe transaction this delegates to). Grants the new
+        administrator every RBAC permission currently declared by any
+        registered capability — gathered dynamically from `_list_capabilities`
+        rather than a hand-maintained list, so it never drifts out of sync
+        with what other engines actually register. This is the only way a
+        first-run desktop administrator can use the application immediately
+        after signing in: RBAC otherwise fails closed for every
+        unprovisioned role (`rbac.py`'s own documented behavior), and this is
+        a single-tenant desktop install being bootstrapped by its own first
+        (and, until it invites others, only) user.
+
+        Records an audit entry mirroring `authenticate()`'s own pattern on
+        both outcomes. Never audits, logs, or returns the submitted password.
+        """
+        permissions: List[str] = []
+        if self._list_capabilities is not None:
+            granted: set[str] = set()
+            for descriptor in self._list_capabilities():
+                if descriptor.required_permissions:
+                    granted.update(descriptor.required_permissions)
+            permissions = sorted(granted)
+
+        safe_tenant_id = tenant_id if isinstance(tenant_id, str) and tenant_id else "unknown"
+        safe_principal_id = principal_id if isinstance(principal_id, str) and principal_id else "unknown"
+
+        try:
+            await self.authentication_manager.bootstrap_first_admin(
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                password=password,
+                roles=[_BOOTSTRAP_ADMIN_ROLE],
+                permissions=permissions,
+            )
+        except Exception as exc:
+            await self._record_security_audit(
+                action=_BOOTSTRAP_CREATE_ADMIN_CAPABILITY,
+                actor_id=safe_principal_id,
+                actor_type="HUMAN",
+                tenant_id=safe_tenant_id,
+                context={"result": "failure", "reason": type(exc).__name__},
+            )
+            raise
+
+        await self._record_security_audit(
+            action=_BOOTSTRAP_CREATE_ADMIN_CAPABILITY,
+            actor_id=safe_principal_id,
+            actor_type="HUMAN",
+            tenant_id=safe_tenant_id,
+            context={"result": "success"},
+        )
+        return {"created": True, "tenant_id": tenant_id, "principal_id": principal_id}
+
+    async def is_bootstrap_required(self) -> bool:
+        """Whether first-run bootstrap is still available (Milestone M7.1).
+
+        Deliberately not its own Kernel capability — consulted directly by
+        `Kernel.health_check()`, reusing the already-established
+        unauthenticated `/health` diagnostic surface instead of widening the
+        capability-registry's bootstrap-exemption allowlist a third time for
+        a read that has an existing, more appropriate home. See
+        `AuthenticationManager.is_bootstrap_required` for the query itself.
+        """
+        return await self.authentication_manager.is_bootstrap_required()
 
     def _make_not_implemented_handler(self, capability_name: str) -> Callable[..., Any]:
         """Build a handler that fails closed for unimplemented capabilities."""

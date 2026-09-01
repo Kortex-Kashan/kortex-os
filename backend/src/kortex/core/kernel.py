@@ -195,13 +195,35 @@ class Kernel:
         self._logger.info("KORTEX Kernel Runtime stopped cleanly.")
 
     async def health_check(self) -> dict[str, Any]:
-        """Perform system-wide health checks."""
+        """Perform system-wide health checks.
+
+        `bootstrap_required` (Milestone M7.1) rides along on this existing,
+        already-unauthenticated `/health` surface rather than becoming a new
+        capability — the desktop app must be able to tell "no principal
+        exists yet, offer first-run setup" apart from "backend still
+        starting" before any session token can possibly exist, which is
+        exactly what `/health` is already for. Best-effort: if the Security
+        Engine isn't registered/ready yet (a transient state during boot,
+        not the steady-state this flag matters for), this defaults to
+        `False` rather than raising — an unreachable/booting backend is
+        already fully described by the surrounding health report, and a
+        client should not offer first-run setup while it cannot even be sure
+        one is warranted.
+        """
         reports = await self._boot_engine.run_system_health_checks(self)
+        bootstrap_required = False
+        try:
+            security_engine = self.get_engine("security")
+            if security_engine is not None and security_engine.state.value in ("READY", "RUNNING"):
+                bootstrap_required = await security_engine.is_bootstrap_required()
+        except Exception as exc:
+            self._logger.debug("Bootstrap-required check unavailable: %s", exc)
         return {
             "kernel_state": self._state.value,
             "db_dialect": self._db_manager.dialect.value,
             "db_connected": self._db_manager.is_connected,
             "system_health": reports,
+            "bootstrap_required": bootstrap_required,
         }
 
     # -- Event Delegation APIs ----------------------------------------------

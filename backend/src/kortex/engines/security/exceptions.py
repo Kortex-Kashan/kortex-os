@@ -44,6 +44,26 @@ class SigningKeyError(SecurityEngineError):
     """
 
 
+# -- First-run Bootstrap (Milestone M7.1) ------------------------------------
+
+
+class BootstrapClosedError(AuthenticationError):
+    """Raised when `bootstrap_create_admin` is invoked but the system already
+    has at least one principal.
+
+    A subclass of `AuthenticationError` (not a fresh `SecurityEngineError`
+    subtree) so it maps through the existing `PERMISSION_DENIED`/401
+    exception taxonomy exactly like every other "you may not do this"
+    identity-layer rejection — no new error category is introduced.
+    """
+
+
+class BootstrapValidationError(SecurityEngineError):
+    """Raised when first-run bootstrap input fails validation (empty tenant
+    ID/username, or a password below the minimum length). Never includes the
+    submitted password in its message."""
+
+
 # -- Authorization (Milestone M4) --------------------------------------------
 
 

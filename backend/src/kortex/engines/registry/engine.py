@@ -20,9 +20,22 @@ if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
 
 
-_BOOTSTRAP_EXEMPT_CAPABILITY = "kortex.security.auth.authenticate"
-"""The one capability permitted to register with `requires_authentication=False` —
-it must be reachable before any session token exists. Enforced in
+_BOOTSTRAP_EXEMPT_CAPABILITIES = frozenset(
+    {
+        "kortex.security.auth.authenticate",
+        # M7.1: the first-run tenant/admin bootstrap capability is the second
+        # (and, by design, still deliberately narrow) member of this
+        # allowlist — it must be reachable before any session token exists
+        # for the identical reason `auth.authenticate` is: there is no
+        # principal yet to authenticate as. It is not a general bypass —
+        # its own handler (`SecurityEngine.bootstrap_create_admin`) fails
+        # closed the moment any principal already exists, exactly mirroring
+        # how `authenticate` fails closed on any credential mismatch.
+        "kortex.security.bootstrap.create_admin",
+    }
+)
+"""Capabilities permitted to register with `requires_authentication=False` —
+each must be reachable before any session token exists. Enforced in
 `RegistryEngine.register_capability`, not merely documented as a convention."""
 
 
@@ -77,9 +90,9 @@ class CapabilityDescriptor(BaseModel):
         default=True,
         description=(
             "Whether the Kernel dispatcher requires a verified session token before invoking this "
-            "capability's handler. Only 'kortex.security.auth.authenticate' may register with this set "
-            "to False — enforced in `register_capability` below, not merely a convention. Every other "
-            "capability defaults to True."
+            "capability's handler. Only the small, fixed allowlist in `_BOOTSTRAP_EXEMPT_CAPABILITIES` "
+            "may register with this set to False — enforced in `register_capability` below, not merely "
+            "a convention. Every other capability defaults to True."
         ),
     )
     security_classification: str = Field(
@@ -271,10 +284,10 @@ class RegistryEngine(BaseEngine):
         if name in self._capabilities:
             raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
 
-        if not requires_authentication and name != _BOOTSTRAP_EXEMPT_CAPABILITY:
+        if not requires_authentication and name not in _BOOTSTRAP_EXEMPT_CAPABILITIES:
             raise ValueError(
                 f"Capability '{name}' cannot register with requires_authentication=False; "
-                f"only '{_BOOTSTRAP_EXEMPT_CAPABILITY}' may bypass authentication."
+                f"only {sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may bypass authentication."
             )
 
         descriptor = CapabilityDescriptor(

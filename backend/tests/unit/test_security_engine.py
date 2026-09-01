@@ -55,6 +55,7 @@ _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.access.authorize",
     "kortex.security.secret.get",
     "kortex.security.signature.verify",
+    "kortex.security.bootstrap.create_admin",  # M7.1
 ]
 _STILL_PLACEHOLDER_CAPABILITY_NAMES = [
     "kortex.security.signature.verify",
@@ -216,7 +217,7 @@ async def test_security_engine_stop_before_start_is_a_no_op() -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_four_canonical_capabilities_registered_with_kernel(tmp_path: Path) -> None:
+async def test_all_canonical_capabilities_registered_with_kernel(tmp_path: Path) -> None:
     kernel, _storage, _security = await _boot_kernel_with_security(tmp_path)
 
     for capability_name in _CANONICAL_CAPABILITY_NAMES:
@@ -232,11 +233,11 @@ def test_capabilities_empty_before_initialize() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capabilities_reflects_all_four_registrations_after_initialize(tmp_path: Path) -> None:
+async def test_capabilities_reflects_all_canonical_registrations_after_initialize(tmp_path: Path) -> None:
     _kernel, _storage, security_engine = await _boot_kernel_with_security(tmp_path)
 
     assert set(security_engine.capabilities()) == set(_CANONICAL_CAPABILITY_NAMES)
-    assert len(security_engine.capabilities()) == 4
+    assert len(security_engine.capabilities()) == len(_CANONICAL_CAPABILITY_NAMES)
 
 
 # -- E. Capability verification: signature.verify is REAL as of M6 -----------------

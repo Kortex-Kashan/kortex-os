@@ -50,7 +50,9 @@ from kortex.engines.connector.models import (
     ConnectorProfile,
     DriverMetadata,
 )
-from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITY
+from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITIES
+
+_A_BOOTSTRAP_EXEMPT_CAPABILITY = next(iter(sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)))
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import (
     AuthenticationError,
@@ -615,12 +617,12 @@ def test_bootstrap_exemption_rejects_every_near_miss_name(tmp_path: Path, near_m
 def test_duplicate_bootstrap_capability_registration_rejected() -> None:
     kernel = Kernel()
     kernel.register_capability(
-        name=_BOOTSTRAP_EXEMPT_CAPABILITY, description="test", provider="test", handler=lambda: None,
+        name=_A_BOOTSTRAP_EXEMPT_CAPABILITY, description="test", provider="test", handler=lambda: None,
         requires_authentication=False,
     )
     with pytest.raises(ResourceAlreadyExistsError):
         kernel.register_capability(
-            name=_BOOTSTRAP_EXEMPT_CAPABILITY, description="test", provider="test", handler=lambda: None,
+            name=_A_BOOTSTRAP_EXEMPT_CAPABILITY, description="test", provider="test", handler=lambda: None,
             requires_authentication=False,
         )
 

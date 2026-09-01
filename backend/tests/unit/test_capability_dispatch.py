@@ -24,7 +24,7 @@ from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest, _safe_classification
 from kortex.core.exceptions import CapabilityNotFoundError, KernelStateError, ResourceNotFoundError
 from kortex.core.kernel import Kernel
-from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITY
+from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITIES
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError, SecurityEngineError
 from kortex.engines.security.models import (
@@ -519,15 +519,16 @@ async def test_requires_authentication_false_reserved_for_bootstrap_capability(t
             handler=lambda: None,
             requires_authentication=False,
         )
-    # The one genuinely exempt capability name is accepted.
-    descriptor = kernel.register_capability(
-        name=_BOOTSTRAP_EXEMPT_CAPABILITY,
-        description="test",
-        provider="test",
-        handler=lambda: None,
-        requires_authentication=False,
-    )
-    assert descriptor.requires_authentication is False
+    # Every genuinely exempt capability name in the fixed allowlist is accepted.
+    for exempt_name in _BOOTSTRAP_EXEMPT_CAPABILITIES:
+        descriptor = kernel.register_capability(
+            name=exempt_name,
+            description="test",
+            provider="test",
+            handler=lambda: None,
+            requires_authentication=False,
+        )
+        assert descriptor.requires_authentication is False
 
 
 # -- 18. Invalid security_classification defaults to RESTRICTED -------------
