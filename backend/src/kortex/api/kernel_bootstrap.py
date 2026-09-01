@@ -28,8 +28,10 @@ from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionB
 from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.ai.identity import AI_SYSTEM_PRINCIPAL_ID, AI_SYSTEM_ROLE, AISystemIdentity
 from kortex.engines.ai.ollama_provider import OllamaProvider
+from kortex.engines.ai.tools import ToolDefinition, ToolRegistry
 from kortex.engines.configuration.engine import SystemSettings
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
@@ -222,4 +224,146 @@ async def build_and_boot_kernel() -> Kernel:
     kernel.register_engine(KnowledgeEngine())
 
     await kernel.boot()
+
+    # M7.3-W1: register the production connector drivers now that the engine
+    # is READY (ConnectorEngine.register_driver requires READY/RUNNING state,
+    # so this cannot happen before kernel.boot()).
+    connector_engine = kernel.get_engine("connector")
+    register_production_connector_drivers(connector_engine)
+
+    # M7.3-W4: register the reference connector AI tools.
+    register_connector_ai_tools(ai_engine.tool_registry)
+
     return kernel
+
+
+def register_production_connector_drivers(connector_engine: ConnectorEngine) -> None:
+    """Register the production connector drivers on an already-booted engine.
+
+    Both `DummyConnectorDriver` and `HttpRestConnectorDriver` already exist
+    and are independently unit/integration tested (see
+    docs/architecture/m7.3_connector_integration_planning_report.md, Pass 1
+    §3.A) -- this only wires them into the production boot path, which no
+    prior milestone did. Idempotent: safe to call more than once against the
+    same engine instance (e.g. a caller that boots, shuts down, and re-boots
+    without recreating the engine) without raising `ConnectorDriverError` for
+    an already-registered driver id.
+    """
+    already_registered = {d.driver_id for d in connector_engine.list_drivers()}
+    for driver in (DummyConnectorDriver(), HttpRestConnectorDriver()):
+        if driver.metadata.driver_id not in already_registered:
+            connector_engine.register_driver(driver)
+
+
+def register_connector_ai_tools(tool_registry: ToolRegistry) -> None:
+    """Register the M7.3 reference connector AI tools into an AI Engine's `ToolRegistry`.
+
+    Two tools prove both the direct-dispatch (read) and approval-gated
+    (mutation) paths through the existing, unmodified `AIToolInvoker` ->
+    `KernelToolExecutionPort` -> `CapabilityDispatcher` -> `ConnectorEngine`
+    chain -- no new plumbing, only the tool declarations the AI Engine's
+    `ToolRegistry` was always able to hold but nothing had ever populated.
+
+    `action_type` is pinned via a JSON Schema `const` per tool so the LLM
+    cannot use the read-only tool to smuggle a mutating action_type past
+    `ToolDefinition.is_mutation`'s approval-gating decision
+    (`DurableAIApprovalPolicy` keys off which TOOL was called, not the
+    payload). `profile_id` is left caller-supplied because real tenant
+    isolation is already enforced one layer down by
+    `ConnectorEngine.execute_action`'s principal-authoritative tenant
+    binding and `ConnectorProfileManager.get_profile`'s tenant-scoped,
+    enumeration-resistant masking (M6.3-1), which a schema-level constant
+    would only duplicate, not strengthen, and cannot do per-tenant anyway
+    since `ToolRegistry` is a single process-wide catalog, not per-tenant.
+
+    The schema nests `profile_id`/`action_type`/`payload` under a top-level
+    `request` object because `ConnectorEngine.execute_action(self, request,
+    principal=None)` takes exactly one parameter named `request` -- the
+    Kernel dispatcher splats a capability's `parameters` dict as
+    `handler(**parameters)`, so the arguments dict a tool call produces must
+    literally contain a `request` key to land on that parameter, identical
+    to the shape `ExternalExecutionManager` already uses to reach this same
+    capability (`parameters={"request": ActionRequest(...)}}`,
+    `test_external_execution_vertical_slice.py`). This is an existing
+    contract this milestone conforms to, not a new convention invented here.
+
+    Idempotent: `ToolRegistry.register_tool` raises `ToolValidationError` on
+    a duplicate name, so this is a no-op on a registry that already holds
+    these tools.
+    """
+    if not tool_registry.has_tool("connector_read_status"):
+        tool_registry.register_tool(
+            ToolDefinition(
+                name="connector_read_status",
+                description=(
+                    "Fetch read-only status information from a connected external "
+                    "service via its connector profile. Safe, no side effects, "
+                    "never requires approval."
+                ),
+                canonical_capability="kortex.connector.action.execute",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "request": {
+                            "type": "object",
+                            "properties": {
+                                "request_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "A unique identifier you generate for this request.",
+                                },
+                                "profile_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "The connector profile to read from.",
+                                },
+                                "action_type": {"type": "string", "const": "FETCH"},
+                                "payload": {"type": "object"},
+                            },
+                            "required": ["request_id", "profile_id", "action_type"],
+                        },
+                    },
+                    "required": ["request"],
+                },
+                is_mutation=False,
+                timeout_seconds=30.0,
+            )
+        )
+    if not tool_registry.has_tool("connector_send_action"):
+        tool_registry.register_tool(
+            ToolDefinition(
+                name="connector_send_action",
+                description=(
+                    "Send a mutating action to an external service via its connector "
+                    "profile. This changes state on the external service and always "
+                    "requires human approval before it executes."
+                ),
+                canonical_capability="kortex.connector.action.execute",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "request": {
+                            "type": "object",
+                            "properties": {
+                                "request_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "A unique identifier you generate for this request.",
+                                },
+                                "profile_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "The connector profile to send the action to.",
+                                },
+                                "action_type": {"type": "string", "const": "SEND"},
+                                "payload": {"type": "object"},
+                            },
+                            "required": ["request_id", "profile_id", "action_type"],
+                        },
+                    },
+                    "required": ["request"],
+                },
+                is_mutation=True,
+                timeout_seconds=30.0,
+            )
+        )

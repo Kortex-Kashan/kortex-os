@@ -18,7 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from kortex.api.kernel_bootstrap import build_and_boot_kernel
+from kortex.api.kernel_bootstrap import (
+    build_and_boot_kernel,
+    register_connector_ai_tools,
+    register_production_connector_drivers,
+)
 from kortex.core.kernel import KernelState
 from kortex.engines.ai.engine import AIOrchestrationEngine
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
@@ -62,12 +66,75 @@ async def test_connector_driver_list_capability_registers_on_production_boot_pat
 
 
 @pytest.mark.asyncio
-async def test_connector_registry_starts_empty_on_production_boot_path() -> None:
+async def test_connector_drivers_register_on_production_boot_path() -> None:
+    """M7.3-W1: both the dummy and the production HTTP driver are now
+    registered automatically on the real boot path (prior to M7.3, driver
+    registration was a public API a caller had to invoke manually — nothing
+    in production ever did, so `list_drivers()` was always empty)."""
     kernel = await build_and_boot_kernel()
     try:
         connector_engine = kernel.get_engine("connector")
         assert isinstance(connector_engine, ConnectorEngine)
-        assert connector_engine.list_drivers() == []
+        driver_ids = {d.driver_id for d in connector_engine.list_drivers()}
+        assert driver_ids == {"connector-dummy", "connector-http-rest"}
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_driver_registration_is_idempotent() -> None:
+    """Calling `register_production_connector_drivers` twice against the
+    same, already-registered engine must not raise `ConnectorDriverError`
+    for a duplicate driver id -- proves the guard in `kernel_bootstrap.py`
+    actually works, not just that booting twice happens to avoid it (a fresh
+    `ConnectorEngine()` is constructed on every `build_and_boot_kernel()`
+    call, so that alone would never have exercised this code path)."""
+    kernel = await build_and_boot_kernel()
+    try:
+        connector_engine = kernel.get_engine("connector")
+        driver_ids_before = {d.driver_id for d in connector_engine.list_drivers()}
+
+        register_production_connector_drivers(connector_engine)
+
+        driver_ids_after = {d.driver_id for d in connector_engine.list_drivers()}
+        assert driver_ids_after == driver_ids_before == {"connector-dummy", "connector-http-rest"}
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_ai_tools_register_on_production_boot_path() -> None:
+    """M7.3-W4: the reference connector tools are registered in the AI
+    Engine's ToolRegistry automatically on the real boot path (prior to
+    M7.3, `create_ai_engine` always constructed an empty `ToolRegistry()`
+    with nothing ever added to it)."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        assert isinstance(ai_engine, AIOrchestrationEngine)
+        assert ai_engine.tool_registry.has_tool("connector_read_status")
+        assert ai_engine.tool_registry.has_tool("connector_send_action")
+        read_tool = ai_engine.tool_registry.get_tool("connector_read_status")
+        send_tool = ai_engine.tool_registry.get_tool("connector_send_action")
+        assert read_tool.is_mutation is False
+        assert send_tool.is_mutation is True
+        assert read_tool.canonical_capability == "kortex.connector.action.execute"
+        assert send_tool.canonical_capability == "kortex.connector.action.execute"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_ai_tool_registration_is_idempotent() -> None:
+    """Calling `register_connector_ai_tools` twice against the same,
+    already-populated registry must not raise `ToolValidationError` for a
+    duplicate tool name."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        register_connector_ai_tools(ai_engine.tool_registry)
+        assert ai_engine.tool_registry.has_tool("connector_read_status")
+        assert ai_engine.tool_registry.has_tool("connector_send_action")
     finally:
         await kernel.shutdown()
 
@@ -335,7 +402,9 @@ async def test_connector_secret_resolver_wired_on_production_boot_path() -> None
         # Prior to the fix, this resolver is None even after a full boot.
         assert connector_engine.pipeline._secret_resolver is not None
 
-        connector_engine.register_driver(DummyConnectorDriver())
+        # M7.3-W1: `connector-dummy` is already registered by production
+        # boot itself now — no manual `register_driver` call needed (and
+        # attempting one would raise `ConnectorDriverError` for a duplicate).
 
         secret_handle = "vault:m6-0-2-regression-secret"
         tenant_id = "tenant-m6-0-2"
@@ -384,7 +453,8 @@ async def test_connector_secret_resolver_stays_tenant_scoped_on_production_boot_
     try:
         security_engine = kernel.get_engine("security")
         connector_engine = kernel.get_engine("connector")
-        connector_engine.register_driver(DummyConnectorDriver())
+        # M7.3-W1: `connector-dummy` is already registered by production
+        # boot itself now — see the sibling test above.
 
         secret_handle = "vault:m6-0-2-tenant-scoped-secret"
         await security_engine.put_secret(secret_handle, "tenant-real-owner", "owner-secret-token")
