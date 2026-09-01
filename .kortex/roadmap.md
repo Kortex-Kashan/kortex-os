@@ -123,3 +123,19 @@
 - [x] Canonical vertical-slice tests proving the AI-tool-to-Document-Engine path end to end (`backend/tests/integration/test_ai_document_tool_invocation.py`): immediate read dispatch, approval-gated generation with real resume, rejection, cross-tenant isolation, duplicate-approval-event idempotency, and large-output truncation.
 - [x] Adversarial tenant-isolation coverage (`backend/tests/unit/test_document_tenant_isolation_dispatch.py`): same-tenant success and cross-tenant fail-closed for `execute_profile` and `transition_lifecycle`; RBAC/authentication gates and same-tenant-only results for `list_profiles`.
 - See `docs/architecture/m7.4_document_engine_ai_integration_implementation_report.md` for the full certification report.
+
+## Application Completion track — M7.5: Knowledge Engine ↔ AI Studio Integration
+
+**Status**: Completed
+
+- [x] Tenant-isolation security gate closed on all five Knowledge Engine capabilities (`search`, `traverse_graph`, `list_nodes`, `index_source`, `load_pack`) — previously none of the five handlers accepted a Kernel-verified `principal` at all, a live gap already reachable via the existing desktop Knowledge UI, independent of any AI exposure. Closed before the AI tool was registered, per the established M7.3/M7.4 ordering discipline.
+- [x] One governed, deliberately read-only AI tool (`knowledge_search`) registered into the AI Engine's `ToolRegistry` at boot (`register_knowledge_ai_tools`) — the third engine (after Connector, M7.3, and Document, M7.4) proven to reach the AI tool-invocation chain unmodified. No mutation-class Knowledge tool was added; left as an explicit open question pending product evidence, not silently included or foreclosed.
+- [x] `KnowledgeQuery.tenant_id` given a `"default"` fallback value (mirroring `document.models.BindingContext.tenant_id`'s identical precedent) so the AI tool's schema can omit `tenant_id` entirely, as required — tenant identity comes exclusively from the verified principal.
+- [x] Independently-discovered diagnostics bug fixed: `KnowledgeEngine._REGISTERED_CAPABILITIES` was missing `kortex.knowledge.graph.list` despite it being a real, registered, dispatchable capability.
+- [x] Verified (not re-fixed) that M7.2's dispatch dict→Pydantic coercion already resolved a historical, documented `KnowledgeQuery`-over-real-IPC defect — closing the master implementation prompt's required Enum/request-coercion audit with evidence rather than assumption.
+- [x] AI-tool-registration hygiene: the copy-pasted idempotency guard across `register_connector_ai_tools`/`register_document_ai_tools`/`register_knowledge_ai_tools` was extracted into a shared `_register_tool_if_absent` helper, closing a coherence gap the M7.5 planning report's own AI-tool-surface investigation identified.
+- [x] Content-security review of knowledge search results entering AI conversation history — confirmed the existing, generic `ToolResult.to_context_entry()` truncation/secret-scrubbing backstop already bounds a large, many-node search result; no new truncation code was needed, proven by a dedicated test.
+- [x] No desktop change made — AI Studio's existing generic tool-call rendering already covers `knowledge_search` with zero UI-side changes; the existing desktop Knowledge UI's calls are unaffected in shape by the tenant-isolation fix, confirmed by a fresh, unchanged desktop test run.
+- [x] Canonical AI vertical-slice tests (`backend/tests/integration/test_ai_knowledge_tool_invocation.py`): immediate read dispatch with conversation-history recording, cross-tenant isolation proven through the real AI path, and large-result truncation.
+- [x] Adversarial tenant-isolation coverage (`backend/tests/unit/test_knowledge_tenant_isolation_dispatch.py`): same-tenant success and cross-tenant fail-closed for all five hardened capabilities.
+- See `docs/architecture/m7.5_knowledge_engine_ai_integration_implementation_report.md` for the full certification report.
