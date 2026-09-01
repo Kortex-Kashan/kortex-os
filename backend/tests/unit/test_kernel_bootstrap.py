@@ -25,6 +25,7 @@ from kortex.api.kernel_bootstrap import (
     register_knowledge_ai_tools,
     register_production_connector_drivers,
 )
+from kortex.core.base_module import ModuleState
 from kortex.core.kernel import KernelState
 from kortex.engines.ai.engine import AIOrchestrationEngine
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
@@ -36,6 +37,7 @@ from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.workflow.engine import WorkflowEngine
+from kortex.modules.finance.module import FinanceModule
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +53,29 @@ async def test_connector_engine_registers_on_production_boot_path() -> None:
         connector_engine = kernel.get_engine("connector")
         assert isinstance(connector_engine, ConnectorEngine)
         assert connector_engine.status() == "RUNNING"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_finance_module_registers_on_production_boot_path() -> None:
+    """Finance-pilot planning pass: `FinanceModule` (a `BaseModule`, not a
+    `BaseEngine` subclass) reaches `ModuleState.ACTIVE` and registers
+    `kortex.finance.invoice.create` via the real production boot path,
+    through the same `kernel.register_engine()` call every `BaseEngine`
+    uses -- proving no Kernel modification was needed for a duck-typed
+    registrant."""
+    kernel = await build_and_boot_kernel()
+    try:
+        assert kernel.state == KernelState.RUNNING
+        finance_module = kernel.get_engine("finance")
+        assert isinstance(finance_module, FinanceModule)
+        assert finance_module.state == ModuleState.ACTIVE
+        assert finance_module.capabilities() == ["kortex.finance.invoice.create"]
+
+        descriptor = kernel.get_capability("kortex.finance.invoice.create")
+        assert descriptor.provider == "finance"
+        assert descriptor.required_permissions == ["finance:invoice:write"]
     finally:
         await kernel.shutdown()
 
