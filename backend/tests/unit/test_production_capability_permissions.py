@@ -43,6 +43,7 @@ _EXPECTED_PERMISSIONS: Dict[str, list[str] | None] = {
     "kortex.security.auth.authenticate": None,
     "kortex.security.access.authorize": ["security:read"],
     "kortex.security.secret.get": ["security:read"],
+    "kortex.security.secret.put": ["security:secret:write"],  # M7.3
     "kortex.security.signature.verify": ["security:read"],
     "kortex.security.bootstrap.create_admin": None,
     "kortex.workflow.instance.start": ["workflow:start"],
@@ -53,6 +54,9 @@ _EXPECTED_PERMISSIONS: Dict[str, list[str] | None] = {
     "kortex.connector.driver.register": ["connector:write"],
     "kortex.connector.driver.list": ["connector:read"],
     "kortex.connector.profile.get": ["connector:read"],
+    "kortex.connector.profile.register": ["connector:write"],  # M7.3
+    "kortex.connector.profile.list": ["connector:read"],  # M7.3
+    "kortex.connector.profile.delete": ["connector:write"],  # M7.3
     "kortex.recipe.load": ["recipe:write"],
     "kortex.recipe.validate": ["recipe:read"],
     "kortex.recipe.compile": ["recipe:read"],

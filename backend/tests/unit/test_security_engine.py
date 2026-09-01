@@ -54,6 +54,7 @@ _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.auth.authenticate",
     "kortex.security.access.authorize",
     "kortex.security.secret.get",
+    "kortex.security.secret.put",  # M7.3
     "kortex.security.signature.verify",
     "kortex.security.bootstrap.create_admin",  # M7.1
 ]

@@ -38,9 +38,11 @@ from kortex.engines.security.events import (
     SecurityAccessGrantedEvent,
     SecurityAuthFailureEvent,
     SecurityAuthSuccessEvent,
+    SecuritySecretModifiedEvent,
 )
 from kortex.engines.security.exceptions import (
     MasterKeyError,
+    SecretStoreError,
     SecurityEngineError,
     SigningKeyError,
 )
@@ -69,6 +71,7 @@ logger = logging.getLogger("kortex.engines.security")
 _MASTER_KEY_CONFIG_KEY = "KORTEX_MASTER_KEY"
 _AUTH_SIGNING_KEY_CONFIG_KEY = "KORTEX_AUTH_SIGNING_PRIVATE_KEY"
 _SECRET_GET_CAPABILITY = "kortex.security.secret.get"
+_SECRET_PUT_CAPABILITY = "kortex.security.secret.put"
 _AUTH_AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate"
 _ACCESS_AUTHORIZE_CAPABILITY = "kortex.security.access.authorize"
 _SIGNATURE_VERIFY_CAPABILITY = "kortex.security.signature.verify"
@@ -78,11 +81,16 @@ _BOOTSTRAP_CREATE_ADMIN_CAPABILITY = "kortex.security.bootstrap.create_admin"
 _BOOTSTRAP_ADMIN_ROLE = "admin"
 
 # Canonical capability registration list, per Security Engine spec S15, plus
-# the M7.1 first-run bootstrap capability.
+# the M7.1 first-run bootstrap capability and the M7.3 secret-provisioning
+# capability (closes the connector-credential write-path gap identified
+# during M7.3 planning: `SecretStore.put_secret` existed and was already
+# used internally for the AI system credential, but no tenant-facing,
+# RBAC-gated, audited capability ever exposed it).
 _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
     (_AUTH_AUTHENTICATE_CAPABILITY, "Authenticate a caller identity."),
     (_ACCESS_AUTHORIZE_CAPABILITY, "Authorize a caller's requested capability."),
     (_SECRET_GET_CAPABILITY, "Resolve a secret handle to its plaintext value."),
+    (_SECRET_PUT_CAPABILITY, "Store or rotate a tenant-scoped secret under a handle."),
     (_SIGNATURE_VERIFY_CAPABILITY, "Verify a cryptographic signature."),
     (_BOOTSTRAP_CREATE_ADMIN_CAPABILITY, "Create the first tenant administrator on a fresh install."),
 ]
@@ -92,9 +100,24 @@ _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
 # bootstrap-exempt capabilities (`requires_authentication=False`), so no RBAC
 # permission requirement applies to either — each instead fails closed via its
 # own handler logic (wrong credentials / bootstrap already closed).
+#
+# `security:secret:write` (M7.3) is deliberately a distinct permission from
+# `security:read` (which already gates the read-only `secret.get`) rather
+# than reusing it or `security:read`'s write-capable sibling from another
+# engine's taxonomy — write access to arbitrary tenant secrets is more
+# sensitive than read access to Security Engine's own authorize/verify
+# capabilities and must be independently grantable/revocable. A fresh
+# install's bootstrap-created admin receives it automatically (M7.1's
+# `bootstrap_create_admin` grants the union of every capability's
+# `required_permissions` registered at that moment); an admin bootstrapped
+# before M7.3 shipped must be granted it manually, the same manual step
+# already required for any RBAC permission on this platform, since no
+# permission-provisioning API exists yet (a pre-existing gap, not introduced
+# here).
 _CANONICAL_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
     _ACCESS_AUTHORIZE_CAPABILITY: ["security:read"],
     _SECRET_GET_CAPABILITY: ["security:read"],
+    _SECRET_PUT_CAPABILITY: ["security:secret:write"],
     _SIGNATURE_VERIFY_CAPABILITY: ["security:read"],
 }
 
@@ -255,6 +278,9 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                 if capability_name == _SECRET_GET_CAPABILITY:
                     handler: Callable[..., Any] = self._secret_store.get_secret
                     capability_description = f"{description} Encrypted, fail-closed (Milestone M2)."
+                elif capability_name == _SECRET_PUT_CAPABILITY:
+                    handler = self.put_secret_capability
+                    capability_description = f"{description} Encrypted, tenant-scoped, audited (Milestone M7.3)."
                 elif capability_name == _AUTH_AUTHENTICATE_CAPABILITY:
                     # `self.authenticate` (not the raw manager method) so this
                     # capability's real dispatch path is also audited (M6).
@@ -681,6 +707,68 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
     async def put_secret(self, secret_handle: str, tenant_id: str, plaintext: str) -> SecretEntry:
         """Encrypt and persist a secret under a handle."""
         return await self.secret_store.put_secret(secret_handle, tenant_id, plaintext)
+
+    async def put_secret_capability(
+        self,
+        secret_handle: str,
+        plaintext: str,
+        tenant_id: Optional[str] = None,
+        principal: Optional[SecurityPrincipal] = None,
+    ) -> Dict[str, Any]:
+        """Capability handler for `kortex.security.secret.put` (M7.3).
+
+        Unlike the pre-existing `kortex.security.secret.get` capability
+        (which registers `self._secret_store.get_secret` directly and has
+        never taken a `principal` parameter, so it still trusts a
+        caller-supplied `tenant_id` as-is -- a pre-existing gap, unrelated to
+        and not introduced by this capability, flagged here rather than
+        silently carried forward), this handler derives tenant identity from
+        the Kernel-verified `principal` whenever one is present, exactly like
+        every other M7.3 capability. A caller-supplied `tenant_id` is used
+        only when no principal was injected (trusted internal callers).
+
+        Never returns the plaintext value, in the response, an exception, or
+        the generic dispatch audit context (the Kernel dispatcher's own
+        `sanitize_for_persistence` already redacts any parameter whose *key*
+        matches `plaintext`/`secret`/etc., independent of this handler).
+        Publishes `SecuritySecretModifiedEvent` (operation=PUT) -- the event
+        class already existed but no code path had ever published it before
+        this capability existed.
+        """
+        tid = principal.tenant_id if principal is not None else tenant_id
+        if not tid:
+            raise SecretStoreError("tenant_id is required to store a secret.")
+
+        entry = await self.secret_store.put_secret(secret_handle, tid, plaintext)
+
+        actor_id = principal.principal_id if principal is not None else "system"
+        actor_type = (
+            _actor_type_for_principal_type(principal.principal_type.value)
+            if principal is not None
+            else "SYSTEM_ENGINE"
+        )
+        await self._record_security_audit(
+            action=_SECRET_PUT_CAPABILITY,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            tenant_id=tid,
+            resource_id=secret_handle,
+            context={"result": "success"},
+        )
+        if self._audit_manager is not None:
+            await self._audit_manager.publish_security_event(
+                SecuritySecretModifiedEvent(
+                    tenant_id=tid,
+                    secret_handle=secret_handle,
+                    operation="PUT",
+                )
+            )
+
+        return {
+            "secret_handle": entry.secret_handle,
+            "tenant_id": tid,
+            "updated_at_utc": entry.updated_at_utc.isoformat(),
+        }
 
     async def delete_secret(self, secret_handle: str, tenant_id: str) -> bool:
         """Delete a secret entry."""
