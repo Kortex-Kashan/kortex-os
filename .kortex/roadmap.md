@@ -83,3 +83,15 @@
 - [x] First-run tenant/administrator bootstrap, fail-closed after first use, concurrency-safe (`kortex.security.bootstrap.create_admin` — `backend/src/kortex/engines/security/{auth,engine}.py`; `apps/desktop/src/auth/BootstrapScreen.tsx`) — previously no path existed for a user to create the first account on an empty install.
 - [x] Cold-start acceptance test: fresh database → backend boot → first-run detection → bootstrap → authenticate → restart → persisted state remains valid (`backend/tests/e2e/test_m71_cold_start.py`).
 - See `docs/architecture/m7.1_implementation_report.md` for the full certification report.
+
+## Application Completion track — M7.2: AI Studio Conversational Completion
+
+**Status**: Completed
+
+- [x] Platform-wide dispatch fix: capability handlers declaring a Pydantic-model parameter (e.g. `LLMRequest`, `AgentTask`, `ResumeToken`) now actually work over the real dict-based HTTP/IPC path (`backend/src/kortex/core/dispatch.py`) — previously every such capability crashed with `AttributeError` outside a same-process test.
+- [x] `kortex.ai.conversation.history.get` — the smallest new capability needed to read durable conversation history, wrapping the existing `AIMemoryManager` (`backend/src/kortex/engines/ai/engine.py`) — no new persistence subsystem.
+- [x] Agent-orchestrated conversation turns (`kortex.ai.agent.orchestrate`/`resume`, including the automatic server-side approval-decided resume) are now recorded into the same durable history `kortex.ai.response.generate` already used, closing the gap where a chat surface built on agent orchestration could not recover its transcript after a restart.
+- [x] AI Studio "Chat" tab (`apps/desktop/src/features/ai-studio/components/ChatPanel.tsx`) — a real conversational surface: sends every message through the existing agent-orchestration capability, rehydrates its transcript from durable backend history on load, and surfaces a governed tool-use approval as a lightweight card that deep-links into the existing Workflow Approval Queue (Option B) rather than duplicating any decision authority — the desktop never calls `kortex.ai.agent.resume` itself.
+- [x] New `Textarea` design-system primitive (`design-system/components/textarea.tsx`).
+- [x] Conversation-recovery-after-restart acceptance test (`backend/tests/e2e/test_m72_conversational_recovery.py`), plus the approval/rejection flows proven end-to-end through the real event-driven auto-resume chain (`backend/tests/integration/test_ai_durable_approval_vertical_slice.py`).
+- See `docs/architecture/m7.2_implementation_report.md` for the full certification report.
