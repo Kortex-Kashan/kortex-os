@@ -88,14 +88,20 @@ async def test_initialize_wires_managers_and_registers_capabilities(tmp_path: Pa
     for cap_name in [
         "kortex.knowledge.query.search",
         "kortex.knowledge.graph.traverse",
+        "kortex.knowledge.graph.list",
         "kortex.knowledge.pack.load",
         "kortex.knowledge.source.index",
     ]:
         descriptor = kernel.get_capability(cap_name)
         assert descriptor.provider == "knowledge"
+    # M7.5-W1: `kortex.knowledge.graph.list` was already registered with the
+    # Kernel at initialize() time but was missing from `_REGISTERED_CAPABILITIES`
+    # (a self-reporting bug, not a dispatch gap) -- fixed alongside the tenant-
+    # isolation work since this method was already being touched.
     assert set(knowledge_engine.capabilities()) == {
         "kortex.knowledge.query.search",
         "kortex.knowledge.graph.traverse",
+        "kortex.knowledge.graph.list",
         "kortex.knowledge.pack.load",
         "kortex.knowledge.source.index",
     }
