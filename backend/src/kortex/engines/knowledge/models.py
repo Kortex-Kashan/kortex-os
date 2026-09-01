@@ -304,7 +304,15 @@ class KnowledgeQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     query_id: str = Field(..., min_length=1)
-    tenant_id: str = Field(..., min_length=1)
+    # M7.5-W3: defaults to "default" (mirrors `document.models.BindingContext.
+    # tenant_id`'s identical precedent) rather than staying required, so a
+    # caller-side construction path that never has a real tenant to supply --
+    # namely the `knowledge_search` AI tool, whose schema must not accept
+    # `tenant_id` at all (the Kernel-verified `principal.tenant_id` is
+    # authoritative and always overrides this via `KnowledgeEngine.search`'s
+    # M7.5-W1 fix) -- can omit it. Every existing direct-construction caller
+    # already supplies a real tenant_id explicitly and is unaffected.
+    tenant_id: str = Field(default="default", min_length=1)
     query_text: str = Field(..., min_length=1)
     filters: Dict[str, Any] = Field(default_factory=dict)
     entity_types: List[str] = Field(default_factory=list)

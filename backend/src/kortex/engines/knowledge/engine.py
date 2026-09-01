@@ -125,6 +125,7 @@ from kortex.engines.knowledge.models import (
 from kortex.engines.knowledge.packs import KnowledgePackManager
 from kortex.engines.knowledge.search import KnowledgeSearchEngine
 from kortex.engines.knowledge.sources import ReferenceSourceProvider
+from kortex.engines.security.models import SecurityPrincipal
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
@@ -134,6 +135,7 @@ logger = logging.getLogger("kortex.engines.knowledge")
 _REGISTERED_CAPABILITIES: List[str] = [
     "kortex.knowledge.query.search",
     "kortex.knowledge.graph.traverse",
+    "kortex.knowledge.graph.list",
     "kortex.knowledge.pack.load",
     "kortex.knowledge.source.index",
 ]
@@ -289,16 +291,35 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
 
     # -- IKnowledgeEngine -------------------------------------------------------
 
-    async def index_source(self, source_id: str, tenant_id: str) -> List[KnowledgeRecord]:
+    async def index_source(
+        self,
+        source_id: str,
+        tenant_id: str,
+        principal: SecurityPrincipal | None = None,
+    ) -> List[KnowledgeRecord]:
         """Index a registered knowledge source: resolve `source_id`, call
         its `ingest()`, persist every returned record via
         `KnowledgeLineageManager.create_record()`. See module docstring for
         why this can never mint anything but `SOURCE_EVIDENCE` records.
 
+        `principal` (M7.5-W1): the Kernel dispatcher injects its own
+        verified identity into any handler parameter literally named
+        `principal`. Before this fix, `tenant_id` was trusted as-is from
+        caller-supplied data with no cross-check against the authenticated
+        caller's real tenant -- a caller holding the ordinary `knowledge:
+        write` permission could ingest records into any tenant's knowledge
+        graph by supplying that tenant's id. When a verified `principal` is
+        present, its `tenant_id` is authoritative and overrides any
+        caller-supplied value before ingestion or persistence ever reads a
+        tenant identifier. Mirrors `ConnectorEngine.execute_action`'s
+        original M6.3-1 correction and `DocumentEngine`'s M7.4-W1 fixes.
+
         Raises `KnowledgeSourceNotFoundError` if `source_id` is not
         registered.
         """
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        if principal is not None:
+            tenant_id = principal.tenant_id
         provider = self._source_providers.get(source_id)
         if provider is None:
             raise KnowledgeSourceNotFoundError(
@@ -318,20 +339,42 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         )
         return created
 
-    async def load_pack(self, pack: KnowledgePack) -> KnowledgePack:
+    async def load_pack(
+        self, pack: KnowledgePack, principal: SecurityPrincipal | None = None
+    ) -> KnowledgePack:
         """Verify and durably register a `.kortex-knowledge` pack — delegates
-        entirely to `KnowledgePackManager.load_pack()` (see `packs.py`)."""
+        entirely to `KnowledgePackManager.load_pack()` (see `packs.py`).
+
+        `principal` (M7.5-W1): `pack.tenant_id` was previously trusted as-is
+        from caller-supplied data. When a verified `principal` is present,
+        its `tenant_id` is authoritative and corrects the effective pack
+        before registration, mirroring `index_source`'s identical fix."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        if principal is not None:
+            pack = pack.model_copy(update={"tenant_id": principal.tenant_id})
         assert self._pack_manager is not None
         loaded = await self._pack_manager.load_pack(pack)
         self._metrics["packs_loaded"] += 1
         await self._emit_event(KnowledgePackLoadedEvent(tenant_id=loaded.tenant_id, asset_id=loaded.asset_id))
         return loaded
 
-    async def search(self, query: KnowledgeQuery) -> KnowledgeQueryResult:
+    async def search(
+        self, query: KnowledgeQuery, principal: SecurityPrincipal | None = None
+    ) -> KnowledgeQueryResult:
         """Execute a multi-modal knowledge search — delegates to
-        `KnowledgeSearchEngine.search_hybrid()` (see `search.py`, M8)."""
+        `KnowledgeSearchEngine.search_hybrid()` (see `search.py`, M8).
+
+        `principal` (M7.5-W1): `query.tenant_id` was previously trusted as-is
+        from caller-supplied data. When a verified `principal` is present,
+        its `tenant_id` is authoritative and corrects the effective query
+        before search execution, mirroring `index_source`'s identical fix.
+        `KnowledgeQuery` is frozen (`ConfigDict(frozen=True)`); `model_copy`
+        still works on a frozen model (only direct attribute assignment is
+        blocked), the same pattern already relied on for `DocumentEngine`'s
+        `BindingContext`."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        if principal is not None:
+            query = query.model_copy(update={"tenant_id": principal.tenant_id})
         assert self._search_engine is not None
         result = await self._search_engine.search_hybrid(query)
         self._metrics["queries_executed"] += 1
@@ -349,30 +392,53 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
 
     # -- Additive facade methods (not on the frozen IKnowledgeEngine Protocol) --
 
-    async def traverse_graph(self, node_id: str, tenant_id: str, max_hops: int) -> List[KnowledgeNode]:
+    async def traverse_graph(
+        self,
+        node_id: str,
+        tenant_id: str,
+        max_hops: int,
+        principal: SecurityPrincipal | None = None,
+    ) -> List[KnowledgeNode]:
         """Backs the `kortex.knowledge.graph.traverse` capability (spec
         §13). `IKnowledgeEngine`'s frozen Protocol has no `traverse` method
         of its own — purely additive, matching the established pattern of
         additive methods beyond a Protocol's declared surface
-        (`graph.py::list_nodes`, `lineage.py::list_current_records`)."""
+        (`graph.py::list_nodes`, `lineage.py::list_current_records`).
+
+        `principal` (M7.5-W1): `tenant_id` was previously trusted as-is from
+        caller-supplied data. When a verified `principal` is present, its
+        `tenant_id` is authoritative, mirroring `index_source`'s identical
+        fix."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        if principal is not None:
+            tenant_id = principal.tenant_id
         return self._graph.traverse(node_id, tenant_id, max_hops)
 
-    def list_nodes(self, tenant_id: str) -> List[KnowledgeNode]:
+    def list_nodes(
+        self, tenant_id: str, principal: SecurityPrincipal | None = None
+    ) -> List[KnowledgeNode]:
         """Backs the `kortex.knowledge.graph.list` capability (Slice 4.7).
 
         `kortex.knowledge.query.search`'s handler (`self.search`) expects a
-        live `KnowledgeQuery` object but the Kernel dispatcher only ever
-        delivers plain, JSON-deserialized dicts as capability parameters —
-        confirmed to raise `AttributeError` over the real IPC path. Rather
-        than modify that existing, already-registered capability, this
-        exposes `KnowledgeGraph.list_nodes` (primitive `str` parameter,
-        already immune to that gap — see `traverse_graph` above, which has
-        the same property) as the desktop's entity-discovery entry point.
-        Purely additive, matching `traverse_graph`'s own established
-        pattern of additive methods beyond `IKnowledgeEngine`'s frozen
-        Protocol surface."""
+        live `KnowledgeQuery` object; the Kernel dispatcher's M7.2
+        `_coerce_model_parameters` fix now coerces a caller-supplied dict
+        into that type generically (proven by
+        `test_knowledge_capability_dispatch.py::
+        test_search_capability_now_works_over_the_real_dict_based_ipc_path`),
+        so the historical reason this method was added as a workaround no
+        longer applies -- it is kept regardless as a useful, already-tested,
+        primitive-parameter entity-discovery entry point the desktop
+        already depends on. Purely additive, matching `traverse_graph`'s
+        own established pattern of additive methods beyond
+        `IKnowledgeEngine`'s frozen Protocol surface.
+
+        `principal` (M7.5-W1): `tenant_id` was previously trusted as-is from
+        caller-supplied data. When a verified `principal` is present, its
+        `tenant_id` is authoritative, mirroring `index_source`'s identical
+        fix."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        if principal is not None:
+            tenant_id = principal.tenant_id
         return self._graph.list_nodes(tenant_id)
 
     # -- Common Diagnostics Interface (IEngineDiagnostics) -----------------------
