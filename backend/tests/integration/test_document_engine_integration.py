@@ -858,6 +858,19 @@ _PRINT_CALL_RE = re.compile(r"(?<![\w.])print\s*\(")
 # "storage" as a Kernel dependency authorizes consuming this boundary, not reaching past it.
 _STORAGE_ABSTRACTION_SUBMODULES = {"interfaces", "models"}
 
+# M7.4-W1: `kortex.engines.security.models` (pure Pydantic DTOs — `SecurityPrincipal`,
+# `TokenPayload`, etc.) is a shared-domain-type exception, not a grant to consume the
+# Security Engine's own behavior — Document Engine's tenant-derivation fix only needs the
+# *type* of the Kernel-verified principal the dispatcher injects, never SecurityEngine
+# itself, identical to the narrow, already-audited exception `ConnectorEngine` and
+# `WorkflowEngine` both already rely on without declaring "security" as a hard Kernel boot
+# dependency (see each engine's own `dependencies()` docstring for why "security" is
+# deliberately not a declared dependency anywhere in this codebase). Unlike the storage
+# carve-out above, this does not require "security" to be a declared dependency at all —
+# it is a standalone always-allowed exception, since Document Engine has no other
+# legitimate reason to import from Security Engine.
+_ALWAYS_ALLOWED_UNDECLARED_ENGINE_SUBMODULES: dict[str, set[str]] = {"security": {"models"}}
+
 
 def _document_engine_source_files() -> list[Path]:
     """Return every .py file in the Document Engine package (source only, never tests)."""
@@ -895,11 +908,17 @@ async def test_architecture_compliance_assertions(tmp_path) -> None:
             if import_match is not None:
                 engine, submodule = import_match.group("engine"), import_match.group("submodule")
                 if engine not in declared_dependencies:
-                    import_violations.append(
-                        f"{path.name}:{lineno}: imports 'kortex.engines.{engine}', which is "
-                        f"not 'document' itself nor in its declared dependency contract "
-                        f"{sorted(declared_dependencies)}"
+                    allowed_undeclared_submodules = _ALWAYS_ALLOWED_UNDECLARED_ENGINE_SUBMODULES.get(
+                        engine, set()
                     )
+                    if submodule not in allowed_undeclared_submodules:
+                        import_violations.append(
+                            f"{path.name}:{lineno}: imports 'kortex.engines.{engine}', which is "
+                            f"not 'document' itself nor in its declared dependency contract "
+                            f"{sorted(declared_dependencies)}, and is not one of the standalone "
+                            f"always-allowed shared-domain-type imports "
+                            f"{_ALWAYS_ALLOWED_UNDECLARED_ENGINE_SUBMODULES}"
+                        )
                 elif engine == "storage" and submodule not in _STORAGE_ABSTRACTION_SUBMODULES:
                     import_violations.append(
                         f"{path.name}:{lineno}: imports 'kortex.engines.storage.{submodule}' — "
