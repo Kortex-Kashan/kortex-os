@@ -53,24 +53,5 @@ jobs:
       - name: mypy
         run: python -m mypy src
 
-      # `-q` plus `-rf` so the short summary names every failing test. The step
-      # stays blocking; the tee only mirrors output for the reporting step below.
       - name: pytest
-        run: python -m pytest -q -rf 2>&1 | tee pytest-output.txt; exit "${PIPESTATUS[0]}"
-
-      # Raw job logs require repository admin rights, so a failing test run is
-      # otherwise unreadable from the API. Re-emitting the summary lines as
-      # workflow `::error::` commands surfaces them as check annotations, which
-      # are readable. Diagnostic only -- `if: failure()` means this never
-      # affects the job's outcome, and the pytest gate above remains blocking.
-      - name: Report failing tests
-        if: failure()
-        run: |
-          if [ -f pytest-output.txt ]; then
-            sed -n '/short test summary info/,$p' pytest-output.txt \
-              | grep -E '^(FAILED|ERROR)' \
-              | while IFS= read -r line; do echo "::error::$line"; done
-            tail -n 40 pytest-output.txt
-          else
-            echo "::error::pytest produced no output file"
-          fi
+        run: python -m pytest -q
