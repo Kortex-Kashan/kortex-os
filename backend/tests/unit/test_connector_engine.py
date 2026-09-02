@@ -263,7 +263,7 @@ async def test_event_publication_failure_isolation_and_privacy(caplog: pytest.Lo
         action_type="SEND",
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="kortex.engine.connector"):
         res = await engine.execute_action(req)
 
     # Verify action execution completed successfully despite event publication failure
@@ -377,7 +377,7 @@ async def test_safe_schedule_event_unhandled_task_exception_handled(caplog: pyte
     engine._set_state(EngineState.RUNNING)
 
     driver = DummyConnectorDriver()
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="kortex.engine.connector"):
         engine.register_driver(driver)
         await asyncio.sleep(0.05)
 

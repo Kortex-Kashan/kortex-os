@@ -7,6 +7,7 @@ diagnostic failure isolation, cancellation safety, and single-counting ownership
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1141,7 +1142,7 @@ async def test_engine_metrics_scenario_r_diagnostic_execution_recording_failure_
     await engine.initialize(MagicMock())
     await engine.start()
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level(logging.WARNING, logger="kortex.engine.connector"):
         result = await engine.execute_action(sample_request)
 
     assert result.status == "SUCCESS"
@@ -1172,7 +1173,7 @@ async def test_engine_metrics_scenario_s_diagnostic_cancellation_recording_failu
     await engine.initialize(MagicMock())
     await engine.start()
 
-    with caplog.at_level("WARNING"), pytest.raises(asyncio.CancelledError):
+    with caplog.at_level(logging.WARNING, logger="kortex.engine.connector"), pytest.raises(asyncio.CancelledError):
         await engine.execute_action(sample_request)
 
     assert "Failed to record connector cancellation metric." in caplog.text
