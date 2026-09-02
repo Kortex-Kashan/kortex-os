@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.core.container import Container
 from kortex.engines.connector.diagnostics import ConnectorDiagnostics
 from kortex.engines.connector.events import (
     ConnectorActionCompletedEvent,
@@ -168,22 +169,23 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             self._kernel = kernel
 
             # Wire Storage Engine dependencies from Kernel IoC container if registered
-            if kernel is not None:
-                try:
-                    storage_engine = kernel.container.resolve("engine.storage")
-                    if storage_engine is not None:
-                        if hasattr(storage_engine, "data") and self._data_store is None:
-                            self._data_store = storage_engine.data
-                        if hasattr(storage_engine, "cache"):
-                            cache_store = storage_engine.cache
-                            if self._profile_manager._cache_store is None:
-                                self._profile_manager._cache_store = cache_store
-                            if self._rate_limiter._cache_store is None:
-                                self._rate_limiter._cache_store = cache_store
-                        if self._profile_manager._data_store is None and self._data_store is not None:
-                            self._profile_manager._data_store = self._data_store
-                except Exception:
-                    self.logger.debug("StorageEngine not resolved from Kernel container; using local fallbacks.")
+            if kernel is not None and isinstance(getattr(kernel, "container", None), Container):
+                if kernel.container.has("engine.storage"):
+                    try:
+                        storage_engine = kernel.container.resolve("engine.storage")
+                        if storage_engine is not None:
+                            if hasattr(storage_engine, "data") and self._data_store is None:
+                                self._data_store = storage_engine.data
+                            if hasattr(storage_engine, "cache"):
+                                cache_store = storage_engine.cache
+                                if self._profile_manager._cache_store is None:
+                                    self._profile_manager._cache_store = cache_store
+                                if self._rate_limiter._cache_store is None:
+                                    self._rate_limiter._cache_store = cache_store
+                            if self._profile_manager._data_store is None and self._data_store is not None:
+                                self._profile_manager._data_store = self._data_store
+                    except Exception:
+                        self.logger.debug("StorageEngine not resolved from Kernel container; using local fallbacks.")
 
                 # Wire the production secret resolver from the Kernel-registered
                 # Security Engine if the caller didn't already supply one (M6.0-2:
@@ -192,7 +194,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 # — SecurityEngine.get_secret(secret_handle, tenant_id) already
                 # matches this resolver's tenant-scoped (handle, tenant_id)
                 # contract exactly, so it's assigned directly, unwrapped).
-                if self._secret_resolver is None:
+                if self._secret_resolver is None and kernel.container.has("engine.security"):
                     try:
                         security_engine = kernel.container.resolve("engine.security")
                         if security_engine is not None:

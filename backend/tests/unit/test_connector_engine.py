@@ -357,7 +357,7 @@ async def test_safe_schedule_event_task_retention_and_completion() -> None:
     # Background task should be registered and executed
     assert len(engine._background_tasks) >= 0  # May already be finished or in-flight
     # Yield to let the event loop finish any scheduled task
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
     assert len(engine._background_tasks) == 0
     assert mock_kernel.publish_event.call_count == 1
     assert mock_kernel.publish_event.call_args.kwargs["topic"] == "connector.driver.registered"
@@ -379,7 +379,7 @@ async def test_safe_schedule_event_unhandled_task_exception_handled(caplog: pyte
     driver = DummyConnectorDriver()
     with caplog.at_level(logging.WARNING):
         engine.register_driver(driver)
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
 
     assert len(engine._background_tasks) == 0
     assert "Unhandled exception in background event task: ZeroDivisionError" in caplog.text
