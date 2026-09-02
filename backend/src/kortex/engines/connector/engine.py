@@ -112,6 +112,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             )
         )
         self._kernel: Kernel | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def name(self) -> str:
@@ -277,6 +278,14 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         """Gracefully shut down active background tasks and release resources."""
         self.ensure_state(EngineState.RUNNING, EngineState.READY)
         self._set_state(EngineState.STOPPING)
+
+        tasks_to_cancel = [task for task in self._background_tasks if not task.done()]
+        for task in tasks_to_cancel:
+            task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        self._background_tasks.clear()
+
         self._set_state(EngineState.STOPPED)
         self.logger.info("Connector Engine stopped.")
 
@@ -647,14 +656,24 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                     event.event_type,
                 )
 
+    def _on_background_task_done(self, task: asyncio.Task[Any]) -> None:
+        """Handle completion of background event tasks and discard reference."""
+        self._background_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                self.logger.warning(
+                    "Unhandled exception in background event task: %s",
+                    type(exc).__name__,
+                )
+
     def _safe_schedule_event(self, event: ConnectorBaseEvent) -> None:
         """Safely schedule event publication from a synchronous context if an active loop exists."""
         try:
             loop = asyncio.get_running_loop()
-
-            # task reference would require new engine-level task bookkeeping and
-            # change Connector dispatch semantics; out of scope for a lint fix.
-            loop.create_task(self._publish_event(event))  # noqa: RUF006
+            task = loop.create_task(self._publish_event(event))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._on_background_task_done)
         except RuntimeError:
             self.logger.debug("No active event loop running to dispatch event '%s'", event.event_type)
 

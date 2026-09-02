@@ -5,7 +5,9 @@ Target: 100% test pass rate, 100% line coverage for engine.py.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -337,3 +339,72 @@ async def test_ensure_state_rejection_when_stopped() -> None:
 
     with pytest.raises(EngineStateError):
         await engine.get_profile("p1")
+
+
+@pytest.mark.asyncio
+async def test_safe_schedule_event_task_retention_and_completion() -> None:
+    """Verify fire-and-forget event scheduling retains task reference and discards on completion."""
+    engine = ConnectorEngine()
+    mock_kernel = MagicMock()
+    mock_kernel.publish_event = AsyncMock()
+
+    await engine.initialize(mock_kernel)
+    await engine.start()
+
+    driver = DummyConnectorDriver()
+    engine.register_driver(driver)
+
+    # Background task should be registered and executed
+    assert len(engine._background_tasks) >= 0  # May already be finished or in-flight
+    # Yield to let the event loop finish any scheduled task
+    await asyncio.sleep(0.01)
+    assert len(engine._background_tasks) == 0
+    assert mock_kernel.publish_event.call_count == 1
+    assert mock_kernel.publish_event.call_args.kwargs["topic"] == "connector.driver.registered"
+
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_safe_schedule_event_unhandled_task_exception_handled(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify unhandled task exception callback logs warning and cleans up task reference."""
+    engine = ConnectorEngine()
+
+    async def _failing_publish(event: Any) -> None:
+        raise ZeroDivisionError("Simulated unhandled task crash")
+
+    engine._publish_event = _failing_publish  # type: ignore[assignment]
+    engine._set_state(EngineState.RUNNING)
+
+    driver = DummyConnectorDriver()
+    with caplog.at_level(logging.WARNING):
+        engine.register_driver(driver)
+        await asyncio.sleep(0.01)
+
+    assert len(engine._background_tasks) == 0
+    assert "Unhandled exception in background event task: ZeroDivisionError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_engine_stop_cancels_and_drains_background_tasks() -> None:
+    """Verify engine stop() cancels all in-flight background event tasks without leaving orphans."""
+    engine = ConnectorEngine()
+    mock_kernel = MagicMock()
+
+    never_finish = asyncio.Event()
+
+    async def _hanging_publish(event: Any) -> None:
+        await never_finish.wait()
+
+    engine._publish_event = _hanging_publish  # type: ignore[assignment]
+    await engine.initialize(mock_kernel)
+    await engine.start()
+
+    driver = DummyConnectorDriver()
+    engine.register_driver(driver)
+
+    assert len(engine._background_tasks) == 1
+    # Stop should cancel the task cleanly
+    await engine.stop()
+    assert len(engine._background_tasks) == 0
+    assert engine.state == EngineState.STOPPED
