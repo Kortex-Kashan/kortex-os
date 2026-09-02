@@ -2,7 +2,7 @@
 
 **Status of this document**: Permanent, living project-execution-control document for the Production Hardening / Production-Ready phase. It is not a one-time report — it must be reviewed first and updated with evidence by every future Production Hardening implementation pass. See §0 for the governance rules that apply to it.
 
-**Last updated**: this pass (Database Migration Wiring implementation), against HEAD `c2616e7498d1f145d455aa4f6251e1f1b9e31a35` at the start of the pass.
+**Last updated**: this pass (formal acceptance of Database Migration Wiring + next-step planning), against HEAD `083990c2d8ba0dc76a851612d5c59a64e1ca29d7` at the start of the pass.
 
 ---
 
@@ -52,7 +52,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 
 | Work Package | Status | Dependencies | Evidence | Acceptance |
 |---|---|---|---|---|
-| Database Migration Wiring | **IMPLEMENTED — AWAITING REVIEW** | None | §5.1 | Pending review |
+| Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
 | Sentinel | PENDING | Benefits from Monitoring; no hard dependency | §5.2 | Not planned yet |
 | Monitoring Engine | PENDING | None hard | §5.3 | Not planned yet |
 | Backup Engine | PENDING | Migrations (now available) | §5.4 | Not planned yet |
@@ -60,14 +60,16 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Update Engine | PENDING | Migrations (now available) | §5.6 | Not planned yet |
 | Docker Production Builds | PENDING | Migrations (now available) + Owner Decision #2 (§3) | §5.7 | Not planned yet |
 | Desktop Installers | PENDING | CI/CD (for repeatable/signed builds) | §5.8 | Not planned yet |
-| CI/CD | PENDING | None | §5.9 | Not planned yet |
+| CI/CD | **PLANNED** | None | §5.9 | Not yet implemented |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-Only **Database Migration Wiring** has been implemented so far. Every other work package remains `PENDING` — identified and assessed by the read-only reconciliation pass that preceded this document, but **not yet formally planned** (no owner-approved objective/dependencies/scope/acceptance criteria exists for them). Do not treat `PENDING` as authorization to implement.
+**Database Migration Wiring is DONE** (formally accepted this pass, §5.1). **CI/CD has been advanced to PLANNED** this pass (§5.9) — it is the one work package with no dependency on any of the three open owner decisions (§3), so its objective/scope/dependencies/non-goals/acceptance-criteria could be defined without pre-empting an unresolved architectural question. Every other work package remains `PENDING` — identified and assessed by the read-only reconciliation pass, but **not yet formally planned**. Do not treat `PENDING` as authorization to implement, and do not treat `PLANNED` as authorization to begin implementation either — a separate, explicit implementation authorization is still required before CI/CD work starts.
 
 ## 5. Work Package Detail
 
-### 5.1 Database Migration Wiring — IMPLEMENTED — AWAITING REVIEW
+### 5.1 Database Migration Wiring — DONE
+
+**Formal acceptance record** (this pass): implementation commit `083990c2d8ba0dc76a851612d5c59a64e1ca29d7` (`feat(db): wire Alembic migration foundation (Database Migration Wiring)`), from baseline `c2616e7`. Verified: migration foundation is implemented (env.py, alembic.ini, baseline revision, 6 tests); focused migration validation passed (6/6, including a test-isolation bug found and fixed during the implementing pass's own verification — compared against a fixed production-table list instead of the live, process-wide `Base.metadata`, which other test modules also legitimately register tables on); `mypy`/`ruff` passed with 0 errors on all new files; full-suite regression's 4 remaining failures were independently reclassified as pre-existing/environmental (tzdata) or contention-only (3 `caplog`-based connector tests, confirmed passing standalone) — none attributable to this work package; architectural review found no migration defect requiring correction. `create_all()` confirmed untouched.
 
 **Objective** (as authorized): establish a real Alembic migration foundation for the current KORTEX SQLAlchemy schema — configuration, environment targeting `kortex.core.db.Base.metadata`, one baseline revision representing the current schema, working `alembic upgrade head`, and migration verification tests. Foundation only; `create_all()` was explicitly required to remain the production boot path, untouched.
 
@@ -101,7 +103,7 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
 - The baseline revision's downgrade is inherently destructive below the baseline (documented in the revision file itself).
 - This work package alone does not make Update Engine or Backup Engine buildable-and-safe by itself — it removes the hard blocker those two work packages had, but neither has been implemented.
 
-**Acceptance criteria status** (self-assessed by the implementing pass — **not** a substitute for formal review): baseline schema byte-for-byte equivalent to `create_all()`'s output — met (Test C). `alembic upgrade head` succeeds from empty — met (Test A). Full test suite green — see regression evidence. Downgrade path defined for baseline — met, with documented inherent limitation. **Status remains `IMPLEMENTED — AWAITING REVIEW`, not `DONE`, pending formal owner acceptance.**
+**Acceptance criteria status**: baseline schema byte-for-byte equivalent to `create_all()`'s output — met (Test C). `alembic upgrade head` succeeds from empty — met (Test A). Full test suite green modulo pre-existing/unrelated failures — met. Downgrade path defined for baseline — met, with documented inherent limitation. **Formally accepted as `DONE` this pass** (see acceptance record above). This does not reopen or authorize modification of the migration implementation — future passes touching this area must treat it as accepted, frozen architecture unless direct evidence of a defect emerges.
 
 ### 5.2 Sentinel — PENDING
 
@@ -117,7 +119,9 @@ Repository state (established by the read-only reconciliation pass, not re-audit
 
 ### 5.5 Recovery Engine — BLOCKED — PENDING OWNER DECISION
 
-`backend/src/kortex/engines/recovery/__init__.py` is a 1-line docstring only; no other files; not registered. As a **dedicated platform engine**, classified **ABSENT**. However, substantial, genuinely tested, engine-local recovery already exists: Workflow Engine's `hydrate_and_recover()` (`engines/workflow/engine.py:510`, invoked at boot, `engine.py:439`), `recover_stranded_executions()` (`engines/workflow/executor.py:582`, deliberately never auto-resuming per its own comment at `executor.py:664`), `hydrate_and_recover_schedules()` (`engines/workflow/scheduler.py:664`); Document Engine's `DocumentRecoveryManager` (`engines/document/recovery.py`, 288 lines, tested in `tests/unit/test_document_recovery.py`). **Blocked on Owner Decision #1 (§3)**: does the roadmap bullet require a new centralizing engine, or does this existing engine-local coverage satisfy it? No implementation should proceed on this work package until that decision is made.
+`backend/src/kortex/engines/recovery/__init__.py` is a 1-line docstring only; no other files; not registered. As a **dedicated platform engine**, classified **ABSENT**. However, substantial, genuinely tested, engine-local recovery already exists: Workflow Engine's `hydrate_and_recover()` (`engines/workflow/engine.py:510`, invoked at boot, `engine.py:439`), `recover_stranded_executions()` (`engines/workflow/executor.py:582`, deliberately never auto-resuming per its own comment at `executor.py:664`), `hydrate_and_recover_schedules()` (`engines/workflow/scheduler.py:664`); Document Engine's `DocumentRecoveryManager` (`engines/document/recovery.py`, 288 lines, tested in `tests/unit/test_document_recovery.py`). **Additional architectural evidence (this pass, via Graphify)**: `hydrate_and_recover()` is called from `WorkflowEngine.start()` (`engine.py:439`) — i.e., recovery runs as an internal step of that engine's own boot lifecycle, not as an independently invocable capability. There is no shared "Recovery" interface, abstraction, or Kernel-dispatched capability either engine's recovery logic implements — Workflow and Document each reinvented their own recovery mechanism independently, with no common contract between them. This does not resolve the interpretation question; it sharpens it: today, nothing exists that a hypothetical Kernel-level orchestrator, operator tool, or future third engine could reuse — a genuine "Recovery Engine" would be new integration/coordination work, not a rename of what's already there.
+
+**Blocked on Owner Decision #1 (§3)**: does the roadmap bullet require a new centralizing engine, or does this existing engine-local coverage satisfy it? No implementation should proceed on this work package until that decision is made.
 
 ### 5.6 Update Engine — PENDING
 
@@ -131,9 +135,20 @@ Zero `Dockerfile`/`docker-compose*`/`.dockerignore` anywhere in the repo; `docke
 
 `tauri.conf.json` configures `msi`/`nsis` bundle targets (buildable manually) but has no signing identity (`certificateThumbprint`/`signingIdentity` absent) and no `updater` section; no CI/script anywhere invokes `tauri build`. Classified **STUB**. `backend_process.rs`, `sidecar.rs`, `secure_keys.rs` confirmed present (already-certified M7.1 work, not re-audited). Depends on CI/CD (§5.9) for repeatable, signed builds.
 
-### 5.9 CI/CD — PENDING
+### 5.9 CI/CD — PLANNED
 
-No `.github/workflows/` directory exists at all; no other CI config (GitLab/Azure/Jenkins) found. Only local `pre-commit` hooks (`ruff`, `ruff-format`, `mypy`) and manual `pnpm`/`pytest` invocation. Classified **ABSENT**. No hard dependency on any other work package — can start independently, in parallel with Migrations-dependent work.
+No `.github/workflows/` directory exists at all; no other CI config (GitLab/Azure/Jenkins) found. Only local `pre-commit` hooks (`ruff`, `ruff-format`, `mypy`) and manual `pnpm`/`pytest` invocation. Classified **ABSENT**. Repo hosting confirmed as GitHub (`origin` remote: `github.com/Kortex-Kashan/kortex-os`), so GitHub Actions is the natural fit — no new CI provider decision needed.
+
+**Planned this pass** (advanced from `PENDING` — no dependency on any of the three open owner decisions, §3):
+
+- **Objective**: automated lint + test pipelines that run on every push/PR, covering backend (Python), desktop (TypeScript), and Rust/Tauri — giving the six `docs/quality/QUALITY_GATES.md` gates (currently enforced only by local `pre-commit`, never automatically) a real, repository-enforced automation surface.
+- **Why it is next**: the only work package with zero dependency on Owner Decisions #1–#3 (§3) — it does not require resolving Recovery Engine's interpretation, deployment topology, or migration boot-integration strategy to have a well-defined scope. It also directly unblocks Desktop Installers (§5.8), which explicitly depends on CI/CD for repeatable, signed builds.
+- **Dependencies**: none.
+- **Explicit scope**: `.github/workflows/backend-ci.yml` (ruff check, ruff format --check, mypy, pytest on push/PR); `.github/workflows/desktop-ci.yml` (typecheck, vitest); a Rust/Tauri check step (cargo check / clippy) either as a third workflow or a job within desktop-ci. Read-only checks only — no deployment, no artifact publishing, no signing.
+- **Explicit non-goals**: no release/deploy pipeline, no artifact/installer building, no code-signing automation (that is Desktop Installers, §5.8, and depends on this work package, not the reverse), no change to `pre-commit` config, no change to `QUALITY_GATES.md`'s thresholds.
+- **Acceptance criteria**: workflows trigger on push/PR to the default branch; backend pipeline reproduces the same ruff/mypy/pytest commands already used locally (no new tooling); desktop pipeline reproduces existing `pnpm typecheck`/`pnpm test` commands; a deliberately introduced lint/type/test failure in a scratch branch is caught by the pipeline (verified once implementation is authorized, not yet performed).
+- **Validation requirements**: none run yet — this is a planning entry, not an implementation. Do not treat this as evidence CI/CD has been built.
+- **Architectural decisions this depends on**: none (this is precisely why it was chosen as the next planned package).
 
 ### 5.10 Fresh-Machine Production Validation — PENDING
 
@@ -142,7 +157,7 @@ No `.github/workflows/` directory exists at all; no other CI config (GitLab/Azur
 ## 6. Critical Path (PROPOSED SEQUENCING — not roadmap text)
 
 ```
-Migrations (DONE as of this pass, pending review)
+Migrations (DONE, formally accepted)
     |
     +-- Update Engine (needs safe schema upgrade path)
     +-- Backup Engine (needs schema-version awareness)
