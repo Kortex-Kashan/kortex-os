@@ -6,15 +6,19 @@ enforcing Clean Architecture, Dependency Inversion, and strict type checking.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from kortex.engines.connector.models import (
     ActionRequest,
     ActionResult,
     ConnectorActionType,
+    ConnectorCapability,
     ConnectorProfile,
     DriverMetadata,
 )
+
+if TYPE_CHECKING:
+    from kortex.engines.connector.base_driver import BaseConnectorDriver
 
 
 @runtime_checkable
@@ -77,16 +81,20 @@ class IConnectorEngine(Protocol):
 class IConnectorDriverRegistry(Protocol):
     """Thread-safe registry protocol for registering and looking up connector drivers."""
 
-    def register_driver(self, driver: IBaseConnectorDriver) -> None:
+    def register_driver(self, driver: BaseConnectorDriver | DriverMetadata) -> BaseConnectorDriver:
         """Register a connector driver in the registry."""
         ...
 
-    def unregister_driver(self, driver_id: str) -> bool:
+    def unregister_driver(self, driver_id: str, version: str | None = None) -> bool:
         """Unregister connector driver by driver ID."""
         ...
 
-    def get_driver(self, driver_id: str) -> IBaseConnectorDriver:
-        """Retrieve registered driver by driver ID."""
+    def get_driver(
+        self,
+        identifier_or_capability: str | ConnectorCapability | ConnectorActionType,
+        version: str | None = None,
+    ) -> BaseConnectorDriver:
+        """Retrieve registered driver by driver ID, action type, or capability."""
         ...
 
     def list_drivers(self) -> list[DriverMetadata]:
@@ -123,7 +131,9 @@ class IConnectorProfileManager(Protocol):
         """Register or update a Connector Profile."""
         ...
 
-    async def list_profiles(self, tenant_id: str | None = None) -> list[ConnectorProfile]:
+    async def list_profiles(
+        self, driver_id: str | None = None, active_only: bool = False, tenant_id: str | None = None
+    ) -> list[ConnectorProfile]:
         """Return registered Connector Profiles, tenant-scoped when `tenant_id` is supplied (M6.3-1)."""
         ...
 

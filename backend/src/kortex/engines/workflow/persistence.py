@@ -1646,7 +1646,8 @@ class SchedulerStore:
             stmt = select(WorkflowScheduleModel).where(WorkflowScheduleModel.id == s_id)
             if tenant_id is not None:
                 stmt = stmt.where(WorkflowScheduleModel.tenant_id == tenant_id)
-            return await session.scalar(stmt)
+            row: WorkflowScheduleModel | None = await session.scalar(stmt)
+            return row
 
         row = await self._data_store.execute_in_transaction(_action)
         return _model_to_schedule(row) if row else None
@@ -1659,7 +1660,8 @@ class SchedulerStore:
                 WorkflowScheduleModel.name == name,
                 WorkflowScheduleModel.tenant_id == tenant_id,
             )
-            return await session.scalar(stmt)
+            row: WorkflowScheduleModel | None = await session.scalar(stmt)
+            return row
 
         row = await self._data_store.execute_in_transaction(_action)
         return _model_to_schedule(row) if row else None
@@ -1762,7 +1764,10 @@ class SchedulerStore:
                     # Another concurrent caller claimed (or otherwise
                     # changed) this row first — not our win, skip it.
                     return None
-                return await session.scalar(select(WorkflowScheduleModel).where(WorkflowScheduleModel.id == sid))
+                row: WorkflowScheduleModel | None = await session.scalar(
+                    select(WorkflowScheduleModel).where(WorkflowScheduleModel.id == sid)
+                )
+                return row
 
             row = await self._data_store.execute_in_transaction(_claim_one)
             if row is not None:
@@ -1947,7 +1952,8 @@ class ExternalExecutionStore:
             stmt = select(ExternalExecutionModel).where(ExternalExecutionModel.id == e_id)
             if tenant_id is not None:
                 stmt = stmt.where(ExternalExecutionModel.tenant_id == tenant_id)
-            return await session.scalar(stmt)
+            row: ExternalExecutionModel | None = await session.scalar(stmt)
+            return row
 
         row = await self._data_store.execute_in_transaction(_action)
         if row is None:
@@ -1973,7 +1979,8 @@ class ExternalExecutionStore:
             stmt = select(ExternalExecutionModel).where(ExternalExecutionModel.id == e_id)
             if tenant_id is not None:
                 stmt = stmt.where(ExternalExecutionModel.tenant_id == tenant_id)
-            return await session.scalar(stmt)
+            row: ExternalExecutionModel | None = await session.scalar(stmt)
+            return row
 
         row = await self._data_store.execute_in_transaction(_action)
         return _model_to_execution(row) if row else None
@@ -2014,7 +2021,8 @@ class ExternalExecutionStore:
                 ExternalExecutionModel.tenant_id == tenant_id,
                 ExternalExecutionModel.idempotency_key == idempotency_key,
             )
-            return await session.scalar(stmt)
+            row: ExternalExecutionModel | None = await session.scalar(stmt)
+            return row
 
         row = await self._data_store.execute_in_transaction(_action)
         return _model_to_execution(row) if row else None

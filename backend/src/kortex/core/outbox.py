@@ -13,7 +13,7 @@ import enum
 import json
 import logging
 import uuid
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import DateTime, Integer, String, Text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,8 +91,7 @@ class OutboxStore:
             await session.flush()
             return record
 
-        result = await self._data_store.execute_in_transaction(_action)
-        return cast(EventOutboxModel, result)
+        return await self._data_store.execute_in_transaction(_action)
 
     async def get_pending_events(
         self,
@@ -113,8 +112,7 @@ class OutboxStore:
             res = await session.execute(stmt)
             return list(res.scalars().all())
 
-        result = await self._data_store.execute_in_transaction(_action)
-        return cast(list[EventOutboxModel], result)
+        return await self._data_store.execute_in_transaction(_action)
 
     async def dispatch_pending(self, event_engine: Any, limit: int = 100) -> int:
         """Sweep PENDING outbox records, publish them to EventEngine, and update status to SENT."""

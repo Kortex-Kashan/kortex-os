@@ -12,9 +12,10 @@ import json
 import logging
 import re
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.document.exceptions import (
@@ -804,7 +805,7 @@ class DocumentRepository(IDocumentRepository):
                     .values(current_version_id=version_id)
                 )
 
-            doc_cas_res = await session.execute(doc_cas_stmt)
+            doc_cas_res = cast(CursorResult[Any], await session.execute(doc_cas_stmt))
             if doc_cas_res.rowcount != 1:
                 raise DocumentLifecycleError(
                     f"Concurrent publication collision or invalid predecessor: document '{document_id}' "

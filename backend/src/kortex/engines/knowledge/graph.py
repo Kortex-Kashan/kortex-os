@@ -167,7 +167,7 @@ class KnowledgeGraph:
         source = new_relationship.source_node_id
 
         visited: set[str] = {target}
-        queue: deque = deque([target])
+        queue: deque[str] = deque([target])
         while queue:
             current = queue.popleft()
             for edge in self._outgoing.get((tenant_id, current), []):

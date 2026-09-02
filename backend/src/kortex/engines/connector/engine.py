@@ -12,7 +12,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +49,7 @@ from kortex.engines.storage.interfaces import IDataStore
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
+    from kortex.engines.connector.base_driver import BaseConnectorDriver
 
 logger = logging.getLogger("kortex.engines.connector")
 
@@ -62,7 +63,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         profile_manager: ConnectorProfileManager | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
         pipeline: ConnectorPipeline | None = None,
-        secret_resolver: Callable[[str, str], Awaitable[str]] | None = None,
+        secret_resolver: Callable[[str, str], Awaitable[str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
         data_store: IDataStore | None = None,
     ) -> None:
@@ -486,7 +487,9 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
     def register_driver(self, driver: IBaseConnectorDriver) -> None:
         """Register a connector driver in the engine registry."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
-        self._registry.register_driver(driver)
+        # Every driver in the system derives from `BaseConnectorDriver`; the
+        # public signature accepts the protocol for caller flexibility.
+        self._registry.register_driver(cast("BaseConnectorDriver", driver))
 
         meta = driver.metadata
         evt = ConnectorDriverRegisteredEvent(

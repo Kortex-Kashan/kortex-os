@@ -305,7 +305,7 @@ class IdempotencyStore:
             result_tuple = await self._data_store.execute_in_transaction(_action)
         except IntegrityError:
             result_tuple = await self._data_store.execute_in_transaction(_requery_after_collision)
-        return cast(tuple[ClaimResult, Any | None, str | None], result_tuple)
+        return result_tuple
 
     async def record_completed(
         self,
@@ -388,5 +388,4 @@ class IdempotencyStore:
             res = await session.execute(stmt)
             return res.scalar_one_or_none()
 
-        result = await self._data_store.execute_in_transaction(_action)
-        return cast(IdempotencyRecordModel | None, result)
+        return await self._data_store.execute_in_transaction(_action)

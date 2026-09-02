@@ -175,7 +175,7 @@ class RecipeInstaller:
                 base_prefix = f"recipes/{recipe_id}/{version}"
                 files = await self.file_store.list_files(base_prefix)
                 for f in files:
-                    await self.file_store.delete_file(f)
+                    await self.file_store.delete_file(f.relative_path)
 
         removed_at = datetime.datetime.now(datetime.UTC).isoformat()
         return RecipeRemovalResult(

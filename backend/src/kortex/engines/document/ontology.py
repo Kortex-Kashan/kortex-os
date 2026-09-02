@@ -287,7 +287,7 @@ class DocumentOntology(BaseModel):
             computed_fields_resolved=[],
         )
 
-    def validate(self, data: dict[str, Any]) -> ValidationReport:
+    def validate(self, data: dict[str, Any]) -> ValidationReport:  # type: ignore[override]
         """Validate both structure and invariant rules against data in a single report.
 
         Args:

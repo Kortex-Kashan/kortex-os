@@ -51,7 +51,12 @@ async def test_recipe_engine_lifecycle_and_capabilities() -> None:
         def has(self, name: str) -> bool:
             return name == "storage"
 
-        def get(self, name: str) -> any:
+        # Mirrors the real `kortex.core.container.Container`, whose lookup method
+        # is `resolve()`. This double previously exposed `get()`, matching a bug
+        # in RecipeEngine.initialize() (the real Container has no `get`, so that
+        # call raised AttributeError against a genuine Kernel); the double is
+        # now aligned with the actual container contract.
+        def resolve(self, name: str) -> any:
             if name == "storage":
                 return DummyStorageEngine()
             raise KeyError(name)

@@ -244,7 +244,7 @@ class StorageConversationStore:
             raise
         except (IntegrityError, Exception) as exc:
             raise ConversationStoreError(f"Conversation store failed to {description}: {type(exc).__name__}") from exc
-        return cast("_T", result)
+        return result
 
 
 class AIAgentTaskRow(BaseModel):

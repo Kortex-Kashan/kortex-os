@@ -20,6 +20,8 @@ from typing import Any
 
 import httpcore
 import httpx
+from httpcore import SOCKET_OPTION
+from httpcore._backends.anyio import AnyIOBackend
 
 from kortex.engines.connector.base_driver import BaseConnectorDriver
 from kortex.engines.connector.exceptions import ConnectorSecurityError, DriverExecutionError
@@ -91,7 +93,10 @@ class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
 
     def __init__(self, pinned_ip: str) -> None:
         self._pinned_ip = pinned_ip
-        self._default_backend = httpcore._backends.anyio.AnyIOBackend()
+        # Annotated with the public base class: `httpcore._backends.anyio` is a
+        # private, untyped module, so both delegating calls below would
+        # otherwise resolve to `Any`.
+        self._default_backend: httpcore.AsyncNetworkBackend = AnyIOBackend()
 
     async def connect_tcp(
         self,
@@ -99,7 +104,7 @@ class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
         port: int,
         timeout: float | None = None,
         local_address: str | None = None,
-        socket_options: Iterable[tuple[int, int, int | bytes]] | None = None,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         """Force socket connection directly to self._pinned_ip, preventing time-of-use DNS re-resolution."""
         return await self._default_backend.connect_tcp(
@@ -518,7 +523,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
             # Reject-All Rule: Validate EVERY resolved address. If ANY address is restricted, fail the request.
             for _family, _socktype, _proto, _canonname, sockaddr in addr_info:
-                ip_str = sockaddr[0]
+                ip_str = str(sockaddr[0])
                 self._verify_ip_object(ip_str)
                 ip_obj = ipaddress.ip_address(ip_str)
                 if isinstance(ip_obj, ipaddress.IPv4Address):

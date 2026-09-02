@@ -460,7 +460,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         context_payload["_schedule_name"] = sch.name
         context_payload["_triggered_by"] = actor
 
-        instance = await self._workflow_engine.start_workflow(
+        instance: WorkflowInstance = await self._workflow_engine.start_workflow(
             definition_id=sch.definition_id,
             initial_context=context_payload,
             tenant_id=tid,

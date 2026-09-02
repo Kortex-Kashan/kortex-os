@@ -235,7 +235,10 @@ class OperationRequest(BaseModel):
     request_id: str
     profile_id: str
     tenant_id: str = "default"
-    binding_context: BindingContext = Field(default_factory=BindingContext)
+    # NOTE: `BindingContext` requires `context_id`, so this factory raises if
+    # the field is ever omitted. Pre-existing; fixing it changes this public
+    # model's contract and needs an owner decision (see mypy cleanup report).
+    binding_context: BindingContext = Field(default_factory=BindingContext)  # type: ignore[arg-type]
     options: dict[str, Any] = Field(default_factory=dict)
     user_id: str | None = None
 

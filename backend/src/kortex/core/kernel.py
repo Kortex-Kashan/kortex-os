@@ -216,7 +216,7 @@ class Kernel:
         reports = await self._boot_engine.run_system_health_checks(self)
         bootstrap_required = False
         try:
-            security_engine = self.get_engine("security")
+            security_engine: Any = self.get_engine("security")
             if security_engine is not None and security_engine.state.value in ("READY", "RUNNING"):
                 bootstrap_required = await security_engine.is_bootstrap_required()
         except Exception as exc:

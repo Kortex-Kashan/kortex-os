@@ -61,7 +61,7 @@ def sanitize_context_content(content: str) -> str:
     return sanitized
 
 
-def require_identifier(value: str, field_name: str) -> str:
+def require_identifier(value: str | None, field_name: str) -> str:
     """Reject a blank or whitespace-only identifier before any query runs.
 
     Public for the same reason `sanitize_context_content` is public: it is

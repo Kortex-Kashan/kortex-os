@@ -7,23 +7,36 @@ and the common diagnostics interface protocol (IEngineDiagnostics).
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.storage.models import FileMetadata, ObjectMetadata
+
+_ActionResultT = TypeVar("_ActionResultT")
 
 
 @runtime_checkable
 class IDataStore(Protocol):
     """Relational transactional database persistence abstraction interface."""
 
-    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+    # Declared with a plain `def` returning `AsyncGenerator`: implementations are
+    # async *generator* functions (`async def` + `yield`), not coroutines that
+    # return a generator. `async def` here would describe
+    # `Coroutine[..., AsyncGenerator[...]]` and mismatch every implementation.
+    def get_session(self) -> AsyncGenerator[AsyncSession, None]:
         """Acquire an asynchronous SQLAlchemy session for database operations."""
         ...
 
-    async def execute_in_transaction(self, action: Callable[[AsyncSession], Any]) -> Any:
+    # Generic in the action's own result: this method returns exactly whatever
+    # the supplied action returns. Previously annotated `-> Any`, which erased
+    # that relationship and forced every typed caller returning its result to
+    # leak `Any` (the single cause of ~30 `no-any-return` errors across the
+    # Document, Workflow, Knowledge, AI and Finance persistence layers).
+    async def execute_in_transaction(
+        self, action: Callable[[AsyncSession], Awaitable[_ActionResultT]]
+    ) -> _ActionResultT:
         """Execute a callable block within an isolated database transaction block."""
         ...
 

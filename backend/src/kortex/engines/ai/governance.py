@@ -58,7 +58,7 @@ class IDurableApprovalBridge(Protocol):
 
     async def create_request(
         self,
-        instance_id: str,
+        instance_id: str | None,
         step_id: str,
         required_role: str,
         tenant_id: str,
@@ -456,7 +456,7 @@ class KernelDurableApprovalBridge:
 
     async def create_request(
         self,
-        instance_id: str,
+        instance_id: str | None,
         step_id: str,
         required_role: str,
         tenant_id: str,

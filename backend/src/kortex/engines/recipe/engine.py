@@ -79,7 +79,7 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
         try:
             # Wire file store if storage engine is present in kernel container
             if hasattr(kernel, "container") and kernel.container.has("storage"):
-                storage_engine = kernel.container.get("storage")
+                storage_engine = kernel.container.resolve("storage")
                 if hasattr(storage_engine, "file"):
                     self.installer.file_store = storage_engine.file
 

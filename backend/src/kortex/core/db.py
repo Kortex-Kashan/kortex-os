@@ -11,6 +11,7 @@ import datetime
 import enum
 import logging
 import os
+import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def _default_app_data_dir() -> Path:
     """
     if os.name == "nt":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    elif os.uname().sysname == "Darwin":  # pragma: no cover - platform-specific
+    elif sys.platform == "darwin":  # pragma: no cover - platform-specific
         base = str(Path.home() / "Library" / "Application Support")
     else:  # pragma: no cover - platform-specific
         base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")

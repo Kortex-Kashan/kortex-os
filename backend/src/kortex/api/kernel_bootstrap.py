@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-from typing import Any
+from typing import Any, cast
 
 from kortex.core.kernel import Kernel
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
@@ -238,14 +238,16 @@ async def build_and_boot_kernel() -> Kernel:
     # `.dependencies`/`.initialize`/`.start`/`.stop`/`.state` with no
     # `isinstance(..., BaseEngine)` check anywhere — no Kernel modification
     # was needed or made to support this.
-    kernel.register_engine(FinanceModule())
+    # `BaseModule` is deliberately not a `BaseEngine`; registration relies on the
+    # Kernel's duck-typed boot dispatch. See `kortex.core.base_module`.
+    kernel.register_engine(FinanceModule())  # type: ignore[arg-type]
 
     await kernel.boot()
 
     # M7.3-W1: register the production connector drivers now that the engine
     # is READY (ConnectorEngine.register_driver requires READY/RUNNING state,
     # so this cannot happen before kernel.boot()).
-    connector_engine = kernel.get_engine("connector")
+    connector_engine = cast("ConnectorEngine", kernel.get_engine("connector"))
     register_production_connector_drivers(connector_engine)
 
     # M7.3-W4: register the reference connector AI tools.

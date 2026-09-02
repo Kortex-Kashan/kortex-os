@@ -7,6 +7,8 @@ constraints declared within business recipes.
 
 from __future__ import annotations
 
+from typing import Any
+
 from kortex.engines.recipe.exceptions import RecipePermissionError
 from kortex.engines.recipe.models import RecipeDefinition, RecipePermission
 
@@ -64,7 +66,7 @@ class PermissionValidator:
         return True
 
     @staticmethod
-    def parse_permissions_yaml_dict(data: dict) -> list[RecipePermission]:
+    def parse_permissions_yaml_dict(data: dict[str, Any]) -> list[RecipePermission]:
         """Convert parsed permissions.yaml dictionary into RecipePermission models."""
         perms = data.get("permissions", [])
         return [RecipePermission(**p) for p in perms]

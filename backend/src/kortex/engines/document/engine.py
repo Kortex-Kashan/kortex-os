@@ -10,6 +10,7 @@ Implementation Specification (Version 3.0.0).
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from kortex.core.base_engine import BaseEngine, EngineState
@@ -323,7 +324,12 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
 
         if kernel is not None and hasattr(kernel, "register_capability"):
             for cap in self.capabilities():
-                handler = None
+                # Capability handlers are deliberately heterogeneous -- each one
+                # has its own parameter/return shape. `Callable[..., Any] | None`
+                # is exactly the type `Kernel.register_capability(handler=...)`
+                # declares for them, so this annotation states the real dispatch
+                # contract rather than letting the first branch narrow it.
+                handler: Callable[..., Any] | None = None
                 if cap == "kortex.document.operation.execute":
                     handler = self.execute_profile
                 elif cap == "kortex.document.lifecycle.transition":
@@ -805,7 +811,11 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         Returns:
             Structured DocumentIntelligenceModel.
         """
-        model = await self._intelligence_provider.analyze_document(document_id, version_id, ontology=ontology)
+        # Provider protocol is intentionally `-> Any` (pluggable boundary); see
+        # this method's docstring on why narrowing it is out of scope here.
+        model: DocumentIntelligenceModel = await self._intelligence_provider.analyze_document(
+            document_id, version_id, ontology=ontology
+        )
         await self._emit_event(DocumentIntelligenceUpdatedEvent(document_id=document_id, version_id=version_id))
         return model
 

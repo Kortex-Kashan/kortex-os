@@ -129,7 +129,7 @@ class ConfigurationEngine(BaseEngine):
             raise ConfigurationLoadError(f"JSON configuration file not found: {path}")
         try:
             with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+                data: dict[str, Any] = json.load(f)
             self._custom_config.update(data)
             self.logger.info("Loaded configuration from JSON file: %s", path)
             return data

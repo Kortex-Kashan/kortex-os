@@ -11,8 +11,10 @@ import asyncio
 import contextlib
 import json
 from datetime import UTC, datetime
+from typing import Any, cast
 
 from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.connector.exceptions import (
@@ -333,7 +335,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
 
             async def _delete_from_db(session: AsyncSession) -> bool:
                 stmt = delete(ConnectorProfileModel).where(ConnectorProfileModel.id == pid)
-                res = await session.execute(stmt)
+                res = cast(CursorResult[Any], await session.execute(stmt))
                 return (res.rowcount or 0) > 0
 
             with contextlib.suppress(Exception):

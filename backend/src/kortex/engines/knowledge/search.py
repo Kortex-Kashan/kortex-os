@@ -214,7 +214,7 @@ class KnowledgeSearchEngine:
             and _node_matches_text(node, query.query_text)
         ]
 
-        seen_ids: set = set()
+        seen_ids: set[str] = set()
         matched_nodes: list[KnowledgeNode] = []
         for seed in seeds:
             if seed.node_id not in seen_ids:

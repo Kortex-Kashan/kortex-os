@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from kortex.engines.connector.exceptions import (
@@ -41,7 +41,7 @@ class ConnectorPipeline(IConnectorPipeline):
         self,
         registry: IConnectorDriverRegistry,
         rate_limiter: IRateLimiter | None = None,
-        secret_resolver: Callable[[str, str], Coroutine[Any, Any, str | None]] | None = None,
+        secret_resolver: Callable[[str, str], Awaitable[str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
     ) -> None:
         """Initialize ConnectorPipeline.
@@ -260,12 +260,13 @@ class ConnectorPipeline(IConnectorPipeline):
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-        return driver_result.model_copy(
+        final_result: ActionResult = driver_result.model_copy(
             update={
                 "execution_time_ms": round(elapsed_ms, 3),
                 "correlation_id": request.correlation_id or driver_result.correlation_id,
             }
         )
+        return final_result
 
 
 __all__ = ["ConnectorPipeline"]

@@ -293,7 +293,7 @@ class KernelToolExecutionPort(IToolExecutionPort):
         ai_identity: object | None = None,
     ) -> None:
         self._kernel_bridge = kernel_bridge
-        self._ai_identity = ai_identity
+        self._ai_identity: Any = ai_identity
 
     async def execute_tool(
         self,
@@ -750,8 +750,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(request.conversation_id, "conversation_id")
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != request.tenant_id:
                 request = request.model_copy(update={"tenant_id": principal_tenant_id})
 
@@ -944,8 +943,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(task.task_id, "task_id")
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
                 task = task.model_copy(update={"tenant_id": principal_tenant_id})
 
@@ -995,8 +993,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(task.task_id, "task_id")
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
                 task = task.model_copy(update={"tenant_id": principal_tenant_id})
 
@@ -1078,8 +1075,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         start_time = time.perf_counter()
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             tenant_id = principal_tenant_id
 
         # M5-A3: tenant tool governance (blocklist/allowlist) is enforced
@@ -1183,8 +1179,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         principal is available.
         """
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             tenant_id = principal_tenant_id
 
         return await self._memory_manager.get_turns(tenant_id, conversation_id, offset=offset)
@@ -1471,7 +1466,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 return
 
             record = await self._agent_orchestrator.get_task(task_id, tenant_id)
-            if record is None or record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+            if record is None or record.status != AgentStatus.PAUSED_FOR_APPROVAL or record.resume_token is None:
                 # Already resumed/cancelled by a prior delivery of this
                 # event, or the task never reached this pause state --
                 # idempotent no-op either way.
