@@ -103,10 +103,14 @@ jobs:
           set -e
           cat cargo_check_output.log
           if [ "$exit_code" -ne 0 ]; then
-            DIAG=$(grep -n -E "^error|-->|Caused by:|pkg-config|panicked|--- stderr" cargo_check_output.log | tail -80)
-            if [ -z "$DIAG" ]; then
-              DIAG=$(tail -n 120 cargo_check_output.log)
-            fi
+            # Unconditional tail of the whole log: cargo always prints the
+            # failure (error:, failing crate, "failed to run custom build
+            # command", Caused by:, --- stdout/--- stderr, pkg-config output,
+            # linker/compiler/panic text) at the END of its output. The
+            # previous grep-based extraction was too narrow and captured only
+            # the bare "Caused by:" header lines, so no filtering is applied
+            # here at all -- only a size bound.
+            DIAG=$(tail -n 250 cargo_check_output.log)
             ENCODED=$(printf '%s\n' "$DIAG" | sed 's/%/%25/g; s/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=cargo check failed (exit ${exit_code})::${ENCODED}"
           fi
