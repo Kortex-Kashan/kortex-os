@@ -93,6 +93,7 @@ _PRODUCTION_TABLE_NAMES = frozenset(
 
 def _alembic_config(db_url: str) -> Config:
     cfg = Config(str(_ALEMBIC_INI))
+    cfg.attributes["configure_logger"] = False
     cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
     cfg.set_main_option("sqlalchemy.url", db_url)
     return cfg

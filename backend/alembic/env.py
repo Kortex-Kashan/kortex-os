@@ -60,8 +60,8 @@ config = context.config
 
 # Interpret the config file for Python logging (alembic.ini's
 # [loggers]/[handlers]/[formatters] sections).
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # The canonical, single metadata target -- see module docstring.
 target_metadata = Base.metadata
