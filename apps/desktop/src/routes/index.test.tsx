@@ -43,10 +43,44 @@ function renderRouter() {
 // on the authenticated shell itself, which is what this file exists to
 // cover. The unauthenticated path (login screen) is covered by
 // `auth/AuthGate.test.tsx` and `auth/LoginScreen.test.tsx`.
+//
+// M7.1: `AuthProvider`'s startup effect now gates all of the above behind
+// a real (bounded-retry) `get_system_health` poll first (`backendReadiness.ts`).
+// Without a `get_system_health` case here, that command falls through to
+// this mock's `Promise.resolve(false)` default — a malformed
+// `SystemHealthOutcome` whose `.ok` is `undefined` — so every attempt
+// reads as "not ready" and the real ~19s bounded backoff runs to
+// exhaustion before these tests' `findBy*` queries ever see anything,
+// timing out. Mocked here as an immediately-healthy, already-bootstrapped
+// backend so these tests can still assert on the authenticated-shell/
+// login-screen split they exist to cover, exactly as before M7.1. The
+// bootstrap-required path (M7.1's own first-run screen) is covered by
+// `auth/AuthGate.test.tsx`, `auth/AuthProvider.test.tsx`, and
+// `auth/BootstrapScreen.test.tsx`, not here.
+// `hasSessionResponse` is mutable per-test state (reset in `beforeEach`
+// below), read by the single shared `invokeMock` implementation — a test
+// that needs the no-stored-session path sets it to `false` rather than
+// replacing `invokeMock`'s implementation outright. `mockImplementation`
+// (unlike `mockImplementationOnce`) replaces it *permanently* until
+// something else replaces it again; with no reset between tests in this
+// file, an earlier test calling `mockImplementation` would leak into every
+// test that runs after it — this pattern avoids that trap entirely.
+let hasSessionResponse = true;
+
 const { invokeMock } = vi.hoisted(() => ({
-  invokeMock: vi.fn((command: string) => {
+  invokeMock: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+
+beforeEach(async () => {
+  hasSessionResponse = true;
+  invokeMock.mockImplementation((command: string) => {
     if (command === "has_session") {
-      return Promise.resolve(true);
+      return Promise.resolve(hasSessionResponse);
+    }
+    if (command === "get_system_health") {
+      return Promise.resolve({ ok: true, statusCode: 200, body: { bootstrap_required: false } });
     }
     if (command === "invoke_capability") {
       return Promise.resolve({
@@ -61,12 +95,8 @@ const { invokeMock } = vi.hoisted(() => ({
       });
     }
     return Promise.resolve(false);
-  }),
-}));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+  });
 
-beforeEach(async () => {
   window.localStorage.clear();
   await act(async () => {
     await router.navigate("/");
@@ -86,7 +116,7 @@ describe("routes/index provider composition", () => {
   });
 
   it("renders the login screen, never the shell, through the real singleton router when no session is stored", async () => {
-    invokeMock.mockImplementationOnce(() => Promise.resolve(false));
+    hasSessionResponse = false;
 
     renderRouter();
 

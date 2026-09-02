@@ -52,8 +52,6 @@ async def kernel(tmp_path: Path) -> AsyncGenerator[Kernel, None]:
     await db_manager.connect()
     await db_manager.create_all_tables()
 
-
-
     k = Kernel()
     k._db_manager = db_manager
 
@@ -75,7 +73,6 @@ async def kernel(tmp_path: Path) -> AsyncGenerator[Kernel, None]:
 
     await k.shutdown()
     await db_manager.disconnect()
-
 
 
 @pytest.mark.asyncio
@@ -276,9 +273,7 @@ async def test_external_execution_requires_approval_gates(kernel: Kernel) -> Non
     assert record.approval_request_id is not None
 
     # Ticket should be created in DurableApprovalManager
-    ticket = await wf_engine.approval_manager.get_request(
-        record.approval_request_id, tenant_id="tenant_alpha"
-    )
+    ticket = await wf_engine.approval_manager.get_request(record.approval_request_id, tenant_id="tenant_alpha")
     assert ticket is not None
     assert ticket.required_role == "DB_ADMIN"
 
@@ -360,11 +355,21 @@ async def test_external_execution_tenant_isolation(tmp_path: Path) -> None:
     await storage_engine.data.execute_in_transaction(_seed_rbac)
 
     auth_alpha = await security_engine.authentication_manager.authenticate(
-        {"principal_type": "USER", "tenant_id": "tenant_alpha", "principal_id": "user_ext_iso_alpha", "password": "pass-alpha"}
+        {
+            "principal_type": "USER",
+            "tenant_id": "tenant_alpha",
+            "principal_id": "user_ext_iso_alpha",
+            "password": "pass-alpha",
+        }
     )
     token_alpha = await security_engine.authentication_manager.issue_token(auth_alpha)
     auth_beta = await security_engine.authentication_manager.authenticate(
-        {"principal_type": "USER", "tenant_id": "tenant_beta", "principal_id": "user_ext_iso_beta", "password": "pass-beta"}
+        {
+            "principal_type": "USER",
+            "tenant_id": "tenant_beta",
+            "principal_id": "user_ext_iso_beta",
+            "password": "pass-beta",
+        }
     )
     token_beta = await security_engine.authentication_manager.issue_token(auth_beta)
 
@@ -458,7 +463,12 @@ async def test_external_execution_dispatches_real_registered_capability(tmp_path
 
         await storage_engine.data.execute_in_transaction(_seed_rbac)
         auth = await security_engine.authentication_manager.authenticate(
-            {"principal_type": "USER", "tenant_id": "tenant_alpha", "principal_id": "user_ext_real_cap", "password": "pass-alpha"}
+            {
+                "principal_type": "USER",
+                "tenant_id": "tenant_alpha",
+                "principal_id": "user_ext_real_cap",
+                "password": "pass-alpha",
+            }
         )
         token = await security_engine.authentication_manager.issue_token(auth)
 
@@ -603,8 +613,6 @@ async def test_external_execution_capability_dispatch_flow(kernel: Kernel) -> No
             )
         )
 
-
-
     await storage.data.execute_in_transaction(_seed_rbac)
 
     p_auth = await security_engine.authentication_manager.authenticate(
@@ -653,8 +661,6 @@ async def test_external_execution_capability_dispatch_flow(kernel: Kernel) -> No
     )
     res_list = await kernel.invoke_capability(req_list)
     assert any(r["id"] == exec_id for r in res_list)
-
-
 
 
 def test_external_execution_api_error_mapping() -> None:

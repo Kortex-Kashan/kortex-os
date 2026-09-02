@@ -2,7 +2,6 @@
 Unit tests for KORTEX Recipe Engine Compiler enforcing pure determinism.
 """
 
-import pytest
 from kortex.engines.recipe.compiler import RecipeCompiler
 from kortex.engines.recipe.models import (
     RecipeDefinition,
@@ -11,7 +10,7 @@ from kortex.engines.recipe.models import (
     RecipeSettings,
     RecipeStep,
 )
-from kortex.engines.workflow.models import WorkflowDefinition, WorkflowPriority, WorkflowTrigger
+from kortex.engines.workflow.models import WorkflowPriority, WorkflowTrigger
 
 
 def test_compiler_deterministic_output() -> None:

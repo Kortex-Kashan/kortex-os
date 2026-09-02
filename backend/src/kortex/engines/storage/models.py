@@ -7,8 +7,8 @@ and bucket configurations.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -24,7 +24,7 @@ class ObjectMetadata(BaseModel):
     file_size_bytes: int = Field(..., ge=0, description="Size of the payload in bytes")
     sha256_hash: str = Field(..., description="SHA-256 hash checksum of the payload")
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the object was stored",
     )
 
@@ -38,11 +38,11 @@ class FileMetadata(BaseModel):
     file_size_bytes: int = Field(..., ge=0, description="File size in bytes")
     sha256_hash: str = Field(..., description="SHA-256 checksum of file content")
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="Creation timestamp",
     )
     modified_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="Last modified timestamp",
     )
 
@@ -54,8 +54,8 @@ class BucketConfig(BaseModel):
     bucket_name: str = Field(..., description="Unique identifier name for the storage bucket")
     provider_type: str = Field("local_fs", description="Storage provider type (e.g., local_fs, s3, azure)")
     base_path: str = Field(..., description="Base directory or root path for bucket files")
-    options: Dict[str, Any] = Field(default_factory=dict, description="Provider-specific configuration options")
+    options: dict[str, Any] = Field(default_factory=dict, description="Provider-specific configuration options")
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the bucket configuration was created",
     )

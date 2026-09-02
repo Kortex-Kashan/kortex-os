@@ -36,7 +36,7 @@ a count of ingested records), not a fabricated node identifier.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,7 +50,7 @@ class KnowledgeBaseEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex}")
     event_type: str
     tenant_id: str = Field(..., min_length=1)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class KnowledgeNodeIndexedEvent(KnowledgeBaseEvent):

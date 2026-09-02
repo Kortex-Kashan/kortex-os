@@ -6,10 +6,15 @@ schemas defined in the Document Engine Implementation Specification (Version 3.0
 
 from __future__ import annotations
 
+import datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from kortex.core.db import BaseModel as SQLAlchemyBaseModel
 
 
 class DocumentLifecycleState(str, Enum):
@@ -230,7 +235,10 @@ class OperationRequest(BaseModel):
     request_id: str
     profile_id: str
     tenant_id: str = "default"
-    binding_context: BindingContext = Field(default_factory=BindingContext)
+    # NOTE: `BindingContext` requires `context_id`, so this factory raises if
+    # the field is ever omitted. Pre-existing; fixing it changes this public
+    # model's contract and needs an owner decision (see mypy cleanup report).
+    binding_context: BindingContext = Field(default_factory=BindingContext)  # type: ignore[arg-type]
     options: dict[str, Any] = Field(default_factory=dict)
     user_id: str | None = None
 
@@ -326,7 +334,10 @@ class AdapterSandboxConfig(BaseModel):
 
     permissions: list[str] = Field(default_factory=list)
     allowed_capabilities: list[AdapterCapability] = Field(default_factory=list)
-    temporary_workspace: str = "/tmp/sandbox"
+    # S108: pre-existing default sandbox workspace path. Changing this default
+    # alters certified AdapterSandbox behaviour, so it is recorded as a
+    # hardening follow-up rather than silently changed in a lint pass.
+    temporary_workspace: str = "/tmp/sandbox"  # noqa: S108
     timeout_seconds: int = 30
     memory_limit_mb: int = 512
 
@@ -348,12 +359,6 @@ class TemplateSchema(BaseModel):
 
 # -- SQLAlchemy ORM Models for IDataStore Persistence -------------------------
 
-import datetime
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
-
-from kortex.core.db import BaseModel as SQLAlchemyBaseModel
-
 
 class DocumentRecord(SQLAlchemyBaseModel):
     """SQLAlchemy ORM model representing the logical root document aggregate."""
@@ -372,9 +377,7 @@ class DocumentVersionRecord(SQLAlchemyBaseModel):
     """SQLAlchemy ORM model representing an immutable document revision snapshot."""
 
     __tablename__ = "document_versions"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "document_id", "version_number", name="uq_tenant_doc_ver_num"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "document_id", "version_number", name="uq_tenant_doc_ver_num"),)
 
     document_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("documents.id", ondelete="CASCADE"), index=True, nullable=False
@@ -426,9 +429,7 @@ class TemplateSchemaRecord(SQLAlchemyBaseModel):
     """SQLAlchemy ORM model for persisting declarative document Template Schemas."""
 
     __tablename__ = "document_template_schemas"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "template_id", "version", name="uq_tenant_template_version"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "template_id", "version", name="uq_tenant_template_version"),)
 
     tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
     template_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
@@ -445,9 +446,7 @@ class DocumentOperationProfileRecord(SQLAlchemyBaseModel):
     """SQLAlchemy ORM model for persisting declarative document operation profiles."""
 
     __tablename__ = "document_operation_profiles"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "profile_id", "version", name="uq_tenant_profile_version"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "profile_id", "version", name="uq_tenant_profile_version"),)
 
     tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="default")
     profile_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)

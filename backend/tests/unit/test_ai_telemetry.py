@@ -39,11 +39,13 @@ class FakeKernelBridge:
     ) -> None:
         if self.should_fail:
             raise RuntimeError("Event engine connection dropped!")
-        self.published_events.append({
-            "topic": topic,
-            "payload": payload,
-            "sender": sender,
-        })
+        self.published_events.append(
+            {
+                "topic": topic,
+                "payload": payload,
+                "sender": sender,
+            }
+        )
 
     async def invoke_capability(
         self,
@@ -74,9 +76,7 @@ async def test_generation_events_emission() -> None:
     bridge = FakeKernelBridge()
     diag = AIDiagnostics()
     exporter = InMemoryTelemetryExporter()
-    telemetry = AITelemetryEmitter(
-        kernel_bridge=bridge, diagnostics=diag, exporter=exporter
-    )
+    telemetry = AITelemetryEmitter(kernel_bridge=bridge, diagnostics=diag, exporter=exporter)
 
     # 1. Started
     await telemetry.emit_generation_started(
@@ -126,9 +126,7 @@ async def test_provider_resilience_events_emission() -> None:
     bridge = FakeKernelBridge()
     diag = AIDiagnostics()
     exporter = InMemoryTelemetryExporter()
-    telemetry = AITelemetryEmitter(
-        kernel_bridge=bridge, diagnostics=diag, exporter=exporter
-    )
+    telemetry = AITelemetryEmitter(kernel_bridge=bridge, diagnostics=diag, exporter=exporter)
 
     await telemetry.emit_provider_timeout(
         provider_id="ollama-local",
@@ -235,6 +233,74 @@ async def test_security_and_tool_events_emission() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_tool_completed_event_emission_carries_latency() -> None:
+    """M7.6-W3: a successful tool invocation must emit a domain event and
+    exporter counter, symmetric with emit_tool_failed/emit_tool_denied --
+    previously it recorded latency only into AIDiagnostics directly,
+    publishing no event and incrementing no counter at all."""
+    bridge = FakeKernelBridge()
+    diag = AIDiagnostics()
+    exporter = InMemoryTelemetryExporter()
+    telemetry = AITelemetryEmitter(kernel_bridge=bridge, diagnostics=diag, exporter=exporter)
+
+    await telemetry.emit_tool_completed(
+        tenant_id="tenant-1",
+        tool_name="knowledge_search",
+        request_id="req-tool-3",
+        latency_ms=42.5,
+    )
+
+    # 1. successful execution emits latency
+    assert len(bridge.published_events) == 1
+    assert bridge.published_events[0]["topic"] == "ai.tool.completed"
+    assert bridge.published_events[0]["payload"]["execution_time_ms"] == 42.5
+    assert bridge.published_events[0]["payload"]["tool_name"] == "knowledge_search"
+
+    # 2. latency is non-negative and structurally valid
+    assert bridge.published_events[0]["payload"]["execution_time_ms"] >= 0.0
+    assert diag.metrics()["tool_invocations"]["successful"] == 1
+    assert exporter.get_counter_value("ai.tool.completed") == 1
+
+    # 4. no duplicate telemetry event is emitted for one call
+    assert len(bridge.published_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_failed_and_denied_telemetry_unaffected_by_completed_event() -> None:
+    """3. existing failure/timeout telemetry remains unchanged by the
+    M7.6-W3 addition -- emit_tool_failed/emit_tool_denied still behave
+    exactly as `test_security_and_tool_events_emission` already proves,
+    with no change to their own topics, payloads, or counters."""
+    bridge = FakeKernelBridge()
+    diag = AIDiagnostics()
+    exporter = InMemoryTelemetryExporter()
+    telemetry = AITelemetryEmitter(kernel_bridge=bridge, diagnostics=diag, exporter=exporter)
+
+    await telemetry.emit_tool_failed(
+        tenant_id="tenant-1",
+        tool_name="knowledge_search",
+        request_id="req-tool-4",
+        error_category="TimeoutError",
+        latency_ms=999.0,
+        is_timeout=True,
+    )
+    await telemetry.emit_tool_denied(
+        tenant_id="tenant-1",
+        tool_name="knowledge_search",
+        request_id="req-tool-5",
+        reason="Missing permission",
+        latency_ms=1.0,
+    )
+
+    topics = [e["topic"] for e in bridge.published_events]
+    assert topics == ["ai.tool.failed", "ai.tool.denied"]
+    assert exporter.get_counter_value("ai.tool.failed") == 1
+    assert exporter.get_counter_value("ai.tool.denied") == 1
+    # The new SUCCESS-path counter must not be incremented by failure/denial.
+    assert exporter.get_counter_value("ai.tool.completed") == 0
+
+
 # ---------------------------------------------------------------------------
 # §2 — Non-Blocking & Exception Isolation Tests
 # ---------------------------------------------------------------------------
@@ -298,10 +364,10 @@ def test_secret_sanitization_removes_credentials() -> None:
 
     sanitized = sanitize_telemetry_payload(raw_payload)
     assert sanitized["api_key"] == "[REDACTED]"
-    assert sanitized["nested"]["token"] == "[REDACTED]"  # noqa: S105
-    assert sanitized["nested"]["password"] == "[REDACTED]"  # noqa: S105
+    assert sanitized["nested"]["token"] == "[REDACTED]"
+    assert sanitized["nested"]["password"] == "[REDACTED]"
     assert sanitized["nested"]["safe_metric"] == 42.0
-    assert sanitized["credentials_list"][0]["secret_key"] == "[REDACTED]"  # noqa: S105
+    assert sanitized["credentials_list"][0]["secret_key"] == "[REDACTED]"
     assert sanitized["credentials_list"][0]["status"] == "active"
     assert sanitized["tenant_id"] == "tenant-1"
 
@@ -343,19 +409,8 @@ FORBIDDEN_NAMESPACES = [
 )
 def test_telemetry_files_quarantine_forbidden_imports(filename: str) -> None:
     """Verify telemetry and diagnostics modules do not import forbidden SDKs or DB engines."""
-    target_path = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "kortex"
-        / "engines"
-        / "ai"
-        / filename
-    )
+    target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / filename
     imports = _collect_imports(target_path)
     for forbidden in FORBIDDEN_NAMESPACES:
-        violations = [
-            imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")
-        ]
-        assert violations == [], (
-            f"{filename} illegally imports {forbidden!r}: {violations}"
-        )
+        violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
+        assert violations == [], f"{filename} illegally imports {forbidden!r}: {violations}"

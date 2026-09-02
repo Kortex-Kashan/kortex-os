@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 from kortex.engines.recipe.exceptions import RecipeValidationError
 from kortex.engines.recipe.models import RecipeManifest
@@ -22,7 +22,7 @@ class RecipeManifestManager:
     """Manages Recipe Manifest parsing, validation, and SHA256 checksum calculation."""
 
     @staticmethod
-    def parse_manifest_dict(data: Dict[str, Any]) -> RecipeManifest:
+    def parse_manifest_dict(data: dict[str, Any]) -> RecipeManifest:
         """Parse dictionary payload into a RecipeManifest instance.
 
         Args:
@@ -44,7 +44,8 @@ class RecipeManifestManager:
         namespace = data["namespace"]
         if not NAMESPACE_REGEX.match(namespace):
             raise RecipeValidationError(
-                f"Invalid manifest namespace format '{namespace}'. Must match canonical format (e.g. kortex.hr.payroll)."
+                f"Invalid manifest namespace format '{namespace}'. Must match canonical format (e.g. "
+                f"kortex.hr.payroll)."
             )
 
         data_copy = dict(data)
@@ -67,6 +68,7 @@ class RecipeManifestManager:
             Validated RecipeManifest model.
         """
         import yaml
+
         try:
             parsed = yaml.safe_load(yaml_content)
         except Exception as e:
@@ -78,7 +80,7 @@ class RecipeManifestManager:
         return RecipeManifestManager.parse_manifest_dict(parsed)
 
     @staticmethod
-    def calculate_checksum(manifest: Union[RecipeManifest, Dict[str, Any]]) -> str:
+    def calculate_checksum(manifest: RecipeManifest | dict[str, Any]) -> str:
         """Compute deterministic SHA256 checksum for a manifest.
 
         Args:

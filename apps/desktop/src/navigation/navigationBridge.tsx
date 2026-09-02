@@ -28,7 +28,7 @@ export function useApplicationNavigation(): ApplicationNavigation {
       if (!route) {
         throw new Error(`Cannot navigate to unknown workspace application "${intent.applicationId}".`);
       }
-      navigate(route);
+      navigate(intent.search ? `${route}${intent.search}` : route);
     },
     [applications, navigate],
   );

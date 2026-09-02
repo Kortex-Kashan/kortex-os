@@ -143,8 +143,7 @@ class OllamaProvider(BaseAIProvider):
             )
         if http_response.status_code == 429 or 500 <= http_response.status_code < 600:
             raise TransientProviderError(
-                f"Ollama provider '{self.provider_id}' returned {http_response.status_code}: "
-                f"{http_response.text[:500]}"
+                f"Ollama provider '{self.provider_id}' returned {http_response.status_code}: {http_response.text[:500]}"
             )
         if http_response.status_code != 200:
             raise PermanentProviderError(
@@ -163,8 +162,7 @@ class OllamaProvider(BaseAIProvider):
         if not isinstance(text_content, str):
             keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
             raise PermanentProviderError(
-                f"Ollama provider '{self.provider_id}' response is missing the expected "
-                f"'response' text field: {keys!r}"
+                f"Ollama provider '{self.provider_id}' response is missing the expected 'response' text field: {keys!r}"
             )
 
         prompt_tokens = int(data.get("prompt_eval_count", 0) or 0)
@@ -213,10 +211,7 @@ class OllamaProvider(BaseAIProvider):
         if not isinstance(models, list):
             return False
         configured_family = self._model_name.split(":")[0]
-        return any(
-            isinstance(m, dict) and str(m.get("name", "")).split(":")[0] == configured_family
-            for m in models
-        )
+        return any(isinstance(m, dict) and str(m.get("name", "")).split(":")[0] == configured_family for m in models)
 
 
 __all__ = ["DEFAULT_OLLAMA_TIMEOUT_SECONDS", "OllamaProvider"]

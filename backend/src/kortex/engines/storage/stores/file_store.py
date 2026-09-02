@@ -13,9 +13,8 @@ import hashlib
 import logging
 import mimetypes
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Union
 
 from kortex.core.exceptions import ResourceNotFoundError
 from kortex.engines.storage.interfaces import IFileStore
@@ -28,7 +27,7 @@ logger = logging.getLogger("kortex.engines.storage.stores.file_store")
 class LocalFileStore(IFileStore):
     """Local sandboxed file system store implementing IFileStore."""
 
-    def __init__(self, base_directory: Union[str, Path]) -> None:
+    def __init__(self, base_directory: str | Path) -> None:
         """Initialize LocalFileStore with a sandboxed base directory path.
 
         Args:
@@ -104,7 +103,7 @@ class LocalFileStore(IFileStore):
         target_path = self._sandbox.resolve_sandboxed_path(relative_path)
         return await asyncio.to_thread(target_path.is_file)
 
-    async def list_files(self, relative_path: str = "") -> List[FileMetadata]:
+    async def list_files(self, relative_path: str = "") -> list[FileMetadata]:
         """List metadata for files contained within a relative folder path.
 
         Args:
@@ -117,11 +116,11 @@ class LocalFileStore(IFileStore):
         if not target_dir.exists() or not target_dir.is_dir():
             return []
 
-        def _scan() -> List[Path]:
+        def _scan() -> list[Path]:
             return [p for p in target_dir.rglob("*") if p.is_file()]
 
         file_paths = await asyncio.to_thread(_scan)
-        results: List[FileMetadata] = []
+        results: list[FileMetadata] = []
         for file_path in file_paths:
             rel_posix = self._sandbox.get_relative_string(file_path)
             meta = await self.get_metadata(rel_posix)
@@ -158,6 +157,6 @@ class LocalFileStore(IFileStore):
             mime_type=mime_type,
             file_size_bytes=stat_result.st_size,
             sha256_hash=sha256_hash,
-            created_at=datetime.fromtimestamp(stat_result.st_ctime, tz=timezone.utc),
-            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+            created_at=datetime.fromtimestamp(stat_result.st_ctime, tz=UTC),
+            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC),
         )

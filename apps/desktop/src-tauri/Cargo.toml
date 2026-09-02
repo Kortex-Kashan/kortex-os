@@ -21,6 +21,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 keyring = "3"
+# M7.1: platform CSPRNG for persistent master/signing key generation
+# (`secure_keys.rs`) — already present transitively (pulled in by several
+# existing dependencies); added directly here rather than relying on that
+# implicitly, since this crate now calls it itself.
+getrandom = "0.2"
 
 [dev-dependencies]
 hyper = { version = "1", features = ["server", "http1"] }

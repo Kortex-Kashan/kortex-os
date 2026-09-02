@@ -44,15 +44,9 @@ class DocumentDiagnostics(IEngineDiagnostics):
         """Return operational health status and diagnostic checks (IEngineDiagnostics protocol)."""
         adapter_count = len(self._registry.list_adapters()) if self._registry is not None else 0
         template_count = (
-            len(getattr(self._template_library, "_templates", {}))
-            if self._template_library is not None
-            else 0
+            len(getattr(self._template_library, "_templates", {})) if self._template_library is not None else 0
         )
-        profile_count = (
-            len(getattr(self._profile_manager, "_profiles", {}))
-            if self._profile_manager is not None
-            else 0
-        )
+        profile_count = len(getattr(self._profile_manager, "_profiles", {})) if self._profile_manager is not None else 0
 
         return {
             "status": "HEALTHY",
@@ -77,8 +71,7 @@ class DocumentDiagnostics(IEngineDiagnostics):
                 100.0
                 if self._operation_count == 0
                 else round(
-                    ((self._operation_count - self._failed_operation_count) / self._operation_count)
-                    * 100.0,
+                    ((self._operation_count - self._failed_operation_count) / self._operation_count) * 100.0,
                     2,
                 )
             ),
@@ -115,6 +108,7 @@ class DocumentDiagnostics(IEngineDiagnostics):
             "kortex.document.adapter.register",
             "kortex.document.adapter.list",
             "kortex.document.template.list",
+            "kortex.document.profile.list",  # M7.4-W2
         ]
 
 

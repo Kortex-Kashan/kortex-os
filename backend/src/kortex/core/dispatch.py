@@ -71,8 +71,9 @@ from __future__ import annotations
 import inspect
 import logging
 import time
+import types
 import uuid
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -129,6 +130,108 @@ class CapabilityRequest(BaseModel):
     session_token: TokenPayload | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
+
+
+def _resolve_model_target(annotation: Any) -> tuple[type[BaseModel], bool] | None:
+    """If `annotation` denotes a Pydantic `BaseModel` — directly, wrapped in
+    `Optional`/`X | None`, as `list[X]`, or as `Optional[list[X]]` — return
+    `(model_type, is_list)`. Otherwise `None`.
+
+    Used by `_coerce_model_parameters` (M7.2) below. Deliberately narrow:
+    only ever matches an actual `BaseModel` subclass, never a plain `dict`
+    annotation (e.g. `ToolCall.arguments: dict[str, object]`), so this can
+    never mis-coerce a parameter that is *supposed* to stay a raw mapping.
+    """
+    origin = get_origin(annotation)
+    if origin is None:
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return annotation, False
+        return None
+    if origin is list:
+        args = get_args(annotation)
+        if args and isinstance(args[0], type) and issubclass(args[0], BaseModel):
+            return args[0], True
+        return None
+    if origin is Union or origin is types.UnionType:
+        # `typing.get_origin` normalizes `typing.Optional[X]`/`typing.Union[X, Y]`
+        # to `typing.Union`, and the PEP 604 `X | Y` spelling to `types.UnionType`
+        # — both must be checked, they are distinct objects.
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            resolved = _resolve_model_target(arg)
+            if resolved is not None:
+                return resolved
+        return None
+    return None
+
+
+def _coerce_model_parameters(handler: Any, call_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Coerce plain-dict `call_kwargs` values into the real Pydantic model
+    instances a handler's own type-annotated parameters declare (M7.2).
+
+    Every real caller of `Kernel.invoke_capability` — the Tauri/Rust IPC
+    bridge, the FastAPI HTTP boundary, and any test driving the dispatch
+    boundary the same way — delivers `request.parameters` as plain,
+    JSON-deserialized data. Before this fix, a handler whose signature
+    declared a `BaseModel`-typed parameter (e.g. `generate_response(request:
+    LLMRequest, ...)`) received a raw `dict` and crashed on its own first
+    attribute access (`request.tenant_id`) — confirmed for
+    `kortex.ai.response.generate`/`orchestrate_agent`/`resume_agent`/
+    `invoke_tool` during M7.2's implementation, the exact same class of
+    defect `test_knowledge_capability_dispatch.py`'s
+    `test_search_capability_is_broken_over_the_real_dict_based_ipc_path`
+    already documented for `kortex.knowledge.query.search` and explicitly
+    anticipated a fix for ("If a future change fixes this (e.g. a coercion
+    wrapper), this test should start failing here").
+
+    Deliberately narrow and additive, not a general validation framework:
+    only parameters whose *handler-declared* annotation resolves to a
+    `BaseModel` (optionally wrapped in `Optional`/`list`) are touched; a
+    value that is already a live instance of the target model (every
+    existing same-process test that hand-constructs a real object, e.g.
+    `test_ai_tenant_isolation_dispatch.py`) is left completely alone —
+    `isinstance` is checked first, so this can never re-validate or replace
+    an object a caller already built correctly. A malformed dict that fails
+    Pydantic validation still raises — this fixes the transport-shape
+    problem, it does not weaken validation.
+
+    `from __future__ import annotations` is active in every engine module,
+    so plain `inspect.signature(handler).parameters[...].annotation` would
+    be an unresolved string, not the real class — `eval_str=True` (Python
+    3.10+) resolves it against the handler's own module globals. If
+    resolution fails for any reason (e.g. a genuinely unresolvable forward
+    reference), this fails open to *no coercion*, exactly the pre-fix
+    behavior — never a dispatch-time crash of its own.
+    """
+    try:
+        parameters = inspect.signature(handler, eval_str=True).parameters
+    except (TypeError, ValueError, NameError):
+        return call_kwargs
+
+    for name, param in parameters.items():
+        if name not in call_kwargs or name == "principal":
+            continue
+        if param.annotation is inspect.Parameter.empty:
+            continue
+        resolved = _resolve_model_target(param.annotation)
+        if resolved is None:
+            continue
+        model_type, is_list = resolved
+        value = call_kwargs[name]
+
+        if is_list:
+            if not isinstance(value, list):
+                continue
+            call_kwargs[name] = [
+                model_type.model_validate(item) if isinstance(item, dict) and not isinstance(item, model_type) else item
+                for item in value
+            ]
+        else:
+            if isinstance(value, dict) and not isinstance(value, model_type):
+                call_kwargs[name] = model_type.model_validate(value)
+
+    return call_kwargs
 
 
 def _safe_classification(value: str) -> ClassificationLevel:
@@ -201,7 +304,7 @@ class CapabilityDispatcher:
 
         return None
 
-    async def dispatch(self, request: CapabilityRequest) -> Any:  # noqa: ANN401
+    async def dispatch(self, request: CapabilityRequest) -> Any:
         """Resolve, authenticate, authorize, enforce idempotency, then invoke.
 
         Execution ordering (Milestone M5.2):
@@ -256,9 +359,7 @@ class CapabilityDispatcher:
 
         # 3. Tenant Determination
         tenant_id = (
-            principal.tenant_id
-            if principal is not None
-            else str(request.context.get("resource_tenant_id", "default"))
+            principal.tenant_id if principal is not None else str(request.context.get("resource_tenant_id", "default"))
         )
 
         # 4. Idempotency Gate (ONLY for requests carrying an idempotency_key)
@@ -355,7 +456,9 @@ class CapabilityDispatcher:
             raise
 
     async def _audit_authentication_success(
-        self, security_engine: SecurityEngine, principal: Any  # noqa: ANN401
+        self,
+        security_engine: SecurityEngine,
+        principal: Any,
     ) -> None:
         """Best-effort audit recording for a successful token verification.
         Never raises — an audit-store outage must not block a security
@@ -412,9 +515,7 @@ class CapabilityDispatcher:
         except Exception as audit_exc:
             logger.warning("Failed to record dispatch authentication-failure audit entry: %s", audit_exc)
 
-    async def _invoke_handler(
-        self, request: CapabilityRequest, principal: SecurityPrincipal | None
-    ) -> Any:  # noqa: ANN401
+    async def _invoke_handler(self, request: CapabilityRequest, principal: SecurityPrincipal | None) -> Any:
         """Resolve and invoke the real handler, awaiting the result only if
         it is actually awaitable.
 
@@ -462,6 +563,12 @@ class CapabilityDispatcher:
         if accepts_principal:
             call_kwargs["principal"] = principal
 
+        # M7.2: coerce plain-dict parameters into the real Pydantic model
+        # instances the handler's own signature declares — see
+        # `_coerce_model_parameters`'s docstring for why this is necessary
+        # (every real caller delivers JSON-shaped dicts, not live objects).
+        call_kwargs = _coerce_model_parameters(handler, call_kwargs)
+
         result = handler(**call_kwargs)
         if inspect.isawaitable(result):
             return await result
@@ -470,12 +577,12 @@ class CapabilityDispatcher:
     async def _audit_execution(
         self,
         security_engine: SecurityEngine,
-        principal: Any | None,  # noqa: ANN401
+        principal: Any | None,
         request: CapabilityRequest,
         tenant_id: str,
         status: str,
         duration_ms: float,
-        result: Any | None = None,  # noqa: ANN401
+        result: Any | None = None,
         error: BaseException | None = None,
     ) -> None:
         """Best-effort audit recording of capability execution outcome (Milestone M5.2).

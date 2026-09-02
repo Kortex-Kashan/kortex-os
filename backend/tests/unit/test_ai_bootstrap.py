@@ -135,9 +135,7 @@ def test_bootstrap_wires_production_ports() -> None:
     zero effect on the production agent orchestrator's tool-call gating.
     """
     bridge = DummyBridge()
-    bootstrap = KernelProductionBootstrap(
-        config=AIEngineRuntimeConfig(enable_cloud_models=True)
-    )
+    bootstrap = KernelProductionBootstrap(config=AIEngineRuntimeConfig(enable_cloud_models=True))
     engine = bootstrap.create_ai_engine(kernel_bridge=bridge)  # type: ignore[arg-type]
 
     orchestrator = engine.agent_orchestrator
@@ -193,9 +191,7 @@ def test_empty_provider_environment_initializes_without_crash() -> None:
 
 def test_custom_providers_wrapped_with_resilience_layer() -> None:
     """Verify custom providers are automatically wrapped in ResilientAIProvider."""
-    bootstrap = KernelProductionBootstrap(
-        config=AIEngineRuntimeConfig(retry_max_attempts=4)
-    )
+    bootstrap = KernelProductionBootstrap(config=AIEngineRuntimeConfig(retry_max_attempts=4))
     raw_provider = FakeProvider("ollama-raw")
     engine = bootstrap.create_ai_engine(custom_providers=[raw_provider])
 
@@ -259,9 +255,7 @@ def test_production_profile_configuration() -> None:
 def test_production_profile_refuses_to_assemble_without_data_store() -> None:
     """M9 'Production Engine Wiring Requirement': a production engine must never
     silently fall back to non-durable in-memory stores."""
-    bootstrap = KernelProductionBootstrap(
-        config=AIEngineRuntimeConfig(environment="production")
-    )
+    bootstrap = KernelProductionBootstrap(config=AIEngineRuntimeConfig(environment="production"))
     with pytest.raises(AIBootstrapError, match="data_store"):
         bootstrap.create_ai_engine(kernel_bridge=DummyBridge())  # type: ignore[arg-type]
 
@@ -269,18 +263,14 @@ def test_production_profile_refuses_to_assemble_without_data_store() -> None:
 def test_production_profile_refuses_to_assemble_without_kernel_bridge() -> None:
     """Without a kernel bridge the assembler substitutes InMemoryToolExecutionPort,
     so every tool call would bypass CapabilityDispatcher and Security Engine."""
-    bootstrap = KernelProductionBootstrap(
-        config=AIEngineRuntimeConfig(environment="production")
-    )
+    bootstrap = KernelProductionBootstrap(config=AIEngineRuntimeConfig(environment="production"))
     with pytest.raises(AIBootstrapError, match="kernel_bridge"):
         bootstrap.create_ai_engine(data_store=object())
 
 
 def test_production_profile_reports_every_missing_dependency_at_once() -> None:
     """An operator fixing production wiring should see the full list, not one at a time."""
-    bootstrap = KernelProductionBootstrap(
-        config=AIEngineRuntimeConfig(environment="production")
-    )
+    bootstrap = KernelProductionBootstrap(config=AIEngineRuntimeConfig(environment="production"))
     with pytest.raises(AIBootstrapError) as exc_info:
         bootstrap.create_ai_engine()
 
@@ -292,9 +282,7 @@ def test_production_profile_reports_every_missing_dependency_at_once() -> None:
 def test_development_profile_still_permits_in_memory_fallbacks() -> None:
     """The guard must be production-only: development stays runnable with no
     Kernel and no database, which is the entire point of that profile."""
-    bootstrap = KernelProductionBootstrap(
-        config=AIEngineRuntimeConfig(environment="development")
-    )
+    bootstrap = KernelProductionBootstrap(config=AIEngineRuntimeConfig(environment="development"))
     engine = bootstrap.create_ai_engine()
     assert engine is not None
 
@@ -327,19 +315,8 @@ FORBIDDEN_NAMESPACES = [
 
 def test_bootstrap_py_quarantine_forbidden_imports() -> None:
     """Verify bootstrap.py does not import forbidden infrastructure or vendor SDKs."""
-    target_path = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "kortex"
-        / "engines"
-        / "ai"
-        / "bootstrap.py"
-    )
+    target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / "bootstrap.py"
     imports = _collect_imports(target_path)
     for forbidden in FORBIDDEN_NAMESPACES:
-        violations = [
-            imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")
-        ]
-        assert violations == [], (
-            f"bootstrap.py illegally imports {forbidden!r}: {violations}"
-        )
+        violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
+        assert violations == [], f"bootstrap.py illegally imports {forbidden!r}: {violations}"

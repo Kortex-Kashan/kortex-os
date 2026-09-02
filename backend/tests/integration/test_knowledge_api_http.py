@@ -204,9 +204,7 @@ async def test_no_authorization_header_returns_401_for_traverse(client: httpx.As
 
 
 @pytest.mark.asyncio
-async def test_authenticated_with_permission_traverse_returns_200(
-    kernel: Kernel, client: httpx.AsyncClient
-) -> None:
+async def test_authenticated_with_permission_traverse_returns_200(kernel: Kernel, client: httpx.AsyncClient) -> None:
     knowledge_engine = kernel.get_engine("knowledge")
     assert isinstance(knowledge_engine, KnowledgeEngine)
     tenant_id = _tenant()

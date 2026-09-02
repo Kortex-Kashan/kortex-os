@@ -543,13 +543,17 @@ def test_metadata_only_adapter_wrapper() -> None:
     registered = registry.register_adapter(meta)
     assert isinstance(registered, MetadataAdapterWrapper)
     assert registered.adapter_id == "meta.only.adapter"
-    assert registered.validate_schema(TemplateSchema(
-        template_id="t1", name="N", namespace="kortex.n", version="1.0.0", description="D"
-    )) is True
+    assert (
+        registered.validate_schema(
+            TemplateSchema(template_id="t1", name="N", namespace="kortex.n", version="1.0.0", description="D")
+        )
+        is True
+    )
 
     # Execute should raise NotImplementedError for metadata-only wrapper
     with pytest.raises(NotImplementedError):
         import asyncio
+
         asyncio.run(registered.execute(DocumentOperationType.GENERATE, BindingContext(context_id="c1"), {}))
 
 
@@ -568,7 +572,7 @@ def test_edge_case_validations_and_lookups() -> None:
         registry.get_adapter(12345)  # type: ignore[arg-type]
 
     # 3. get_adapter_by_id with non-existent version
-    with pytest.raises(AdapterNotFoundError, match="version '9.9.9' not found"):
+    with pytest.raises(AdapterNotFoundError, match=r"version '9.9.9' not found"):
         registry.get_adapter_by_id("kortex.adapter.pdf", version="9.9.9")
 
     # 4. get_adapter_by_capability with string
@@ -619,6 +623,7 @@ def test_bad_metadata_type_rejection() -> None:
 # =============================================================================
 # Milestone 7: Adapter Discovery Cache
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_adapter_discovery_cache_absent_delegates_to_list_adapters() -> None:
@@ -730,4 +735,3 @@ def test_adapter_registration_outside_event_loop_marks_cache_dirty_for_next_read
     result = asyncio.run(_read())
     assert result == []
     assert registry._discovery_cache_dirty is False
-

@@ -110,9 +110,7 @@ def _parse_context(context: dict[str, Any]) -> RoutingContext:
             submitted values, which may be caller-sensitive.
     """
     if not isinstance(context, dict):
-        raise RoutingValidationError(
-            f"Routing context must be a dict, got {type(context).__name__}."
-        )
+        raise RoutingValidationError(f"Routing context must be a dict, got {type(context).__name__}.")
 
     if "model_id" in context:
         raise RoutingValidationError(_MODEL_ID_REJECTION)
@@ -155,9 +153,7 @@ class ModelRouter:
     def __init__(self, registry: ProviderRegistry) -> None:
         self._registry = registry
 
-    async def select_candidates(
-        self, request: LLMRequest, context: dict[str, Any]
-    ) -> list[AIProviderMetadata]:
+    async def select_candidates(self, request: LLMRequest, context: dict[str, Any]) -> list[AIProviderMetadata]:
         """Return every qualifying provider, best first.
 
         `request` is accepted for interface conformance but no field of it is
@@ -185,9 +181,7 @@ class ModelRouter:
 
         return self._discover(ctx)
 
-    async def select_model(
-        self, request: LLMRequest, context: dict[str, Any]
-    ) -> AIProviderMetadata:
+    async def select_model(self, request: LLMRequest, context: dict[str, Any]) -> AIProviderMetadata:
         """Return the single best-ranked qualifying provider.
 
         Defined as the first element of `select_candidates`, so ranking lives
@@ -204,9 +198,7 @@ class ModelRouter:
             hint = ""
             if ctx.endpoint_type is None and not ctx.allow_cloud:
                 hint = " Cloud providers are excluded unless allow_cloud=True is passed explicitly."
-            raise NoRoutableProviderError(
-                f"No routable AI provider matched the routing constraints.{hint}"
-            )
+            raise NoRoutableProviderError(f"No routable AI provider matched the routing constraints.{hint}")
         return candidates[0]
 
     def _resolve_pinned(self, ctx: RoutingContext, pinned_id: str) -> list[AIProviderMetadata]:
@@ -221,8 +213,7 @@ class ModelRouter:
 
         if metadata.provider_id != pinned_id:
             raise ProviderNotRoutableError(
-                f"Provider registered as '{pinned_id}' reports a different identity; "
-                "it cannot be routed to."
+                f"Provider registered as '{pinned_id}' reports a different identity; it cannot be routed to."
             )
         if not _is_executable(provider):
             raise ProviderNotRoutableError(

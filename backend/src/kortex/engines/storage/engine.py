@@ -8,7 +8,7 @@ registers capabilities with the Kernel, and implements the Common Diagnostics In
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.storage.interfaces import (
@@ -40,17 +40,17 @@ class StorageEngine(BaseEngine, IEngineDiagnostics):
         """
         super().__init__()
         self._base_directory = base_directory
-        self._data_store: Optional[IDataStore] = None
-        self._file_store: Optional[IFileStore] = None
-        self._object_store: Optional[IObjectStore] = None
-        self._cache_store: Optional[ICacheStore] = None
-        self._registered_capabilities: List[str] = [
+        self._data_store: IDataStore | None = None
+        self._file_store: IFileStore | None = None
+        self._object_store: IObjectStore | None = None
+        self._cache_store: ICacheStore | None = None
+        self._registered_capabilities: list[str] = [
             "kortex.storage.data.session",
             "kortex.storage.file.store",
             "kortex.storage.object.put",
             "kortex.storage.cache.set",
         ]
-        self._metrics: Dict[str, Any] = {
+        self._metrics: dict[str, Any] = {
             "files_stored": 0,
             "objects_stored": 0,
             "cache_ops": 0,
@@ -63,7 +63,7 @@ class StorageEngine(BaseEngine, IEngineDiagnostics):
         return "storage"
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Names of prerequisite foundation engines."""
         return ["configuration", "registry"]
 
@@ -166,13 +166,13 @@ class StorageEngine(BaseEngine, IEngineDiagnostics):
         self._set_state(EngineState.STOPPED)
         self.logger.info("Storage Engine stopped cleanly.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Perform diagnostic health check."""
         return self.health()
 
     # -- Common Diagnostics Interface (IEngineDiagnostics) -------------------
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return diagnostic health checks."""
         return {
             "engine": self.name,
@@ -186,11 +186,11 @@ class StorageEngine(BaseEngine, IEngineDiagnostics):
             },
         }
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return operational runtime metrics."""
         return dict(self._metrics)
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics."""
         return {
             "engine": self.name,
@@ -209,6 +209,6 @@ class StorageEngine(BaseEngine, IEngineDiagnostics):
         """Return semantic version string."""
         return "1.0.0"
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of capability strings registered by this engine."""
         return list(self._registered_capabilities)

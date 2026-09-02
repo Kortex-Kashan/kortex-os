@@ -1,0 +1,57 @@
+name: Backend CI
+
+# Read-only validation for the Python backend, per the Production Hardening
+# CI/CD work package (docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md
+# §5.9). Reproduces the exact ruff/mypy/pytest commands already used locally
+# and by .pre-commit-config.yaml -- no new tooling introduced. Deliberately
+# does not deploy, publish, build installers, or touch the database
+# migration/boot behavior established by Database Migration Wiring (DONE).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  backend:
+    name: Lint, type-check, and test (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # backend/pyproject.toml: requires-python = ">=3.12"; backend/requirements.txt
+      # and requirements-dev.txt both target 3.12+ explicitly.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Same commands .pre-commit-config.yaml's ruff hook and this repo's own
+      # `[tool.ruff]` config (backend/pyproject.toml) already define.
+      - name: Ruff check
+        run: python -m ruff check .
+
+      - name: Ruff format check
+        run: python -m ruff format --check .
+
+      # backend/pyproject.toml's `[tool.mypy]` already scopes this to `src`
+      # (mypy_path = ["src"]) in strict mode -- this reproduces that exactly,
+      # not a new configuration.
+      - name: mypy
+        run: python -m mypy src
+
+      - name: pytest
+        run: python -m pytest -q

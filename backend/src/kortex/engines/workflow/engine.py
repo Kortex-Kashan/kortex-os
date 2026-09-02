@@ -454,9 +454,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             try:
                 await self._external_executor.reconcile_stranded_waiting_approvals()
             except Exception as e:
-                self.logger.error(
-                    "Error during stranded waiting-approval reconciliation scan: %s", e, exc_info=True
-                )
+                self.logger.error("Error during stranded waiting-approval reconciliation scan: %s", e, exc_info=True)
 
         # Scheduler hydration and background polling daemon
         if self._scheduler is not None:
@@ -502,8 +500,6 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
 
         self._set_state(EngineState.STOPPED)
         self.logger.info("Workflow Engine stopped cleanly.")
-
-
 
     # -- Hydration & Restart Recovery ---------------------------------------
 
@@ -718,9 +714,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             raise ResourceNotFoundError(f"Workflow definition '{definition_id}' not found.")
         return self._definitions[definition_id]
 
-    async def get_definition_async(
-        self, definition_id: str, tenant_id: str | None = None
-    ) -> WorkflowDefinition:
+    async def get_definition_async(self, definition_id: str, tenant_id: str | None = None) -> WorkflowDefinition:
         """Retrieve a WorkflowDefinition by ID, reading through to persistent store if necessary."""
         if definition_id in self._definitions:
             return self._definitions[definition_id]
@@ -842,10 +836,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         task.add_done_callback(lambda t: self._running_tasks.pop(instance.id, None))
         return instance
 
-
-    async def _run_instance_steps(
-        self, instance: WorkflowInstance, definition: WorkflowDefinition
-    ) -> WorkflowResult:
+    async def _run_instance_steps(self, instance: WorkflowInstance, definition: WorkflowDefinition) -> WorkflowResult:
         """Internal step execution loop with durable step runs and state updates."""
         start_time = time.time()
         step_results: list[ExecutionResult] = []
@@ -1110,7 +1101,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         capability_name: str,
         parameters: dict[str, Any],
         context: dict[str, Any],
-    ) -> Any:  # noqa: ANN401
+    ) -> Any:
         """Helper to invoke a capability through the Kernel capability dispatch boundary."""
         if not self._kernel:
             return None
@@ -1199,7 +1190,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         correlation_id: str | None = None,
         action_fingerprint: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Create an approval request ticket (kortex.workflow.approval.create capability).
 
@@ -1243,7 +1234,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         role_filter: str | None = None,
         state_filter: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """List approval request tickets for tenant (kortex.workflow.approval.list capability).
 
@@ -1284,7 +1275,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         request_id: str | UUID,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Get approval request ticket by ID (kortex.workflow.approval.get capability).
 
@@ -1330,7 +1321,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         decision_data: dict[str, Any] | None = None,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Submit a decision for an approval ticket (kortex.workflow.approval.decide capability)."""
         dec_state: ApprovalState
@@ -1435,9 +1426,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         )
 
         ticket_state_val = (
-            updated_ticket.state.value
-            if hasattr(updated_ticket.state, "value")
-            else str(updated_ticket.state)
+            updated_ticket.state.value if hasattr(updated_ticket.state, "value") else str(updated_ticket.state)
         )
         return {
             "id": str(updated_ticket.id),
@@ -1456,16 +1445,12 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         valid_until: str | datetime.datetime,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Delegate an approval role to another principal (kortex.workflow.approval.delegate capability)."""
         tid = tenant_id or "default"
-        dt_from = (
-            datetime.datetime.fromisoformat(valid_from) if isinstance(valid_from, str) else valid_from
-        )
-        dt_until = (
-            datetime.datetime.fromisoformat(valid_until) if isinstance(valid_until, str) else valid_until
-        )
+        dt_from = datetime.datetime.fromisoformat(valid_from) if isinstance(valid_from, str) else valid_from
+        dt_until = datetime.datetime.fromisoformat(valid_until) if isinstance(valid_until, str) else valid_until
 
         # Resolve principal from session_token if not directly provided
         if principal is None and "session_token" in kwargs:
@@ -1714,18 +1699,14 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         timezone: str = "UTC",
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Create a workflow execution schedule (kortex.workflow.schedule.create capability)."""
         if self._scheduler is None:
             raise WorkflowScheduleError("Scheduler subsystem is not initialized.")
 
         tid = tenant_id or "default"
-        dt_run_at = (
-            datetime.datetime.fromisoformat(run_at)
-            if isinstance(run_at, str)
-            else run_at
-        )
+        dt_run_at = datetime.datetime.fromisoformat(run_at) if isinstance(run_at, str) else run_at
 
         # Resolve principal from session_token if not provided
         if principal is None and "session_token" in kwargs:
@@ -1734,6 +1715,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
                 try:
                     from kortex.engines.security.models import TokenPayload
+
                     if isinstance(raw_token, TokenPayload):
                         principal = await sec_eng.authentication_manager.verify_token(raw_token)
                     elif isinstance(raw_token, dict):
@@ -1777,7 +1759,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         tenant_id: str | None = None,
         status: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """List workflow schedules for tenant (kortex.workflow.schedule.list capability).
 
@@ -1809,7 +1791,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         schedule_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Get workflow schedule by ID or name (kortex.workflow.schedule.get capability).
 
@@ -1847,7 +1829,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         schedule_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Pause a workflow schedule (kortex.workflow.schedule.pause capability)."""
         if self._scheduler is None:
@@ -1861,7 +1843,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         schedule_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Resume a paused workflow schedule (kortex.workflow.schedule.resume capability)."""
         if self._scheduler is None:
@@ -1881,7 +1863,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         schedule_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Cancel and disable a workflow schedule (kortex.workflow.schedule.cancel capability)."""
         if self._scheduler is None:
@@ -1895,7 +1877,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         schedule_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Manually trigger a schedule execution (kortex.workflow.schedule.trigger capability)."""
         if self._scheduler is None:
@@ -1926,7 +1908,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         correlation_id: str | None = None,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Execute a governed external operation with safety guards (kortex.workflow.external.execute capability)."""
         if self._external_executor is None:
@@ -1941,6 +1923,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
                 try:
                     from kortex.engines.security.models import TokenPayload
+
                     if isinstance(session_token, TokenPayload):
                         principal = await sec_eng.authentication_manager.verify_token(session_token)
                     elif isinstance(session_token, dict):
@@ -1991,7 +1974,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         execution_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Get external execution record by ID (kortex.workflow.external.get capability).
 
@@ -2022,7 +2005,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         status: str | None = None,
         limit: int = 100,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """List external execution records for tenant (kortex.workflow.external.list capability).
 
@@ -2032,9 +2015,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         if self._external_executor is None:
             return []
         tid = principal.tenant_id if principal is not None else (tenant_id or "default")
-        records = await self._external_executor.list_executions(
-            tenant_id=tid, status=status, limit=limit
-        )
+        records = await self._external_executor.list_executions(tenant_id=tid, status=status, limit=limit)
         return [
             {
                 "id": str(r.id),
@@ -2055,7 +2036,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         execution_id: str,
         tenant_id: str | None = None,
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Cancel a pending external execution (kortex.workflow.external.cancel capability)."""
         if self._external_executor is None:
@@ -2067,7 +2048,6 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         return {"id": str(record.id), "status": record.status.value, "tenant_id": record.tenant_id}
 
     # -- Common Diagnostics Interface (IEngineDiagnostics) -------------------
-
 
     def health(self) -> dict[str, Any]:
         """Return diagnostic health check report."""

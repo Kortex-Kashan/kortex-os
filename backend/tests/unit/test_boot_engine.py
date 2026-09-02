@@ -2,7 +2,7 @@
 Unit tests for Boot Engine.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 
@@ -14,7 +14,7 @@ from kortex.engines.security.exceptions import MasterKeyError
 
 
 class MockEngine(BaseEngine):
-    def __init__(self, name: str, deps: List[str] = None) -> None:
+    def __init__(self, name: str, deps: list[str] | None = None) -> None:
         self._name = name
         self._deps = deps or []
         super().__init__()
@@ -27,7 +27,7 @@ class MockEngine(BaseEngine):
         return self._name
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         return self._deps
 
     async def initialize(self, kernel: Kernel) -> None:
@@ -38,7 +38,7 @@ class MockEngine(BaseEngine):
         self.started = True
         self._set_state(EngineState.RUNNING)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"engine": self._name, "status": "healthy"}
 
     async def stop(self) -> None:
@@ -88,7 +88,7 @@ class _RaisingInitializeEngine(BaseEngine):
     secondary exception that would mask the original error.
     """
 
-    def __init__(self, name: str, error: Exception, deps: Optional[List[str]] = None) -> None:
+    def __init__(self, name: str, error: Exception, deps: list[str] | None = None) -> None:
         self._name = name
         self._deps = deps or []
         self._error = error
@@ -99,7 +99,7 @@ class _RaisingInitializeEngine(BaseEngine):
         return self._name
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         return self._deps
 
     async def initialize(self, kernel: Kernel) -> None:
@@ -108,7 +108,7 @@ class _RaisingInitializeEngine(BaseEngine):
     async def start(self) -> None:
         self._set_state(EngineState.RUNNING)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"engine": self._name, "status": "healthy"}
 
     async def stop(self) -> None:
@@ -136,7 +136,7 @@ class _StateValueHealthEngine(BaseEngine):
     async def start(self) -> None:
         self._set_state(EngineState.RUNNING)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"engine": self._name, "status": self._state.value, "healthy": self._healthy}
 
     async def stop(self) -> None:

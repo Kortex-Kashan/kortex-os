@@ -5,7 +5,10 @@ Target: 100% pass rate, 100% line coverage for intelligence.py.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from pydantic import ValidationError
 
 from kortex.engines.document.intelligence import (
     DefaultDocumentIntelligenceProvider,
@@ -42,7 +45,7 @@ async def test_document_intelligence_model_and_protocol() -> None:
     assert len(model.knowledge_references) > 0
 
     # Immutability check
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         model.document_id = "doc-mutated"  # type: ignore[misc]
 
     delta = await provider.update_intelligence_incrementally("doc-1", {"net_pay": 5500.0})
@@ -135,7 +138,9 @@ async def test_document_engine_intelligence_and_recommendation_di() -> None:
         async def recommend_operation_profile(self, business_operation: str, user_context: dict[str, Any]) -> str:
             return "profile.custom.v1"
 
-        async def recommend_adapter_pipeline(self, profile_id: str, installed_adapters: list[AdapterMetadata]) -> list[str]:
+        async def recommend_adapter_pipeline(
+            self, profile_id: str, installed_adapters: list[AdapterMetadata]
+        ) -> list[str]:
             return ["custom.adapter.v1"]
 
     custom_intel = CustomIntelligenceProvider()

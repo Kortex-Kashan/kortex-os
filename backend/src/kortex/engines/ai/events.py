@@ -28,9 +28,7 @@ class AIBaseEvent(BaseModel):
 
     event_id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex}")
     event_type: str
-    timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +208,26 @@ class AIToolInvokedEvent(AIBaseEvent):
     tool_name: str
 
 
+class AIToolCompletedEvent(AIBaseEvent):
+    """Dispatched when an AI-requested tool invocation completes successfully
+    (M7.6-W3). Mirrors `AIGenerationCompletedEvent`'s established convention
+    of carrying `execution_time_ms` on a "completed" event -- previously no
+    event existed for a successful tool completion at all: `AIToolInvokedEvent`
+    fires before execution (no latency to report yet, correctly), and only
+    the failure/denial paths (`AIToolFailedEvent`/`AIToolDeniedEvent`)
+    published a domain event on completion. A successful invocation's
+    already-computed `ToolResult.execution_time_ms` was recorded only into
+    `AIDiagnostics` directly, bypassing `AITelemetryEmitter` and its
+    domain-event/exporter-counter behavior entirely -- the one telemetry
+    consumers most need to see (the common case) was invisible to them."""
+
+    event_type: Literal["ai.tool.completed"] = "ai.tool.completed"
+    request_id: str
+    tenant_id: str
+    tool_name: str
+    execution_time_ms: float
+
+
 class AIToolFailedEvent(AIBaseEvent):
     """Dispatched when a tool execution fails with an error."""
 
@@ -241,6 +259,7 @@ __all__ = [
     "AISecurityDeniedEvent",
     "AISecurityValidationFailedEvent",
     "AIStorageWriteFailedEvent",
+    "AIToolCompletedEvent",
     "AIToolDeniedEvent",
     "AIToolFailedEvent",
     "AIToolInvokedEvent",

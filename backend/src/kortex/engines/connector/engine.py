@@ -8,44 +8,16 @@ TokenBucketRateLimiter, ConnectorPipeline, ConnectorDiagnostics, and system even
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, cast
 
-from kortex.core.base_engine import BaseEngine, EngineState
-from kortex.engines.connector.diagnostics import ConnectorDiagnostics
-from kortex.engines.connector.events import (
-    ConnectorActionCompletedEvent,
-    ConnectorActionFailedEvent,
-    ConnectorActionStartedEvent,
-    ConnectorBaseEvent,
-    ConnectorDriverRegisteredEvent,
-)
-from kortex.engines.connector.interfaces import (
-    IBaseConnectorDriver,
-    IEngineDiagnostics,
-)
-from kortex.engines.connector.models import (
-    ActionRequest,
-    ActionResult,
-    ConnectorProfile,
-    DriverMetadata,
-)
-from kortex.engines.connector.pipeline import ConnectorPipeline
-from kortex.engines.connector.profiles import ConnectorProfileManager
-from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
-from kortex.engines.connector.registry import ConnectorDriverRegistry
-
-if TYPE_CHECKING:
-    from kortex.core.kernel import Kernel
-
-logger = logging.getLogger("kortex.engines.connector")
-
-
-import json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.base_engine import BaseEngine, EngineState
+from kortex.core.container import Container
 from kortex.engines.connector.diagnostics import ConnectorDiagnostics
 from kortex.engines.connector.events import (
     ConnectorActionCompletedEvent,
@@ -78,6 +50,7 @@ from kortex.engines.storage.interfaces import IDataStore
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
+    from kortex.engines.connector.base_driver import BaseConnectorDriver
 
 logger = logging.getLogger("kortex.engines.connector")
 
@@ -91,7 +64,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         profile_manager: ConnectorProfileManager | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
         pipeline: ConnectorPipeline | None = None,
-        secret_resolver: Callable[[str, str], Awaitable[str]] | None = None,
+        secret_resolver: Callable[[str, str], Awaitable[str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
         data_store: IDataStore | None = None,
     ) -> None:
@@ -118,9 +91,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         self._profile_manager = (
             profile_manager if profile_manager is not None else ConnectorProfileManager(data_store=data_store)
         )
-        self._rate_limiter = (
-            rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
-        )
+        self._rate_limiter = rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
         self._secret_resolver = secret_resolver
         self._diagnostics = (
             diagnostics
@@ -142,6 +113,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             )
         )
         self._kernel: Kernel | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def name(self) -> str:
@@ -197,22 +169,23 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             self._kernel = kernel
 
             # Wire Storage Engine dependencies from Kernel IoC container if registered
-            if kernel is not None:
-                try:
-                    storage_engine = kernel.container.resolve("engine.storage")
-                    if storage_engine is not None:
-                        if hasattr(storage_engine, "data") and self._data_store is None:
-                            self._data_store = storage_engine.data
-                        if hasattr(storage_engine, "cache"):
-                            cache_store = storage_engine.cache
-                            if self._profile_manager._cache_store is None:
-                                self._profile_manager._cache_store = cache_store
-                            if self._rate_limiter._cache_store is None:
-                                self._rate_limiter._cache_store = cache_store
-                        if self._profile_manager._data_store is None and self._data_store is not None:
-                            self._profile_manager._data_store = self._data_store
-                except Exception:
-                    self.logger.debug("StorageEngine not resolved from Kernel container; using local fallbacks.")
+            if kernel is not None and isinstance(getattr(kernel, "container", None), Container):
+                if kernel.container.has("engine.storage"):
+                    try:
+                        storage_engine = kernel.container.resolve("engine.storage")
+                        if storage_engine is not None:
+                            if hasattr(storage_engine, "data") and self._data_store is None:
+                                self._data_store = storage_engine.data
+                            if hasattr(storage_engine, "cache"):
+                                cache_store = storage_engine.cache
+                                if self._profile_manager._cache_store is None:
+                                    self._profile_manager._cache_store = cache_store
+                                if self._rate_limiter._cache_store is None:
+                                    self._rate_limiter._cache_store = cache_store
+                            if self._profile_manager._data_store is None and self._data_store is not None:
+                                self._profile_manager._data_store = self._data_store
+                    except Exception:
+                        self.logger.debug("StorageEngine not resolved from Kernel container; using local fallbacks.")
 
                 # Wire the production secret resolver from the Kernel-registered
                 # Security Engine if the caller didn't already supply one (M6.0-2:
@@ -221,7 +194,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 # — SecurityEngine.get_secret(secret_handle, tenant_id) already
                 # matches this resolver's tenant-scoped (handle, tenant_id)
                 # contract exactly, so it's assigned directly, unwrapped).
-                if self._secret_resolver is None:
+                if self._secret_resolver is None and kernel.container.has("engine.security"):
                     try:
                         security_engine = kernel.container.resolve("engine.security")
                         if security_engine is not None:
@@ -264,6 +237,27 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 handler=self.get_profile,
                 required_permissions=["connector:read"],
             )
+            kernel.register_capability(
+                name="kortex.connector.profile.register",
+                description="Create or update a tenant-scoped connector profile (M7.3)",
+                provider=self.name,
+                handler=self.register_profile,
+                required_permissions=["connector:write"],
+            )
+            kernel.register_capability(
+                name="kortex.connector.profile.list",
+                description="List connector profiles owned by the caller's tenant (M7.3)",
+                provider=self.name,
+                handler=self.list_profiles,
+                required_permissions=["connector:read"],
+            )
+            kernel.register_capability(
+                name="kortex.connector.profile.delete",
+                description="Delete a tenant-scoped connector profile (M7.3)",
+                provider=self.name,
+                handler=self.delete_profile,
+                required_permissions=["connector:write"],
+            )
 
             self._set_state(EngineState.READY)
             self.logger.info("Connector Engine initialized successfully.")
@@ -286,6 +280,14 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         """Gracefully shut down active background tasks and release resources."""
         self.ensure_state(EngineState.RUNNING, EngineState.READY)
         self._set_state(EngineState.STOPPING)
+
+        tasks_to_cancel = [task for task in self._background_tasks if not task.done()]
+        for task in tasks_to_cancel:
+            task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        self._background_tasks.clear()
+
         self._set_state(EngineState.STOPPED)
         self.logger.info("Connector Engine stopped.")
 
@@ -382,9 +384,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         is_success = False
         resolved_driver_id: str | None = None
         action_type_str = (
-            request.action_type.value
-            if hasattr(request.action_type, "value")
-            else str(request.action_type)
+            request.action_type.value if hasattr(request.action_type, "value") else str(request.action_type)
         )
         executed_recorded = False
 
@@ -405,9 +405,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
 
             # RBAC Capability Permission Verification
             granted_permissions = request.options.get("granted_permissions")
-            if granted_permissions is not None and isinstance(
-                granted_permissions, (list, set, tuple)
-            ):
+            if granted_permissions is not None and isinstance(granted_permissions, (list, set, tuple)):
                 required_perm = "kortex.connector.action.execute"
                 if required_perm not in granted_permissions:
                     raise ConnectorSecurityError(
@@ -424,9 +422,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             await self._publish_event(started_evt)
 
             # 2. Resolve profile, tenant-scoped (M6.3-1)
-            profile = await self._profile_manager.get_profile(
-                request.profile_id, tenant_id=request.tenant_id
-            )
+            profile = await self._profile_manager.get_profile(request.profile_id, tenant_id=request.tenant_id)
             resolved_driver_id = profile.driver_id
 
             # 3. Execute action through pipeline
@@ -502,16 +498,16 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
     def register_driver(self, driver: IBaseConnectorDriver) -> None:
         """Register a connector driver in the engine registry."""
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
-        self._registry.register_driver(driver)
+        # Every driver in the system derives from `BaseConnectorDriver`; the
+        # public signature accepts the protocol for caller flexibility.
+        self._registry.register_driver(cast("BaseConnectorDriver", driver))
 
         meta = driver.metadata
         evt = ConnectorDriverRegisteredEvent(
             driver_id=meta.driver_id,
             driver_name=meta.display_name,
             version=meta.version,
-            supported_actions=tuple(
-                act.value if hasattr(act, "value") else str(act) for act in meta.supported_actions
-            ),
+            supported_actions=tuple(act.value if hasattr(act, "value") else str(act) for act in meta.supported_actions),
         )
         self._safe_schedule_event(evt)
 
@@ -536,6 +532,78 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         tid = principal.tenant_id if principal is not None else tenant_id
         return await self._profile_manager.get_profile(profile_id, tenant_id=tid)
 
+    async def register_profile(
+        self,
+        profile: ConnectorProfile | dict[str, Any],
+        principal: SecurityPrincipal | None = None,
+    ) -> ConnectorProfile:
+        """Create or update a tenant-scoped connector profile (M7.3).
+
+        Mirrors `execute_action`/`get_profile`'s principal-authoritative
+        tenant binding (M6.3-1): a caller-supplied `tenant_id` on the
+        submitted profile is never trusted once a verified `principal` is
+        present -- it is always overwritten with `principal.tenant_id`
+        before the profile is persisted, so a caller cannot register (or
+        silently take over) a profile under another tenant's id.
+
+        `profile` may arrive as a plain `dict` when this capability is
+        reached through the real dispatch boundary (the Kernel dispatcher's
+        M7.2 dict-coercion fix already handles this generically, but the
+        explicit branch mirrors `execute_action`'s own defensive coercion
+        for the direct, non-dispatch call path used by tests).
+
+        Rejects a `driver_id` that is not currently registered -- a profile
+        referencing a nonexistent driver would otherwise register
+        successfully and only fail much later, at execution time, inside
+        `ConnectorPipeline`'s dispatch stage.
+        """
+        if isinstance(profile, dict):
+            profile = ConnectorProfile(**profile)
+        if principal is not None:
+            profile = profile.model_copy(update={"tenant_id": principal.tenant_id})
+
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        self._registry.get_driver_by_id(profile.driver_id)
+        await self._profile_manager.register_profile(profile)
+        return profile
+
+    async def list_profiles(
+        self,
+        driver_id: str | None = None,
+        active_only: bool = False,
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> list[ConnectorProfile]:
+        """List connector profiles scoped to the caller's tenant (M7.3).
+
+        `principal`, when present, is authoritative over a caller-supplied
+        `tenant_id` -- identical precedence to `get_profile`/`execute_action`.
+        """
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        tid = principal.tenant_id if principal is not None else tenant_id
+        return await self._profile_manager.list_profiles(driver_id=driver_id, active_only=active_only, tenant_id=tid)
+
+    async def delete_profile(
+        self,
+        profile_id: str,
+        principal: SecurityPrincipal | None = None,
+    ) -> bool:
+        """Delete a tenant-scoped connector profile (M7.3).
+
+        `ConnectorProfileManager.delete_profile` deletes by `profile_id`
+        alone with no tenant check -- it never needed one before this
+        capability existed, since every prior caller was already trusted and
+        tenant-scoped upstream. Ownership is verified first via the
+        already-tenant-scoped, enumeration-resistant `get_profile` (M6.3-1),
+        which raises `ConnectorProfileNotFoundError` -- masked identically to
+        a genuinely nonexistent profile -- if the caller's tenant does not
+        own it. Deletion is only ever attempted after that check passes.
+        """
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        tid = principal.tenant_id if principal is not None else None
+        await self._profile_manager.get_profile(profile_id, tenant_id=tid)
+        return await self._profile_manager.delete_profile(profile_id)
+
     # -- Internal Helper Methods --------------------------------------------
 
     async def _record_action_history(
@@ -554,9 +622,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             err_json = json.dumps(result.error_details)
 
         action_type_str = (
-            request.action_type.value
-            if hasattr(request.action_type, "value")
-            else str(request.action_type)
+            request.action_type.value if hasattr(request.action_type, "value") else str(request.action_type)
         )
 
         async def _save_history(session: AsyncSession) -> None:
@@ -592,15 +658,26 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                     event.event_type,
                 )
 
+    def _on_background_task_done(self, task: asyncio.Task[Any]) -> None:
+        """Handle completion of background event tasks and discard reference."""
+        self._background_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                self.logger.warning(
+                    "Unhandled exception in background event task: %s",
+                    type(exc).__name__,
+                )
+
     def _safe_schedule_event(self, event: ConnectorBaseEvent) -> None:
         """Safely schedule event publication from a synchronous context if an active loop exists."""
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._publish_event(event))
+            task = loop.create_task(self._publish_event(event))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._on_background_task_done)
         except RuntimeError:
-            self.logger.debug(
-                "No active event loop running to dispatch event '%s'", event.event_type
-            )
+            self.logger.debug("No active event loop running to dispatch event '%s'", event.event_type)
 
 
 __all__ = ["ConnectorEngine"]

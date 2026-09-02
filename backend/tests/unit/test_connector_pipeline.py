@@ -6,15 +6,12 @@ Target: 100% pass rate, 100% line coverage for pipeline.py.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.exceptions import (
-    ConnectorOperationError,
     DriverExecutionError,
-    DriverNotFoundError,
 )
 from kortex.engines.connector.interfaces import IConnectorPipeline
 from kortex.engines.connector.models import (

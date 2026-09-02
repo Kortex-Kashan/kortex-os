@@ -4,7 +4,8 @@ Unit tests for KORTEX Storage Engine Interfaces & Data Models (Milestone 1).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -118,7 +119,9 @@ class DummyFileStore:
 
 
 class DummyObjectStore:
-    async def put_object(self, bucket_name: str, object_key: str, data: bytes, mime_type: str = "application/octet-stream"):
+    async def put_object(
+        self, bucket_name: str, object_key: str, data: bytes, mime_type: str = "application/octet-stream"
+    ):
         return ObjectMetadata(
             storage_key=object_key,
             bucket_name=bucket_name,

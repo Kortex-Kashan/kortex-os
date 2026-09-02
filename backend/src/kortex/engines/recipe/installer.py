@@ -7,10 +7,10 @@ and persistent storage via Storage Engine (IFileStore / IDataStore).
 
 from __future__ import annotations
 
+import contextlib
 import datetime
-from typing import Dict, Optional
+
 from kortex.engines.recipe.compiler import RecipeCompiler
-from kortex.engines.recipe.exceptions import RecipeInstallationError
 from kortex.engines.recipe.loader import RecipeLoader
 from kortex.engines.recipe.models import (
     RecipeDefinition,
@@ -29,10 +29,10 @@ class RecipeInstaller:
     def __init__(
         self,
         registry: RecipeRegistry,
-        file_store: Optional[IFileStore] = None,
-        validator: Optional[RecipeValidator] = None,
-        loader: Optional[RecipeLoader] = None,
-        compiler: Optional[RecipeCompiler] = None,
+        file_store: IFileStore | None = None,
+        validator: RecipeValidator | None = None,
+        loader: RecipeLoader | None = None,
+        compiler: RecipeCompiler | None = None,
     ) -> None:
         self.registry = registry
         self.file_store = file_store
@@ -43,8 +43,8 @@ class RecipeInstaller:
     async def install(
         self,
         recipe: RecipeDefinition,
-        package_bytes: Optional[bytes] = None,
-        raw_files: Optional[Dict[str, bytes]] = None,
+        package_bytes: bytes | None = None,
+        raw_files: dict[str, bytes] | None = None,
     ) -> RecipeInstallationResult:
         """Install a new recipe into the system environment and register catalog entry.
 
@@ -92,7 +92,7 @@ class RecipeInstaller:
         # 4. Register catalog entry
         self.registry.register(recipe)
 
-        installed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        installed_at = datetime.datetime.now(datetime.UTC).isoformat()
         return RecipeInstallationResult(
             success=True,
             recipe_id=recipe_id,
@@ -103,8 +103,8 @@ class RecipeInstaller:
     async def upgrade(
         self,
         recipe: RecipeDefinition,
-        package_bytes: Optional[bytes] = None,
-        raw_files: Optional[Dict[str, bytes]] = None,
+        package_bytes: bytes | None = None,
+        raw_files: dict[str, bytes] | None = None,
     ) -> RecipeUpgradeResult:
         """Upgrade an installed recipe to a new version.
 
@@ -171,15 +171,13 @@ class RecipeInstaller:
 
         # Remove files from IFileStore if available
         if self.file_store:
-            try:
+            with contextlib.suppress(Exception):  # Ignore missing files cleanup warnings
                 base_prefix = f"recipes/{recipe_id}/{version}"
                 files = await self.file_store.list_files(base_prefix)
                 for f in files:
-                    await self.file_store.delete_file(f)
-            except Exception:
-                pass  # Ignore missing files cleanup warnings
+                    await self.file_store.delete_file(f.relative_path)
 
-        removed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        removed_at = datetime.datetime.now(datetime.UTC).isoformat()
         return RecipeRemovalResult(
             success=True,
             recipe_id=recipe_id,
@@ -198,7 +196,7 @@ class RecipeInstaller:
                 errors=[f"Target rollback version '{target_version}' for recipe '{recipe_id}' is not available."],
             )
 
-        installed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        installed_at = datetime.datetime.now(datetime.UTC).isoformat()
         return RecipeInstallationResult(
             success=True,
             recipe_id=recipe_id,

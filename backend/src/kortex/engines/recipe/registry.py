@@ -7,7 +7,6 @@ Supports lookup by ID, version, namespace, tag search, and listing.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
 from kortex.engines.recipe.models import RecipeDefinition
 
 
@@ -16,7 +15,7 @@ class RecipeRegistry:
 
     def __init__(self) -> None:
         # Key: (recipe_id, version) -> RecipeDefinition
-        self._recipes: Dict[Tuple[str, str], RecipeDefinition] = {}
+        self._recipes: dict[tuple[str, str], RecipeDefinition] = {}
 
     def register(self, recipe: RecipeDefinition) -> bool:
         """Register a recipe in the registry catalog.
@@ -47,7 +46,7 @@ class RecipeRegistry:
             return True
         return False
 
-    def find_by_id(self, recipe_id: str, version: Optional[str] = None) -> Optional[RecipeDefinition]:
+    def find_by_id(self, recipe_id: str, version: str | None = None) -> RecipeDefinition | None:
         """Find a registered recipe by ID and optional version string.
 
         Args:
@@ -67,7 +66,7 @@ class RecipeRegistry:
         # Return last registered match
         return matches[-1]
 
-    def find_by_namespace(self, namespace: str) -> List[RecipeDefinition]:
+    def find_by_namespace(self, namespace: str) -> list[RecipeDefinition]:
         """Find all recipes registered under a given namespace.
 
         Args:
@@ -82,7 +81,7 @@ class RecipeRegistry:
             if recipe.manifest.namespace == namespace or recipe.manifest.namespace.startswith(f"{namespace}.")
         ]
 
-    def search(self, query: str) -> List[RecipeDefinition]:
+    def search(self, query: str) -> list[RecipeDefinition]:
         """Search registered recipes by ID, name, namespace, or description text.
 
         Args:
@@ -92,18 +91,13 @@ class RecipeRegistry:
             List of matching RecipeDefinition models.
         """
         q = query.lower()
-        results: List[RecipeDefinition] = []
+        results: list[RecipeDefinition] = []
         for recipe in self._recipes.values():
             m = recipe.manifest
-            if (
-                q in m.id.lower()
-                or q in m.name.lower()
-                or q in m.namespace.lower()
-                or q in m.description.lower()
-            ):
+            if q in m.id.lower() or q in m.name.lower() or q in m.namespace.lower() or q in m.description.lower():
                 results.append(recipe)
         return results
 
-    def list_all(self) -> List[RecipeDefinition]:
+    def list_all(self) -> list[RecipeDefinition]:
         """Return list of all currently registered recipes."""
         return list(self._recipes.values())

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime
 import uuid
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,9 +25,7 @@ class CheckpointState(BaseModel):
     request_id: str
     stage_id: str
     state_data: bytes
-    created_at: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
+    created_at: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 class FailureMetadata(BaseModel):
@@ -41,9 +38,7 @@ class FailureMetadata(BaseModel):
     adapter_id: str
     error_code: str
     stack_trace_snippet: str
-    timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 class DocumentRecoveryManager(IDocumentRecoveryProvider):

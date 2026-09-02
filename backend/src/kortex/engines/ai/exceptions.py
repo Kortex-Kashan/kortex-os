@@ -24,7 +24,6 @@ class AIBootstrapError(AIOrchestrationError):
     """Raised when runtime bootstrap, dependency assembly, or startup validation fails."""
 
 
-
 class AIProviderError(AIOrchestrationError):
     """Base exception for AI provider adapter errors.
 
@@ -54,7 +53,6 @@ class TransientProviderError(AIProviderError):
 
 class PermanentProviderError(AIProviderError):
     """Raised when an AI provider encounters a non-retryable error."""
-
 
 
 class ProviderAlreadyRegisteredError(AIOrchestrationError):

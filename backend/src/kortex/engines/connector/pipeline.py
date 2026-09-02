@@ -8,8 +8,10 @@ in accordance with the Connector Engine Specification.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from kortex.engines.connector.exceptions import (
     ConnectorOperationError,
@@ -39,7 +41,7 @@ class ConnectorPipeline(IConnectorPipeline):
         self,
         registry: IConnectorDriverRegistry,
         rate_limiter: IRateLimiter | None = None,
-        secret_resolver: Callable[[str, str], Coroutine[Any, Any, str | None]] | None = None,
+        secret_resolver: Callable[[str, str], Awaitable[str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
     ) -> None:
         """Initialize ConnectorPipeline.
@@ -62,16 +64,12 @@ class ConnectorPipeline(IConnectorPipeline):
         """Helper to invoke a diagnostic recording method safely without altering execution flow."""
         if self._diagnostics is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             fn = getattr(self._diagnostics, record_fn_name, None)
             if callable(fn):
                 fn(*args, **kwargs)
-        except Exception:
-            pass
 
-    async def execute(
-        self, request: ActionRequest, profile: ConnectorProfile
-    ) -> ActionResult:
+    async def execute(self, request: ActionRequest, profile: ConnectorProfile) -> ActionResult:
         """Execute a multi-stage pipeline for an action request through target ConnectorProfile.
 
         Stages:
@@ -205,9 +203,7 @@ class ConnectorPipeline(IConnectorPipeline):
 
         attempts = 0
 
-        async def _tracked_driver_execute(
-            req: ActionRequest, secret_token: str | None = None
-        ) -> ActionResult:
+        async def _tracked_driver_execute(req: ActionRequest, secret_token: str | None = None) -> ActionResult:
             nonlocal attempts
             attempts += 1
             return await driver.execute_action(req, secret_token=secret_token)
@@ -264,12 +260,13 @@ class ConnectorPipeline(IConnectorPipeline):
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-        return driver_result.model_copy(
+        final_result: ActionResult = driver_result.model_copy(
             update={
                 "execution_time_ms": round(elapsed_ms, 3),
                 "correlation_id": request.correlation_id or driver_result.correlation_id,
             }
         )
+        return final_result
 
 
 __all__ = ["ConnectorPipeline"]

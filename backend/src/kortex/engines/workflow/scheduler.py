@@ -54,10 +54,10 @@ class DurableWorkflowScheduler(ISchedulerProvider):
     def __init__(
         self,
         data_store: IDataStore,
-        workflow_engine: Any = None,  # noqa: ANN401
-        security_engine: Any = None,  # noqa: ANN401
+        workflow_engine: Any = None,
+        security_engine: Any = None,
         outbox_store: OutboxStore | None = None,
-        event_engine: Any = None,  # noqa: ANN401
+        event_engine: Any = None,
     ) -> None:
         self._data_store = data_store
         self._workflow_engine = workflow_engine
@@ -144,7 +144,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
     async def schedule_workflow(
         self,
         definition_name: str,
-        cron_expression_or_delay_seconds: Any,  # noqa: ANN401
+        cron_expression_or_delay_seconds: Any,
         initial_context: dict[str, Any] | None = None,
         tenant_id: str = "default",
         name: str | None = None,
@@ -169,9 +169,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         """
         sch_name = name or f"sched_{definition_name}_{uuid4().hex[:8]}"
 
-
         if isinstance(cron_expression_or_delay_seconds, int):
-
             # Interval in seconds
             stype = ScheduleType.INTERVAL
             interval_sec = cron_expression_or_delay_seconds
@@ -195,9 +193,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
             cron_expr = None
             interval_sec = None
         else:
-            raise WorkflowValidationError(
-                f"Unsupported schedule specification: '{cron_expression_or_delay_seconds}'"
-            )
+            raise WorkflowValidationError(f"Unsupported schedule specification: '{cron_expression_or_delay_seconds}'")
 
         schedule = await self.create_schedule(
             name=sch_name,
@@ -321,15 +317,11 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         )
         return schedule
 
-    async def get_schedule(
-        self, schedule_id: UUID | str, tenant_id: str | None = None
-    ) -> WorkflowSchedule | None:
+    async def get_schedule(self, schedule_id: UUID | str, tenant_id: str | None = None) -> WorkflowSchedule | None:
         """Retrieve a schedule by ID with tenant isolation."""
         return await self._store.get_schedule(schedule_id, tenant_id=tenant_id)
 
-    async def get_schedule_by_name(
-        self, name: str, tenant_id: str = "default"
-    ) -> WorkflowSchedule | None:
+    async def get_schedule_by_name(self, name: str, tenant_id: str = "default") -> WorkflowSchedule | None:
         """Retrieve a schedule by unique name within tenant."""
         return await self._store.get_schedule_by_name(name, tenant_id=tenant_id)
 
@@ -468,19 +460,14 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         context_payload["_schedule_name"] = sch.name
         context_payload["_triggered_by"] = actor
 
-        instance = await self._workflow_engine.start_workflow(
+        instance: WorkflowInstance = await self._workflow_engine.start_workflow(
             definition_id=sch.definition_id,
             initial_context=context_payload,
             tenant_id=tid,
         )
 
-
         new_count = sch.run_count + 1
-        new_status = (
-            ScheduleStatus.COMPLETED.value
-            if sch.max_runs and new_count >= sch.max_runs
-            else sch.status.value
-        )
+        new_status = ScheduleStatus.COMPLETED.value if sch.max_runs and new_count >= sch.max_runs else sch.status.value
         next_run = (
             None
             if new_status == ScheduleStatus.COMPLETED.value
@@ -537,9 +524,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
         # `claim_due_schedules` (M5-A5) atomically transitions each returned
         # row ACTIVE -> TRIGGERING before returning it, so every schedule in
         # `due_schedules` is now exclusively ours to execute.
-        due_schedules = await self._store.claim_due_schedules(
-            before_time=now, tenant_id=tenant_id, limit=limit
-        )
+        due_schedules = await self._store.claim_due_schedules(before_time=now, tenant_id=tenant_id, limit=limit)
         triggered: list[WorkflowSchedule] = []
 
         for sch in due_schedules:
@@ -549,9 +534,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
 
         return triggered
 
-    async def _execute_claimed_schedule(
-        self, sch: WorkflowSchedule, now: datetime.datetime
-    ) -> WorkflowSchedule | None:
+    async def _execute_claimed_schedule(self, sch: WorkflowSchedule, now: datetime.datetime) -> WorkflowSchedule | None:
         """Start the workflow instance for one already-claimed (TRIGGERING)
         due schedule and record the tick. Shared by `tick()` and
         `hydrate_and_recover_schedules()` (M5-A5) — the latter must drive
@@ -661,9 +644,7 @@ class DurableWorkflowScheduler(ISchedulerProvider):
             return max(1, count)
         return 1
 
-    async def hydrate_and_recover_schedules(
-        self, tenant_id: str | None = None
-    ) -> list[WorkflowSchedule]:
+    async def hydrate_and_recover_schedules(self, tenant_id: str | None = None) -> list[WorkflowSchedule]:
         """Recover active schedules upon engine boot and evaluate missed execution windows."""
         now = datetime.datetime.now(UTC)
         logger.info("Hydrating and recovering durable workflow schedules (Tenant: %s)...", tenant_id or "ALL")

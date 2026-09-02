@@ -13,7 +13,7 @@ disturbance to lineage/version bookkeeping on success.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -33,7 +33,7 @@ from kortex.engines.knowledge.models import (
     KnowledgeTrustState,
 )
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _record(
@@ -296,7 +296,9 @@ async def test_supersede_enforces_tenant_isolation() -> None:
     manager = KnowledgeLineageManager()
     await manager.create_record(_record("rec-1", "v1", tenant_id="tenant-a"))
     with pytest.raises(KnowledgeRecordNotFoundError):
-        await manager.supersede("rec-1", "tenant-b", _record("rec-1", "v2", tenant_id="tenant-b", parent_version_id="v1"))
+        await manager.supersede(
+            "rec-1", "tenant-b", _record("rec-1", "v2", tenant_id="tenant-b", parent_version_id="v1")
+        )
 
 
 # -- promote (Milestone M6: USER-only trust-state promotion) ----------------------
@@ -359,7 +361,9 @@ async def test_promote_raises_for_missing_record() -> None:
 @pytest.mark.asyncio
 async def test_promote_enforces_tenant_isolation() -> None:
     manager = KnowledgeLineageManager()
-    await manager.create_record(_record("rec-1", "v1", tenant_id="tenant-a", trust_state=KnowledgeTrustState.AI_CANDIDATE))
+    await manager.create_record(
+        _record("rec-1", "v1", tenant_id="tenant-a", trust_state=KnowledgeTrustState.AI_CANDIDATE)
+    )
 
     with pytest.raises(KnowledgeRecordNotFoundError):
         await manager.promote(
@@ -407,9 +411,7 @@ async def test_promote_rejects_already_confirmed_record() -> None:
     record must be rejected, not silently accepted as a no-op."""
     manager = KnowledgeLineageManager()
     await manager.create_record(_record("rec-1", "v1", trust_state=KnowledgeTrustState.AI_CANDIDATE))
-    await manager.promote(
-        "rec-1", "tenant-a", "actor-1", KnowledgeActorType.USER, KnowledgeTrustState.HUMAN_CONFIRMED
-    )
+    await manager.promote("rec-1", "tenant-a", "actor-1", KnowledgeActorType.USER, KnowledgeTrustState.HUMAN_CONFIRMED)
 
     with pytest.raises(KnowledgeInvalidTrustTransitionError):
         await manager.promote(
@@ -456,9 +458,7 @@ async def test_promote_never_mutates_the_original_caller_object() -> None:
     original = _record("rec-1", "v1", trust_state=KnowledgeTrustState.AI_CANDIDATE)
     await manager.create_record(original)
 
-    await manager.promote(
-        "rec-1", "tenant-a", "actor-1", KnowledgeActorType.USER, KnowledgeTrustState.HUMAN_CONFIRMED
-    )
+    await manager.promote("rec-1", "tenant-a", "actor-1", KnowledgeActorType.USER, KnowledgeTrustState.HUMAN_CONFIRMED)
 
     assert original.trust_state == KnowledgeTrustState.AI_CANDIDATE  # caller's own object, unchanged
     current = await manager.get_current("rec-1", "tenant-a")
@@ -487,9 +487,7 @@ async def test_create_record_and_supersede_accept_confirmed_trust_state_directly
     not a silent, undiscovered bypass."""
     manager = KnowledgeLineageManager()
 
-    created = await manager.create_record(
-        _record("rec-1", "v1", trust_state=KnowledgeTrustState.HUMAN_CONFIRMED)
-    )
+    created = await manager.create_record(_record("rec-1", "v1", trust_state=KnowledgeTrustState.HUMAN_CONFIRMED))
     assert created.trust_state == KnowledgeTrustState.HUMAN_CONFIRMED
 
     superseded = await manager.supersede(

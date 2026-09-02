@@ -3,6 +3,7 @@ Unit tests for RecipeDSL structural model and validation.
 """
 
 import pytest
+
 from kortex.engines.recipe.dsl import RecipeDSL
 from kortex.engines.recipe.exceptions import RecipeValidationError
 from kortex.engines.recipe.models import RecipeManifest, RecipeStep

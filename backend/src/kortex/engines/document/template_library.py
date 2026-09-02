@@ -8,7 +8,7 @@ and validation in accordance with Section 7 of the Document Engine Implementatio
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from kortex.engines.document.exceptions import DocumentTemplateError
 from kortex.engines.document.models import AdapterCapability, TemplateSchema
@@ -189,18 +189,14 @@ class TemplateLibrary:
         if version is not None:
             version = version.strip()
             if version not in self._templates[template_id]:
-                raise DocumentTemplateError(
-                    f"Template '{template_id}' version '{version}' not found."
-                )
+                raise DocumentTemplateError(f"Template '{template_id}' version '{version}' not found.")
             return self._templates[template_id][version]
 
         versions = list(self._templates[template_id].keys())
         sorted_versions = sorted(versions, key=lambda v: parse_semver(v))
         return self._templates[template_id][sorted_versions[-1]]
 
-    async def register_template(
-        self, schema: TemplateSchema, tenant_id: str | None = None
-    ) -> TemplateSchema:
+    async def register_template(self, schema: TemplateSchema, tenant_id: str | None = None) -> TemplateSchema:
         """Register a new TemplateSchema in the library after validation.
 
         When a repository is configured, registration persists through it and the
@@ -224,18 +220,13 @@ class TemplateLibrary:
         version = schema.version.strip()
         resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
 
-        is_duplicate_in_memory = (
-            template_id in self._templates and version in self._templates[template_id]
-        )
+        is_duplicate_in_memory = template_id in self._templates and version in self._templates[template_id]
 
         if self._repository is not None:
-            existing = await self._repository.get_template(
-                template_id, version=version, tenant_id=resolved_tenant_id
-            )
+            existing = await self._repository.get_template(template_id, version=version, tenant_id=resolved_tenant_id)
             if existing is not None or is_duplicate_in_memory:
                 raise DocumentTemplateError(
-                    f"Duplicate template registration: '{template_id}' version '{version}' "
-                    f"is already registered."
+                    f"Duplicate template registration: '{template_id}' version '{version}' is already registered."
                 )
             saved = await self._repository.save_template(schema, tenant_id=resolved_tenant_id)
             await self._invalidate_template_cache(template_id, resolved_tenant_id)
@@ -253,9 +244,7 @@ class TemplateLibrary:
         await self._invalidate_template_cache(template_id, resolved_tenant_id)
         return schema
 
-    async def install_template(
-        self, schema: TemplateSchema, tenant_id: str | None = None
-    ) -> bool:
+    async def install_template(self, schema: TemplateSchema, tenant_id: str | None = None) -> bool:
         """Install a template into the library (ITemplateLibrary protocol method).
 
         Args:
@@ -317,18 +306,14 @@ class TemplateLibrary:
 
         return resolved
 
-    async def _resolve_template(
-        self, template_id: str, version: str | None, tenant_id: str
-    ) -> TemplateSchema:
+    async def _resolve_template(self, template_id: str, version: str | None, tenant_id: str) -> TemplateSchema:
         """Resolve a TemplateSchema through the repository-first / in-memory-fallback chain.
 
         Extracted from get_template so the Template Schema Cache can wrap this unchanged
         resolution logic without altering its behavior.
         """
         if self._repository is not None:
-            result = await self._repository.get_template(
-                template_id, version=version, tenant_id=tenant_id
-            )
+            result = await self._repository.get_template(template_id, version=version, tenant_id=tenant_id)
             if result is not None:
                 return result
             return self._get_from_memory(template_id, version=version)
@@ -353,9 +338,7 @@ class TemplateLibrary:
         """
         return await self.get_template(template_id, version=version, tenant_id=tenant_id)
 
-    async def get_latest_version(
-        self, template_id: str, tenant_id: str | None = None
-    ) -> TemplateSchema:
+    async def get_latest_version(self, template_id: str, tenant_id: str | None = None) -> TemplateSchema:
         """Retrieve the latest version of a TemplateSchema based on SemVer comparison.
 
         Args:
@@ -370,9 +353,7 @@ class TemplateLibrary:
         """
         return await self.get_template(template_id, version=None, tenant_id=tenant_id)
 
-    async def update_template(
-        self, schema: TemplateSchema, tenant_id: str | None = None
-    ) -> TemplateSchema:
+    async def update_template(self, schema: TemplateSchema, tenant_id: str | None = None) -> TemplateSchema:
         """Update an existing template schema or register a new version.
 
         Note: Registered versions are immutable. If the exact template_id + version
@@ -393,9 +374,7 @@ class TemplateLibrary:
         resolved_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
 
         if self._repository is not None:
-            existing = await self._repository.get_template(
-                template_id, version=version, tenant_id=resolved_tenant_id
-            )
+            existing = await self._repository.get_template(template_id, version=version, tenant_id=resolved_tenant_id)
             if existing is not None:
                 raise DocumentTemplateError(
                     f"Cannot update immutable registered template '{template_id}' version "
@@ -403,7 +382,8 @@ class TemplateLibrary:
                 )
         elif template_id in self._templates and version in self._templates[template_id]:
             raise DocumentTemplateError(
-                f"Cannot update immutable registered template '{template_id}' version '{version}'. Register a new version instead."
+                f"Cannot update immutable registered template '{template_id}' version '{version}'. Register a new "
+                f"version instead."
             )
 
         return await self.register_template(schema, tenant_id=tenant_id)
@@ -442,16 +422,12 @@ class TemplateLibrary:
                     raise DocumentTemplateError(
                         f"Cannot delete: Template '{template_id}' version '{version}' not found."
                     )
-                await self._repository.delete_template(
-                    template_id, version, tenant_id=resolved_tenant_id
-                )
+                await self._repository.delete_template(template_id, version, tenant_id=resolved_tenant_id)
                 await self._invalidate_template_cache(template_id, resolved_tenant_id)
                 return True
 
             for match in matches:
-                await self._repository.delete_template(
-                    template_id, match.version, tenant_id=resolved_tenant_id
-                )
+                await self._repository.delete_template(template_id, match.version, tenant_id=resolved_tenant_id)
             await self._invalidate_template_cache(template_id, resolved_tenant_id)
             return True
 
@@ -461,9 +437,7 @@ class TemplateLibrary:
         if version is not None:
             version = version.strip()
             if version not in self._templates[template_id]:
-                raise DocumentTemplateError(
-                    f"Cannot delete: Template '{template_id}' version '{version}' not found."
-                )
+                raise DocumentTemplateError(f"Cannot delete: Template '{template_id}' version '{version}' not found.")
             del self._templates[template_id][version]
             if not self._templates[template_id]:
                 del self._templates[template_id]
@@ -483,9 +457,7 @@ class TemplateLibrary:
         """Alias for delete_template."""
         return await self.delete_template(template_id, version=version, tenant_id=tenant_id)
 
-    async def _get_latest_candidates(
-        self, tenant_id: str | None = None
-    ) -> list[TemplateSchema]:
+    async def _get_latest_candidates(self, tenant_id: str | None = None) -> list[TemplateSchema]:
         """Return the latest version of every known template_id across repository and memory.
 
         When a repository is configured, persisted templates take precedence per template_id;
@@ -557,9 +529,7 @@ class TemplateLibrary:
 
         return result
 
-    async def search_by_namespace(
-        self, namespace: str, tenant_id: str | None = None
-    ) -> list[TemplateSchema]:
+    async def search_by_namespace(self, namespace: str, tenant_id: str | None = None) -> list[TemplateSchema]:
         """Retrieve all latest templates belonging to a specific namespace.
 
         Args:
@@ -571,9 +541,7 @@ class TemplateLibrary:
         """
         return await self.list_templates(namespace=namespace, tenant_id=tenant_id)
 
-    async def get_by_namespace(
-        self, namespace: str, tenant_id: str | None = None
-    ) -> list[TemplateSchema]:
+    async def get_by_namespace(self, namespace: str, tenant_id: str | None = None) -> list[TemplateSchema]:
         """Alias for search_by_namespace."""
         return await self.search_by_namespace(namespace, tenant_id=tenant_id)
 
@@ -632,9 +600,7 @@ class TemplateLibrary:
 
             if tags:
                 template_tags = latest.schema_definition.get("tags", [])
-                if not isinstance(template_tags, list) or not all(
-                    t in template_tags for t in tags
-                ):
+                if not isinstance(template_tags, list) or not all(t in template_tags for t in tags):
                     continue
 
             result.append(latest)

@@ -2,7 +2,8 @@
 
 This module implements DocumentOperationProfileManager, which manages discovery,
 registration, validation, versioning, template resolution, and capability validation for
-declarative Document Operation Profiles, in accordance with the Document Engine Implementation Specification (Version 3.0.0).
+declarative Document Operation Profiles, in accordance with the Document Engine Implementation Specification (Version
+3.0.0).
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ class DocumentOperationProfileManager:
         self,
         template_library: TemplateLibrary | None = None,
         adapter_registry: DocumentAdapterRegistry | None = None,
-        repository: "IDocumentRepository | None" = None,
+        repository: IDocumentRepository | None = None,
         tenant_id: str = "default",
     ) -> None:
         """Initialize DocumentOperationProfileManager with optional dependencies.
@@ -80,7 +81,7 @@ class DocumentOperationProfileManager:
         return self._adapter_registry
 
     @property
-    def repository(self) -> "IDocumentRepository | None":
+    def repository(self) -> IDocumentRepository | None:
         """Return the configured IDocumentRepository, or None if in-memory mode."""
         return self._repository
 
@@ -164,9 +165,7 @@ class DocumentOperationProfileManager:
                 f"is not installed in TemplateLibrary."
             ) from err
 
-    def _validate_pipeline_definition(
-        self, profile_id: str, pipeline: AdapterPipelineDefinition
-    ) -> None:
+    def _validate_pipeline_definition(self, profile_id: str, pipeline: AdapterPipelineDefinition) -> None:
         """Validate pipeline definition associated with an operation profile."""
         if not pipeline.pipeline_id or not pipeline.pipeline_id.strip():
             raise DocumentOperationError(f"Pipeline definition in profile '{profile_id}' missing pipeline_id.")
@@ -186,9 +185,7 @@ class DocumentOperationProfileManager:
             seen_stages.add(stage_id)
 
             if not stage.adapter_id or not stage.adapter_id.strip():
-                raise DocumentOperationError(
-                    f"Stage '{stage_id}' in profile '{profile_id}' missing adapter_id."
-                )
+                raise DocumentOperationError(f"Stage '{stage_id}' in profile '{profile_id}' missing adapter_id.")
 
             # Validate adapter in registry if configured
             if self._adapter_registry is not None:
@@ -196,16 +193,16 @@ class DocumentOperationProfileManager:
                     adapter = self._adapter_registry.get_adapter_by_id(stage.adapter_id)
                     if not adapter.supports_capability(stage.required_capability):
                         raise DocumentOperationError(
-                            f"Adapter '{stage.adapter_id}' in stage '{stage_id}' does not support required capability '{stage.required_capability.value}'."
+                            f"Adapter '{stage.adapter_id}' in stage '{stage_id}' does not support required capability "
+                            f"'{stage.required_capability.value}'."
                         )
                 except AdapterNotFoundError as err:
                     raise DocumentOperationError(
-                        f"Adapter '{stage.adapter_id}' referenced in stage '{stage_id}' of profile '{profile_id}' is not registered."
+                        f"Adapter '{stage.adapter_id}' referenced in stage '{stage_id}' of profile '{profile_id}' is "
+                        f"not registered."
                     ) from err
 
-    async def register_profile(
-        self, profile: DocumentOperationProfile, tenant_id: str | None = None
-    ) -> None:
+    async def register_profile(self, profile: DocumentOperationProfile, tenant_id: str | None = None) -> None:
         """Register a DocumentOperationProfile (IDocumentOperationProfileManager protocol).
 
         When a repository is configured, registration persists through it; otherwise it is
@@ -231,8 +228,7 @@ class DocumentOperationProfileManager:
             )
             if existing is not None:
                 raise DocumentOperationError(
-                    f"Duplicate profile registration: '{profile_id}' version '{version}' "
-                    f"is already registered."
+                    f"Duplicate profile registration: '{profile_id}' version '{version}' is already registered."
                 )
             await self._repository.save_operation_profile(profile, tenant_id=resolved_tenant_id)
             return
@@ -301,9 +297,7 @@ class DocumentOperationProfileManager:
                 )
 
             for match in matches:
-                await self._repository.delete_operation_profile(
-                    profile_id, match.version, tenant_id=resolved_tenant_id
-                )
+                await self._repository.delete_operation_profile(profile_id, match.version, tenant_id=resolved_tenant_id)
             return True
 
         if profile_id not in self._profiles or not self._profiles[profile_id]:
@@ -384,9 +378,7 @@ class DocumentOperationProfileManager:
         """
         return await self.get_profile(profile_id, version=version, tenant_id=tenant_id)
 
-    async def get_latest_version(
-        self, profile_id: str, tenant_id: str | None = None
-    ) -> DocumentOperationProfile:
+    async def get_latest_version(self, profile_id: str, tenant_id: str | None = None) -> DocumentOperationProfile:
         """Retrieve the latest registered version of a profile using SemVer resolution.
 
         Prioritizes stable versions over pre-release versions.
@@ -420,9 +412,7 @@ class DocumentOperationProfileManager:
         latest_ver = sorted_versions[-1]
         return self._profiles[profile_id][latest_ver]
 
-    async def _get_latest_candidates(
-        self, tenant_id: str | None = None
-    ) -> list[DocumentOperationProfile]:
+    async def _get_latest_candidates(self, tenant_id: str | None = None) -> list[DocumentOperationProfile]:
         """Return the latest version of every persisted profile_id for tenant_id.
 
         Repository-mode only helper; standalone in-memory mode iterates self._profiles
@@ -442,9 +432,7 @@ class DocumentOperationProfileManager:
         by_id: dict[str, list[DocumentOperationProfile]] = {}
         for p in persisted:
             by_id.setdefault(p.id, []).append(p)
-        return [
-            max(versions, key=lambda p: parse_semver(p.version)) for versions in by_id.values()
-        ]
+        return [max(versions, key=lambda p: parse_semver(p.version)) for versions in by_id.values()]
 
     async def list_profiles(self, tenant_id: str | None = None) -> list[DocumentOperationProfile]:
         """List latest versions of all registered DocumentOperationProfiles.
@@ -466,9 +454,7 @@ class DocumentOperationProfileManager:
             result.append(latest)
         return result
 
-    async def list_all_profile_versions(
-        self, tenant_id: str | None = None
-    ) -> list[DocumentOperationProfile]:
+    async def list_all_profile_versions(self, tenant_id: str | None = None) -> list[DocumentOperationProfile]:
         """List all versions of all registered DocumentOperationProfiles.
 
         Args:
@@ -483,8 +469,8 @@ class DocumentOperationProfileManager:
             return await self._repository.list_operation_profiles(tenant_id=resolved_tenant_id)
 
         result: list[DocumentOperationProfile] = []
-        for profile_id, versions_map in self._profiles.items():
-            for ver_str, profile in versions_map.items():
+        for _profile_id, versions_map in self._profiles.items():
+            for _ver_str, profile in versions_map.items():
                 result.append(profile)
         return result
 
@@ -515,9 +501,7 @@ class DocumentOperationProfileManager:
 
         return result
 
-    async def find_by_namespace(
-        self, namespace: str, tenant_id: str | None = None
-    ) -> list[DocumentOperationProfile]:
+    async def find_by_namespace(self, namespace: str, tenant_id: str | None = None) -> list[DocumentOperationProfile]:
         """Find all registered profiles belonging to a specific namespace.
 
         Args:

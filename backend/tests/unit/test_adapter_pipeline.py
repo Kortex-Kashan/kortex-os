@@ -17,12 +17,12 @@ from kortex.engines.document.adapter_pipeline import (
     evaluate_declarative_condition,
 )
 from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
+from kortex.engines.document.adapters.macro_adapter import MacroAdapter
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.exceptions import (
     AdapterNotFoundError,
     DocumentOperationError,
 )
-from kortex.engines.document.adapters.macro_adapter import MacroAdapter
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -31,7 +31,6 @@ from kortex.engines.document.models import (
     DocumentOperationProfile,
     DocumentOperationType,
     OperationRequest,
-    PipelineExecutionMode,
     PipelineStage,
     TemplateSchema,
 )
@@ -237,9 +236,15 @@ async def test_valid_multi_stage_sequential_pipeline() -> None:
         pipeline_id="pipe-multi",
         profile_id="prof-multi",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s3", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM
+            ),
+            PipelineStage(
+                stage_id="s2", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s3", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM
+            ),
         ],
     )
     context = BindingContext(context_id="c2")
@@ -274,7 +279,9 @@ async def test_correct_stage_ordering_and_data_flow() -> None:
         def metadata(self) -> AdapterMetadata:
             return self._meta
 
-        async def execute(self, operation_type: DocumentOperationType, binding_context: BindingContext, options: dict[str, Any]) -> bytes:
+        async def execute(
+            self, operation_type: DocumentOperationType, binding_context: BindingContext, options: dict[str, Any]
+        ) -> bytes:
             execution_order.append(self.name)
             prev = options.get("input_bytes", b"")
             return prev + f"->{self.name}".encode()
@@ -312,7 +319,9 @@ async def test_unknown_adapter_rejection() -> None:
     definition = AdapterPipelineDefinition(
         pipeline_id="pipe-err",
         profile_id="p",
-        stages=[PipelineStage(stage_id="s1", adapter_id="unknown.adapter", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(stage_id="s1", adapter_id="unknown.adapter", required_capability=AdapterCapability.GENERATE)
+        ],
     )
 
     with pytest.raises(AdapterNotFoundError, match="not found in registry"):
@@ -330,7 +339,11 @@ async def test_unsupported_capability_rejection() -> None:
     definition = AdapterPipelineDefinition(
         pipeline_id="pipe-cap-err",
         profile_id="p",
-        stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.OCR)],
+        stages=[
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.OCR
+            )
+        ],
     )
 
     with pytest.raises(DocumentOperationError, match="does not support required capability 'OCR'"):
@@ -361,14 +374,18 @@ async def test_invalid_pipeline_definition_rejection() -> None:
     with pytest.raises(DocumentOperationError, match="Pipeline stage missing stage_id"):
         executor.validate_pipeline_definition(
             AdapterPipelineDefinition(
-                pipeline_id="p1", profile_id="pr", stages=[PipelineStage(stage_id="", adapter_id="a", required_capability=AdapterCapability.GENERATE)]
+                pipeline_id="p1",
+                profile_id="pr",
+                stages=[PipelineStage(stage_id="", adapter_id="a", required_capability=AdapterCapability.GENERATE)],
             )
         )
 
     with pytest.raises(DocumentOperationError, match="missing adapter_id"):
         executor.validate_pipeline_definition(
             AdapterPipelineDefinition(
-                pipeline_id="p1", profile_id="pr", stages=[PipelineStage(stage_id="s1", adapter_id="", required_capability=AdapterCapability.GENERATE)]
+                pipeline_id="p1",
+                profile_id="pr",
+                stages=[PipelineStage(stage_id="s1", adapter_id="", required_capability=AdapterCapability.GENERATE)],
             )
         )
 
@@ -385,8 +402,12 @@ async def test_duplicate_stage_id_rejection() -> None:
         pipeline_id="pipe-dup-stage",
         profile_id="p",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
         ],
     )
 
@@ -410,9 +431,18 @@ async def test_required_stage_failure_stops_execution() -> None:
         pipeline_id="pipe-fail",
         profile_id="p",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.failing", required_capability=AdapterCapability.GENERATE, is_optional=False),
-            PipelineStage(stage_id="s3", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s2",
+                adapter_id="kortex.adapter.failing",
+                required_capability=AdapterCapability.GENERATE,
+                is_optional=False,
+            ),
+            PipelineStage(
+                stage_id="s3", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM
+            ),
         ],
     )
 
@@ -440,9 +470,18 @@ async def test_optional_stage_failure_behavior() -> None:
         pipeline_id="pipe-opt-fail",
         profile_id="p",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.failing", required_capability=AdapterCapability.GENERATE, is_optional=True),
-            PipelineStage(stage_id="s3", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s2",
+                adapter_id="kortex.adapter.failing",
+                required_capability=AdapterCapability.GENERATE,
+                is_optional=True,
+            ),
+            PipelineStage(
+                stage_id="s3", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM
+            ),
         ],
     )
 
@@ -469,7 +508,9 @@ async def test_conditional_stage_behavior() -> None:
         pipeline_id="pipe-cond",
         profile_id="p",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
             PipelineStage(
                 stage_id="s2",
                 adapter_id="kortex.adapter.watermark",
@@ -508,9 +549,15 @@ async def test_multiple_adapters_and_reused_adapter_in_stages() -> None:
         pipeline_id="pipe-reuse",
         profile_id="p",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM),
-            PipelineStage(stage_id="s3", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.CONVERT),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s2", adapter_id="kortex.adapter.watermark", required_capability=AdapterCapability.TRANSFORM
+            ),
+            PipelineStage(
+                stage_id="s3", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.CONVERT
+            ),
         ],
     )
 
@@ -530,7 +577,11 @@ async def test_stage_and_pipeline_result_structures() -> None:
     definition = AdapterPipelineDefinition(
         pipeline_id="pipe-res",
         profile_id="prof-res",
-        stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            )
+        ],
     )
 
     res = await executor.execute_pipeline_definition(definition, BindingContext(context_id="c"))
@@ -560,7 +611,11 @@ async def test_deterministic_execution_and_immutability() -> None:
     definition = AdapterPipelineDefinition(
         pipeline_id="pipe-immut",
         profile_id="p",
-        stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            )
+        ],
     )
     context = BindingContext(context_id="c-immut", data={"val": 100})
 
@@ -613,7 +668,9 @@ async def test_empty_registry_behavior() -> None:
     definition = AdapterPipelineDefinition(
         pipeline_id="pipe-empty-reg",
         profile_id="p",
-        stages=[PipelineStage(stage_id="s1", adapter_id="missing.adapter", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(stage_id="s1", adapter_id="missing.adapter", required_capability=AdapterCapability.GENERATE)
+        ],
     )
 
     with pytest.raises(AdapterNotFoundError):
@@ -642,7 +699,11 @@ async def test_performance_sanity_test_overhead() -> None:
     definition = AdapterPipelineDefinition(
         pipeline_id="pipe-perf",
         profile_id="p",
-        stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            )
+        ],
     )
 
     start = time.perf_counter()
@@ -661,7 +722,9 @@ async def test_execute_pipeline_protocol_facade() -> None:
     registry.register_adapter(pdf)
 
     executor = AdapterPipelineExecutor(registry=registry)
-    req = OperationRequest(request_id="req-100", profile_id="profile-pdf", binding_context=BindingContext(context_id="c-100"))
+    req = OperationRequest(
+        request_id="req-100", profile_id="profile-pdf", binding_context=BindingContext(context_id="c-100")
+    )
 
     res = await executor.execute_pipeline("profile-pdf", req)
     assert res.status == "COMPLETED"
@@ -669,7 +732,12 @@ async def test_execute_pipeline_protocol_facade() -> None:
 
     # Test error handling when request_id is missing or request is None
     with pytest.raises(DocumentOperationError, match="Invalid OperationRequest"):
-        await executor.execute_pipeline("profile-pdf", OperationRequest(request_id="", profile_id="profile-pdf", binding_context=BindingContext(context_id="c-empty")))
+        await executor.execute_pipeline(
+            "profile-pdf",
+            OperationRequest(
+                request_id="", profile_id="profile-pdf", binding_context=BindingContext(context_id="c-empty")
+            ),
+        )
 
     with pytest.raises(DocumentOperationError, match="Invalid OperationRequest"):
         await executor.execute_pipeline("profile-pdf", None)  # type: ignore[arg-type]
@@ -880,8 +948,12 @@ async def test_pipeline_recovery_checkpoints_created_on_success() -> None:
         pipeline_id="pipe-chk",
         profile_id="p-chk",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s2", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM
+            ),
         ],
     )
 
@@ -919,7 +991,9 @@ async def test_pipeline_recovery_retries_transient_failure_and_succeeds() -> Non
         pipeline_id="pipe-retry",
         profile_id="p-retry",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.transient", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.transient", required_capability=AdapterCapability.GENERATE
+            ),
         ],
     )
 
@@ -957,8 +1031,12 @@ async def test_pipeline_recovery_exhausts_retries_and_rolls_back() -> None:
         pipeline_id="pipe-exhaust",
         profile_id="p-exhaust",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.fail", required_capability=AdapterCapability.GENERATE),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s2", adapter_id="kortex.adapter.fail", required_capability=AdapterCapability.GENERATE
+            ),
         ],
     )
 
@@ -997,9 +1075,18 @@ async def test_pipeline_recovery_optional_stage_failure_isolated() -> None:
         pipeline_id="pipe-opt",
         profile_id="p-opt",
         stages=[
-            PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-            PipelineStage(stage_id="s2", adapter_id="kortex.adapter.opt_fail", required_capability=AdapterCapability.GENERATE, is_optional=True),
-            PipelineStage(stage_id="s3", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM),
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            ),
+            PipelineStage(
+                stage_id="s2",
+                adapter_id="kortex.adapter.opt_fail",
+                required_capability=AdapterCapability.GENERATE,
+                is_optional=True,
+            ),
+            PipelineStage(
+                stage_id="s3", adapter_id="kortex.adapter.normalizer", required_capability=AdapterCapability.TRANSFORM
+            ),
         ],
     )
 
@@ -1019,4 +1106,3 @@ async def test_pipeline_recovery_optional_stage_failure_isolated() -> None:
     failures = await recovery.get_failures("req-opt-1")
     assert len(failures) == 1
     assert failures[0].stage_id == "s2"
-

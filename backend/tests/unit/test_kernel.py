@@ -2,12 +2,13 @@
 Unit tests for Kernel Runtime.
 """
 
-import pytest
-from typing import Dict, Any, List
+from typing import Any
 
-from kortex.core.kernel import Kernel, KernelState
+import pytest
+
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.exceptions import KernelStateError, ResourceAlreadyExistsError, ResourceNotFoundError
+from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.event.engine import Event
 
 
@@ -28,7 +29,7 @@ class MockCustomEngine(BaseEngine):
         self.boot_called = True
         self._set_state(EngineState.RUNNING)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"engine": self._name, "status": "healthy"}
 
     async def stop(self) -> None:
@@ -78,7 +79,7 @@ async def test_kernel_boot_and_shutdown_lifecycle() -> None:
     custom = MockCustomEngine("worker")
     kernel.register_engine(custom)
 
-    events_received: List[str] = []
+    events_received: list[str] = []
 
     def on_startup(event: Event) -> None:
         events_received.append(event.topic)

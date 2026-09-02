@@ -54,13 +54,13 @@ _TEST_SIGNING_KEY = b"\xbb" * 32
 class _CounterSpy:
     """Spy callable that records invocations and returns customizable results."""
 
-    def __init__(self, return_value: Any = None, sleep_s: float = 0.0) -> None:  # noqa: ANN401
+    def __init__(self, return_value: Any = None, sleep_s: float = 0.0) -> None:
         self.call_count = 0
         self.invocations: list[dict[str, Any]] = []
         self.return_value = return_value or {"status": "ok"}
         self.sleep_s = sleep_s
 
-    async def __call__(self, **kwargs: Any) -> Any:  # noqa: ANN401
+    async def __call__(self, **kwargs: Any) -> Any:
         self.call_count += 1
         self.invocations.append(dict(kwargs))
         if self.sleep_s > 0:
@@ -197,7 +197,7 @@ async def test_transport_propagation_to_capability_request(tmp_path: Path) -> No
 
     captured_requests: list[CapabilityRequest] = []
 
-    async def _inspecting_handler(**kwargs: Any) -> dict[str, str]:  # noqa: ANN401
+    async def _inspecting_handler(**kwargs: Any) -> dict[str, str]:
         return {"result": "ok"}
 
     kernel.register_capability(
@@ -218,7 +218,7 @@ async def test_transport_propagation_to_capability_request(tmp_path: Path) -> No
     # Intercept dispatch to inspect the created CapabilityRequest
     original_dispatch = kernel._dispatcher.dispatch
 
-    async def _intercept(request: CapabilityRequest) -> Any:  # noqa: ANN401
+    async def _intercept(request: CapabilityRequest) -> Any:
         captured_requests.append(request)
         return await original_dispatch(request)
 
@@ -494,7 +494,7 @@ async def test_concurrent_fresh_key_claims_never_raise_unhandled_error(tmp_path:
     key = f"fresh-race-key-{uuid.uuid4().hex[:8]}"
     concurrency = 8
 
-    async def _attempt() -> Any:  # noqa: ANN401
+    async def _attempt() -> Any:
         request = CapabilityRequest(
             capability_name="test.race.fresh_claim",
             idempotency_key=key,
@@ -505,9 +505,7 @@ async def test_concurrent_fresh_key_claims_never_raise_unhandled_error(tmp_path:
 
     results = await asyncio.gather(*(_attempt() for _ in range(concurrency)), return_exceptions=True)
 
-    unexpected = [
-        r for r in results if isinstance(r, BaseException) and not isinstance(r, ConcurrentExecutionError)
-    ]
+    unexpected = [r for r in results if isinstance(r, BaseException) and not isinstance(r, ConcurrentExecutionError)]
     assert unexpected == [], f"Unhandled exception(s) from concurrent claim race: {unexpected!r}"
 
     successes = [r for r in results if not isinstance(r, BaseException)]
@@ -978,7 +976,7 @@ async def test_transactional_outbox_staging_and_dispatch(tmp_path: Path) -> None
 
     received_events: list[dict[str, Any]] = []
 
-    async def _on_order_created(event: Any) -> None:  # noqa: ANN401
+    async def _on_order_created(event: Any) -> None:
         received_events.append(event.payload)
 
     event_engine.subscribe("order.created", _on_order_created)

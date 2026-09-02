@@ -7,8 +7,8 @@ packager, and catalog registry manager.
 
 from kortex.engines.recipe.engine import RecipeEngine
 from kortex.engines.recipe.exceptions import (
-    RecipeCompilationError,
     RecipeCompatibilityError,
+    RecipeCompilationError,
     RecipeDependencyError,
     RecipeError,
     RecipeInstallationError,
@@ -20,15 +20,15 @@ from kortex.engines.recipe.exceptions import (
 )
 
 __all__ = [
+    "RecipeCompatibilityError",
+    "RecipeCompilationError",
+    "RecipeDependencyError",
     "RecipeEngine",
     "RecipeError",
-    "RecipeValidationError",
-    "RecipeCompilationError",
-    "RecipeCompatibilityError",
-    "RecipePermissionError",
-    "RecipeDependencyError",
     "RecipeInstallationError",
     "RecipePackageError",
+    "RecipePermissionError",
     "RecipeSignatureError",
+    "RecipeValidationError",
     "RecipeVersionError",
 ]

@@ -47,7 +47,8 @@ constructor injection, keeping this module fully testable without a Kernel.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Awaitable, Callable, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

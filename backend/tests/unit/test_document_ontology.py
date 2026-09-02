@@ -31,9 +31,7 @@ def _payslip_ontology(version: str = "1.0.0") -> DocumentOntology:
             OntologyField(name="gross_salary", field_type=OntologyFieldType.NUMBER),
             OntologyField(name="total_deductions", field_type=OntologyFieldType.NUMBER),
             OntologyField(name="net_salary", field_type=OntologyFieldType.NUMBER),
-            OntologyField(
-                name="notes", field_type=OntologyFieldType.STRING, required=False
-            ),
+            OntologyField(name="notes", field_type=OntologyFieldType.STRING, required=False),
         ],
         child_structures={
             "employee_info": [
@@ -64,21 +62,13 @@ def test_apply_invariant_operator_sum_equals() -> None:
 
 def test_apply_invariant_operator_difference_equals() -> None:
     """DIFFERENCE_EQUALS verification holds when target equals operand[0] - sum(operand[1:])."""
-    assert (
-        apply_invariant_operator(InvariantOperator.DIFFERENCE_EQUALS, 80.0, [100.0, 20.0])
-        is True
-    )
-    assert (
-        apply_invariant_operator(InvariantOperator.DIFFERENCE_EQUALS, 79.0, [100.0, 20.0])
-        is False
-    )
+    assert apply_invariant_operator(InvariantOperator.DIFFERENCE_EQUALS, 80.0, [100.0, 20.0]) is True
+    assert apply_invariant_operator(InvariantOperator.DIFFERENCE_EQUALS, 79.0, [100.0, 20.0]) is False
 
 
 def test_apply_invariant_operator_tolerance() -> None:
     """Floating-point tolerance absorbs negligible rounding differences."""
-    assert apply_invariant_operator(
-        InvariantOperator.SUM_EQUALS, 30.0000001, [10.0, 20.0], tolerance=1e-4
-    ) is True
+    assert apply_invariant_operator(InvariantOperator.SUM_EQUALS, 30.0000001, [10.0, 20.0], tolerance=1e-4) is True
 
 
 def test_compute_invariant_target_sum_equals() -> None:
@@ -196,9 +186,7 @@ def test_resolve_field_dotted_path_traversal() -> None:
         ontology_id="ontology.nested.v1",
         entity_name="Nested",
         version="1.0.0",
-        fields=[
-            OntologyField(name="summary.net_salary", field_type=OntologyFieldType.NUMBER)
-        ],
+        fields=[OntologyField(name="summary.net_salary", field_type=OntologyFieldType.NUMBER)],
     )
     data = {"summary": {"net_salary": 800}}
     report = ontology.validate_structure(data)
@@ -319,7 +307,7 @@ async def test_registry_get_specific_version_not_found_raises() -> None:
     """Requesting a registered entity's unregistered version raises DocumentTemplateError."""
     registry = OntologyRegistry()
     await registry.register_ontology(_payslip_ontology(version="1.0.0"))
-    with pytest.raises(DocumentTemplateError, match="version '2.0.0' not found"):
+    with pytest.raises(DocumentTemplateError, match=r"version '2.0.0' not found"):
         await registry.get_ontology("Payslip", version="2.0.0")
 
 

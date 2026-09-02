@@ -2,7 +2,6 @@
 Unit tests for KORTEX Recipe Engine Packager (.kortex-recipe).
 """
 
-import pytest
 from kortex.engines.recipe.models import RecipeManifest
 from kortex.engines.recipe.packager import RecipePackager
 

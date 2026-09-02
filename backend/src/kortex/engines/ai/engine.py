@@ -53,6 +53,7 @@ from kortex.engines.ai.exceptions import (
     AIProviderTimeoutError,
     ConversationStoreError,
     NoRoutableProviderError,
+    TenantQuotaExceededError,
 )
 from kortex.engines.ai.governance import (
     AIGovernanceManager,
@@ -68,6 +69,7 @@ from kortex.engines.ai.interfaces import (
 )
 from kortex.engines.ai.memory import (
     AIMemoryManager,
+    ConversationTurn,
     InMemoryConversationStore,
     require_identifier,
     sanitize_context_content,
@@ -190,9 +192,7 @@ class EngineAgentContextPort(IAgentContextPort):
         """Assemble an `LLMRequest` for the next reasoning step with prompt, RAG, and history."""
         # 1. Slide window over the most recent steps
         windowed_steps = (
-            steps[-self._max_step_history_window:]
-            if len(steps) > self._max_step_history_window
-            else steps
+            steps[-self._max_step_history_window :] if len(steps) > self._max_step_history_window else steps
         )
 
         history_lines: list[str] = []
@@ -201,15 +201,11 @@ class EngineAgentContextPort(IAgentContextPort):
             for s in windowed_steps:
                 history_lines.append(f"Step {s.step_number}:")
                 if s.thought:
-                    sanitized_thought = sanitize_context_content(
-                        scrub_secrets_from_text(s.thought)
-                    )
+                    sanitized_thought = sanitize_context_content(scrub_secrets_from_text(s.thought))
                     history_lines.append(f"  Thought: {sanitized_thought}")
                 for tc in s.tool_calls:
                     tc_args_str = json.dumps(tc.arguments, default=str)
-                    sanitized_args = sanitize_context_content(
-                        scrub_secrets_from_text(tc_args_str)
-                    )
+                    sanitized_args = sanitize_context_content(scrub_secrets_from_text(tc_args_str))
                     history_lines.append(f"  Tool Call: {tc.tool_name}({sanitized_args})")
                 for tr in s.tool_results:
                     raw_out = str(tr.output) if tr.output is not None else "null"
@@ -220,19 +216,13 @@ class EngineAgentContextPort(IAgentContextPort):
                         )
                     scrubbed_out = scrub_secrets_from_text(raw_out)
                     sanitized_out = sanitize_context_content(scrubbed_out)
-                    history_lines.append(
-                        f"  Tool Result: status={tr.status.value}, output={sanitized_out}"
-                    )
+                    history_lines.append(f"  Tool Result: status={tr.status.value}, output={sanitized_out}")
                 if s.response_text:
-                    sanitized_resp = sanitize_context_content(
-                        scrub_secrets_from_text(s.response_text)
-                    )
+                    sanitized_resp = sanitize_context_content(scrub_secrets_from_text(s.response_text))
                     history_lines.append(f"  Response: {sanitized_resp}")
 
         history_block = "\n".join(history_lines)
-        full_prompt = (
-            f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
-        )
+        full_prompt = f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
 
         raw_request = LLMRequest(
             request_id=f"req-{uuid.uuid4().hex}",
@@ -303,7 +293,7 @@ class KernelToolExecutionPort(IToolExecutionPort):
         ai_identity: object | None = None,
     ) -> None:
         self._kernel_bridge = kernel_bridge
-        self._ai_identity = ai_identity
+        self._ai_identity: Any = ai_identity
 
     async def execute_tool(
         self,
@@ -319,6 +309,7 @@ class KernelToolExecutionPort(IToolExecutionPort):
             is_allowed = await authorizer(capability_name, arguments)
             if not is_allowed:
                 from kortex.engines.ai.exceptions import ToolAuthorizationError
+
                 raise ToolAuthorizationError(f"Authorization denied for capability '{capability_name}'.")
 
         session_token = None
@@ -364,20 +355,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         super().__init__()
         self._default_generation_timeout_seconds = default_generation_timeout_seconds
         self._throttler = throttler if throttler is not None else TenantConcurrencyThrottler()
-        self._provider_registry = (
-            provider_registry if provider_registry is not None else ProviderRegistry()
-        )
-        self._model_router = (
-            model_router if model_router is not None else ModelRouter(registry=self._provider_registry)
-        )
+        self._provider_registry = provider_registry if provider_registry is not None else ProviderRegistry()
+        self._model_router = model_router if model_router is not None else ModelRouter(registry=self._provider_registry)
         self._memory_manager = (
-            memory_manager
-            if memory_manager is not None
-            else AIMemoryManager(store=InMemoryConversationStore())
+            memory_manager if memory_manager is not None else AIMemoryManager(store=InMemoryConversationStore())
         )
-        self._tool_registry = (
-            tool_registry if tool_registry is not None else ToolRegistry()
-        )
+        self._tool_registry = tool_registry if tool_registry is not None else ToolRegistry()
         self._tool_invoker = (
             tool_invoker
             if tool_invoker is not None
@@ -404,11 +387,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 tool_registry=self._tool_registry,
             )
         )
-        self._telemetry = (
-            telemetry
-            if telemetry is not None
-            else AITelemetryEmitter(diagnostics=self._diagnostics)
-        )
+        self._telemetry = telemetry if telemetry is not None else AITelemetryEmitter(diagnostics=self._diagnostics)
         self._governance_manager = (
             governance_manager
             if governance_manager is not None
@@ -438,7 +417,6 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
 
         self._kernel: IKernelBridge | None = None
-
 
     @property
     def name(self) -> str:
@@ -559,6 +537,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 provider=self.name,
                 handler=self.invoke_tool,
                 required_permissions=["ai:execute"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.conversation.history.get",
+                description="Retrieve durable conversation turns for a conversation",
+                provider=self.name,
+                handler=self.get_conversation_history,
+                required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
             kernel.register_capability(
@@ -758,18 +744,13 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         governance/quota/persistence/audit-tested) is unaffected by this
         fix without further changes.
         """
-        effective_timeout = (
-            timeout_seconds
-            if timeout_seconds is not None
-            else self._default_generation_timeout_seconds
-        )
+        effective_timeout = timeout_seconds if timeout_seconds is not None else self._default_generation_timeout_seconds
         start_time = time.perf_counter()
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != request.tenant_id:
                 request = request.model_copy(update={"tenant_id": principal_tenant_id})
 
@@ -802,9 +783,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 quota_manager = self._governance_manager.quota_manager
                 pre_quota = await quota_manager.get_or_create_quota(request.tenant_id)
                 today = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
-                already_consumed = (
-                    pre_quota.daily_tokens_consumed if pre_quota.last_reset_date == today else 0
-                )
+                already_consumed = pre_quota.daily_tokens_consumed if pre_quota.last_reset_date == today else 0
                 if already_consumed >= policy.max_daily_budget_tokens:
                     raise AIGovernanceQuotaExceededError(
                         request.tenant_id,
@@ -838,8 +817,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     )
                 except ConversationStoreError as exc:
                     self.logger.critical(
-                        "Conversation history write failed after successful generation "
-                        "for request '%s': %s",
+                        "Conversation history write failed after successful generation for request '%s': %s",
                         request.request_id,
                         exc,
                     )
@@ -915,9 +893,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
 
             except TimeoutError as exc:
                 latency_ms = (time.perf_counter() - start_time) * 1000.0
-                timeout_err = AIProviderTimeoutError(
-                    f"Global AI generation timeout exceeded ({effective_timeout}s)."
-                )
+                timeout_err = AIProviderTimeoutError(f"Global AI generation timeout exceeded ({effective_timeout}s).")
                 await self._telemetry.emit_generation_failed(
                     tenant_id=request.tenant_id,
                     user_id=request.user_id,
@@ -967,8 +943,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(task.task_id, "task_id")
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
                 task = task.model_copy(update={"tenant_id": principal_tenant_id})
 
@@ -985,6 +960,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     latency_ms=latency_ms,
                     status=result.status.value,
                 )
+                result = await self._record_agent_conversation_turn(task, result)
                 return result
 
             except Exception as exc:
@@ -1017,8 +993,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(task.task_id, "task_id")
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
                 task = task.model_copy(update={"tenant_id": principal_tenant_id})
 
@@ -1040,6 +1015,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     latency_ms=latency_ms,
                     status=result.status.value,
                 )
+                result = await self._record_agent_conversation_turn(task, result)
                 return result
 
             except Exception as exc:
@@ -1059,9 +1035,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         """Cancel an active or paused agent task across local and durable task stores."""
         return await self._agent_orchestrator.cancel_task(task_id, tenant_id)
 
-    async def get_agent_task(
-        self, task_id: str, tenant_id: str
-    ) -> PersistedAgentTaskRecord | None:
+    async def get_agent_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
         """Retrieve a persisted agent task record by identity."""
         return await self._agent_orchestrator.get_task(task_id, tenant_id)
 
@@ -1101,8 +1075,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         start_time = time.perf_counter()
 
         if principal is not None:
-            principal_tenant_id = getattr(principal, "tenant_id", None)
-            require_identifier(principal_tenant_id, "principal.tenant_id")
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             tenant_id = principal_tenant_id
 
         # M5-A3: tenant tool governance (blocklist/allowlist) is enforced
@@ -1147,8 +1120,15 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             latency_ms = (time.perf_counter() - start_time) * 1000.0
 
             if result.status.value == "SUCCESS":
-                self._diagnostics.record_tool_invocation(
-                    status="SUCCESS",
+                # M7.6-W3: previously called `self._diagnostics.record_tool_invocation`
+                # directly, bypassing `AITelemetryEmitter` -- unlike the DENIED/
+                # failed branches below, a successful completion published no
+                # domain event and incremented no exporter counter. Now
+                # symmetric with `emit_tool_failed`/`emit_tool_denied`.
+                await self._telemetry.emit_tool_completed(
+                    tenant_id=tenant_id,
+                    tool_name=tool_call.tool_name,
+                    request_id=tool_call.call_id,
                     latency_ms=latency_ms,
                 )
             elif result.status.value == "DENIED":
@@ -1182,6 +1162,71 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
             self.logger.warning("Tool invocation failed: %s", exc)
             raise
+
+    async def get_conversation_history(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        offset: int = 0,
+        principal: Any = None,
+    ) -> list[ConversationTurn]:
+        """Return the durable conversation turns for `conversation_id` (M7.2).
+
+        A thin, read-only wrapper over the existing `AIMemoryManager` /
+        `IConversationStore` -- no new persistence subsystem. `principal`
+        (same tenant-correction pattern as `invoke_tool`/`generate_response`):
+        a caller-supplied `tenant_id` is never authoritative once a verified
+        principal is available.
+        """
+        if principal is not None:
+            principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
+            tenant_id = principal_tenant_id
+
+        return await self._memory_manager.get_turns(tenant_id, conversation_id, offset=offset)
+
+    async def _record_agent_conversation_turn(
+        self, task: AgentTask, result: AgentExecutionResult
+    ) -> AgentExecutionResult:
+        """Record a completed agent turn into the same durable conversation
+        history `generate_response` already writes to (M7.2), so a chat
+        surface built on `orchestrate_agent`/`resume_agent` can recover its
+        transcript via `get_conversation_history` after a restart -- exactly
+        as a plain generated turn already can. Only terminal outcomes with a
+        `final_response` are recorded; `PAUSED_FOR_APPROVAL` (and the
+        transient `RUNNING`/`RESUMING`) are deliberately skipped -- there is
+        nothing resolved yet to show as a turn.
+        """
+        if result.status in (AgentStatus.PAUSED_FOR_APPROVAL, AgentStatus.RUNNING, AgentStatus.RESUMING):
+            return result
+        if result.final_response is None:
+            return result
+
+        synthetic_request = LLMRequest(
+            request_id=f"{task.task_id}:{result.total_steps}",
+            tenant_id=task.tenant_id,
+            user_id=task.user_id,
+            conversation_id=task.conversation_id,
+            prompt=task.goal,
+        )
+        synthetic_response = LLMResponse(
+            request_id=synthetic_request.request_id,
+            text_content=result.final_response,
+        )
+        try:
+            await self._memory_manager.append_history(
+                tenant_id=task.tenant_id,
+                conversation_id=task.conversation_id,
+                request=synthetic_request,
+                response=synthetic_response,
+            )
+        except ConversationStoreError as exc:
+            self.logger.critical(
+                "Conversation history write failed after agent task '%s' completed: %s",
+                task.task_id,
+                exc,
+            )
+            result = result.model_copy(update={"degraded": True})
+        return result
 
     # -- AI Governance Capability Handlers (M5.5) ----------------------------
 
@@ -1258,7 +1303,6 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             self._governance_manager.quota_manager._memory_quotas[q.tenant_id] = q
         return q.model_dump(mode="json")
 
-
     async def query_decision_records(
         self,
         tenant_id: str,
@@ -1332,7 +1376,6 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         }
 
     def register_provider(self, provider: BaseAIProvider) -> None:
-
         """Register an AI provider in the provider registry."""
         self._provider_registry.register(provider)
 
@@ -1366,8 +1409,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         (scrubbed args, `sort_keys=True`) or a legitimate approval would
         spuriously fail re-verification here."""
         calls_summary = [
-            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
-            for c in tool_calls
+            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))} for c in tool_calls
         ]
         return hashlib.sha256(json.dumps(calls_summary, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1387,6 +1429,27 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         Fails closed: any ambiguity (task not found, wrong status, missing
         or mismatched action fingerprint) results in the paused task being
         left alone or cancelled — never resumed on uncertain grounds.
+
+        Tenant concurrency (M7.6-W1): this is the *only* path that resumes
+        an approved AI-originated mutation in production (a human decision
+        always arrives here, asynchronously, via this event — never through
+        the synchronous `resume_agent` API). Before this fix, the resumed
+        `resume_task` call below was not wrapped in
+        `self._throttler.acquire_agent_slot(...)`, unlike both synchronous
+        entry points (`orchestrate_agent`, `resume_agent`), which already
+        wrap their own `resume_task`/`run_task` calls in it — a real,
+        verified asymmetry (M7.6 planning report §8): every mutating AI
+        tool's approval-resume traffic bypassed the same per-tenant
+        concurrent-agent-workflow cap the rest of the control plane
+        enforces. Fixed by wrapping only the APPROVED branch's `resume_task`
+        call (not the whole handler, which would incorrectly also gate the
+        REJECTED branch's `cancel_task` -- rejection must never consume a
+        slot) in the same, single, authoritative `TenantConcurrencyThrottler`
+        already owned by this engine -- no second throttling mechanism.
+        `AgentOrchestrator` itself has no throttler awareness (confirmed via
+        Graphify: zero `uses` edge to `TenantConcurrencyThrottler`), so this
+        is the correct, lowest layer that closes the gap without risking a
+        double acquisition against `resume_agent`'s own wrapping.
         """
         try:
             payload = getattr(event, "payload", None)
@@ -1403,7 +1466,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 return
 
             record = await self._agent_orchestrator.get_task(task_id, tenant_id)
-            if record is None or record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+            if record is None or record.status != AgentStatus.PAUSED_FOR_APPROVAL or record.resume_token is None:
                 # Already resumed/cancelled by a prior delivery of this
                 # event, or the task never reached this pause state --
                 # idempotent no-op either way.
@@ -1421,11 +1484,39 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     )
                     await self._agent_orchestrator.cancel_task(task_id, tenant_id)
                     return
-                await self._agent_orchestrator.resume_task(
-                    task=record.task,
-                    resume_token=record.resume_token,
-                    approved_tool_calls=record.pending_tool_calls,
-                )
+                try:
+                    async with self._throttler.acquire_agent_slot(tenant_id):
+                        resumed_result = await self._agent_orchestrator.resume_task(
+                            task=record.task,
+                            resume_token=record.resume_token,
+                            approved_tool_calls=record.pending_tool_calls,
+                        )
+                        await self._record_agent_conversation_turn(record.task, resumed_result)
+                except TenantQuotaExceededError:
+                    # The tenant is already at its concurrent-agent-workflow cap
+                    # (`acquire_agent_slot` fails fast, it never waits/queues --
+                    # see throttling.py). Unlike orchestrate_agent/resume_agent
+                    # (synchronous callers that can surface this to a retrying
+                    # caller), this is an asynchronous event handler with no
+                    # caller to return an error to. The approval decision itself
+                    # is already durably recorded by the Workflow Engine (this
+                    # handler neither created nor consumes it) -- deliberately
+                    # leave the task PAUSED_FOR_APPROVAL rather than cancel a
+                    # validly-approved action. Safe under this handler's own
+                    # pre-existing idempotency guarantee above (a no-op once the
+                    # task is no longer PAUSED_FOR_APPROVAL): a later redelivery
+                    # or operator-triggered replay of this exact event can still
+                    # resume it once a slot frees up, with zero risk of double
+                    # execution.
+                    self.logger.warning(
+                        "Deferring resume of agent task '%s' for tenant '%s': tenant "
+                        "concurrent-agent-workflow limit reached. The approval decision "
+                        "remains durably recorded; task stays PAUSED_FOR_APPROVAL for a "
+                        "later retry.",
+                        task_id,
+                        tenant_id,
+                    )
+                    return
             else:
                 # REJECTED (or any other terminal, non-approved decision):
                 # the paused task must never execute the calls it was

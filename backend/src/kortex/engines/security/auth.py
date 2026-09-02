@@ -55,16 +55,19 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, NamedTuple, Optional, cast
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any, NamedTuple, cast
 
 from argon2 import PasswordHasher
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.security.crypto import VerificationService
 from kortex.engines.security.exceptions import (
     AuthenticationError,
+    BootstrapClosedError,
+    BootstrapValidationError,
     InvalidTokenError,
     SecurityEngineError,
     SigningKeyError,
@@ -75,6 +78,7 @@ from kortex.engines.security.models import (
     CryptographicSignature,
     PrincipalRecord,
     PrincipalType,
+    RolePermissionRecord,
     SecurityPrincipal,
     TokenPayload,
 )
@@ -83,6 +87,15 @@ from kortex.engines.storage.interfaces import IDataStore
 _SIGNING_KEY_LENGTH_BYTES = 32
 _HEX_KEY_LENGTH_CHARS = 64
 _TOKEN_TTL = timedelta(minutes=15)
+
+# M7.1 first-run bootstrap. A fixed, well-known sentinel identity used
+# exclusively as a concurrency mutex (see `bootstrap_first_admin` below) —
+# never a real, authenticatable principal (`enabled=False`,
+# `credential_hash=None`, so even a guessed match always fails closed in
+# `authenticate()`).
+_BOOTSTRAP_LOCK_TENANT_ID = "__system__"
+_BOOTSTRAP_LOCK_PRINCIPAL_ID = "__bootstrap_lock__"
+_BOOTSTRAP_MIN_PASSWORD_LENGTH = 8
 
 # Generic, identical failure message for every authentication denial reason
 # (unknown principal, disabled principal, wrong credential, malformed
@@ -112,9 +125,9 @@ class _PrincipalSnapshot(NamedTuple):
     principal_type: str
     tenant_id: str
     enabled: bool
-    credential_hash: Optional[str]
+    credential_hash: str | None
     roles: list[str]
-    attributes: Dict[str, Any]
+    attributes: dict[str, Any]
 
 
 class AuthenticationManager(IAuthenticationManager):
@@ -251,7 +264,7 @@ class AuthenticationManager(IAuthenticationManager):
 
     async def _load_principal(
         self, tenant_id: str, principal_id: str, principal_type: str
-    ) -> Optional[_PrincipalSnapshot]:
+    ) -> _PrincipalSnapshot | None:
         """Look up a `PrincipalRecord` by `(tenant_id, principal_id, principal_type)`.
 
         Returns `None` if no matching record exists — callers must treat this
@@ -259,7 +272,7 @@ class AuthenticationManager(IAuthenticationManager):
         enumeration-resistance purposes.
         """
 
-        async def _action(session: AsyncSession) -> Optional[_PrincipalSnapshot]:
+        async def _action(session: AsyncSession) -> _PrincipalSnapshot | None:
             stmt = select(PrincipalRecord).where(
                 PrincipalRecord.tenant_id == tenant_id,
                 PrincipalRecord.principal_id == principal_id,
@@ -279,7 +292,7 @@ class AuthenticationManager(IAuthenticationManager):
                 attributes=dict(record.attributes),
             )
 
-        return cast(Optional[_PrincipalSnapshot], await self._run_in_transaction(_action))
+        return cast(_PrincipalSnapshot | None, await self._run_in_transaction(_action))
 
     def _verify_credential(self, presented: str, stored_hash: str) -> bool:
         """Verify `presented` against `stored_hash` via Argon2id.
@@ -296,7 +309,7 @@ class AuthenticationManager(IAuthenticationManager):
 
     # -- IAuthenticationManager ---------------------------------------------------
 
-    async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
+    async def authenticate(self, credentials: dict[str, Any]) -> SecurityPrincipal:
         """Verify credentials and return the resulting `SecurityPrincipal`.
 
         Uniform across `USER`/`SERVICE_PRINCIPAL`/`AGENT` — all three verify
@@ -351,7 +364,7 @@ class AuthenticationManager(IAuthenticationManager):
         principal_type: PrincipalType,
         credential: str,
         roles: list[str] | None = None,
-        attributes: Dict[str, Any] | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> bool:
         """Idempotently ensure a `PrincipalRecord` exists for a system/service identity (M6.2-1).
 
@@ -400,6 +413,117 @@ class AuthenticationManager(IAuthenticationManager):
 
         return cast(bool, await self._run_in_transaction(_action))
 
+    # -- First-run bootstrap (Milestone M7.1) -------------------------------
+
+    async def is_bootstrap_required(self) -> bool:
+        """True if no `PrincipalRecord` exists anywhere in the system yet.
+
+        Read-only, cheap (`SELECT COUNT(*)`), and deliberately global — not
+        scoped to any one `tenant_id` — since a fresh KORTEX install has no
+        tenant at all yet; "is there a single principal anywhere" is the
+        only meaningful definition of "has this install ever been set up."
+        Consulted by `Kernel.health_check()` (via `SecurityEngine`), not
+        exposed as its own Kernel capability — `/health` is already the
+        established unauthenticated diagnostic surface, so no new
+        bootstrap-exempt read capability is needed alongside
+        `bootstrap_first_admin`'s unavoidable write one.
+        """
+
+        async def _action(session: AsyncSession) -> bool:
+            count_stmt = select(func.count()).select_from(PrincipalRecord)
+            total = (await session.execute(count_stmt)).scalar_one()
+            return bool(total == 0)
+
+        return cast(bool, await self._run_in_transaction(_action))
+
+    async def bootstrap_first_admin(
+        self,
+        tenant_id: str,
+        principal_id: str,
+        password: str,
+        roles: list[str],
+        permissions: list[str],
+    ) -> None:
+        """Create the very first tenant/administrator identity on a fresh
+        install, and close bootstrap permanently in the same transaction.
+
+        Fail-closed by construction, not by convention:
+          1. A `SELECT COUNT(*)` re-check inside the transaction rejects
+             immediately (`BootstrapClosedError`) if any principal already
+             exists — the common, non-racing case.
+          2. A fixed sentinel `PrincipalRecord`
+             (`_BOOTSTRAP_LOCK_TENANT_ID`/`_BOOTSTRAP_LOCK_PRINCIPAL_ID`) is
+             inserted in the *same* transaction as the real admin principal
+             and its RBAC grants. Two genuinely concurrent callers can both
+             pass step 1 before either commits, but both attempt to insert
+             the identical sentinel row — `PrincipalRecord`'s existing
+             `UniqueConstraint("tenant_id", "principal_id", "principal_type")`
+             (Milestone M3, unmodified here) lets the database itself reject
+             the loser's entire transaction, admin principal and RBAC grants
+             included, not just the sentinel. There is no window in which a
+             second admin can be created, and no window in which a caller
+             observes a sentinel-only, partially-bootstrapped system: either
+             everything in this method commits together, or none of it does
+             and bootstrap remains open for a retry.
+
+        Raises:
+            BootstrapValidationError: For empty tenant_id/principal_id, or a
+                password shorter than `_BOOTSTRAP_MIN_PASSWORD_LENGTH`. Never
+                includes the submitted password.
+            BootstrapClosedError: If a principal already exists.
+            SecurityEngineError: If the underlying storage operation fails,
+                including the true-concurrency race described above (the
+                loser observes a generic storage failure, not a clean
+                `BootstrapClosedError` — both outcomes equally prevent a
+                second admin from being created).
+        """
+        if not (isinstance(tenant_id, str) and tenant_id.strip()):
+            raise BootstrapValidationError("A tenant ID is required.")
+        if not (isinstance(principal_id, str) and principal_id.strip()):
+            raise BootstrapValidationError("A username is required.")
+        if not isinstance(password, str) or len(password) < _BOOTSTRAP_MIN_PASSWORD_LENGTH:
+            raise BootstrapValidationError(f"Password must be at least {_BOOTSTRAP_MIN_PASSWORD_LENGTH} characters.")
+        if not roles:
+            raise BootstrapValidationError("At least one role is required for the bootstrap administrator.")
+
+        credential_hash = self._password_hasher.hash(password)
+        primary_role = roles[0]
+
+        async def _action(session: AsyncSession) -> None:
+            count_stmt = select(func.count()).select_from(PrincipalRecord)
+            existing = (await session.execute(count_stmt)).scalar_one()
+            if existing > 0:
+                raise BootstrapClosedError("Bootstrap is no longer available: an administrator already exists.")
+
+            session.add(
+                PrincipalRecord(
+                    id=str(uuid.uuid4()),
+                    tenant_id=_BOOTSTRAP_LOCK_TENANT_ID,
+                    principal_id=_BOOTSTRAP_LOCK_PRINCIPAL_ID,
+                    principal_type=PrincipalType.SERVICE_PRINCIPAL.value,
+                    enabled=False,
+                    credential_hash=None,
+                    roles=[],
+                    attributes={},
+                )
+            )
+            session.add(
+                PrincipalRecord(
+                    id=str(uuid.uuid4()),
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    principal_type=PrincipalType.USER.value,
+                    enabled=True,
+                    credential_hash=credential_hash,
+                    roles=list(roles),
+                    attributes={"clearance_level": "RESTRICTED"},
+                )
+            )
+            for permission in sorted(set(permissions)):
+                session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=primary_role, permission=permission))
+
+        await self._run_in_transaction(_action)
+
     async def issue_token(self, principal: SecurityPrincipal) -> TokenPayload:
         """Issue a short-lived (15-minute), Ed25519-signed session token for `principal`.
 
@@ -407,16 +531,18 @@ class AuthenticationManager(IAuthenticationManager):
         token is fully self-contained and self-validating.
         """
         token_id = os.urandom(16).hex()
-        issued_at_utc = datetime.now(timezone.utc)
+        issued_at_utc = datetime.now(UTC)
         expires_at_utc = issued_at_utc + _TOKEN_TTL
 
         payload_bytes = self._build_signing_payload(
-            token_id, principal.principal_id, principal.principal_type.value, principal.tenant_id,
-            issued_at_utc, expires_at_utc,
+            token_id,
+            principal.principal_id,
+            principal.principal_type.value,
+            principal.tenant_id,
+            issued_at_utc,
+            expires_at_utc,
         )
-        signature = self._verification_service.sign(
-            payload_bytes, self._signing_private_key, self._signing_public_key
-        )
+        signature = self._verification_service.sign(payload_bytes, self._signing_private_key, self._signing_public_key)
 
         return TokenPayload(
             token_id=token_id,
@@ -452,8 +578,12 @@ class AuthenticationManager(IAuthenticationManager):
             raise InvalidTokenError("Token has no signature.")
 
         payload_bytes = self._build_signing_payload(
-            token.token_id, token.principal_id, token.principal_type.value, token.tenant_id,
-            token.issued_at_utc, token.expires_at_utc,
+            token.token_id,
+            token.principal_id,
+            token.principal_type.value,
+            token.tenant_id,
+            token.issued_at_utc,
+            token.expires_at_utc,
         )
         signature_model = CryptographicSignature(
             algorithm="ed25519", signature=token.signature, public_key=self._signing_public_key
@@ -466,7 +596,7 @@ class AuthenticationManager(IAuthenticationManager):
         if snapshot is None or not snapshot.enabled:
             raise InvalidTokenError("Token principal is no longer valid.")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             is_temporally_invalid = now > token.expires_at_utc or now < token.issued_at_utc
         except TypeError:

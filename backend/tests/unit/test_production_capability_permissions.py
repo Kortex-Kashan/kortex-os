@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 from argon2 import PasswordHasher
@@ -25,7 +25,7 @@ from kortex.core.kernel import Kernel
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.recipe.engine import RecipeEngine
-from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITY
+from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITIES
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord, TokenPayload
@@ -39,11 +39,13 @@ _TEST_SIGNING_KEY = b"\x44" * 32
 # milestone. Kept as an explicit literal here (not re-derived from source) so
 # a future accidental change to any engine's registration call is caught as
 # a real test failure rather than silently drifting.
-_EXPECTED_PERMISSIONS: Dict[str, list[str] | None] = {
+_EXPECTED_PERMISSIONS: dict[str, list[str] | None] = {
     "kortex.security.auth.authenticate": None,
     "kortex.security.access.authorize": ["security:read"],
     "kortex.security.secret.get": ["security:read"],
+    "kortex.security.secret.put": ["security:secret:write"],  # M7.3
     "kortex.security.signature.verify": ["security:read"],
+    "kortex.security.bootstrap.create_admin": None,
     "kortex.workflow.instance.start": ["workflow:start"],
     "kortex.workflow.instance.approve": ["workflow:approve"],
     "kortex.workflow.instance.cancel": ["workflow:cancel"],
@@ -52,6 +54,9 @@ _EXPECTED_PERMISSIONS: Dict[str, list[str] | None] = {
     "kortex.connector.driver.register": ["connector:write"],
     "kortex.connector.driver.list": ["connector:read"],
     "kortex.connector.profile.get": ["connector:read"],
+    "kortex.connector.profile.register": ["connector:write"],  # M7.3
+    "kortex.connector.profile.list": ["connector:read"],  # M7.3
+    "kortex.connector.profile.delete": ["connector:write"],  # M7.3
     "kortex.recipe.load": ["recipe:write"],
     "kortex.recipe.validate": ["recipe:read"],
     "kortex.recipe.compile": ["recipe:read"],
@@ -162,20 +167,18 @@ async def test_production_capability_permission_matrix(tmp_path: Path) -> None:
         assert name in descriptors, f"expected capability '{name}' to be registered"
         descriptor = descriptors[name]
         assert descriptor.required_permissions == expected_permissions, (
-            f"{name}: expected required_permissions={expected_permissions}, "
-            f"got {descriptor.required_permissions}"
+            f"{name}: expected required_permissions={expected_permissions}, got {descriptor.required_permissions}"
         )
         checked += 1
     assert checked == len(_EXPECTED_PERMISSIONS)
 
-    # -- E. Bootstrap exemption remains the ONLY unauthenticated capability --
+    # -- E. Bootstrap exemption remains limited to the fixed allowlist -------
     for name, descriptor in descriptors.items():
-        if name == _BOOTSTRAP_EXEMPT_CAPABILITY:
+        if name in _BOOTSTRAP_EXEMPT_CAPABILITIES:
             assert descriptor.requires_authentication is False
         else:
             assert descriptor.requires_authentication is True, (
-                f"{name} must require authentication; only "
-                f"'{_BOOTSTRAP_EXEMPT_CAPABILITY}' may be exempt"
+                f"{name} must require authentication; only {sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may be exempt"
             )
 
 

@@ -53,7 +53,7 @@ TENANT = "tenant-a"
 CONVERSATION = "conv-1"
 UNICODE_LOOKALIKE = "publ" + chr(0x131) + "c"
 # A provenance identifier sentinel, not a credential.
-SECRET_SOURCE_ID = "SOURCE-ID-MUST-NOT-APPEAR-IN-PROMPT"  # noqa: S105
+SECRET_SOURCE_ID = "SOURCE-ID-MUST-NOT-APPEAR-IN-PROMPT"
 
 
 def _request(
@@ -83,9 +83,7 @@ class _RecordingPort(InMemoryKnowledgeQueryPort):
         super().__init__(documents)
         self.calls: list[tuple[str, str, int]] = []
 
-    async def search(
-        self, tenant_id: str, query_text: str, max_results: int
-    ) -> list[RetrievedDocument]:
+    async def search(self, tenant_id: str, query_text: str, max_results: int) -> list[RetrievedDocument]:
         self.calls.append((tenant_id, query_text, max_results))
         return await super().search(tenant_id, query_text, max_results)
 
@@ -94,18 +92,14 @@ class _FailingPort(IKnowledgeQueryPort):
     def __init__(self, exc: Exception | None = None) -> None:
         self._exc = exc or RuntimeError("knowledge backend unreachable")
 
-    async def search(
-        self, tenant_id: str, query_text: str, max_results: int
-    ) -> list[RetrievedDocument]:
+    async def search(self, tenant_id: str, query_text: str, max_results: int) -> list[RetrievedDocument]:
         raise self._exc
 
 
 class _OverReturningPort(IKnowledgeQueryPort):
     """Violates the port contract by ignoring max_results."""
 
-    async def search(
-        self, tenant_id: str, query_text: str, max_results: int
-    ) -> list[RetrievedDocument]:
+    async def search(self, tenant_id: str, query_text: str, max_results: int) -> list[RetrievedDocument]:
         return [_doc(f"doc {i}") for i in range(max_results + 3)]
 
 
@@ -133,8 +127,11 @@ async def _seed_history(memory: AIMemoryManager, count: int, prompt: str = "u") 
             TENANT,
             CONVERSATION,
             LLMRequest(
-                request_id=f"r{index}", tenant_id=TENANT, user_id="user-1",
-                conversation_id=CONVERSATION, prompt=f"{prompt}{index}",
+                request_id=f"r{index}",
+                tenant_id=TENANT,
+                user_id="user-1",
+                conversation_id=CONVERSATION,
+                prompt=f"{prompt}{index}",
             ),
             LLMResponse(request_id=f"r{index}", text_content=f"a{index}"),
         )
@@ -194,14 +191,15 @@ async def test_composed_output_never_contains_a_system_marker() -> None:
         TENANT,
         CONVERSATION,
         LLMRequest(
-            request_id="r1", tenant_id=TENANT, user_id="user-1",
-            conversation_id=CONVERSATION, prompt=hostile,
+            request_id="r1",
+            tenant_id=TENANT,
+            user_id="user-1",
+            conversation_id=CONVERSATION,
+            prompt=hostile,
         ),
         LLMResponse(request_id="r1", text_content=hostile),
     )
-    result = await composer.compose(
-        _request(context_documents=[hostile]), knowledge_query="unrestricted"
-    )
+    result = await composer.compose(_request(context_documents=[hostile]), knowledge_query="unrestricted")
     for entry in result.context_documents:
         assert "[[system]]" not in entry
 
@@ -298,9 +296,7 @@ def test_ordering_is_caller_then_knowledge_then_history() -> None:
 
 def test_history_sits_adjacent_to_the_prompt() -> None:
     """The last context entry is history, not knowledge."""
-    result = PromptPipeline().assemble(
-        _request(), [f"{USER_MARKER}\nlast"], [_doc("knowledge")]
-    )
+    result = PromptPipeline().assemble(_request(), [f"{USER_MARKER}\nlast"], [_doc("knowledge")])
     assert result.context_documents[-1].startswith(USER_MARKER)
 
 
@@ -357,9 +353,7 @@ def test_sanitizer_is_reused_not_reimplemented() -> None:
 
 
 def test_source_id_is_never_inserted_into_the_prompt() -> None:
-    result = PromptPipeline().assemble(
-        _request(), [], [_doc("body text", source_id=SECRET_SOURCE_ID)]
-    )
+    result = PromptPipeline().assemble(_request(), [], [_doc("body text", source_id=SECRET_SOURCE_ID)])
     for entry in result.context_documents:
         assert SECRET_SOURCE_ID not in entry
 
@@ -474,9 +468,7 @@ def test_max_documents_is_clamped(requested: int, effective: int) -> None:
 
 
 async def test_duplicate_documents_are_removed_keeping_first() -> None:
-    port = InMemoryKnowledgeQueryPort(
-        [_doc("same body"), _doc("same body"), _doc("other body")]
-    )
+    port = InMemoryKnowledgeQueryPort([_doc("same body"), _doc("same body"), _doc("other body")])
     composer, _ = _composer(knowledge=port, max_documents=10)
     result = await composer.compose(_request(), knowledge_query="body")
     knowledge_entries = [e for e in result.context_documents if e.startswith(KNOWLEDGE_MARKER)]
@@ -508,9 +500,7 @@ async def test_allowed_classifications_are_admitted(classification: str) -> None
 
 async def test_explicit_opt_in_admits_confidential() -> None:
     port = InMemoryKnowledgeQueryPort([_doc("confidential body", classification=CONFIDENTIAL)])
-    composer, _ = _composer(
-        knowledge=port, max_documents=10, allowed=frozenset({PUBLIC, INTERNAL, CONFIDENTIAL})
-    )
+    composer, _ = _composer(knowledge=port, max_documents=10, allowed=frozenset({PUBLIC, INTERNAL, CONFIDENTIAL}))
     result = await composer.compose(_request(), knowledge_query="body")
     assert any(e.endswith("confidential body") for e in result.context_documents)
 
@@ -551,9 +541,7 @@ async def test_full_composition_order_end_to_end() -> None:
     port = InMemoryKnowledgeQueryPort([_doc("KNOWLEDGE BODY")])
     composer, memory = _composer(knowledge=port, max_documents=5)
     await _seed_history(memory, 1)
-    result = await composer.compose(
-        _request(context_documents=["CALLER"]), knowledge_query="KNOWLEDGE"
-    )
+    result = await composer.compose(_request(context_documents=["CALLER"]), knowledge_query="KNOWLEDGE")
     assert result.context_documents[0] == "CALLER"
     assert result.context_documents[1].startswith(KNOWLEDGE_MARKER)
     assert result.context_documents[2].startswith(USER_MARKER)

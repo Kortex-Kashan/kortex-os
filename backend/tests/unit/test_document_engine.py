@@ -10,9 +10,7 @@ from typing import Any
 
 import pytest
 
-from kortex.engines.document.adapter_pipeline import AdapterPipelineExecutor
 from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
-from kortex.engines.document.adapter_sandbox import AdapterSandbox
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document.exceptions import (
@@ -21,14 +19,12 @@ from kortex.engines.document.exceptions import (
     DocumentTemplateError,
 )
 from kortex.engines.document.interfaces import IDocumentEngine
-from kortex.engines.document.lifecycle import DocumentLifecycleManager
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
     AdapterPipelineDefinition,
     BindingContext,
     DocumentLifecycleState,
-    DocumentMetadata,
     DocumentOperationProfile,
     DocumentOperationType,
     OperationRequest,
@@ -37,12 +33,8 @@ from kortex.engines.document.models import (
     PreviewOptions,
     PreviewResult,
     TemplateSchema,
-    ValidationReport,
 )
-from kortex.engines.document.operation_profile import DocumentOperationProfileManager
 from kortex.engines.document.security import DocumentStorageBinder
-from kortex.engines.document.template_binder import TemplateBinder
-from kortex.engines.document.template_library import TemplateLibrary
 
 
 class DummyFacadeAdapter(BaseDocumentAdapter):
@@ -147,9 +139,7 @@ async def test_successful_end_to_end_orchestration() -> None:
         ],
     )
 
-    profile = create_facade_test_profile(
-        required_template_id="payslip.declarative.v1", pipeline=pipeline_def
-    )
+    profile = create_facade_test_profile(required_template_id="payslip.declarative.v1", pipeline=pipeline_def)
     await engine.profile_manager.register_profile(profile)
 
     context = BindingContext(
@@ -190,7 +180,9 @@ async def test_execute_profile_validation_and_missing_profile() -> None:
     with pytest.raises(DocumentOperationError, match="request_id missing"):
         await engine.execute_profile(
             "missing.profile",
-            OperationRequest(request_id="", profile_id="missing.profile", binding_context=BindingContext(context_id="c")),
+            OperationRequest(
+                request_id="", profile_id="missing.profile", binding_context=BindingContext(context_id="c")
+            ),
         )
 
     # Missing profile
@@ -223,9 +215,7 @@ async def test_template_resolution_and_binding_delegation() -> None:
     assert report.is_valid is True
 
     # Failed template binding inside execute_profile
-    profile = create_facade_test_profile(
-        profile_id="p.tmpl.fail", required_template_id="payslip.declarative.v1"
-    )
+    profile = create_facade_test_profile(profile_id="p.tmpl.fail", required_template_id="payslip.declarative.v1")
     await engine.profile_manager.register_profile(profile)
 
     context_invalid = BindingContext(context_id="c-bind-fail", data={})  # missing required fields
@@ -295,9 +285,7 @@ async def test_lifecycle_transition_delegation() -> None:
     """Lifecycle transition delegation test."""
     engine = DocumentEngine()
 
-    version = await engine.lifecycle_manager.create_version(
-        document_id="doc-100", title="Test Doc"
-    )
+    version = await engine.lifecycle_manager.create_version(document_id="doc-100", title="Test Doc")
     assert version.document_id == "doc-100"
 
     updated = await engine.transition_lifecycle(
@@ -417,6 +405,7 @@ async def test_initialize_is_idempotent_when_called_twice() -> None:
 # =============================================================================
 # Milestone 9: Remaining Named Edge Cases (missing templates, storage errors)
 # =============================================================================
+
 
 class RaisingStorageBinder(DocumentStorageBinder):
     """DocumentStorageBinder whose store_document_output always raises.

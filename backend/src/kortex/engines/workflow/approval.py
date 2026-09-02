@@ -97,12 +97,12 @@ class ApprovalProvider(Protocol):
         instance_id: UUID | str | None = None,
         step_id: str | None = None,
         required_role: str = "",
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> ApprovalRequest:
         """Create a new approval request ticket."""
         ...
 
-    async def submit_decision(self, decision: ApprovalDecision, **kwargs: Any) -> ApprovalRequest:  # noqa: ANN401
+    async def submit_decision(self, decision: ApprovalDecision, **kwargs: Any) -> ApprovalRequest:
         """Submit an approval decision for a pending ticket."""
         ...
 
@@ -172,14 +172,10 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
         principal: SecurityPrincipal | None = None,
         correlation_id: str | None = None,
         action_fingerprint: str | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> ApprovalRequest:
         """Create and register a new pending approval ticket."""
-        inst_id: UUID | None = (
-            UUID(str(instance_id))
-            if instance_id is not None and str(instance_id).strip()
-            else None
-        )
+        inst_id: UUID | None = UUID(str(instance_id)) if instance_id is not None and str(instance_id).strip() else None
         request = ApprovalRequest(
             instance_id=inst_id,
             step_id=step_id,
@@ -199,7 +195,7 @@ class MemoryApprovalManager(ApprovalRepository, ApprovalProvider):
         )
         return request
 
-    async def submit_decision(self, decision: ApprovalDecision, **kwargs: Any) -> ApprovalRequest:  # noqa: ANN401
+    async def submit_decision(self, decision: ApprovalDecision, **kwargs: Any) -> ApprovalRequest:
         """Submit an approval decision (APPROVED or REJECTED) for a pending ticket.
 
         Raises:
@@ -251,9 +247,9 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
     def __init__(
         self,
         data_store: IDataStore,
-        security_engine: Any = None,  # noqa: ANN401
+        security_engine: Any = None,
         outbox_store: OutboxStore | None = None,
-        event_engine: Any = None,  # noqa: ANN401
+        event_engine: Any = None,
     ) -> None:
         self._data_store = data_store
         self._security_engine = security_engine
@@ -300,7 +296,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                 except Exception as exc:
                     logger.error("Failed to record audit entry for '%s': %s", action, exc)
 
-    def _get_verification_service(self) -> Any:  # noqa: ANN401
+    def _get_verification_service(self) -> Any:
         """Resolve VerificationService from SecurityEngine if wired."""
         if self._security_engine is not None:
             vs = getattr(self._security_engine, "_verification_service", None)
@@ -326,9 +322,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         self, role_filter: str | None = None, tenant_id: str = "default"
     ) -> list[ApprovalRequest]:
         """List pending approval requests within a tenant boundary."""
-        return await self._store.list_requests(
-            tenant_id=tenant_id, role_filter=role_filter, state_filter="PENDING"
-        )
+        return await self._store.list_requests(tenant_id=tenant_id, role_filter=role_filter, state_filter="PENDING")
 
     async def list_requests(
         self,
@@ -337,9 +331,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         state_filter: str | None = None,
     ) -> list[ApprovalRequest]:
         """List approval requests matching criteria within a tenant boundary."""
-        return await self._store.list_requests(
-            tenant_id=tenant_id, role_filter=role_filter, state_filter=state_filter
-        )
+        return await self._store.list_requests(tenant_id=tenant_id, role_filter=role_filter, state_filter=state_filter)
 
     async def get_request_by_instance(
         self, instance_id: UUID | str, tenant_id: str | None = None
@@ -367,7 +359,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         principal: SecurityPrincipal | None = None,
         correlation_id: str | None = None,
         action_fingerprint: str | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> ApprovalRequest:
         """Create and persist a new pending approval ticket.
 
@@ -378,15 +370,9 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         audit trail can use to correctly attribute an AI-originated ticket
         rather than mislabeling it `HUMAN`.
         """
-        inst_id: UUID | None = (
-            UUID(str(instance_id))
-            if instance_id is not None and str(instance_id).strip()
-            else None
-        )
+        inst_id: UUID | None = UUID(str(instance_id)) if instance_id is not None and str(instance_id).strip() else None
         timeout_at = (
-            datetime.datetime.now(UTC) + timedelta(seconds=timeout_seconds)
-            if timeout_seconds is not None
-            else None
+            datetime.datetime.now(UTC) + timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
         )
         sanitized_context = sanitize_for_persistence(context_snapshot or {})
 
@@ -446,7 +432,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         valid_until: datetime.datetime,
         tenant_id: str = "default",
         principal: SecurityPrincipal | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> ApprovalDelegation:
         """Create and persist a new approver role delegation."""
         dt_from = valid_from.replace(tzinfo=UTC) if valid_from.tzinfo is None else valid_from
@@ -460,8 +446,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         # created unconditionally just because none was supplied.
         if principal is None:
             raise AuthorizationDeniedError(
-                "Authentication required: a role delegation must be created by a "
-                "verified, authenticated principal."
+                "Authentication required: a role delegation must be created by a verified, authenticated principal."
             )
         if principal.tenant_id != tenant_id:
             raise AuthorizationDeniedError(
@@ -475,13 +460,9 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
             raise AuthorizationDeniedError(
                 f"Principal '{principal.principal_id}' cannot delegate on behalf of delegator '{delegator_id}'."
             )
-        has_role = (
-            role in principal.roles or "admin" in principal.roles or "SECURITY_ADMIN" in principal.roles
-        )
+        has_role = role in principal.roles or "admin" in principal.roles or "SECURITY_ADMIN" in principal.roles
         if not has_role:
-            raise AuthorizationDeniedError(
-                f"Delegator '{delegator_id}' does not possess role '{role}' to delegate."
-            )
+            raise AuthorizationDeniedError(f"Delegator '{delegator_id}' does not possess role '{role}' to delegate.")
 
         delegation = ApprovalDelegation(
             id=uuid4(),
@@ -524,7 +505,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
         decision: ApprovalDecision,
         principal: SecurityPrincipal | None = None,
         tenant_id: str | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> ApprovalRequest:
         """Submit an approval decision (APPROVED or REJECTED) with cryptographic verification.
 
@@ -547,9 +528,7 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
             )
 
         if decision.decision not in (ApprovalState.APPROVED, ApprovalState.REJECTED):
-            raise WorkflowApprovalError(
-                f"Invalid decision state '{decision.decision}'. Must be APPROVED or REJECTED."
-            )
+            raise WorkflowApprovalError(f"Invalid decision state '{decision.decision}'. Must be APPROVED or REJECTED.")
 
         # 2. Verify Principal Authorization & Delegation
         #
@@ -771,8 +750,6 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                             sender="workflow.approval",
                         )
                     except Exception as exc:
-                        logger.warning(
-                            "Failed to publish expiry decision event for ticket '%s': %s", req.id, exc
-                        )
+                        logger.warning("Failed to publish expiry decision event for ticket '%s': %s", req.id, exc)
 
         return expired_results

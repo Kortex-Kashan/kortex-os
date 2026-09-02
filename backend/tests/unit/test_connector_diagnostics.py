@@ -5,8 +5,6 @@ Target: 100% test pass rate, 100% line coverage for diagnostics.py.
 
 from __future__ import annotations
 
-import pytest
-
 from kortex.engines.connector.diagnostics import (
     CANONICAL_CAPABILITIES,
     ConnectorDiagnostics,
@@ -109,6 +107,7 @@ def test_health_checks_degraded_state() -> None:
 
 def test_health_checks_unhealthy_registry() -> None:
     """Test health() returning 'unhealthy' when registry raises an exception."""
+
     class BrokenRegistry(ConnectorDriverRegistry):
         def list_drivers(self) -> list:
             raise RuntimeError("Database registry failure")
@@ -142,6 +141,7 @@ def test_metrics_reporting_and_deferred_contract() -> None:
 
 def test_metrics_fallback_on_exception() -> None:
     """Test metrics() fallback when registry raises an exception."""
+
     class BrokenRegistry(ConnectorDriverRegistry):
         def list_drivers(self) -> list:
             raise RuntimeError("Registry access error")
@@ -183,6 +183,7 @@ def test_diagnostics_sanitized_primitives_and_privacy() -> None:
 
 def test_diagnostics_fallback_on_exception() -> None:
     """Test diagnostics() graceful handling when registry fails."""
+
     class BrokenRegistry(ConnectorDriverRegistry):
         def list_drivers(self) -> list:
             raise RuntimeError("Registry failure")

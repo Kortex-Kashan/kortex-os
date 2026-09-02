@@ -4,7 +4,7 @@ docstring for why this must not rely on `TokenPayload.model_dump_json()`)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,7 +13,7 @@ from kortex.engines.security.models import TokenPayload
 
 
 def _token(**overrides: object) -> TokenPayload:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     defaults: dict = {
         "token_id": "tok-1",
         "principal_id": "alice",

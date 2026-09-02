@@ -8,13 +8,17 @@ sessions and isolated transaction block execution (SQLite / PostgreSQL).
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import TypeVar
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.db import DatabaseEngineManager
 from kortex.engines.storage.interfaces import IDataStore
 
 logger = logging.getLogger("kortex.engines.storage.stores.data_store")
+
+_ActionResultT = TypeVar("_ActionResultT")
 
 
 class RelationalDataStore(IDataStore):
@@ -38,7 +42,9 @@ class RelationalDataStore(IDataStore):
         async for session in self._db_manager.get_session():
             yield session
 
-    async def execute_in_transaction(self, action: Callable[[AsyncSession], Any]) -> Any:
+    async def execute_in_transaction(
+        self, action: Callable[[AsyncSession], Awaitable[_ActionResultT]]
+    ) -> _ActionResultT:
         """Execute a callable block within an isolated database transaction block.
 
         Args:
@@ -46,8 +52,15 @@ class RelationalDataStore(IDataStore):
 
         Returns:
             Result returned by the action callable.
+
+        Raises:
+            RuntimeError: If the session provider yielded no session. Previously
+                this path fell through and implicitly returned `None` into
+                callers that all treat the result as a real value; it is now an
+                explicit error instead of a confusing downstream failure.
         """
         async for session in self._db_manager.get_session():
             async with session.begin():
                 result = await action(session)
                 return result
+        raise RuntimeError("DatabaseEngineManager.get_session() yielded no session.")

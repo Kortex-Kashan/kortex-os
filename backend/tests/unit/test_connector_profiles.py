@@ -39,23 +39,17 @@ def test_validate_profile_rules() -> None:
 
     # Empty profile_id
     with pytest.raises(ConnectorValidationError) as exc1:
-        ConnectorProfileManager.validate_profile(
-            ConnectorProfile(profile_id="   ", name="N", driver_id="D")
-        )
+        ConnectorProfileManager.validate_profile(ConnectorProfile(profile_id="   ", name="N", driver_id="D"))
     assert "profile_id" in exc1.value.message
 
     # Empty name
     with pytest.raises(ConnectorValidationError) as exc2:
-        ConnectorProfileManager.validate_profile(
-            ConnectorProfile(profile_id="P", name="   ", driver_id="D")
-        )
+        ConnectorProfileManager.validate_profile(ConnectorProfile(profile_id="P", name="   ", driver_id="D"))
     assert "name" in exc2.value.message
 
     # Empty driver_id
     with pytest.raises(ConnectorValidationError) as exc3:
-        ConnectorProfileManager.validate_profile(
-            ConnectorProfile(profile_id="P", name="N", driver_id="   ")
-        )
+        ConnectorProfileManager.validate_profile(ConnectorProfile(profile_id="P", name="N", driver_id="   "))
     assert "driver_id" in exc3.value.message
 
     # Non-positive rate_limit_per_sec
@@ -137,15 +131,9 @@ async def test_list_profiles_and_filtering() -> None:
     """Test list_profiles with driver_id and active_only filtering."""
     mgr = ConnectorProfileManager()
 
-    await mgr.register_profile(
-        ConnectorProfile(profile_id="p1", name="P1", driver_id="drv-a", is_active=True)
-    )
-    await mgr.register_profile(
-        ConnectorProfile(profile_id="p2", name="P2", driver_id="drv-a", is_active=False)
-    )
-    await mgr.register_profile(
-        ConnectorProfile(profile_id="p3", name="P3", driver_id="drv-b", is_active=True)
-    )
+    await mgr.register_profile(ConnectorProfile(profile_id="p1", name="P1", driver_id="drv-a", is_active=True))
+    await mgr.register_profile(ConnectorProfile(profile_id="p2", name="P2", driver_id="drv-a", is_active=False))
+    await mgr.register_profile(ConnectorProfile(profile_id="p3", name="P3", driver_id="drv-b", is_active=True))
 
     all_profiles = await mgr.list_profiles()
     assert len(all_profiles) == 3

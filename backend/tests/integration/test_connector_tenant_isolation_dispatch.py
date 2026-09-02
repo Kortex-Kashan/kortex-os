@@ -127,7 +127,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, ConnectorEng
         await db_manager.disconnect()
 
 
-async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: str):  # noqa: ANN001
+async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: str):
     security_engine: SecurityEngine = kernel.get_engine("security")
     principal = await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": principal_id, "password": password}
@@ -229,7 +229,7 @@ async def test_case_e_caller_supplied_tenant_id_cannot_override_principal_tenant
 ) -> None:
     """Tenant B authenticates as itself but forges `ActionRequest.tenant_id`
     to claim tenant A -- the verified principal must still win."""
-    kernel, connector_engine = kernel_env
+    kernel, _connector_engine = kernel_env
     token_b = await _token(kernel, _TENANT_B, "user_conn_iso_b", "pass-b")
 
     with pytest.raises(ConnectorProfileNotFoundError):
@@ -316,7 +316,7 @@ async def test_authorization_denied_for_principal_without_connector_permission(
     of the tenant fix -- a principal without `connector:execute` is denied
     before ever reaching the handler."""
     kernel, _connector = kernel_env
-    security_engine: SecurityEngine = kernel.get_engine("security")
+    kernel.get_engine("security")
     storage_engine: StorageEngine = kernel.get_engine("storage")
     hasher = PasswordHasher()
 

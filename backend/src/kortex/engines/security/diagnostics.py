@@ -14,7 +14,7 @@ module does not create one.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from kortex.engines.security.interfaces import ICryptoProvider
 
@@ -22,7 +22,7 @@ _ENGINE_VERSION = "0.1.0-m1"
 
 # Explicit, honest declaration of what M1 actually provides. Nothing here
 # implies Kernel capability registration, authentication, or authorization.
-_M1_SUPPORTED_CRYPTO_OPERATIONS: List[str] = [
+_M1_SUPPORTED_CRYPTO_OPERATIONS: list[str] = [
     "crypto.sha256.hash",
     "crypto.sha256.verify",
     "crypto.ed25519.sign",
@@ -31,7 +31,7 @@ _M1_SUPPORTED_CRYPTO_OPERATIONS: List[str] = [
     "crypto.aes256gcm.decrypt",
 ]
 
-_NOT_YET_IMPLEMENTED: List[str] = [
+_NOT_YET_IMPLEMENTED: list[str] = [
     "authentication",
     "authorization",
     "secret_storage",
@@ -46,7 +46,7 @@ class SecurityDiagnostics:
     Implements `kortex.engines.security.interfaces.IEngineDiagnostics`.
     """
 
-    def __init__(self, crypto_provider: Optional[ICryptoProvider]) -> None:
+    def __init__(self, crypto_provider: ICryptoProvider | None) -> None:
         """Initialize with the crypto provider whose readiness this reports on.
 
         `crypto_provider` may be `None` to represent an unconfigured subsystem
@@ -55,7 +55,7 @@ class SecurityDiagnostics:
         """
         self._crypto_provider = crypto_provider
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Report M1 subsystem health. Only the crypto provider's presence is checked.
 
         No key material, secret material, or credential data ever appears here.
@@ -73,7 +73,7 @@ class SecurityDiagnostics:
             "audit_implemented": False,
         }
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return M1 runtime metrics.
 
         M1 performs no stateful, counted operations, so this is intentionally
@@ -84,7 +84,7 @@ class SecurityDiagnostics:
             "milestone": "M1",
         }
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics for the M1 subsystem."""
         return {
             "engine": "security",
@@ -111,7 +111,7 @@ class SecurityDiagnostics:
         """Return the semantic version string for the M1 subsystem."""
         return _ENGINE_VERSION
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return Kernel-registered capability strings.
 
         Always empty in M1 — no capability registration with the Kernel

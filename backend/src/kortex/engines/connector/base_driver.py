@@ -45,15 +45,11 @@ class BaseConnectorDriver(ABC):
         return action_type in self.supported_actions
 
     @abstractmethod
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         """Execute a connector action and return the result payload."""
 
     @abstractmethod
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         """Test connectivity and configuration validity for target profile."""
 
 

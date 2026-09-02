@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -285,9 +286,7 @@ async def test_document_soft_delete_and_filtering(repository: DocumentRepository
     assert fetched_default is None
 
     # Include deleted returns the document
-    fetched_all = await repository.get_document(
-        "doc-soft-del", tenant_id="tenant-alpha", include_deleted=True
-    )
+    fetched_all = await repository.get_document("doc-soft-del", tenant_id="tenant-alpha", include_deleted=True)
     assert fetched_all is not None
     assert fetched_all.document_id == "doc-soft-del"
 
@@ -309,9 +308,7 @@ async def test_document_listing_and_pagination(repository: DocumentRepository) -
     assert len(all_docs) == 5
 
     # Filter by type
-    invoices = await repository.list_documents(
-        tenant_id="tenant-alpha", document_type="INVOICE"
-    )
+    invoices = await repository.list_documents(tenant_id="tenant-alpha", document_type="INVOICE")
     assert len(invoices) == 3
 
     # Pagination
@@ -346,7 +343,7 @@ async def test_version_creation_and_retrieval(repository: DocumentRepository) ->
         sha256_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         storage_key="tenant-alpha/doc-ver-1/ver-1-0.pdf",
         bucket_name="documents",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     content = DocumentContent(
         storage_key="tenant-alpha/doc-ver-1/ver-1-0.pdf",
@@ -359,7 +356,7 @@ async def test_version_creation_and_retrieval(repository: DocumentRepository) ->
         version_id="ver-1-0",
         document_id="doc-ver-1",
         version_number="1.0.0",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="hr_lead",
         is_immutable=False,
         metadata=doc_meta,
@@ -393,13 +390,13 @@ async def test_version_creation_non_existent_document(repository: DocumentReposi
         version_id="ver-0",
         title="Title",
         author_id="author",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     ver = DocumentVersion(
         version_id="ver-0",
         document_id="doc-missing",
         version_number="1.0.0",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="author",
         metadata=doc_meta,
     )
@@ -418,13 +415,13 @@ async def test_version_number_uniqueness_rejection(repository: DocumentRepositor
         version_id="ver-1",
         title="V1",
         author_id="author",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     ver1 = DocumentVersion(
         version_id="ver-1",
         document_id="doc-ver-uniq",
         version_number="1.0.0",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="author",
         metadata=doc_meta,
     )
@@ -436,13 +433,13 @@ async def test_version_number_uniqueness_rejection(repository: DocumentRepositor
         version_id="ver-1-duplicate",
         title="V1 Duplicate",
         author_id="author",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     ver2 = DocumentVersion(
         version_id="ver-1-duplicate",
         document_id="doc-ver-uniq",
         version_number="1.0.0",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="author",
         metadata=doc_meta2,
     )
@@ -463,13 +460,13 @@ async def test_version_creation_invalid_semver_rejection(repository: DocumentRep
             version_id=f"ver-inv-{idx}",
             title="Invalid Version Test",
             author_id="author",
-            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
         ver = DocumentVersion(
             version_id=f"ver-inv-{idx}",
             document_id="doc-ver-semver-test",
             version_number=inv_semver,
-            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
             created_by="author",
             metadata=meta,
         )
@@ -487,17 +484,17 @@ async def test_version_lineage_and_latest_lookup(repository: DocumentRepository)
         doc_meta = DocumentMetadata(
             document_id="doc-lineage",
             version_id=f"ver-{i}",
-            parent_version_id=f"ver-{i-1}" if i > 1 else None,
+            parent_version_id=f"ver-{i - 1}" if i > 1 else None,
             title=f"Lineage Version {i}",
             author_id="author",
-            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
         ver = DocumentVersion(
             version_id=f"ver-{i}",
             document_id="doc-lineage",
-            parent_version_id=f"ver-{i-1}" if i > 1 else None,
+            parent_version_id=f"ver-{i - 1}" if i > 1 else None,
             version_number=f"1.{i}.0",
-            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
             created_by="author",
             metadata=doc_meta,
         )
@@ -535,13 +532,13 @@ async def test_update_version_state(repository: DocumentRepository) -> None:
         version_id="ver-state-1",
         title="V1",
         author_id="author",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     ver = DocumentVersion(
         version_id="ver-state-1",
         document_id="doc-state",
         version_number="1.0.0",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="author",
         metadata=doc_meta,
     )
@@ -605,7 +602,9 @@ async def test_update_version_state_published_bypass_rejected(repository: Docume
     await repository.create_version(ver, tenant_id="tenant-alpha")
 
     # Direct transition to PUBLISHED via update_version_state MUST be rejected
-    with pytest.raises(DocumentLifecycleError, match="Direct transition to 'PUBLISHED' state via update_version_state is forbidden"):
+    with pytest.raises(
+        DocumentLifecycleError, match="Direct transition to 'PUBLISHED' state via update_version_state is forbidden"
+    ):
         await repository.update_version_state(
             document_id="doc-bypass-pub",
             version_id="ver-bypass-pub-1",
@@ -656,9 +655,7 @@ async def test_tenant_isolation_complete_boundary(repository: DocumentRepository
 
 
 @pytest.mark.asyncio
-async def test_foreign_key_cascade_hard_delete(
-    repository: DocumentRepository, data_store: RelationalDataStore
-) -> None:
+async def test_foreign_key_cascade_hard_delete(repository: DocumentRepository, data_store: RelationalDataStore) -> None:
     """Verify that hard deleting a DocumentRecord cascades to delete child DocumentVersionRecords."""
     doc = Document(document_id="doc-cascade", tenant_id="tenant-alpha", title="Cascade Test")
     await repository.create_document(doc)
@@ -669,13 +666,13 @@ async def test_foreign_key_cascade_hard_delete(
             version_id=f"ver-cas-{i}",
             title=f"V{i}",
             author_id="author",
-            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
         ver = DocumentVersion(
             version_id=f"ver-cas-{i}",
             document_id="doc-cascade",
             version_number=f"1.{i}.0",
-            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
             created_by="author",
             metadata=doc_meta,
         )
@@ -688,9 +685,7 @@ async def test_foreign_key_cascade_hard_delete(
 
     # Verify versions are gone at database level
     async def _check_versions(session: AsyncSession) -> int:
-        stmt = select(DocumentVersionRecord).where(
-            DocumentVersionRecord.document_id == "doc-cascade"
-        )
+        stmt = select(DocumentVersionRecord).where(DocumentVersionRecord.document_id == "doc-cascade")
         res = await session.execute(stmt)
         return len(res.scalars().all())
 
@@ -791,9 +786,7 @@ async def test_operation_profile_persistence_and_versioning(
     assert saved_v1.permissions == ["document:generate", "finance:invoice"]
 
     # Save version 2.0.0 of same profile
-    profile_v2 = profile_v1.model_copy(
-        update={"version": "2.0.0", "description": "Generates v2 customer invoices"}
-    )
+    profile_v2 = profile_v1.model_copy(update={"version": "2.0.0", "description": "Generates v2 customer invoices"})
     await repository.save_operation_profile(profile_v2, tenant_id="tenant-alpha")
 
     # Fetch exact versions
@@ -825,21 +818,18 @@ async def test_operation_profile_persistence_and_versioning(
         "profile.invoice.generate", version="1.0.0", tenant_id="tenant-alpha"
     )
     assert deleted is True
-    assert await repository.delete_operation_profile(
-        "profile.invoice.generate", version="1.0.0", tenant_id="tenant-alpha"
-    ) is False
+    assert (
+        await repository.delete_operation_profile("profile.invoice.generate", version="1.0.0", tenant_id="tenant-alpha")
+        is False
+    )
 
     # Verify v1 is gone but v2 remains
     assert (
-        await repository.get_operation_profile(
-            "profile.invoice.generate", version="1.0.0", tenant_id="tenant-alpha"
-        )
+        await repository.get_operation_profile("profile.invoice.generate", version="1.0.0", tenant_id="tenant-alpha")
         is None
     )
     assert (
-        await repository.get_operation_profile(
-            "profile.invoice.generate", version="2.0.0", tenant_id="tenant-alpha"
-        )
+        await repository.get_operation_profile("profile.invoice.generate", version="2.0.0", tenant_id="tenant-alpha")
         is not None
     )
 
@@ -848,9 +838,7 @@ async def test_operation_profile_persistence_and_versioning(
 
 
 @pytest.mark.asyncio
-async def test_transaction_rollback_guarantee(
-    repository: DocumentRepository, data_store: RelationalDataStore
-) -> None:
+async def test_transaction_rollback_guarantee(repository: DocumentRepository, data_store: RelationalDataStore) -> None:
     """Verify that any exception inside execute_in_transaction rolls back all partial writes."""
     doc_id = "doc-rollback-test"
 
@@ -878,10 +866,9 @@ async def test_transaction_rollback_guarantee(
 
 
 @pytest.mark.asyncio
-async def test_json_parsing_resilience(
-    data_store: RelationalDataStore, repository: DocumentRepository
-) -> None:
+async def test_json_parsing_resilience(data_store: RelationalDataStore, repository: DocumentRepository) -> None:
     """Verify repository resilience against malformed JSON in database text columns."""
+
     async def _inject_corrupt_records(session: AsyncSession) -> None:
         # Document with bad JSON
         doc_rec = DocumentRecord(
@@ -962,13 +949,13 @@ async def test_additional_persistence_edge_cases(
         version_id="ver-pub-test",
         title="V1",
         author_id="author",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     ver = DocumentVersion(
         version_id="ver-pub-test",
         document_id="doc-zero-ver",
         version_number="1.0.0",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="author",
         metadata=doc_meta,
     )
@@ -990,13 +977,13 @@ async def test_additional_persistence_edge_cases(
         title="V2",
         author_id="author",
         lifecycle_state=DocumentLifecycleState.DRAFT,
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
     ver_pub = DocumentVersion(
         version_id="ver-pub-test-2",
         document_id="doc-zero-ver",
         version_number="1.0.1",
-        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         created_by="author",
         metadata=doc_meta_pub,
     )
@@ -1024,15 +1011,11 @@ async def test_additional_persistence_edge_cases(
     )
     await repository.save_operation_profile(prof, tenant_id="tenant-alpha")
 
-    by_op = await repository.list_operation_profiles(
-        tenant_id="tenant-alpha", business_operation="FILTER_OP"
-    )
+    by_op = await repository.list_operation_profiles(tenant_id="tenant-alpha", business_operation="FILTER_OP")
     assert len(by_op) == 1
     assert by_op[0].id == "prof-filter-test"
 
-    by_ns = await repository.list_operation_profiles(
-        tenant_id="tenant-alpha", namespace="kortex.filter.ns"
-    )
+    by_ns = await repository.list_operation_profiles(tenant_id="tenant-alpha", namespace="kortex.filter.ns")
     assert len(by_ns) == 1
     assert by_ns[0].id == "prof-filter-test"
 
@@ -1245,9 +1228,7 @@ async def test_publish_version_records_sha256_hash_when_provided(
 
     assert child.metadata.sha256_hash == expected_hash
 
-    reread = await repository.get_version(
-        "doc-hash-persist", "ver-hash-persist", tenant_id="tenant-alpha"
-    )
+    reread = await repository.get_version("doc-hash-persist", "ver-hash-persist", tenant_id="tenant-alpha")
     assert reread is not None
     assert reread.metadata.sha256_hash == expected_hash
 
@@ -1369,7 +1350,8 @@ async def test_publish_version_with_parent_superseding(
 async def test_publish_version_rejections(
     repository: DocumentRepository,
 ) -> None:
-    """Verify rejections on missing child, invalid child state, missing parent, non-published parent, and CAS collision."""
+    """Verify rejections on missing child, invalid child state, missing parent,
+    non-published parent, and CAS collision."""
     doc = Document(document_id="doc-rej-test", tenant_id="tenant-alpha", title="Rejection Test")
     await repository.create_document(doc)
 
@@ -1543,7 +1525,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
     await repository.create_document(doc_beta)
 
     # 1. Publish genesis version on Doc A
-    vA1 = DocumentVersion(
+    v_a1 = DocumentVersion(
         version_id="ver-A-1",
         document_id="doc-lineage-a",
         version_number="1.0.0",
@@ -1558,7 +1540,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             created_at="2026-01-01T00:00:00Z",
         ),
     )
-    await repository.create_version(vA1, tenant_id="tenant-alpha")
+    await repository.create_version(v_a1, tenant_id="tenant-alpha")
     await repository.publish_version(
         document_id="doc-lineage-a",
         version_id="ver-A-1",
@@ -1567,7 +1549,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
     )
 
     # 2. Publish genesis version on Doc B
-    vB1 = DocumentVersion(
+    v_b1 = DocumentVersion(
         version_id="ver-B-1",
         document_id="doc-lineage-b",
         version_number="1.0.0",
@@ -1582,7 +1564,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             created_at="2026-01-01T00:00:00Z",
         ),
     )
-    await repository.create_version(vB1, tenant_id="tenant-alpha")
+    await repository.create_version(v_b1, tenant_id="tenant-alpha")
     await repository.publish_version(
         document_id="doc-lineage-b",
         version_id="ver-B-1",
@@ -1591,7 +1573,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
     )
 
     # 3. Create child version A2 derived from A1
-    vA2 = DocumentVersion(
+    v_a2 = DocumentVersion(
         version_id="ver-A-2",
         document_id="doc-lineage-a",
         parent_version_id="ver-A-1",
@@ -1608,7 +1590,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             created_at="2026-01-02T00:00:00Z",
         ),
     )
-    await repository.create_version(vA2, tenant_id="tenant-alpha")
+    await repository.create_version(v_a2, tenant_id="tenant-alpha")
 
     # A. Wrong parent ID rejection: caller passes parent_version_id="ver-wrong"
     with pytest.raises(DocumentLifecycleError, match="Lineage mismatch"):
@@ -1629,7 +1611,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
         )
 
     # C. Genesis child published with parent ID
-    vA_gen_draft = DocumentVersion(
+    v_a_gen_draft = DocumentVersion(
         version_id="ver-A-gen-draft",
         document_id="doc-lineage-a",
         parent_version_id=None,
@@ -1646,7 +1628,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             created_at="2026-01-03T00:00:00Z",
         ),
     )
-    await repository.create_version(vA_gen_draft, tenant_id="tenant-alpha")
+    await repository.create_version(v_a_gen_draft, tenant_id="tenant-alpha")
     with pytest.raises(DocumentLifecycleError, match="Lineage mismatch"):
         await repository.publish_version(
             document_id="doc-lineage-a",
@@ -1656,7 +1638,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
         )
 
     # D. Cross-document parent: child on Doc A with parent_version_id="ver-B-1" (on Doc B)
-    vA_cross_doc = DocumentVersion(
+    v_a_cross_doc = DocumentVersion(
         version_id="ver-A-cross-doc",
         document_id="doc-lineage-a",
         parent_version_id="ver-B-1",
@@ -1673,7 +1655,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             created_at="2026-01-04T00:00:00Z",
         ),
     )
-    await repository.create_version(vA_cross_doc, tenant_id="tenant-alpha")
+    await repository.create_version(v_a_cross_doc, tenant_id="tenant-alpha")
     with pytest.raises(DocumentLifecycleError, match="non-existent parent version"):
         await repository.publish_version(
             document_id="doc-lineage-a",
@@ -1683,7 +1665,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
         )
 
     # E. Cross-tenant parent: child on Tenant Alpha attempting to use parent on Tenant Beta
-    vBeta1 = DocumentVersion(
+    v_beta1 = DocumentVersion(
         version_id="ver-Beta-1",
         document_id="doc-lineage-beta",
         version_number="1.0.0",
@@ -1699,7 +1681,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             security_metadata=SecurityMetadata(tenant_id="tenant-beta"),
         ),
     )
-    await repository.create_version(vBeta1, tenant_id="tenant-beta")
+    await repository.create_version(v_beta1, tenant_id="tenant-beta")
     await repository.publish_version(
         document_id="doc-lineage-beta",
         version_id="ver-Beta-1",
@@ -1707,7 +1689,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
         tenant_id="tenant-beta",
     )
 
-    vA_cross_tenant = DocumentVersion(
+    v_a_cross_tenant = DocumentVersion(
         version_id="ver-A-cross-tenant",
         document_id="doc-lineage-a",
         parent_version_id="ver-Beta-1",
@@ -1724,7 +1706,7 @@ async def test_publish_version_lineage_and_parent_identity_validation(
             created_at="2026-01-05T00:00:00Z",
         ),
     )
-    await repository.create_version(vA_cross_tenant, tenant_id="tenant-alpha")
+    await repository.create_version(v_a_cross_tenant, tenant_id="tenant-alpha")
     with pytest.raises(DocumentLifecycleError, match="non-existent parent version"):
         await repository.publish_version(
             document_id="doc-lineage-a",
@@ -1864,7 +1846,8 @@ async def test_pointer_invariant_lifecycle_stages(
 async def test_concurrent_genesis_publication_race(
     concurrent_data_store: RelationalDataStore,
 ) -> None:
-    """Verify that concurrent genesis publication attempts across independent repositories result in exactly one winner."""
+    """Verify that concurrent genesis publication attempts across independent
+    repositories result in exactly one winner."""
     repo_a = DocumentRepository(concurrent_data_store)
     repo_b = DocumentRepository(concurrent_data_store)
 
@@ -1872,7 +1855,7 @@ async def test_concurrent_genesis_publication_race(
     await repo_a.create_document(doc)
 
     # Create competing genesis draft versions A and B
-    vA = DocumentVersion(
+    v_a = DocumentVersion(
         version_id="ver-gen-A",
         document_id="doc-conc-gen",
         version_number="1.0.0",
@@ -1887,7 +1870,7 @@ async def test_concurrent_genesis_publication_race(
             created_at="2026-01-01T00:00:00Z",
         ),
     )
-    vB = DocumentVersion(
+    v_b = DocumentVersion(
         version_id="ver-gen-B",
         document_id="doc-conc-gen",
         version_number="1.0.1",
@@ -1902,8 +1885,8 @@ async def test_concurrent_genesis_publication_race(
             created_at="2026-01-01T00:00:01Z",
         ),
     )
-    await repo_a.create_version(vA, tenant_id="tenant-alpha")
-    await repo_a.create_version(vB, tenant_id="tenant-alpha")
+    await repo_a.create_version(v_a, tenant_id="tenant-alpha")
+    await repo_a.create_version(v_b, tenant_id="tenant-alpha")
 
     # Run competing publications concurrently using independent repository instances
     results = await asyncio.gather(
@@ -1958,7 +1941,8 @@ async def test_concurrent_genesis_publication_race(
 async def test_concurrent_sibling_publication_race(
     concurrent_data_store: RelationalDataStore,
 ) -> None:
-    """Verify that concurrent sibling child publications across independent repositories result in exactly one winner."""
+    """Verify that concurrent sibling child publications across independent
+    repositories result in exactly one winner."""
     repo_a = DocumentRepository(concurrent_data_store)
     repo_b = DocumentRepository(concurrent_data_store)
 
@@ -1990,7 +1974,7 @@ async def test_concurrent_sibling_publication_race(
     )
 
     # 2. Create sibling child drafts derived from V1
-    v2A = DocumentVersion(
+    v2_a = DocumentVersion(
         version_id="ver-child-A",
         document_id="doc-conc-sib",
         parent_version_id="ver-parent-root",
@@ -2007,7 +1991,7 @@ async def test_concurrent_sibling_publication_race(
             created_at="2026-01-02T00:00:00Z",
         ),
     )
-    v2B = DocumentVersion(
+    v2_b = DocumentVersion(
         version_id="ver-child-B",
         document_id="doc-conc-sib",
         parent_version_id="ver-parent-root",
@@ -2024,8 +2008,8 @@ async def test_concurrent_sibling_publication_race(
             created_at="2026-01-02T00:00:01Z",
         ),
     )
-    await repo_a.create_version(v2A, tenant_id="tenant-alpha")
-    await repo_a.create_version(v2B, tenant_id="tenant-alpha")
+    await repo_a.create_version(v2_a, tenant_id="tenant-alpha")
+    await repo_a.create_version(v2_b, tenant_id="tenant-alpha")
 
     # 3. Competing concurrent sibling publication across independent repository instances
     results = await asyncio.gather(
@@ -2051,7 +2035,7 @@ async def test_concurrent_sibling_publication_race(
     assert len(failures) == 1
     assert isinstance(failures[0], DocumentLifecycleError)
 
-    winning_child, superseded_parent = successes[0]
+    winning_child, _superseded_parent = successes[0]
     losing_child_id = "ver-child-B" if winning_child.version_id == "ver-child-A" else "ver-child-A"
 
     # 4. Verify Document pointer

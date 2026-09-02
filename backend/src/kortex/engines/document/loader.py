@@ -42,9 +42,7 @@ class DocumentAdapterLoader:
         """
         self._registry = registry
 
-    def discover_adapters(
-        self, package: str = DEFAULT_ADAPTER_PACKAGE
-    ) -> list[type[BaseDocumentAdapter]]:
+    def discover_adapters(self, package: str = DEFAULT_ADAPTER_PACKAGE) -> list[type[BaseDocumentAdapter]]:
         """Discover concrete BaseDocumentAdapter subclasses defined within `package`.
 
         Only classes defined directly in one of the scanned modules are returned — classes
@@ -74,9 +72,7 @@ class DocumentAdapterLoader:
             try:
                 module = importlib.import_module(module_name)
             except Exception as exc:
-                logger.warning(
-                    "Skipping adapter module '%s': failed to import: %s", module_name, exc
-                )
+                logger.warning("Skipping adapter module '%s': failed to import: %s", module_name, exc)
                 continue
 
             for _, obj in inspect.getmembers(module, inspect.isclass):
@@ -90,9 +86,7 @@ class DocumentAdapterLoader:
 
         return discovered
 
-    def load_and_register_all(
-        self, package: str = DEFAULT_ADAPTER_PACKAGE
-    ) -> list[BaseDocumentAdapter]:
+    def load_and_register_all(self, package: str = DEFAULT_ADAPTER_PACKAGE) -> list[BaseDocumentAdapter]:
         """Discover, instantiate, and register every adapter found in `package`.
 
         Duplicate registrations (an adapter_id+version already present in the registry) and

@@ -62,7 +62,7 @@ as an elevated clearance.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from kortex.engines.security.models import AccessDecision, ClassificationLevel, PermissionRequirement, SecurityPrincipal
 
@@ -89,7 +89,7 @@ class ABACEvaluator:
     """M4 ABAC evaluator. Backs `AuthorizationEngine.evaluate_abac`. Stateless."""
 
     def evaluate(
-        self, principal: SecurityPrincipal, requirement: PermissionRequirement, context: Dict[str, Any]
+        self, principal: SecurityPrincipal, requirement: PermissionRequirement, context: dict[str, Any]
     ) -> AccessDecision:
         """Evaluate `tenant_id` and `security_classification` rules.
 
@@ -99,7 +99,7 @@ class ABACEvaluator:
         empty context — i.e. it fails the tenant check below (missing
         `resource_tenant_id`), never silently skips it.
         """
-        safe_context: Dict[str, Any] = context if isinstance(context, dict) else {}
+        safe_context: dict[str, Any] = context if isinstance(context, dict) else {}
 
         resource_tenant_id = safe_context.get("resource_tenant_id")
         if resource_tenant_id is None:

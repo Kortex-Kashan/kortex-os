@@ -7,21 +7,36 @@ and the common diagnostics interface protocol (IEngineDiagnostics).
 
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Any, Protocol, TypeVar, runtime_checkable
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.storage.models import FileMetadata, ObjectMetadata
+
+_ActionResultT = TypeVar("_ActionResultT")
 
 
 @runtime_checkable
 class IDataStore(Protocol):
     """Relational transactional database persistence abstraction interface."""
 
-    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+    # Declared with a plain `def` returning `AsyncGenerator`: implementations are
+    # async *generator* functions (`async def` + `yield`), not coroutines that
+    # return a generator. `async def` here would describe
+    # `Coroutine[..., AsyncGenerator[...]]` and mismatch every implementation.
+    def get_session(self) -> AsyncGenerator[AsyncSession, None]:
         """Acquire an asynchronous SQLAlchemy session for database operations."""
         ...
 
-    async def execute_in_transaction(self, action: Callable[[AsyncSession], Any]) -> Any:
+    # Generic in the action's own result: this method returns exactly whatever
+    # the supplied action returns. Previously annotated `-> Any`, which erased
+    # that relationship and forced every typed caller returning its result to
+    # leak `Any` (the single cause of ~30 `no-any-return` errors across the
+    # Document, Workflow, Knowledge, AI and Finance persistence layers).
+    async def execute_in_transaction(
+        self, action: Callable[[AsyncSession], Awaitable[_ActionResultT]]
+    ) -> _ActionResultT:
         """Execute a callable block within an isolated database transaction block."""
         ...
 
@@ -46,7 +61,7 @@ class IFileStore(Protocol):
         """Check if a file exists within sandboxed storage."""
         ...
 
-    async def list_files(self, relative_path: str = "") -> List[FileMetadata]:
+    async def list_files(self, relative_path: str = "") -> list[FileMetadata]:
         """List metadata for files contained within a relative folder path."""
         ...
 
@@ -81,7 +96,7 @@ class IObjectStore(Protocol):
         """Check if an object blob exists in a specified bucket."""
         ...
 
-    async def list_objects(self, bucket_name: str, prefix: Optional[str] = None) -> List[ObjectMetadata]:
+    async def list_objects(self, bucket_name: str, prefix: str | None = None) -> list[ObjectMetadata]:
         """List metadata descriptors for objects matching a prefix filter in a bucket."""
         ...
 
@@ -90,11 +105,11 @@ class IObjectStore(Protocol):
 class ICacheStore(Protocol):
     """Ephemeral in-memory key-value caching abstraction interface."""
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Retrieve a cached value by key. Returns None if key is missing or expired."""
         ...
 
-    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
         """Store a value in cache with an optional Time-To-Live (TTL) in seconds."""
         ...
 
@@ -111,15 +126,15 @@ class ICacheStore(Protocol):
 class IEngineDiagnostics(Protocol):
     """Standardized diagnostics interface exposed by all KORTEX System Engines."""
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return operational health status and diagnostic checks."""
         ...
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return runtime performance and throughput metrics."""
         ...
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics and system environment details."""
         ...
 
@@ -131,6 +146,6 @@ class IEngineDiagnostics(Protocol):
         """Return semantic version string of the engine."""
         ...
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of capability strings registered by the engine."""
         ...

@@ -25,7 +25,6 @@ from kortex.engines.document.models import (
     DocumentOperationType,
     OperationRequest,
     OperationResult,
-    PipelineExecutionMode,
     PipelineStage,
 )
 
@@ -143,8 +142,8 @@ class AdapterPipelineExecutor:
         self,
         registry: DocumentAdapterRegistry | None = None,
         sandbox: Any | None = None,
-        profile_manager: "DocumentOperationProfileManager | None" = None,
-        recovery_manager: "DocumentRecoveryManager | None" = None,
+        profile_manager: DocumentOperationProfileManager | None = None,
+        recovery_manager: DocumentRecoveryManager | None = None,
     ) -> None:
         """Initialize AdapterPipelineExecutor with an optional DocumentAdapterRegistry and sandbox.
 
@@ -174,12 +173,12 @@ class AdapterPipelineExecutor:
         return self._sandbox
 
     @property
-    def profile_manager(self) -> "DocumentOperationProfileManager | None":
+    def profile_manager(self) -> DocumentOperationProfileManager | None:
         """Return the configured DocumentOperationProfileManager, or None if unset."""
         return self._profile_manager
 
     @property
-    def recovery_manager(self) -> "DocumentRecoveryManager | None":
+    def recovery_manager(self) -> DocumentRecoveryManager | None:
         """Return the configured DocumentRecoveryManager, or None if unset."""
         return self._recovery_manager
 
@@ -212,9 +211,7 @@ class AdapterPipelineExecutor:
 
             stage_id = stage.stage_id.strip()
             if stage_id in seen_stages:
-                raise DocumentOperationError(
-                    f"Duplicate stage ID '{stage_id}' in pipeline '{definition.pipeline_id}'."
-                )
+                raise DocumentOperationError(f"Duplicate stage ID '{stage_id}' in pipeline '{definition.pipeline_id}'.")
             seen_stages.add(stage_id)
 
             if not stage.adapter_id or not stage.adapter_id.strip():
@@ -228,7 +225,8 @@ class AdapterPipelineExecutor:
             # Verify adapter advertises required capability
             if not adapter.supports_capability(stage.required_capability):
                 raise DocumentOperationError(
-                    f"Adapter '{stage.adapter_id}' in stage '{stage_id}' does not support required capability '{stage.required_capability.value}'."
+                    f"Adapter '{stage.adapter_id}' in stage '{stage_id}' does not support required capability "
+                    f"'{stage.required_capability.value}'."
                 )
 
     async def execute_pipeline_definition(
@@ -262,9 +260,7 @@ class AdapterPipelineExecutor:
             stage_start = time.perf_counter()
 
             # Evaluate declarative execution condition
-            if stage.execution_condition and not evaluate_declarative_condition(
-                stage.execution_condition, context
-            ):
+            if stage.execution_condition and not evaluate_declarative_condition(stage.execution_condition, context):
                 stage_time_ms = (time.perf_counter() - stage_start) * 1000.0
                 stage_results.append(
                     StageExecutionResult(
@@ -367,9 +363,7 @@ class AdapterPipelineExecutor:
 
                     if can_retry:
                         backoff_delay = 0.001
-                        if self._recovery_manager is not None and hasattr(
-                            self._recovery_manager, "calculate_backoff"
-                        ):
+                        if self._recovery_manager is not None and hasattr(self._recovery_manager, "calculate_backoff"):
                             backoff_delay = self._recovery_manager.calculate_backoff(
                                 attempt=stage_attempt,
                                 backoff_factor=backoff_factor,
@@ -416,9 +410,7 @@ class AdapterPipelineExecutor:
             errors=errors,
         )
 
-    async def execute_pipeline(
-        self, profile_id: str, request: OperationRequest
-    ) -> OperationResult:
+    async def execute_pipeline(self, profile_id: str, request: OperationRequest) -> OperationResult:
         """Facade method executing pipeline for a request (IAdapterPipelineExecutor protocol).
 
         When a DocumentOperationProfileManager is configured, resolves the real registered
@@ -444,9 +436,7 @@ class AdapterPipelineExecutor:
         pipeline_def: AdapterPipelineDefinition | None = None
         if self._profile_manager is not None:
             try:
-                profile = await self._profile_manager.get_profile(
-                    profile_id, tenant_id=context.tenant_id
-                )
+                profile = await self._profile_manager.get_profile(profile_id, tenant_id=context.tenant_id)
                 pipeline_def = profile.adapter_pipeline
             except Exception:
                 pipeline_def = None
@@ -456,9 +446,7 @@ class AdapterPipelineExecutor:
             try:
                 adapter = self._registry.get_adapter_by_id(profile_id)
                 cap = (
-                    adapter.supported_capabilities[0]
-                    if adapter.supported_capabilities
-                    else AdapterCapability.GENERATE
+                    adapter.supported_capabilities[0] if adapter.supported_capabilities else AdapterCapability.GENERATE
                 )
                 pipeline_def = AdapterPipelineDefinition(
                     pipeline_id=f"pipeline-{profile_id}",
@@ -479,9 +467,7 @@ class AdapterPipelineExecutor:
                 )
 
         try:
-            res = await self.execute_pipeline_definition(
-                pipeline_def, context, request_id=request.request_id
-            )
+            res = await self.execute_pipeline_definition(pipeline_def, context, request_id=request.request_id)
             exec_ms = (time.perf_counter() - start_time) * 1000.0
 
             return OperationResult(

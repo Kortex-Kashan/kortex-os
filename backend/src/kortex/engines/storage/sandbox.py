@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Union
 
 from kortex.core.exceptions import KortexError
 
@@ -23,7 +22,7 @@ class PathSandboxError(KortexError):
 class PathSandboxValidator:
     """Validates and resolves file paths within a strict base directory sandbox."""
 
-    def __init__(self, base_directory: Union[str, Path]) -> None:
+    def __init__(self, base_directory: str | Path) -> None:
         """Initialize the path sandbox with an absolute base directory path.
 
         Args:
@@ -38,7 +37,7 @@ class PathSandboxValidator:
         """Return the resolved absolute base directory of the sandbox."""
         return self._base_dir
 
-    def resolve_sandboxed_path(self, relative_or_absolute_path: Union[str, Path]) -> Path:
+    def resolve_sandboxed_path(self, relative_or_absolute_path: str | Path) -> Path:
         """Resolve a target path and verify it remains strictly within the base directory.
 
         Args:
@@ -53,10 +52,7 @@ class PathSandboxValidator:
         raw_path = Path(relative_or_absolute_path)
 
         # If relative, anchor to base_directory
-        if not raw_path.is_absolute():
-            target_path = (self._base_dir / raw_path).resolve()
-        else:
-            target_path = raw_path.resolve()
+        target_path = (self._base_dir / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
 
         # Check path containment
         try:
@@ -67,13 +63,15 @@ class PathSandboxValidator:
                 relative_or_absolute_path,
                 self._base_dir,
             )
+            # `from None`: the internal `relative_to` ValueError carries no
+            # diagnostic value and this is a security-boundary rejection.
             raise PathSandboxError(
                 f"Security violation: Access path '{relative_or_absolute_path}' escapes sandbox base directory."
-            )
+            ) from None
 
         return target_path
 
-    def get_relative_string(self, full_path: Union[str, Path]) -> str:
+    def get_relative_string(self, full_path: str | Path) -> str:
         """Convert a full path inside the sandbox into a canonical relative string format (POSIX style).
 
         Args:

@@ -3,8 +3,9 @@ Unit tests for KORTEX Recipe Engine Permission and least-privilege checks.
 """
 
 import pytest
+
 from kortex.engines.recipe.exceptions import RecipePermissionError
-from kortex.engines.recipe.models import RecipeDefinition, RecipeManifest, RecipePermission, RecipeStep
+from kortex.engines.recipe.models import RecipeDefinition, RecipeManifest, RecipeStep
 from kortex.engines.recipe.permissions import PermissionValidator
 
 

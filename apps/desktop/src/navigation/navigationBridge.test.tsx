@@ -42,11 +42,15 @@ function NavigationProbe() {
     <div>
       <p data-testid="active-id">{state.applicationId ?? "none"}</p>
       <p data-testid="pathname">{location.pathname}</p>
+      <p data-testid="search">{location.search}</p>
       <button onClick={() => navigateToApplication({ applicationId: "dashboard" })}>
         Go to Dashboard
       </button>
       <button onClick={() => navigateToApplication({ applicationId: "ai-studio" })}>
         Go to AI Studio
+      </button>
+      <button onClick={() => navigateToApplication({ applicationId: "dashboard", search: "?tab=approvals" })}>
+        Go to Dashboard Approvals Tab
       </button>
       <button onClick={() => navigate(-1)}>Back</button>
       <button onClick={() => navigate(1)}>Forward</button>
@@ -86,6 +90,15 @@ describe("useApplicationNavigation", () => {
 
     expect(screen.getByTestId("pathname")).toHaveTextContent("/dashboard");
     expect(screen.getByTestId("active-id")).toHaveTextContent("dashboard");
+  });
+
+  it("M7.2: appends an optional search string to the resolved route", () => {
+    render(<RouterProvider router={buildTestRouter(makeApps(), ["/"])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard Approvals Tab" }));
+
+    expect(screen.getByTestId("pathname")).toHaveTextContent("/dashboard");
+    expect(screen.getByTestId("search")).toHaveTextContent("?tab=approvals");
   });
 
   it("throws when asked to navigate to an unknown application id", () => {

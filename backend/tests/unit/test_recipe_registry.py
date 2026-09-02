@@ -2,7 +2,6 @@
 Unit tests for KORTEX Recipe Engine Catalog Registry.
 """
 
-import pytest
 from kortex.engines.recipe.models import RecipeDefinition, RecipeManifest, RecipeStep
 from kortex.engines.recipe.registry import RecipeRegistry
 

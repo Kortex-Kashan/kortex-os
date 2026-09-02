@@ -44,7 +44,7 @@ convention as the two rows above.
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
@@ -59,24 +59,22 @@ class KnowledgeRecordRow(BaseModel):
     `KnowledgeLineageManager`'s own in-memory keying exactly."""
 
     __tablename__ = "knowledge_records"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "record_id", "version_id", name="uq_knowledge_records_identity"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "record_id", "version_id", name="uq_knowledge_records_identity"),)
 
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     record_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     version_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    parent_version_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    lineage_path: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    parent_version_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lineage_path: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     record_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    content: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    content: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     trust_state: Mapped[str] = mapped_column(String(64), nullable=False)
     classification: Mapped[str] = mapped_column(String(64), nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     created_by_type: Mapped[str] = mapped_column(String(64), nullable=False)
     record_created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False)
-    successor_version_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    successor_version_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class KnowledgeAnnotationRow(BaseModel):
@@ -86,9 +84,7 @@ class KnowledgeAnnotationRow(BaseModel):
     own in-memory keying exactly."""
 
     __tablename__ = "knowledge_annotations"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "annotation_id", name="uq_knowledge_annotations_identity"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "annotation_id", name="uq_knowledge_annotations_identity"),)
 
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     annotation_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -98,7 +94,7 @@ class KnowledgeAnnotationRow(BaseModel):
     actor_type: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(String, nullable=False)
     annotation_created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    supersedes_annotation_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    supersedes_annotation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Strictly-increasing per-process sequence number (`time.monotonic_ns()`
     # at insert time), NOT the row's own UUID `id` or its `created_at`
     # audit column — a UUID sorts arbitrarily, and two annotations added
@@ -125,15 +121,13 @@ class KnowledgePackRow(BaseModel):
     inherits `core.db.BaseModel`, no new persistence mechanism."""
 
     __tablename__ = "knowledge_packs"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "asset_id", name="uq_knowledge_packs_identity"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "asset_id", name="uq_knowledge_packs_identity"),)
 
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     asset_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    manifest: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    digital_signature: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    digital_signature: Mapped[str | None] = mapped_column(String, nullable=True)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(255), nullable=False)

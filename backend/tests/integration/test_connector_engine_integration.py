@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.base_engine import EngineState
 from kortex.core.db import DatabaseEngineManager
@@ -20,13 +22,16 @@ from kortex.core.exceptions import KernelBootError
 from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
-from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError
+from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError, ConnectorSecurityError
 from kortex.engines.connector.models import (
     ActionRequest,
     ActionResult,
+    ConnectorActionHistoryModel,
     ConnectorProfile,
+    ConnectorProfileModel,
 )
 from kortex.engines.connector.profiles import ConnectorProfileManager
+from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
 from kortex.engines.storage.engine import StorageEngine
 
 
@@ -97,9 +102,9 @@ async def test_kernel_capability_lookup_and_execution(tmp_path) -> None:
     await connector_engine.profile_manager.register_profile(profile)
 
     # 3. Look up profile retrieval capability
-    fetched_profile = await kernel._registry_engine.get_raw_handler_for_testing(
-        "kortex.connector.profile.get"
-    )("prof-cap-1")
+    fetched_profile = await kernel._registry_engine.get_raw_handler_for_testing("kortex.connector.profile.get")(
+        "prof-cap-1"
+    )
     assert fetched_profile.profile_id == "prof-cap-1"
 
     # 4. Look up action execution capability
@@ -111,9 +116,9 @@ async def test_kernel_capability_lookup_and_execution(tmp_path) -> None:
         correlation_id="corr-cap-1",
     )
 
-    res: ActionResult = await kernel._registry_engine.get_raw_handler_for_testing(
-        "kortex.connector.action.execute"
-    )(req)
+    res: ActionResult = await kernel._registry_engine.get_raw_handler_for_testing("kortex.connector.action.execute")(
+        req
+    )
     assert res.status == "SUCCESS"
     assert res.request_id == "req-cap-exec-1"
     assert res.correlation_id == "corr-cap-1"
@@ -464,6 +469,7 @@ async def test_dependency_boot_failure_when_unregistered() -> None:
 @pytest.mark.asyncio
 async def test_storage_cache_failure_fallback_resiliency() -> None:
     """11. Test ConnectorProfileManager fallback to local memory when ICacheStore raises exceptions."""
+
     class FailingCacheStore:
         async def get(self, key: str) -> Any:
             raise RuntimeError("Cache storage connection timeout")
@@ -549,15 +555,6 @@ async def test_failure_pathway_missing_profile_and_failed_action(tmp_path) -> No
 
 # -- Milestone 9.1 Remediation Integration Tests ------------------------------
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from kortex.engines.connector.exceptions import ConnectorSecurityError
-from kortex.engines.connector.models import (
-    ConnectorActionHistoryModel,
-    ConnectorProfileModel,
-)
-from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
-
 
 @pytest.mark.asyncio
 async def test_idatastore_profile_persistence_and_query(tmp_path) -> None:
@@ -571,9 +568,7 @@ async def test_idatastore_profile_persistence_and_query(tmp_path) -> None:
     new column (M6.3-1's `tenant_id`) that a stale on-disk table predates.
     """
     kernel = Kernel()
-    db_manager = DatabaseEngineManager(
-        connection_url=f"sqlite+aiosqlite:///{tmp_path}/idatastore_prof.db"
-    )
+    db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{tmp_path}/idatastore_prof.db")
     kernel._db_manager = db_manager
     storage_engine = StorageEngine(base_directory=str(tmp_path / "idatastore_prof_storage"))
     connector_engine = ConnectorEngine()

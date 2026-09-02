@@ -59,9 +59,7 @@ def _ollama_reachable_with_model() -> bool:
     if not isinstance(models, list):
         return False
     configured_family = _OLLAMA_TEST_MODEL.split(":")[0]
-    return any(
-        isinstance(m, dict) and str(m.get("name", "")).split(":")[0] == configured_family for m in models
-    )
+    return any(isinstance(m, dict) and str(m.get("name", "")).split(":")[0] == configured_family for m in models)
 
 
 pytestmark = pytest.mark.skipif(

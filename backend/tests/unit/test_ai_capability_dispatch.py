@@ -162,9 +162,7 @@ async def test_authenticated_without_ai_read_permission_is_denied_authorization(
 
 @pytest.mark.parametrize("capability_name", ["kortex.ai.provider.list", "kortex.ai.model.list"])
 @pytest.mark.asyncio
-async def test_authenticated_with_ai_read_permission_lists_empty_registry(
-    tmp_path: Path, capability_name: str
-) -> None:
+async def test_authenticated_with_ai_read_permission_lists_empty_registry(tmp_path: Path, capability_name: str) -> None:
     kernel, storage_engine, security_engine = await _boot_kernel(tmp_path)
 
     tenant_id = _tenant(tmp_path)

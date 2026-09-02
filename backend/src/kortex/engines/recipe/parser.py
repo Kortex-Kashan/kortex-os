@@ -7,7 +7,8 @@ manifest.yaml, schema.yaml, and permissions.yaml. Performs NO validation.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
+
 import yaml
 
 from kortex.engines.recipe.exceptions import RecipeValidationError
@@ -26,7 +27,7 @@ from kortex.engines.recipe.models import (
 class RecipeParser:
     """YAML parser for loading recipe specification payloads."""
 
-    def parse_yaml_string(self, yaml_content: str) -> Dict[str, Any]:
+    def parse_yaml_string(self, yaml_content: str) -> dict[str, Any]:
         """Parse raw YAML content into a dictionary mapping.
 
         Args:
@@ -47,23 +48,23 @@ class RecipeParser:
             raise RecipeValidationError("Parsed YAML must be a root key-value dictionary.")
         return parsed
 
-    def parse_recipe_yaml(self, raw_content: str) -> Dict[str, Any]:
+    def parse_recipe_yaml(self, raw_content: str) -> dict[str, Any]:
         """Parse recipe.yaml specification payload."""
         return self.parse_yaml_string(raw_content)
 
-    def parse_manifest_yaml(self, raw_content: str) -> Dict[str, Any]:
+    def parse_manifest_yaml(self, raw_content: str) -> dict[str, Any]:
         """Parse manifest.yaml specification payload."""
         return self.parse_yaml_string(raw_content)
 
-    def parse_schema_yaml(self, raw_content: str) -> Dict[str, Any]:
+    def parse_schema_yaml(self, raw_content: str) -> dict[str, Any]:
         """Parse schema.yaml specification payload."""
         return self.parse_yaml_string(raw_content)
 
-    def parse_permissions_yaml(self, raw_content: str) -> Dict[str, Any]:
+    def parse_permissions_yaml(self, raw_content: str) -> dict[str, Any]:
         """Parse permissions.yaml specification payload."""
         return self.parse_yaml_string(raw_content)
 
-    def parse_definition(self, raw_recipe: str, raw_manifest: Optional[str] = None) -> RecipeDefinition:
+    def parse_definition(self, raw_recipe: str, raw_manifest: str | None = None) -> RecipeDefinition:
         """Parse raw recipe YAML and optional manifest YAML into a RecipeDefinition model.
 
         Args:
@@ -81,7 +82,9 @@ class RecipeParser:
         elif "manifest" in recipe_dict and isinstance(recipe_dict["manifest"], dict):
             manifest = RecipeManifestManager.parse_manifest_dict(recipe_dict["manifest"])
         else:
-            raise RecipeValidationError("Recipe specification must include a valid manifest section or separate manifest.yaml.")
+            raise RecipeValidationError(
+                "Recipe specification must include a valid manifest section or separate manifest.yaml."
+            )
 
         inputs = [RecipeInput(**i) for i in recipe_dict.get("inputs", [])]
         steps = [RecipeStep(**s) for s in recipe_dict.get("steps", [])]

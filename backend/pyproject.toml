@@ -87,9 +87,51 @@ select = [
     "RUF",   # Ruff-specific rules
 ]
 ignore = [
-    "ANN101",  # Missing type annotation for `self`
-    "ANN102",  # Missing type annotation for `cls`
-    "S101",    # Use of assert (needed in tests)
+    # `S101` (use of `assert`): assert is the assertion mechanism pytest is built
+    # on, and `assert` is used in `src` only for internal invariants.
+    "S101",
+    # `ANN401` (dynamically typed `Any` in annotations): KORTEX is a
+    # capability-dispatch platform. `Any` is intentional and correct at its
+    # dynamic boundaries -- `CapabilityDispatcher` handler signatures, JSON/dict
+    # payloads crossing the HTTP/IPC edge, `IEngineDiagnostics` return maps and
+    # `Protocol` surfaces that accept arbitrary engine payloads. Replacing those
+    # with concrete types would change public engine/capability signatures, which
+    # is an API change, not a lint fix. mypy in strict mode over `src`
+    # (`[tool.mypy]` below, and the `mypy src` CI step) remains the authoritative
+    # typing gate; strict mypy already rejects *implicit* Any, which is the
+    # actual risk ANN401 exists to catch.
+    "ANN401",
+    # `UP042` (`class X(str, Enum)` -> `StrEnum`): not behaviour-preserving here.
+    # `str(SomeEnum.MEMBER)` yields "SomeEnum.MEMBER" under `(str, Enum)` but
+    # "member_value" under `StrEnum`. These enums are serialized into API
+    # payloads, persisted columns, audit records and log lines across certified
+    # engines, so the rewrite would be an observable behaviour change to
+    # already-certified functionality rather than a cleanup.
+    "UP042",
+]
+
+# Note: `ANN101`/`ANN102` were previously listed here. Both rules have been
+# removed from Ruff, which warns that ignoring them has no effect, so they are
+# dropped rather than carried as dead configuration.
+
+[tool.ruff.lint.per-file-ignores]
+# Test-suite conventions. These are scoped to `tests/` only -- `src/` is held to
+# the full rule set.
+"tests/**/*.py" = [
+    # flake8-annotations: the project already scopes strict typing to `src`
+    # only -- `[tool.mypy] mypy_path = ["src"]` and the Backend CI step runs
+    # `mypy src`, not `mypy tests`. Requiring full annotations on fixtures,
+    # helper factories and test-double methods would contradict that existing
+    # decision without improving what the tests actually verify.
+    "ANN",
+    # flake8-bandit hardcoded-credential rules. Test credentials, fake tokens
+    # and deterministic key material are the point of the security tests (e.g.
+    # `_TEST_MASTER_KEY`, `"pass-alpha"`), not a leak. This extends the same
+    # test-scoped reasoning the pre-existing `S101` ignore already applied.
+    "S105",  # hardcoded password string
+    "S106",  # hardcoded password function argument
+    "S107",  # hardcoded password default
+    "S108",  # hardcoded temp-file path (tmp_path-adjacent fixtures)
 ]
 
 [tool.ruff.lint.isort]

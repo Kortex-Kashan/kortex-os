@@ -6,6 +6,11 @@
  */
 export interface NavigationIntent {
   applicationId: string;
+  /** Optional query string (e.g. "?tab=approvals"), appended verbatim to
+   * the resolved route (M7.2) -- lets a caller deep-link into a specific
+   * tab of the target application without either side needing to know
+   * about the other's internal tab state. Must include the leading "?". */
+  search?: string;
 }
 
 /**

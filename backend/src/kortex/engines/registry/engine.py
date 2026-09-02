@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import datetime
 import enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -20,9 +21,22 @@ if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
 
 
-_BOOTSTRAP_EXEMPT_CAPABILITY = "kortex.security.auth.authenticate"
-"""The one capability permitted to register with `requires_authentication=False` —
-it must be reachable before any session token exists. Enforced in
+_BOOTSTRAP_EXEMPT_CAPABILITIES = frozenset(
+    {
+        "kortex.security.auth.authenticate",
+        # M7.1: the first-run tenant/admin bootstrap capability is the second
+        # (and, by design, still deliberately narrow) member of this
+        # allowlist — it must be reachable before any session token exists
+        # for the identical reason `auth.authenticate` is: there is no
+        # principal yet to authenticate as. It is not a general bypass —
+        # its own handler (`SecurityEngine.bootstrap_create_admin`) fails
+        # closed the moment any principal already exists, exactly mirroring
+        # how `authenticate` fails closed on any credential mismatch.
+        "kortex.security.bootstrap.create_admin",
+    }
+)
+"""Capabilities permitted to register with `requires_authentication=False` —
+each must be reachable before any session token exists. Enforced in
 `RegistryEngine.register_capability`, not merely documented as a convention."""
 
 
@@ -46,9 +60,9 @@ class ResourceMetadata(BaseModel):
     version: str = Field(default="0.1.0", description="Resource version string")
     description: str = Field(default="", description="Human readable description")
     provider: str = Field(default="system", description="Provider or author module name")
-    attributes: Dict[str, Any] = Field(default_factory=dict, description="Custom attribute metadata")
+    attributes: dict[str, Any] = Field(default_factory=dict, description="Custom attribute metadata")
     registered_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc),
+        default_factory=lambda: datetime.datetime.now(datetime.UTC),
         description="Timestamp of registration",
     )
 
@@ -59,9 +73,9 @@ class CapabilityDescriptor(BaseModel):
     name: str = Field(description="Unique capability name, e.g., 'payroll.calculate'")
     description: str = Field(description="Description of what this capability performs")
     provider: str = Field(description="Name of the providing module or engine")
-    parameters_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON schema for parameters")
-    returns_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON schema for return value")
-    required_permissions: Optional[List[str]] = Field(
+    parameters_schema: dict[str, Any] = Field(default_factory=dict, description="JSON schema for parameters")
+    returns_schema: dict[str, Any] = Field(default_factory=dict, description="JSON schema for return value")
+    required_permissions: list[str] | None = Field(
         default=None,
         description=(
             "RBAC permission keys required to execute this capability, sourced exclusively from this "
@@ -77,9 +91,9 @@ class CapabilityDescriptor(BaseModel):
         default=True,
         description=(
             "Whether the Kernel dispatcher requires a verified session token before invoking this "
-            "capability's handler. Only 'kortex.security.auth.authenticate' may register with this set "
-            "to False — enforced in `register_capability` below, not merely a convention. Every other "
-            "capability defaults to True."
+            "capability's handler. Only the small, fixed allowlist in `_BOOTSTRAP_EXEMPT_CAPABILITIES` "
+            "may register with this set to False — enforced in `register_capability` below, not merely "
+            "a convention. Every other capability defaults to True."
         ),
     )
     security_classification: str = Field(
@@ -98,12 +112,10 @@ class RegistryEngine(BaseEngine):
 
     def __init__(self) -> None:
         super().__init__()
-        self._stores: Dict[RegistryCategory, Dict[str, ResourceMetadata]] = {
-            cat: {} for cat in RegistryCategory
-        }
-        self._handlers: Dict[str, Any] = {}
-        self._capabilities: Dict[str, CapabilityDescriptor] = {}
-        self._capability_handlers: Dict[str, Optional[Callable[..., Any]]] = {}
+        self._stores: dict[RegistryCategory, dict[str, ResourceMetadata]] = {cat: {} for cat in RegistryCategory}
+        self._handlers: dict[str, Any] = {}
+        self._capabilities: dict[str, CapabilityDescriptor] = {}
+        self._capability_handlers: dict[str, Callable[..., Any] | None] = {}
         """Milestone M8: the SOLE store of real capability handler callables.
 
         Deliberately separate from `_capabilities` (which holds the public
@@ -132,7 +144,7 @@ class RegistryEngine(BaseEngine):
         self._set_state(EngineState.RUNNING)
         self.logger.info("Registry Engine running.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Diagnostic health check."""
         counts = {cat.value: len(store) for cat, store in self._stores.items()}
         return {
@@ -158,15 +170,13 @@ class RegistryEngine(BaseEngine):
         description: str = "",
         version: str = "0.1.0",
         provider: str = "system",
-        attributes: Optional[Dict[str, Any]] = None,
+        attributes: dict[str, Any] | None = None,
         allow_overwrite: bool = False,
     ) -> ResourceMetadata:
         """Register any named resource into a registry category."""
         store = self._stores[category]
         if name in store and not allow_overwrite:
-            raise ResourceAlreadyExistsError(
-                f"Resource '{name}' is already registered in category '{category.value}'."
-            )
+            raise ResourceAlreadyExistsError(f"Resource '{name}' is already registered in category '{category.value}'.")
 
         meta = ResourceMetadata(
             name=name,
@@ -187,9 +197,7 @@ class RegistryEngine(BaseEngine):
         """Fetch metadata for a registered resource."""
         store = self._stores[category]
         if name not in store:
-            raise ResourceNotFoundError(
-                f"Resource '{name}' not found in category '{category.value}'."
-            )
+            raise ResourceNotFoundError(f"Resource '{name}' not found in category '{category.value}'.")
         return store[name]
 
     def get_target_object(self, name: str, category: RegistryCategory) -> Any:
@@ -201,7 +209,7 @@ class RegistryEngine(BaseEngine):
             )
         return self._handlers[key]
 
-    def list_resources(self, category: RegistryCategory) -> List[ResourceMetadata]:
+    def list_resources(self, category: RegistryCategory) -> list[ResourceMetadata]:
         """List all registered metadata objects in a category."""
         return list(self._stores[category].values())
 
@@ -250,10 +258,10 @@ class RegistryEngine(BaseEngine):
         name: str,
         description: str,
         provider: str,
-        handler: Optional[Callable[..., Any]] = None,
-        parameters_schema: Optional[Dict[str, Any]] = None,
-        returns_schema: Optional[Dict[str, Any]] = None,
-        required_permissions: Optional[List[str]] = None,
+        handler: Callable[..., Any] | None = None,
+        parameters_schema: dict[str, Any] | None = None,
+        returns_schema: dict[str, Any] | None = None,
+        required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
     ) -> CapabilityDescriptor:
@@ -271,10 +279,10 @@ class RegistryEngine(BaseEngine):
         if name in self._capabilities:
             raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
 
-        if not requires_authentication and name != _BOOTSTRAP_EXEMPT_CAPABILITY:
+        if not requires_authentication and name not in _BOOTSTRAP_EXEMPT_CAPABILITIES:
             raise ValueError(
                 f"Capability '{name}' cannot register with requires_authentication=False; "
-                f"only '{_BOOTSTRAP_EXEMPT_CAPABILITY}' may bypass authentication."
+                f"only {sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may bypass authentication."
             )
 
         descriptor = CapabilityDescriptor(
@@ -306,11 +314,11 @@ class RegistryEngine(BaseEngine):
             raise CapabilityNotFoundError(f"Capability '{name}' not found in registry.")
         return self._capabilities[name]
 
-    def list_capabilities(self) -> List[CapabilityDescriptor]:
+    def list_capabilities(self) -> list[CapabilityDescriptor]:
         """List all discoverable capabilities."""
         return list(self._capabilities.values())
 
-    def _resolve_handler(self, name: str) -> Optional[Callable[..., Any]]:
+    def _resolve_handler(self, name: str) -> Callable[..., Any] | None:
         """Internal, dispatcher-only handler resolution (Milestone M8).
 
         NOT part of the public contract — not exposed on `Kernel`, not
@@ -325,7 +333,7 @@ class RegistryEngine(BaseEngine):
             raise CapabilityNotFoundError(f"Capability '{name}' not found in registry.")
         return self._capability_handlers[name]
 
-    def get_raw_handler_for_testing(self, name: str) -> Optional[Callable[..., Any]]:
+    def get_raw_handler_for_testing(self, name: str) -> Callable[..., Any] | None:
         """TEST-ONLY accessor for a capability's raw handler (Milestone M8).
 
         Exists solely so existing unit/integration tests that deliberately

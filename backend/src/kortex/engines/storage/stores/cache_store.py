@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from kortex.engines.storage.interfaces import ICacheStore
 
@@ -22,10 +22,10 @@ class MemoryCacheStore(ICacheStore):
     def __init__(self) -> None:
         """Initialize MemoryCacheStore dictionary index."""
         # Maps key -> (value, expire_timestamp_or_none)
-        self._cache: Dict[str, Tuple[Any, Optional[float]]] = {}
+        self._cache: dict[str, tuple[Any, float | None]] = {}
         logger.debug("Initialized MemoryCacheStore")
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Retrieve a cached value by key.
 
         Args:
@@ -45,7 +45,7 @@ class MemoryCacheStore(ICacheStore):
 
         return value
 
-    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
         """Store a value in cache with an optional Time-To-Live (TTL) in seconds.
 
         Args:

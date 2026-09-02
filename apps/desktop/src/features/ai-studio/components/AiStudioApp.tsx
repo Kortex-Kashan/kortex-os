@@ -15,18 +15,27 @@ import { useAiModels } from "../hooks/useAiModels";
 import { useAiProviders } from "../hooks/useAiProviders";
 import type { AiModel, AiProvider } from "../types";
 import { AiGovernanceTab } from "./AiGovernanceTab";
+import { ChatPanel } from "./ChatPanel";
 import { useAuth } from "@/auth/AuthProvider";
 
-type AiTab = "registry" | "governance";
+type AiTab = "registry" | "governance" | "chat";
+
+const TAB_LABEL: Record<AiTab, string> = {
+  registry: "Providers & Models",
+  governance: "Governance",
+  chat: "Chat",
+};
 
 /** The AI Studio workspace: tabbed between the provider/model registry
- * (read-only) and the AI Governance dashboard (M5.6).
+ * (read-only), the AI Governance dashboard (M5.6), and Chat (M7.2).
  * Each tab independently manages its own loading/error states. */
 export function AiStudioApp() {
   const [activeTab, setActiveTab] = useState<AiTab>("registry");
   const { state } = useAuth();
   const tenantId =
     state.status === "AUTHENTICATED" && state.identity ? state.identity.tenantId : "";
+  const userId =
+    state.status === "AUTHENTICATED" && state.identity ? state.identity.principalId : "";
 
   return (
     <div className="space-y-4">
@@ -35,7 +44,7 @@ export function AiStudioApp() {
         aria-label="AI Studio tabs"
         className="flex gap-1 border-b border-border pb-1"
       >
-        {(["registry", "governance"] as AiTab[]).map((tab) => (
+        {(["registry", "governance", "chat"] as AiTab[]).map((tab) => (
           <button
             key={tab}
             role="tab"
@@ -50,7 +59,7 @@ export function AiStudioApp() {
                 : "text-muted-foreground hover:text-foreground hover:bg-muted",
             ].join(" ")}
           >
-            {tab === "registry" ? "Providers & Models" : "Governance"}
+            {TAB_LABEL[tab]}
           </button>
         ))}
       </nav>
@@ -76,6 +85,7 @@ export function AiStudioApp() {
           </Card>
         )}
         {activeTab === "governance" && <AiGovernanceTab tenantId={tenantId} />}
+        {activeTab === "chat" && <ChatPanel tenantId={tenantId} userId={userId} />}
       </div>
     </div>
   );

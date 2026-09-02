@@ -56,9 +56,7 @@ def _parse_field(field_str: str, min_val: int, max_val: int, field_name: str) ->
                     f"Invalid range values in cron field '{field_name}': '{part}'. Must be integers."
                 ) from err
             if start > end or start < min_val or end > max_val:
-                raise WorkflowValidationError(
-                    f"Range '{part}' out of bounds for '{field_name}' [{min_val}-{max_val}]."
-                )
+                raise WorkflowValidationError(f"Range '{part}' out of bounds for '{field_name}' [{min_val}-{max_val}].")
         else:
             try:
                 val = int(part)
@@ -118,7 +116,6 @@ def validate_cron_expression(cron_expr: str) -> None:
         WorkflowValidationError: If syntax is invalid or values are out of range.
     """
     CronScheduleSpec(cron_expr)
-
 
 
 def compute_next_cron_run(

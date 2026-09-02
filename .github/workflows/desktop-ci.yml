@@ -1,0 +1,112 @@
+name: Desktop CI
+
+# Read-only validation for the desktop app (apps/desktop, design-system) and
+# its Tauri/Rust shell, per the Production Hardening CI/CD work package
+# (docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md §5.9). Reproduces
+# the exact pnpm/tsc/vitest/cargo commands already used locally -- no new
+# tooling introduced. Deliberately does not build/sign/publish installers,
+# invoke `tauri build`, or run any release/deployment step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Typecheck and test (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Root package.json pins the package manager exactly
+      # ("packageManager": "pnpm@11.23.0+...") -- pnpm/action-setup reads
+      # that field automatically when `version` is omitted, so the workflow
+      # never risks drifting from what the repo itself declares.
+      - uses: pnpm/action-setup@v4
+
+      # No repo-declared Node version exists anywhere (no .nvmrc/engines
+      # field) -- Node 22 (active LTS) is a CI-required default, not a value
+      # read from repository config. If a Node version is ever pinned in the
+      # repo, this should be updated to match it rather than left to drift
+      # independently.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Root package.json's own "typecheck"/"test" scripts (`pnpm -r ...`)
+      # already fan out to both workspace packages (design-system,
+      # apps/desktop) -- reproduced here verbatim, not reimplemented per-package.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+  rust:
+    name: Tauri shell (cargo check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uses `stable`, NOT the `rust-version = "1.77"` floor declared in
+      # apps/desktop/src-tauri/Cargo.toml. Pinning 1.77 was the cause of this
+      # job's original failure: the locked dependency graph contains
+      # `icu_normalizer 2.3.0`, whose manifest declares `edition = "2024"`,
+      # and Cargo 1.77.2 rejects it outright at manifest-parse time --
+      # "feature `edition2024` is required ... not stabilized in this version
+      # of Cargo" -- before compiling anything. edition2024 stabilized in
+      # Rust 1.85. `stable` is what developers actually build with locally
+      # (verified against cargo 1.98.0), so CI now matches the real toolchain
+      # rather than an MSRV floor the current Cargo.lock no longer satisfies.
+      # NOTE (separate decision, deliberately not changed here): Cargo.toml's
+      # `rust-version = "1.77"` is therefore stale relative to its own
+      # Cargo.lock. Correcting that declaration is application/certified-M7.1
+      # source and needs its own authorization.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # Tauri's Linux backend needs webkit2gtk/related system libraries for
+      # `cargo check`/`clippy` -- these are standard packages from the Tauri
+      # project's own documented Linux prerequisites, not KORTEX-specific.
+      # libsoup-3.0-dev and libdbus-1-dev are retained deliberately: they were
+      # added while investigating this job's failure and did NOT fix it (the
+      # cause was the toolchain pin, see above), but Cargo.lock shows they are
+      # genuine build-time requirements once compilation actually proceeds --
+      # `webkit2gtk-sys` depends directly on `soup3-sys`, whose build script
+      # probes libsoup-3.0 via `system-deps`, and `dbus` depends on
+      # `libdbus-sys`, whose build script probes dbus-1 via `pkg-config`.
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev libdbus-1-dev
+
+      - name: cargo check
+        run: cargo check
+
+      # Informational only (continue-on-error): no repo-established clippy
+      # strictness convention exists (no clippy.toml, no deny(warnings)) --
+      # `cargo check` above is the blocking Rust validation gate. Denying all
+      # clippy warnings would introduce a new, stricter policy unilaterally
+      # and immediately fail on a pre-existing, unrelated lint
+      # (`large_enum_variant` in sidecar.rs) that predates this CI/CD work.
+      - name: cargo clippy (informational)
+        continue-on-error: true
+        run: cargo clippy

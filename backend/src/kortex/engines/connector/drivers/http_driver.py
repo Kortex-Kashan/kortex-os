@@ -15,9 +15,13 @@ import logging
 import socket
 import time
 import urllib.parse
+from collections.abc import Iterable
 from typing import Any
 
+import httpcore
 import httpx
+from httpcore import SOCKET_OPTION
+from httpcore._backends.anyio import AnyIOBackend
 
 from kortex.engines.connector.base_driver import BaseConnectorDriver
 from kortex.engines.connector.exceptions import ConnectorSecurityError, DriverExecutionError
@@ -32,7 +36,6 @@ from kortex.engines.connector.models import (
 
 logger = logging.getLogger("kortex.engines.connector.drivers.http")
 
-import httpcore
 
 # Restricted IPv4 and IPv6 Networks for SSRF Validation
 RESTRICTED_IPV4_NETWORKS = [
@@ -71,16 +74,18 @@ MAX_RESPONSE_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
 # This prevents credential-bearing headers (Set-Cookie, Authorization, Proxy-Authorization,
 # X-Api-Key, Api-Key, WWW-Authenticate, etc.) from leaking into workflow step_outputs,
 # WorkflowContext persistence, connector events, or logs.
-ALLOWED_RESPONSE_HEADERS: frozenset[str] = frozenset({
-    "content-type",
-    "content-length",
-    "etag",
-    "last-modified",
-    "date",
-    "cache-control",
-    "x-request-id",
-    "x-correlation-id",
-})
+ALLOWED_RESPONSE_HEADERS: frozenset[str] = frozenset(
+    {
+        "content-type",
+        "content-length",
+        "etag",
+        "last-modified",
+        "date",
+        "cache-control",
+        "x-request-id",
+        "x-correlation-id",
+    }
+)
 
 
 class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -88,7 +93,10 @@ class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
 
     def __init__(self, pinned_ip: str) -> None:
         self._pinned_ip = pinned_ip
-        self._default_backend = httpcore._backends.anyio.AnyIOBackend()
+        # Annotated with the public base class: `httpcore._backends.anyio` is a
+        # private, untyped module, so both delegating calls below would
+        # otherwise resolve to `Any`.
+        self._default_backend: httpcore.AsyncNetworkBackend = AnyIOBackend()
 
     async def connect_tcp(
         self,
@@ -96,7 +104,7 @@ class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
         port: int,
         timeout: float | None = None,
         local_address: str | None = None,
-        socket_options=None,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         """Force socket connection directly to self._pinned_ip, preventing time-of-use DNS re-resolution."""
         return await self._default_backend.connect_tcp(
@@ -107,7 +115,7 @@ class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
             socket_options=socket_options,
         )
 
-    async def connect_unix_socket(self, *args, **kwargs):
+    async def connect_unix_socket(self, *args: Any, **kwargs: Any) -> httpcore.AsyncNetworkStream:
         return await self._default_backend.connect_unix_socket(*args, **kwargs)
 
     async def sleep(self, seconds: float) -> None:
@@ -155,9 +163,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
             vendor="KORTEX",
             author="KORTEX Core Team",
             version="1.0.0",
-            description=(
-                "Production REST/HTTP connector driver plugin for external web API dispatches."
-            ),
+            description=("Production REST/HTTP connector driver plugin for external web API dispatches."),
             license="MIT",
             is_sandboxed=True,
             supported_actions=[
@@ -173,9 +179,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
             ],
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         """Execute a REST/HTTP connector action and return the response result.
 
         Args:
@@ -244,78 +248,80 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         # 9. Execute HTTP request via SSRFHardenedTransport (follow_redirects=False, trust_env=False)
         transport = SSRFHardenedTransport(pinned_ip=pinned_ip)
         try:
-            async with httpx.AsyncClient(
-                transport=transport,
-                follow_redirects=False,
-                trust_env=False,
-                timeout=timeout_config,
-            ) as client:
-                async with client.stream(
+            async with (
+                httpx.AsyncClient(
+                    transport=transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    timeout=timeout_config,
+                ) as client,
+                client.stream(
                     method=method,
                     url=final_url,
                     params=params if params else None,
                     headers=headers,
                     content=body_bytes,
-                ) as response:
-                    body_chunks: list[bytes] = []
-                    total_bytes = 0
+                ) as response,
+            ):
+                body_chunks: list[bytes] = []
+                total_bytes = 0
 
-                    async for chunk in response.aiter_bytes():
-                        total_bytes += len(chunk)
-                        if total_bytes > MAX_RESPONSE_BODY_SIZE:
-                            await response.aclose()
-                            raise DriverExecutionError(
-                                "Response body size exceeds maximum allowed limit of 10MB (10485760 bytes).",
-                                details={"request_id": request.request_id},
-                            )
-                        body_chunks.append(chunk)
-
-                    response_bytes = b"".join(body_chunks)
-                    exec_time_ms = (time.perf_counter() - start_time) * 1000.0
-                    status_code = response.status_code
-
-                    if 200 <= status_code <= 299:
-                        # Attempt JSON parsing, fall back to UTF-8 text string
-                        try:
-                            res_body: Any = json.loads(response_bytes.decode("utf-8"))
-                        except Exception:
-                            res_body = response_bytes.decode("utf-8", errors="replace")
-
-                        return ActionResult(
-                            request_id=request.request_id,
-                            status="SUCCESS",
-                            response_payload={
-                                "status_code": status_code,
-                                "headers": self._sanitize_response_headers(response.headers),
-                                "body": res_body,
-                            },
-                            execution_time_ms=exec_time_ms,
-                            correlation_id=request.correlation_id,
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_RESPONSE_BODY_SIZE:
+                        await response.aclose()
+                        raise DriverExecutionError(
+                            "Response body size exceeds maximum allowed limit of 10MB (10485760 bytes).",
+                            details={"request_id": request.request_id},
                         )
-                    else:
-                        return ActionResult(
-                            request_id=request.request_id,
-                            status="FAILED",
-                            response_payload={},
-                            execution_time_ms=exec_time_ms,
-                            error_details={
-                                "error": f"HTTP status error {status_code}",
-                                "status_code": status_code,
-                            },
-                            correlation_id=request.correlation_id,
-                        )
+                    body_chunks.append(chunk)
+
+                response_bytes = b"".join(body_chunks)
+                exec_time_ms = (time.perf_counter() - start_time) * 1000.0
+                status_code = response.status_code
+
+                if 200 <= status_code <= 299:
+                    # Attempt JSON parsing, fall back to UTF-8 text string
+                    try:
+                        res_body: Any = json.loads(response_bytes.decode("utf-8"))
+                    except Exception:
+                        res_body = response_bytes.decode("utf-8", errors="replace")
+
+                    return ActionResult(
+                        request_id=request.request_id,
+                        status="SUCCESS",
+                        response_payload={
+                            "status_code": status_code,
+                            "headers": self._sanitize_response_headers(response.headers),
+                            "body": res_body,
+                        },
+                        execution_time_ms=exec_time_ms,
+                        correlation_id=request.correlation_id,
+                    )
+                else:
+                    return ActionResult(
+                        request_id=request.request_id,
+                        status="FAILED",
+                        response_payload={},
+                        execution_time_ms=exec_time_ms,
+                        error_details={
+                            "error": f"HTTP status error {status_code}",
+                            "status_code": status_code,
+                        },
+                        correlation_id=request.correlation_id,
+                    )
 
         except (DriverExecutionError, ConnectorSecurityError):
             raise
-        except (httpx.TimeoutException, asyncio.TimeoutError):
+        except (TimeoutError, httpx.TimeoutException) as exc:
             raise DriverExecutionError(
                 "HTTP request execution timed out.",
                 details={
                     "request_id": request.request_id,
                     "driver_id": self.driver_id,
                 },
-            )
-        except (httpx.RequestError, socket.error) as e:
+            ) from exc
+        except (OSError, httpx.RequestError) as e:
             # Sanitize network exception details to prevent credential/URL leak
             raise DriverExecutionError(
                 "HTTP network connection request failed.",
@@ -325,9 +331,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
                 },
             ) from e
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         """Test connectivity and endpoint validity for target connector profile.
 
         Args:
@@ -357,9 +361,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
     # -- Internal Helper Implementations ------------------------------------
 
-    def _resolve_http_method(
-        self, action_type: ConnectorActionType, payload: dict[str, Any]
-    ) -> str:
+    def _resolve_http_method(self, action_type: ConnectorActionType, payload: dict[str, Any]) -> str:
         """Resolve requested HTTP method string from payload or action_type."""
         explicit_method = payload.get("method")
         if explicit_method and isinstance(explicit_method, str):
@@ -401,9 +403,10 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
                     merged_headers[k] = v
 
         if secret_token and isinstance(secret_token, str):
+            # S105 false positive: an HTTP *header name*, not a secret value.
             secret_header_key = options.get("secret_header") or payload.get("secret_header") or "Authorization"
             if not isinstance(secret_header_key, str):
-                secret_header_key = "Authorization"
+                secret_header_key = "Authorization"  # noqa: S105
 
             if secret_header_key.lower() == "authorization":
                 if secret_token.startswith("Bearer ") or secret_token.startswith("Basic "):
@@ -415,9 +418,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
         return merged_headers
 
-    def _build_query_params(
-        self, options: dict[str, Any], payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _build_query_params(self, options: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         """Combine default profile query parameters with request payload parameters."""
         params: dict[str, Any] = {}
 
@@ -440,11 +441,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         and debug headers are silently excluded so they never propagate into
         ActionResult, workflow step_outputs, events, persistence, or logs.
         """
-        return {
-            k: v
-            for k, v in headers.items()
-            if k.lower() in ALLOWED_RESPONSE_HEADERS
-        }
+        return {k: v for k, v in headers.items() if k.lower() in ALLOWED_RESPONSE_HEADERS}
 
     def _build_request_body(self, payload: dict[str, Any]) -> bytes | None:
         """Serialize and validate request payload body size."""
@@ -468,18 +465,14 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
         return body_bytes
 
-    def _build_timeout_config(
-        self, options: dict[str, Any], payload: dict[str, Any]
-    ) -> httpx.Timeout:
+    def _build_timeout_config(self, options: dict[str, Any], payload: dict[str, Any]) -> httpx.Timeout:
         """Construct httpx.Timeout object with default or overridden request limits."""
         req_timeout = payload.get("timeout") or options.get("timeout")
         if req_timeout is not None:
             try:
                 total_t = float(req_timeout)
                 if total_t < 0.1 or total_t > 60.0:
-                    raise DriverExecutionError(
-                        "Timeout override must be between 0.1 and 60.0 seconds."
-                    )
+                    raise DriverExecutionError("Timeout override must be between 0.1 and 60.0 seconds.")
                 return httpx.Timeout(connect=5.0, read=total_t, write=15.0, pool=30.0)
             except (ValueError, TypeError) as e:
                 raise DriverExecutionError("Invalid timeout value provided.") from e
@@ -501,9 +494,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
         scheme = parsed.scheme.lower() if parsed.scheme else ""
         if scheme not in ("http", "https"):
-            raise DriverExecutionError(
-                f"Invalid URL scheme '{scheme}': scheme must be http or https."
-            )
+            raise DriverExecutionError(f"Invalid URL scheme '{scheme}': scheme must be http or https.")
 
         hostname = parsed.hostname
         if not hostname or not isinstance(hostname, str):
@@ -513,9 +504,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
 
         # Reject literal forbidden hostnames
         if normalized_host in ("localhost", "metadata", "169.254.169.254") or normalized_host.endswith(".local"):
-            raise ConnectorSecurityError(
-                f"SSRF validation failed: access to target host '{hostname}' is forbidden."
-            )
+            raise ConnectorSecurityError(f"SSRF validation failed: access to target host '{hostname}' is forbidden.")
 
         port = parsed.port or (443 if scheme == "https" else 80)
 
@@ -527,16 +516,14 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
             loop = asyncio.get_running_loop()
             addr_info = await loop.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)
             if not addr_info:
-                raise ConnectorSecurityError(
-                    f"SSRF validation failed: unable to resolve hostname '{hostname}'."
-                )
+                raise ConnectorSecurityError(f"SSRF validation failed: unable to resolve hostname '{hostname}'.")
 
             validated_ipv4: list[str] = []
             validated_ipv6: list[str] = []
 
             # Reject-All Rule: Validate EVERY resolved address. If ANY address is restricted, fail the request.
-            for family, socktype, proto, canonname, sockaddr in addr_info:
-                ip_str = sockaddr[0]
+            for _family, _socktype, _proto, _canonname, sockaddr in addr_info:
+                ip_str = str(sockaddr[0])
                 self._verify_ip_object(ip_str)
                 ip_obj = ipaddress.ip_address(ip_str)
                 if isinstance(ip_obj, ipaddress.IPv4Address):
@@ -550,9 +537,7 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         except ConnectorSecurityError:
             raise
         except Exception as e:
-            raise ConnectorSecurityError(
-                f"SSRF validation failed: DNS resolution error for '{hostname}': {e}"
-            ) from e
+            raise ConnectorSecurityError(f"SSRF validation failed: DNS resolution error for '{hostname}': {e}") from e
 
     def _check_explicit_ip(self, host: str) -> None:
         """Check if host string is a literal IPv4/IPv6 or obfuscated integer/hex IP."""
@@ -588,7 +573,14 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         except ValueError as e:
             raise ConnectorSecurityError(f"SSRF validation failed: invalid IP address format '{ip_str}'.") from e
 
-        if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified or ip_obj.is_reserved:
+        if (
+            ip_obj.is_loopback
+            or ip_obj.is_private
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_unspecified
+            or ip_obj.is_reserved
+        ):
             raise ConnectorSecurityError(
                 f"SSRF validation failed: access to restricted IP address '{ip_str}' is forbidden."
             )
@@ -596,10 +588,11 @@ class HttpRestConnectorDriver(BaseConnectorDriver):
         if isinstance(ip_obj, ipaddress.IPv4Address):
             for net in RESTRICTED_IPV4_NETWORKS:
                 if ip_obj in net:
-                    raise ConnectorSecurityError(f"SSRF validation failed: access to restricted IPv4 network '{net}' is forbidden.")
-        elif isinstance(ip_obj, ipaddress.IPv6Address):
-            if ip_obj.ipv4_mapped:
-                self._verify_ip_object(str(ip_obj.ipv4_mapped))
+                    raise ConnectorSecurityError(
+                        f"SSRF validation failed: access to restricted IPv4 network '{net}' is forbidden."
+                    )
+        elif isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+            self._verify_ip_object(str(ip_obj.ipv4_mapped))
 
 
-__all__ = ["HttpRestConnectorDriver", "SSRFHardenedTransport", "PinnedIPNetworkBackend", "ALLOWED_RESPONSE_HEADERS"]
+__all__ = ["ALLOWED_RESPONSE_HEADERS", "HttpRestConnectorDriver", "PinnedIPNetworkBackend", "SSRFHardenedTransport"]

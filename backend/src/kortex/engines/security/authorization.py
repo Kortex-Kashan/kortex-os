@@ -66,7 +66,7 @@ verify that principal was ever genuinely authenticated.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from kortex.engines.security.abac import ABACEvaluator
 from kortex.engines.security.exceptions import AuthorizationDeniedError
@@ -79,7 +79,7 @@ from kortex.engines.storage.interfaces import ICacheStore, IDataStore
 class AuthorizationEngine(IAuthorizationEngine):
     """M4 hybrid RBAC + ABAC authorization engine. Implements `IAuthorizationEngine`."""
 
-    def __init__(self, data_store: IDataStore, cache_store: Optional[ICacheStore] = None) -> None:
+    def __init__(self, data_store: IDataStore, cache_store: ICacheStore | None = None) -> None:
         """Args:
         data_store: Storage Engine's `IDataStore` — the exclusive authoritative
             RBAC permission-matrix source.
@@ -96,7 +96,7 @@ class AuthorizationEngine(IAuthorizationEngine):
         return await self._rbac.evaluate(principal, requirement)
 
     async def evaluate_abac(
-        self, principal: SecurityPrincipal, requirement: PermissionRequirement, context: Dict[str, Any]
+        self, principal: SecurityPrincipal, requirement: PermissionRequirement, context: dict[str, Any]
     ) -> AccessDecision:
         """Evaluate dynamic attribute-based rules against `requirement` and `context`."""
         return self._abac.evaluate(principal, requirement, context)
@@ -105,7 +105,7 @@ class AuthorizationEngine(IAuthorizationEngine):
         self,
         principal: SecurityPrincipal,
         requirement: PermissionRequirement,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> AccessDecision:
         """Evaluate RBAC then ABAC; RBAC deny short-circuits. Both must allow."""
         rbac_decision = await self.evaluate_rbac(principal, requirement)
@@ -126,7 +126,7 @@ class AuthorizationEngine(IAuthorizationEngine):
         self,
         principal: SecurityPrincipal,
         requirement: PermissionRequirement,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Same as `authorize`, raising `AuthorizationDeniedError` on any deny."""
         decision = await self.authorize(principal, requirement, context)

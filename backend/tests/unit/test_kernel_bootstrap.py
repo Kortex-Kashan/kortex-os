@@ -18,10 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from kortex.api.kernel_bootstrap import build_and_boot_kernel
+from kortex.api.kernel_bootstrap import (
+    build_and_boot_kernel,
+    register_connector_ai_tools,
+    register_document_ai_tools,
+    register_knowledge_ai_tools,
+    register_production_connector_drivers,
+)
+from kortex.core.base_module import ModuleState
 from kortex.core.kernel import KernelState
 from kortex.engines.ai.engine import AIOrchestrationEngine
-from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError
 from kortex.engines.connector.models import ActionRequest, ConnectorActionType, ConnectorProfile
@@ -30,6 +36,7 @@ from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.workflow.engine import WorkflowEngine
+from kortex.modules.finance.module import FinanceModule
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +57,36 @@ async def test_connector_engine_registers_on_production_boot_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finance_module_registers_on_production_boot_path() -> None:
+    """Finance-pilot planning pass: `FinanceModule` (a `BaseModule`, not a
+    `BaseEngine` subclass) reaches `ModuleState.ACTIVE` and registers
+    `kortex.finance.invoice.create`/`.get` via the real production boot
+    path, through the same `kernel.register_engine()` call every
+    `BaseEngine` uses -- proving no Kernel modification was needed for a
+    duck-typed registrant."""
+    kernel = await build_and_boot_kernel()
+    try:
+        assert kernel.state == KernelState.RUNNING
+        finance_module = kernel.get_engine("finance")
+        assert isinstance(finance_module, FinanceModule)
+        assert finance_module.state == ModuleState.ACTIVE
+        assert finance_module.capabilities() == [
+            "kortex.finance.invoice.create",
+            "kortex.finance.invoice.get",
+        ]
+
+        create_descriptor = kernel.get_capability("kortex.finance.invoice.create")
+        assert create_descriptor.provider == "finance"
+        assert create_descriptor.required_permissions == ["finance:invoice:write"]
+
+        get_descriptor = kernel.get_capability("kortex.finance.invoice.get")
+        assert get_descriptor.provider == "finance"
+        assert get_descriptor.required_permissions == ["finance:invoice:read"]
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_connector_driver_list_capability_registers_on_production_boot_path() -> None:
     kernel = await build_and_boot_kernel()
     try:
@@ -62,12 +99,151 @@ async def test_connector_driver_list_capability_registers_on_production_boot_pat
 
 
 @pytest.mark.asyncio
-async def test_connector_registry_starts_empty_on_production_boot_path() -> None:
+async def test_connector_drivers_register_on_production_boot_path() -> None:
+    """M7.3-W1: both the dummy and the production HTTP driver are now
+    registered automatically on the real boot path (prior to M7.3, driver
+    registration was a public API a caller had to invoke manually — nothing
+    in production ever did, so `list_drivers()` was always empty)."""
     kernel = await build_and_boot_kernel()
     try:
         connector_engine = kernel.get_engine("connector")
         assert isinstance(connector_engine, ConnectorEngine)
-        assert connector_engine.list_drivers() == []
+        driver_ids = {d.driver_id for d in connector_engine.list_drivers()}
+        assert driver_ids == {"connector-dummy", "connector-http-rest"}
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_driver_registration_is_idempotent() -> None:
+    """Calling `register_production_connector_drivers` twice against the
+    same, already-registered engine must not raise `ConnectorDriverError`
+    for a duplicate driver id -- proves the guard in `kernel_bootstrap.py`
+    actually works, not just that booting twice happens to avoid it (a fresh
+    `ConnectorEngine()` is constructed on every `build_and_boot_kernel()`
+    call, so that alone would never have exercised this code path)."""
+    kernel = await build_and_boot_kernel()
+    try:
+        connector_engine = kernel.get_engine("connector")
+        driver_ids_before = {d.driver_id for d in connector_engine.list_drivers()}
+
+        register_production_connector_drivers(connector_engine)
+
+        driver_ids_after = {d.driver_id for d in connector_engine.list_drivers()}
+        assert driver_ids_after == driver_ids_before == {"connector-dummy", "connector-http-rest"}
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_ai_tools_register_on_production_boot_path() -> None:
+    """M7.3-W4: the reference connector tools are registered in the AI
+    Engine's ToolRegistry automatically on the real boot path (prior to
+    M7.3, `create_ai_engine` always constructed an empty `ToolRegistry()`
+    with nothing ever added to it)."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        assert isinstance(ai_engine, AIOrchestrationEngine)
+        assert ai_engine.tool_registry.has_tool("connector_read_status")
+        assert ai_engine.tool_registry.has_tool("connector_send_action")
+        read_tool = ai_engine.tool_registry.get_tool("connector_read_status")
+        send_tool = ai_engine.tool_registry.get_tool("connector_send_action")
+        assert read_tool.is_mutation is False
+        assert send_tool.is_mutation is True
+        assert read_tool.canonical_capability == "kortex.connector.action.execute"
+        assert send_tool.canonical_capability == "kortex.connector.action.execute"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_connector_ai_tool_registration_is_idempotent() -> None:
+    """Calling `register_connector_ai_tools` twice against the same,
+    already-populated registry must not raise `ToolValidationError` for a
+    duplicate tool name."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        register_connector_ai_tools(ai_engine.tool_registry)
+        assert ai_engine.tool_registry.has_tool("connector_read_status")
+        assert ai_engine.tool_registry.has_tool("connector_send_action")
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_document_ai_tools_register_on_production_boot_path() -> None:
+    """M7.4-W3: the Document Engine AI tools are registered in the AI
+    Engine's ToolRegistry automatically on the real boot path. Mirrors
+    `test_connector_ai_tools_register_on_production_boot_path` -- this
+    coverage never existed for the Document tools until M7.6-W2 closed the
+    gap the M7.5 planning report's own AI-tool-surface investigation
+    flagged."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        assert isinstance(ai_engine, AIOrchestrationEngine)
+        assert ai_engine.tool_registry.has_tool("document_list_templates")
+        assert ai_engine.tool_registry.has_tool("document_generate")
+        list_tool = ai_engine.tool_registry.get_tool("document_list_templates")
+        generate_tool = ai_engine.tool_registry.get_tool("document_generate")
+        assert list_tool.is_mutation is False
+        assert generate_tool.is_mutation is True
+        assert list_tool.canonical_capability == "kortex.document.template.list"
+        assert generate_tool.canonical_capability == "kortex.document.operation.execute"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_document_ai_tool_registration_is_idempotent() -> None:
+    """M7.6-W2: calling `register_document_ai_tools` twice against the same,
+    already-populated registry must not raise `ToolValidationError` for a
+    duplicate tool name -- the same guarantee `test_connector_ai_tool_
+    registration_is_idempotent` already proves for the Connector tools,
+    now proven for Document too."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        register_document_ai_tools(ai_engine.tool_registry)
+        assert ai_engine.tool_registry.has_tool("document_list_templates")
+        assert ai_engine.tool_registry.has_tool("document_generate")
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_ai_tool_registers_on_production_boot_path() -> None:
+    """M7.5-W3: the Knowledge Engine AI tool is registered in the AI
+    Engine's ToolRegistry automatically on the real boot path. Mirrors
+    `test_connector_ai_tools_register_on_production_boot_path` -- this
+    coverage never existed for the Knowledge tool until M7.6-W2 closed the
+    gap."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        assert isinstance(ai_engine, AIOrchestrationEngine)
+        assert ai_engine.tool_registry.has_tool("knowledge_search")
+        search_tool = ai_engine.tool_registry.get_tool("knowledge_search")
+        assert search_tool.is_mutation is False
+        assert search_tool.canonical_capability == "kortex.knowledge.query.search"
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_ai_tool_registration_is_idempotent() -> None:
+    """M7.6-W2: calling `register_knowledge_ai_tools` twice against the
+    same, already-populated registry must not raise `ToolValidationError`
+    for a duplicate tool name -- the same guarantee `test_connector_ai_tool_
+    registration_is_idempotent` already proves for the Connector tools, now
+    proven for Knowledge too."""
+    kernel = await build_and_boot_kernel()
+    try:
+        ai_engine = kernel.get_engine("ai")
+        register_knowledge_ai_tools(ai_engine.tool_registry)
+        assert ai_engine.tool_registry.has_tool("knowledge_search")
     finally:
         await kernel.shutdown()
 
@@ -335,7 +511,9 @@ async def test_connector_secret_resolver_wired_on_production_boot_path() -> None
         # Prior to the fix, this resolver is None even after a full boot.
         assert connector_engine.pipeline._secret_resolver is not None
 
-        connector_engine.register_driver(DummyConnectorDriver())
+        # M7.3-W1: `connector-dummy` is already registered by production
+        # boot itself now — no manual `register_driver` call needed (and
+        # attempting one would raise `ConnectorDriverError` for a duplicate).
 
         secret_handle = "vault:m6-0-2-regression-secret"
         tenant_id = "tenant-m6-0-2"
@@ -384,7 +562,8 @@ async def test_connector_secret_resolver_stays_tenant_scoped_on_production_boot_
     try:
         security_engine = kernel.get_engine("security")
         connector_engine = kernel.get_engine("connector")
-        connector_engine.register_driver(DummyConnectorDriver())
+        # M7.3-W1: `connector-dummy` is already registered by production
+        # boot itself now — see the sibling test above.
 
         secret_handle = "vault:m6-0-2-tenant-scoped-secret"
         await security_engine.put_secret(secret_handle, "tenant-real-owner", "owner-secret-token")

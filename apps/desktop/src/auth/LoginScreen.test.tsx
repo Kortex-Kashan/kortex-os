@@ -14,7 +14,14 @@ vi.mock("./AuthProvider", () => ({
 }));
 
 function mockAuth(state: AuthState) {
-  useAuthMock.mockReturnValue({ state, login: loginSpy, logout: vi.fn(), reportIpcResult: vi.fn() });
+  useAuthMock.mockReturnValue({
+    state,
+    login: loginSpy,
+    logout: vi.fn(),
+    bootstrap: vi.fn(),
+    retryConnection: vi.fn(),
+    reportIpcResult: vi.fn(),
+  });
 }
 
 function fillForm() {
@@ -114,13 +121,6 @@ describe("LoginScreen error states", () => {
     render(<LoginScreen />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("Authentication failed: invalid credentials.");
-  });
-
-  it("accessibly announces backend unavailability", () => {
-    mockAuth({ status: "BACKEND_UNAVAILABLE" });
-    render(<LoginScreen />);
-
-    expect(screen.getByRole("alert")).toHaveTextContent(/can.t reach the kortex backend/i);
   });
 
   it("clears the password, but not the tenant ID or username, after a failed attempt", () => {

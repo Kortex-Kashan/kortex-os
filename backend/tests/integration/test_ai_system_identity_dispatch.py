@@ -32,7 +32,6 @@ from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import AuthorizationDeniedError
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
 from kortex.engines.storage.engine import StorageEngine
-from kortex.engines.storage.stores.data_store import RelationalDataStore
 
 _TEST_MASTER_KEY = b"\xaa" * 32
 _TEST_SIGNING_KEY = b"\xbb" * 32
@@ -199,12 +198,8 @@ async def test_ai_identity_is_tenant_scoped_not_shared(kernel_env: Kernel) -> No
     # every tenant's `AI_SYSTEM_ACTOR` principal.
     port = _make_port(kernel_env)
 
-    result_default = await port.execute_tool(
-        tenant_id="default", capability_name=_GATED_CAPABILITY, arguments={}
-    )
-    result_acme = await port.execute_tool(
-        tenant_id="acme", capability_name=_GATED_CAPABILITY, arguments={}
-    )
+    result_default = await port.execute_tool(tenant_id="default", capability_name=_GATED_CAPABILITY, arguments={})
+    result_acme = await port.execute_tool(tenant_id="acme", capability_name=_GATED_CAPABILITY, arguments={})
 
     assert result_default["tenant_id"] == "default"
     assert result_acme["tenant_id"] == "acme"

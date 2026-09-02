@@ -26,7 +26,6 @@ from kortex.engines.knowledge.models import (
 )
 from kortex.engines.knowledge.sources import ReferenceSourceProvider
 
-
 # -- Contract conformance -------------------------------------------------------
 
 
@@ -130,7 +129,7 @@ async def test_concurrent_ingest_calls_for_different_tenants_do_not_cross_contam
 
     results = await asyncio.gather(*(provider.ingest(t) for t in tenants))
 
-    for tenant, records in zip(tenants, results):
+    for tenant, records in zip(tenants, results, strict=False):
         assert records, f"no records returned for {tenant}"
         assert all(r.tenant_id == tenant for r in records)
 
@@ -148,7 +147,7 @@ async def test_repeated_ingest_is_shape_deterministic_but_identity_fresh() -> No
     second = await provider.ingest("tenant-a")
 
     assert len(first) == len(second)
-    for r1, r2 in zip(first, second):
+    for r1, r2 in zip(first, second, strict=False):
         assert r1.record_id != r2.record_id
         assert r1.version_id != r2.version_id
         assert r1.tenant_id == r2.tenant_id
@@ -191,9 +190,7 @@ def test_sources_module_has_zero_production_references_to_lineage_or_graph() -> 
     this very boundary in words)."""
     import kortex.engines.knowledge.sources as sources_module
 
-    imported_module_names = {
-        getattr(value, "__module__", None) for value in vars(sources_module).values()
-    }
+    imported_module_names = {getattr(value, "__module__", None) for value in vars(sources_module).values()}
     assert "kortex.engines.knowledge.lineage" not in imported_module_names
     assert "kortex.engines.knowledge.graph" not in imported_module_names
     module_globals = vars(sources_module)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,13 +18,9 @@ class ConnectorBaseEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    event_id: str = Field(
-        default_factory=lambda: f"evt-{uuid.uuid4().hex}"
-    )
+    event_id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex}")
     event_type: str
-    timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 class ConnectorActionStartedEvent(ConnectorBaseEvent):

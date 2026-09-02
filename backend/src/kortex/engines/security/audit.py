@@ -11,18 +11,16 @@ and logged without causing audit rollback or application failure.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
-
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kortex.engines.event.engine import Event
 from kortex.engines.security.events import SecurityAuditEvent, SecurityBaseEvent
 from kortex.engines.security.exceptions import AuditError, SecurityEngineError
 from kortex.engines.security.interfaces import IAuditManager, ICryptoProvider
@@ -43,8 +41,8 @@ class AuditManager(IAuditManager):
     def __init__(
         self,
         data_store: IDataStore,
-        event_engine: Optional[EventEngine] = None,
-        crypto_provider: Optional[ICryptoProvider] = None,
+        event_engine: EventEngine | None = None,
+        crypto_provider: ICryptoProvider | None = None,
     ) -> None:
         """Initialize AuditManager.
 
@@ -59,7 +57,7 @@ class AuditManager(IAuditManager):
 
     # -- State Hashing Helpers ------------------------------------------------
 
-    def compute_state_hash(self, data: bytes | str | Dict[str, Any] | None) -> Optional[str]:
+    def compute_state_hash(self, data: bytes | str | dict[str, Any] | None) -> str | None:
         """Compute a deterministic SHA-256 hex digest for state tracking.
 
         Returns None if data is None.
@@ -125,7 +123,6 @@ class AuditManager(IAuditManager):
             )
             session.add(record)
 
-
         await self._run_in_transaction(_action)
 
         # Dispatch event to EventEngine if connected (non-blocking / error isolated)
@@ -151,7 +148,6 @@ class AuditManager(IAuditManager):
                 )
             except Exception as exc:
                 logger.warning("Failed to publish security audit event: %s", exc)
-
 
         return entry
 
@@ -182,11 +178,11 @@ class AuditManager(IAuditManager):
         actor_id: str,
         actor_type: str | PrincipalType,
         tenant_id: str,
-        resource_id: Optional[str] = None,
-        previous_state_hash: Optional[str] = None,
-        new_state_hash: Optional[str] = None,
-        client_ip: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None,
+        resource_id: str | None = None,
+        previous_state_hash: str | None = None,
+        new_state_hash: str | None = None,
+        client_ip: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> UniversalAuditEntry:
         """Convenience method to construct and record a `UniversalAuditEntry`."""
         actor_type_str = actor_type.value if isinstance(actor_type, PrincipalType) else str(actor_type)
@@ -208,9 +204,9 @@ class AuditManager(IAuditManager):
         tenant_id: str,
         limit: int = 100,
         offset: int = 0,
-        action: Optional[str] = None,
-        actor_id: Optional[str] = None,
-    ) -> List[UniversalAuditEntry]:
+        action: str | None = None,
+        actor_id: str | None = None,
+    ) -> list[UniversalAuditEntry]:
         """Retrieve audit entries scoped strictly to `tenant_id`.
 
         Args:
@@ -229,7 +225,7 @@ class AuditManager(IAuditManager):
         clamped_limit = max(1, min(limit, _MAX_QUERY_LIMIT))
         clamped_offset = max(0, offset)
 
-        async def _action(session: AsyncSession) -> List[AuditRecord]:
+        async def _action(session: AsyncSession) -> list[AuditRecord]:
             stmt = select(AuditRecord).where(AuditRecord.tenant_id == tenant_id)
             if action:
                 stmt = stmt.where(AuditRecord.action == action)
@@ -240,7 +236,7 @@ class AuditManager(IAuditManager):
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
-        records: List[AuditRecord] = await self._run_in_transaction(_action)
+        records: list[AuditRecord] = await self._run_in_transaction(_action)
 
         return [
             UniversalAuditEntry(
@@ -259,7 +255,7 @@ class AuditManager(IAuditManager):
             for r in records
         ]
 
-    async def get_audit_entry(self, audit_id: str, tenant_id: str) -> Optional[UniversalAuditEntry]:
+    async def get_audit_entry(self, audit_id: str, tenant_id: str) -> UniversalAuditEntry | None:
         """Retrieve a specific audit entry by `audit_id` and `tenant_id`.
 
         Returns None if not found or if `tenant_id` does not match (preventing cross-tenant leakage).
@@ -267,7 +263,7 @@ class AuditManager(IAuditManager):
         if not audit_id or not audit_id.strip() or not tenant_id or not tenant_id.strip():
             raise AuditError("audit_id and tenant_id must be non-empty strings.")
 
-        async def _action(session: AsyncSession) -> Optional[AuditRecord]:
+        async def _action(session: AsyncSession) -> AuditRecord | None:
             stmt = select(AuditRecord).where(
                 AuditRecord.audit_id == audit_id,
                 AuditRecord.tenant_id == tenant_id,
@@ -275,7 +271,7 @@ class AuditManager(IAuditManager):
             result = await session.execute(stmt)
             return result.scalars().first()
 
-        record: Optional[AuditRecord] = await self._run_in_transaction(_action)
+        record: AuditRecord | None = await self._run_in_transaction(_action)
         if record is None:
             return None
 

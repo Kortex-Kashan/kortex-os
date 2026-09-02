@@ -15,10 +15,14 @@ import { useAuth } from "./AuthProvider";
 import { EyeIcon, EyeOffIcon } from "./icons";
 
 /**
- * The KORTEX Desktop login screen (M4.1). Rendered by `AuthGate` for every
- * non-CHECKING, non-AUTHENTICATED state — `useAuth()`'s `state.status`
- * distinguishes UNAUTHENTICATED / AUTHENTICATING / AUTHENTICATION_ERROR /
- * BACKEND_UNAVAILABLE without this component ever remounting between them.
+ * The KORTEX Desktop login screen (M4.1). Rendered by `AuthGate` once the
+ * backend is reachable and the system is already bootstrapped —
+ * `useAuth()`'s `state.status` distinguishes UNAUTHENTICATED /
+ * AUTHENTICATING / AUTHENTICATION_ERROR without this component ever
+ * remounting between them. `BACKEND_UNAVAILABLE` (M7.1) routes to
+ * `BackendUnavailableScreen` instead, and `BOOTSTRAP_REQUIRED`/
+ * `BOOTSTRAPPING`/`BOOTSTRAP_ERROR` (M7.1) route to `BootstrapScreen` — see
+ * `AuthGate.tsx`'s `screenFor`.
  *
  * Deliberately plain: no illustration, no marketing copy, no animated
  * background — an enterprise desktop sign-in, not a landing page. Every
@@ -140,11 +144,6 @@ export function LoginScreen() {
             {auth.state.status === "AUTHENTICATION_ERROR" && (
               <p role="alert" className="text-body text-destructive">
                 {auth.state.message}
-              </p>
-            )}
-            {auth.state.status === "BACKEND_UNAVAILABLE" && (
-              <p role="alert" className="text-body text-destructive">
-                Can&apos;t reach the KORTEX backend. Check that it&apos;s running and try again.
               </p>
             )}
 

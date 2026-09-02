@@ -8,26 +8,24 @@ and 100% statement coverage for HttpRestConnectorDriver.
 
 from __future__ import annotations
 
-from typing import Any
-
-import asyncio
 import json
-import logging
-import os
 import socket
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpcore
 import httpx
 import pytest
 
-from kortex.engines.connector.drivers.http_driver import HttpRestConnectorDriver, PinnedIPNetworkBackend
+from kortex.engines.connector.drivers.http_driver import (
+    HttpRestConnectorDriver,
+    PinnedIPNetworkBackend,
+    SSRFHardenedTransport,
+)
 from kortex.engines.connector.exceptions import ConnectorSecurityError, DriverExecutionError
 from kortex.engines.connector.models import (
     ActionRequest,
-    ActionResult,
     ConnectorActionType,
-    ConnectorCapability,
     ConnectorProfile,
 )
 
@@ -66,6 +64,7 @@ def http_driver() -> HttpRestConnectorDriver:
 
 # -- A. Driver Contract Tests -------------------------------------------------
 
+
 def test_driver_metadata_and_properties(http_driver: HttpRestConnectorDriver) -> None:
     """A1. Verify driver metadata, ID, vendor, supported actions, and capabilities."""
     assert http_driver.driver_id == "connector-http-rest"
@@ -98,6 +97,7 @@ async def test_unsupported_action_raises_driver_execution_error(http_driver: Htt
 
 # -- B & C. Request Construction & HTTP Method Dispatching --------------------
 
+
 @pytest.mark.asyncio
 async def test_execute_get_request(http_driver: HttpRestConnectorDriver) -> None:
     """B1. Test executing HTTP GET request with query params and base_url."""
@@ -111,21 +111,23 @@ async def test_execute_get_request(http_driver: HttpRestConnectorDriver) -> None
 
     resp_bytes = json.dumps({"users": [{"id": 1, "name": "Alice"}]}).encode("utf-8")
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([resp_bytes], status_code=200)
-            res = await http_driver.execute_action(req)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([resp_bytes], status_code=200)
+        res = await http_driver.execute_action(req)
 
-            assert res.status == "SUCCESS"
-            assert res.response_payload["status_code"] == 200
-            assert res.response_payload["body"] == {"users": [{"id": 1, "name": "Alice"}]}
-            mock_stream.assert_called_once_with(
-                method="GET",
-                url="https://api.example.com/users",
-                params={"page": "1"},
-                headers={},
-                content=None,
-            )
+        assert res.status == "SUCCESS"
+        assert res.response_payload["status_code"] == 200
+        assert res.response_payload["body"] == {"users": [{"id": 1, "name": "Alice"}]}
+        mock_stream.assert_called_once_with(
+            method="GET",
+            url="https://api.example.com/users",
+            params={"page": "1"},
+            headers={},
+            content=None,
+        )
 
 
 @pytest.mark.asyncio
@@ -140,14 +142,16 @@ async def test_execute_post_json_request(http_driver: HttpRestConnectorDriver) -
 
     resp_bytes = json.dumps({"id": "item-100", "created": True}).encode("utf-8")
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([resp_bytes], status_code=201)
-            res = await http_driver.execute_action(req)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([resp_bytes], status_code=201)
+        res = await http_driver.execute_action(req)
 
-            assert res.status == "SUCCESS"
-            assert res.response_payload["status_code"] == 201
-            assert res.response_payload["body"] == {"id": "item-100", "created": True}
+        assert res.status == "SUCCESS"
+        assert res.response_payload["status_code"] == 201
+        assert res.response_payload["body"] == {"id": "item-100", "created": True}
 
 
 @pytest.mark.asyncio
@@ -166,16 +170,18 @@ async def test_execute_put_and_delete_methods(http_driver: HttpRestConnectorDriv
         payload={"url": "https://api.example.com/items/1", "method": "DELETE"},
     )
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b"OK"])
-            res_put = await http_driver.execute_action(req_put)
-            assert res_put.status == "SUCCESS"
-            assert res_put.response_payload["body"] == "OK"
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b"OK"])
+        res_put = await http_driver.execute_action(req_put)
+        assert res_put.status == "SUCCESS"
+        assert res_put.response_payload["body"] == "OK"
 
-            mock_stream.return_value = MockStreamResponse([b"OK"])
-            res_del = await http_driver.execute_action(req_del)
-            assert res_del.status == "SUCCESS"
+        mock_stream.return_value = MockStreamResponse([b"OK"])
+        res_del = await http_driver.execute_action(req_del)
+        assert res_del.status == "SUCCESS"
 
 
 @pytest.mark.asyncio
@@ -196,18 +202,20 @@ async def test_header_and_query_param_merging(http_driver: HttpRestConnectorDriv
         },
     )
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
-            await http_driver.execute_action(req)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
+        await http_driver.execute_action(req)
 
-            sent_headers = mock_stream.call_args[1]["headers"]
-            sent_params = mock_stream.call_args[1]["params"]
-            assert sent_headers["X-Custom"] == "request-val"
-            assert sent_headers["X-Profile"] == "yes"
-            assert sent_headers["Accept"] == "text/html"
-            assert sent_params["p1"] == "req-p1"
-            assert sent_params["p2"] == "prof-p2"
+        sent_headers = mock_stream.call_args[1]["headers"]
+        sent_params = mock_stream.call_args[1]["params"]
+        assert sent_headers["X-Custom"] == "request-val"
+        assert sent_headers["X-Profile"] == "yes"
+        assert sent_headers["Accept"] == "text/html"
+        assert sent_params["p1"] == "req-p1"
+        assert sent_params["p2"] == "prof-p2"
 
 
 @pytest.mark.asyncio
@@ -226,17 +234,19 @@ async def test_body_types_bytes_and_scalar(http_driver: HttpRestConnectorDriver)
         payload={"url": "https://api.example.com/scalar", "body": 12345},
     )
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b"OK"])
-            res1 = await http_driver.execute_action(req_bytes)
-            assert res1.status == "SUCCESS"
-            assert mock_stream.call_args[1]["content"] == b"binary_data"
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b"OK"])
+        res1 = await http_driver.execute_action(req_bytes)
+        assert res1.status == "SUCCESS"
+        assert mock_stream.call_args[1]["content"] == b"binary_data"
 
-            mock_stream.return_value = MockStreamResponse([b"OK"])
-            res2 = await http_driver.execute_action(req_scalar)
-            assert res2.status == "SUCCESS"
-            assert mock_stream.call_args[1]["content"] == b"12345"
+        mock_stream.return_value = MockStreamResponse([b"OK"])
+        res2 = await http_driver.execute_action(req_scalar)
+        assert res2.status == "SUCCESS"
+        assert mock_stream.call_args[1]["content"] == b"12345"
 
 
 @pytest.mark.asyncio
@@ -271,6 +281,7 @@ async def test_invalid_url_payload_raises_error(http_driver: HttpRestConnectorDr
 
 # -- D & G. HTTP Response Mapping & Non-Redirect Policy -----------------------
 
+
 @pytest.mark.asyncio
 async def test_http_error_responses(http_driver: HttpRestConnectorDriver) -> None:
     """D1. Test HTTP 400, 401, 403, 404, 422, 429, 500 status code response mapping."""
@@ -281,13 +292,15 @@ async def test_http_error_responses(http_driver: HttpRestConnectorDriver) -> Non
             action_type=ConnectorActionType.FETCH,
             payload={"url": "https://api.example.com/status"},
         )
-        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-            with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-                mock_stream.return_value = MockStreamResponse([b"Error Response"], status_code=status_code)
-                res = await http_driver.execute_action(req)
-                assert res.status == "FAILED"
-                assert res.error_details is not None
-                assert res.error_details["status_code"] == status_code
+        with (
+            patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+            patch.object(httpx.AsyncClient, "stream") as mock_stream,
+        ):
+            mock_stream.return_value = MockStreamResponse([b"Error Response"], status_code=status_code)
+            res = await http_driver.execute_action(req)
+            assert res.status == "FAILED"
+            assert res.error_details is not None
+            assert res.error_details["status_code"] == status_code
 
 
 @pytest.mark.asyncio
@@ -300,14 +313,19 @@ async def test_redirect_3xx_is_not_followed(http_driver: HttpRestConnectorDriver
             action_type=ConnectorActionType.FETCH,
             payload={"url": "https://api.example.com/redirect"},
         )
-        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-            with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-                mock_stream.return_value = MockStreamResponse([], status_code=status_code, headers={"location": "https://other.com"})
-                res = await http_driver.execute_action(req)
-                assert res.status == "FAILED"
+        with (
+            patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+            patch.object(httpx.AsyncClient, "stream") as mock_stream,
+        ):
+            mock_stream.return_value = MockStreamResponse(
+                [], status_code=status_code, headers={"location": "https://other.com"}
+            )
+            res = await http_driver.execute_action(req)
+            assert res.status == "FAILED"
 
 
 # -- E. Network Failure Exception Handling ------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_network_timeouts_and_connection_failures(http_driver: HttpRestConnectorDriver) -> None:
@@ -319,22 +337,25 @@ async def test_network_timeouts_and_connection_failures(http_driver: HttpRestCon
         payload={"url": "https://api.example.com/timeout"},
     )
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.side_effect = httpx.TimeoutException("Connection timed out")
-            with pytest.raises(DriverExecutionError) as exc_info:
-                await http_driver.execute_action(req)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.side_effect = httpx.TimeoutException("Connection timed out")
+        with pytest.raises(DriverExecutionError) as exc_info:
+            await http_driver.execute_action(req)
 
-            assert "timed out" in str(exc_info.value)
+        assert "timed out" in str(exc_info.value)
 
-            mock_stream.side_effect = httpx.ConnectError("Failed to connect")
-            with pytest.raises(DriverExecutionError) as exc_info2:
-                await http_driver.execute_action(req)
+        mock_stream.side_effect = httpx.ConnectError("Failed to connect")
+        with pytest.raises(DriverExecutionError) as exc_info2:
+            await http_driver.execute_action(req)
 
-            assert "failed" in str(exc_info2.value)
+        assert "failed" in str(exc_info2.value)
 
 
 # -- F. SSRF Security Hardening Tests -----------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_ssrf_forbidden_hostnames_and_ip_ranges(http_driver: HttpRestConnectorDriver) -> None:
@@ -440,6 +461,7 @@ async def test_ssrf_ipv6_mapped_and_invalid_ip_verification(http_driver: HttpRes
 
 # -- H. Body Size Limit & Timeout Override Tests ------------------------------
 
+
 @pytest.mark.asyncio
 async def test_request_body_size_limits_exact_and_oversized(http_driver: HttpRestConnectorDriver) -> None:
     """H1. Test enforcing 10MB limits on request bodies (exact vs oversized)."""
@@ -451,11 +473,13 @@ async def test_request_body_size_limits_exact_and_oversized(http_driver: HttpRes
         action_type=ConnectorActionType.PUSH,
         payload={"url": "https://api.example.com/upload", "body": exact_req_body},
     )
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b"OK"])
-            res = await http_driver.execute_action(req_exact)
-            assert res.status == "SUCCESS"
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b"OK"])
+        res = await http_driver.execute_action(req_exact)
+        assert res.status == "SUCCESS"
 
     # Oversized Request Body (10MB + 1 byte) -> rejected before network dispatch
     large_req_body = "x" * (10 * 1024 * 1024 + 1)
@@ -485,46 +509,54 @@ async def test_streaming_response_body_size_limits(http_driver: HttpRestConnecto
         action_type=ConnectorActionType.FETCH,
         payload={"url": "https://api.example.com/download"},
     )
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([exact_10mb_chunk])
-            res_exact = await http_driver.execute_action(req_exact_res)
-            assert res_exact.status == "SUCCESS"
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([exact_10mb_chunk])
+        res_exact = await http_driver.execute_action(req_exact_res)
+        assert res_exact.status == "SUCCESS"
 
     # 2. Oversized 10MB + 1 byte single chunk -> DriverExecutionError & stream closed
     oversized_chunk = b"a" * (10 * 1024 * 1024 + 1)
     mock_over_resp = MockStreamResponse([oversized_chunk])
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream2:
-            mock_stream2.return_value = mock_over_resp
-            with pytest.raises(DriverExecutionError) as exc_info1:
-                await http_driver.execute_action(req_exact_res)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream2,
+    ):
+        mock_stream2.return_value = mock_over_resp
+        with pytest.raises(DriverExecutionError) as exc_info1:
+            await http_driver.execute_action(req_exact_res)
 
-            assert "Response body size exceeds maximum" in str(exc_info1.value)
-            assert mock_over_resp.closed is True
+        assert "Response body size exceeds maximum" in str(exc_info1.value)
+        assert mock_over_resp.closed is True
 
     # 3. Multiple chunks reaching exactly 10MB (5x 2MB chunks) -> SUCCESS
     chunk_2mb = b"b" * (2 * 1024 * 1024)
     mock_multi_5 = MockStreamResponse([chunk_2mb] * 5)
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream3:
-            mock_stream3.return_value = mock_multi_5
-            res_multi = await http_driver.execute_action(req_exact_res)
-            assert res_multi.status == "SUCCESS"
-            assert mock_multi_5.consumed_chunks_count == 5
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream3,
+    ):
+        mock_stream3.return_value = mock_multi_5
+        res_multi = await http_driver.execute_action(req_exact_res)
+        assert res_multi.status == "SUCCESS"
+        assert mock_multi_5.consumed_chunks_count == 5
 
     # 4. Multiple chunks exceeding 10MB (6x 2MB chunks = 12MB) -> DriverExecutionError & stops reading
     mock_multi_6 = MockStreamResponse([chunk_2mb] * 6)
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream4:
-            mock_stream4.return_value = mock_multi_6
-            with pytest.raises(DriverExecutionError) as exc_info2:
-                await http_driver.execute_action(req_exact_res)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream4,
+    ):
+        mock_stream4.return_value = mock_multi_6
+        with pytest.raises(DriverExecutionError) as exc_info2:
+            await http_driver.execute_action(req_exact_res)
 
-            assert "Response body size exceeds maximum" in str(exc_info2.value)
-            assert mock_multi_6.closed is True
-            # Stopped after chunk 6 (when cumulative size exceeded 10MB)
-            assert mock_multi_6.consumed_chunks_count == 6
+        assert "Response body size exceeds maximum" in str(exc_info2.value)
+        assert mock_multi_6.closed is True
+        # Stopped after chunk 6 (when cumulative size exceeded 10MB)
+        assert mock_multi_6.consumed_chunks_count == 6
 
 
 @pytest.mark.asyncio
@@ -537,11 +569,13 @@ async def test_timeout_overrides_and_validation(http_driver: HttpRestConnectorDr
         action_type=ConnectorActionType.FETCH,
         payload={"url": "https://api.example.com/fast", "timeout": 10.0},
     )
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
-            res = await http_driver.execute_action(req_valid)
-            assert res.status == "SUCCESS"
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
+        res = await http_driver.execute_action(req_valid)
+        assert res.status == "SUCCESS"
 
     # Invalid timeout bounds (<0.1 or >60.0)
     for invalid_tout in [0.01, 100.0, "invalid"]:
@@ -551,12 +585,15 @@ async def test_timeout_overrides_and_validation(http_driver: HttpRestConnectorDr
             action_type=ConnectorActionType.FETCH,
             payload={"url": "https://api.example.com/fast", "timeout": invalid_tout},
         )
-        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-            with pytest.raises(DriverExecutionError):
-                await http_driver.execute_action(req_invalid)
+        with (
+            patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+            pytest.raises(DriverExecutionError),
+        ):
+            await http_driver.execute_action(req_invalid)
 
 
 # -- I. Credential Isolation Tests --------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_credential_secret_token_injection_and_privacy(http_driver: HttpRestConnectorDriver) -> None:
@@ -569,47 +606,50 @@ async def test_credential_secret_token_injection_and_privacy(http_driver: HttpRe
         payload={"url": "https://api.example.com/protected"},
     )
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b'{"auth": "ok"}'])
-            res = await http_driver.execute_action(req, secret_token=secret)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b'{"auth": "ok"}'])
+        res = await http_driver.execute_action(req, secret_token=secret)
 
-            # Check header was injected with Bearer prefix
-            sent_headers = mock_stream.call_args[1]["headers"]
-            assert sent_headers["Authorization"] == f"Bearer {secret}"
+        # Check header was injected with Bearer prefix
+        sent_headers = mock_stream.call_args[1]["headers"]
+        assert sent_headers["Authorization"] == f"Bearer {secret}"
 
-            # Verify secret token NEVER leaks in ActionResult
-            res_str = str(res.model_dump())
-            assert secret not in res_str
+        # Verify secret token NEVER leaks in ActionResult
+        res_str = str(res.model_dump())
+        assert secret not in res_str
 
-            # Test secret token already having Bearer prefix
-            mock_stream.return_value = MockStreamResponse([b'{"auth": "ok"}'])
-            await http_driver.execute_action(req, secret_token="Bearer already_prefixed_token")
-            sent_headers_prefixed = mock_stream.call_args[1]["headers"]
-            assert sent_headers_prefixed["Authorization"] == "Bearer already_prefixed_token"
+        # Test secret token already having Bearer prefix
+        mock_stream.return_value = MockStreamResponse([b'{"auth": "ok"}'])
+        await http_driver.execute_action(req, secret_token="Bearer already_prefixed_token")
+        sent_headers_prefixed = mock_stream.call_args[1]["headers"]
+        assert sent_headers_prefixed["Authorization"] == "Bearer already_prefixed_token"
 
-            # Test custom secret header (e.g. X-API-Key)
-            req_custom_hdr = ActionRequest(
-                request_id="req-sec-custom",
-                profile_id="prof-1",
-                action_type=ConnectorActionType.FETCH,
-                payload={"url": "https://api.example.com/protected"},
-                options={"secret_header": "X-API-Key"},
-            )
-            mock_stream.return_value = MockStreamResponse([b'{"auth": "ok"}'])
-            await http_driver.execute_action(req_custom_hdr, secret_token="api_key_xyz")
-            sent_headers_custom = mock_stream.call_args[1]["headers"]
-            assert sent_headers_custom["X-API-Key"] == "api_key_xyz"
+        # Test custom secret header (e.g. X-API-Key)
+        req_custom_hdr = ActionRequest(
+            request_id="req-sec-custom",
+            profile_id="prof-1",
+            action_type=ConnectorActionType.FETCH,
+            payload={"url": "https://api.example.com/protected"},
+            options={"secret_header": "X-API-Key"},
+        )
+        mock_stream.return_value = MockStreamResponse([b'{"auth": "ok"}'])
+        await http_driver.execute_action(req_custom_hdr, secret_token="api_key_xyz")
+        sent_headers_custom = mock_stream.call_args[1]["headers"]
+        assert sent_headers_custom["X-API-Key"] == "api_key_xyz"
 
-            # Test failure response privacy
-            mock_stream.side_effect = httpx.ConnectError("Failure")
-            with pytest.raises(DriverExecutionError) as exc_info:
-                await http_driver.execute_action(req, secret_token=secret)
+        # Test failure response privacy
+        mock_stream.side_effect = httpx.ConnectError("Failure")
+        with pytest.raises(DriverExecutionError) as exc_info:
+            await http_driver.execute_action(req, secret_token=secret)
 
-            assert secret not in str(exc_info.value)
+        assert secret not in str(exc_info.value)
 
 
 # -- J. Test Connection Method ------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_test_connection_method(http_driver: HttpRestConnectorDriver) -> None:
@@ -636,16 +676,19 @@ async def test_test_connection_method(http_driver: HttpRestConnectorDriver) -> N
     assert await http_driver.test_connection(profile_missing_url) is False
     assert await http_driver.test_connection(profile_forbidden_url) is False
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse([b"OK"], status_code=200)
-            assert await http_driver.test_connection(profile_valid) is True
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b"OK"], status_code=200)
+        assert await http_driver.test_connection(profile_valid) is True
 
-            mock_stream.return_value = MockStreamResponse([b"Error"], status_code=500)
-            assert await http_driver.test_connection(profile_valid) is False
+        mock_stream.return_value = MockStreamResponse([b"Error"], status_code=500)
+        assert await http_driver.test_connection(profile_valid) is False
 
 
 # -- K. Additional Direct Helper Unit Tests for 100% Line Coverage -------------
+
 
 def test_resolve_http_method_direct(http_driver: HttpRestConnectorDriver) -> None:
     """K1. Direct unit test for _resolve_http_method helper covering fallback error paths."""
@@ -782,21 +825,12 @@ def test_check_explicit_ip_hex_and_verify_ip_object(http_driver: HttpRestConnect
 # TCP connection target.
 
 
-from kortex.engines.connector.drivers.http_driver import SSRFHardenedTransport
-
-
 class RecordingStream(httpcore.AsyncNetworkStream):
     """Minimal httpcore stream that returns a valid HTTP/1.1 response, enabling
     the full transport stack to complete without a real network connection."""
 
     def __init__(self) -> None:
-        self._response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: application/json\r\n"
-            b"Content-Length: 12\r\n"
-            b"\r\n"
-            b'{"ok": true}'
-        )
+        self._response = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{"ok": true}'
         self._offset = 0
         self.closed = False
 
@@ -842,11 +876,13 @@ class RecordingNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options=None,
     ) -> httpcore.AsyncNetworkStream:
         stream = RecordingStream()
-        self.tcp_connections.append({
-            "host": host,
-            "port": port,
-            "stream": stream,
-        })
+        self.tcp_connections.append(
+            {
+                "host": host,
+                "port": port,
+                "stream": stream,
+            }
+        )
         return stream
 
     async def connect_unix_socket(self, *args, **kwargs):
@@ -930,9 +966,7 @@ async def test_real_transport_dns_rebinding_prevention(http_driver: HttpRestConn
     # Now simulate t1: even though getaddrinfo would return 127.0.0.1 if called again,
     # the transport is already pinned to 93.184.216.34
     transport, recorder = _make_recording_transport(pinned_ip)
-    with patch("socket.getaddrinfo", return_value=[
-        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
-    ]):
+    with patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]):
         async with httpx.AsyncClient(
             transport=transport,
             follow_redirects=False,
@@ -989,7 +1023,8 @@ async def test_real_transport_ipv4_preferred_over_ipv6(http_driver: HttpRestConn
 
 @pytest.mark.asyncio
 async def test_real_transport_environment_proxy_isolation(
-    http_driver: HttpRestConnectorDriver, monkeypatch: pytest.MonkeyPatch,
+    http_driver: HttpRestConnectorDriver,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """L6. Real transport: Environment proxy variables are ignored (trust_env=False)
     and the request connects directly to the pinned IP."""
@@ -1026,10 +1061,7 @@ async def test_real_transport_redirect_not_followed() -> None:
 
         def __init__(self):
             self._response = (
-                b"HTTP/1.1 301 Moved Permanently\r\n"
-                b"Location: http://127.0.0.1/evil\r\n"
-                b"Content-Length: 0\r\n"
-                b"\r\n"
+                b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1/evil\r\nContent-Length: 0\r\n\r\n"
             )
             self._offset = 0
 
@@ -1091,6 +1123,7 @@ async def test_real_transport_tls_sni_hostname_preservation() -> None:
 
     class SNIRecordingStream(RecordingStream):
         """Records server_hostname from start_tls."""
+
         tls_server_hostname: str | None = None
 
         async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
@@ -1146,19 +1179,21 @@ async def test_real_transport_pool_and_transport_isolation(http_driver: HttpRest
         if transport is not None:
             captured_transports.append(transport)
 
-    with patch("socket.getaddrinfo", return_value=addr_info):
-        with patch.object(httpx.AsyncClient, "__init__", capturing_init):
-            with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-                mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
+    with (
+        patch("socket.getaddrinfo", return_value=addr_info),
+        patch.object(httpx.AsyncClient, "__init__", capturing_init),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse([b'{"ok": true}'])
 
-                req = ActionRequest(
-                    request_id="req-iso",
-                    profile_id="prof-1",
-                    action_type=ConnectorActionType.FETCH,
-                    payload={"url": "https://api.example.com/data"},
-                )
-                await http_driver.execute_action(req)
-                await http_driver.execute_action(req)
+        req = ActionRequest(
+            request_id="req-iso",
+            profile_id="prof-1",
+            action_type=ConnectorActionType.FETCH,
+            payload={"url": "https://api.example.com/data"},
+        )
+        await http_driver.execute_action(req)
+        await http_driver.execute_action(req)
 
     assert len(captured_transports) == 2
     t1, t2 = captured_transports
@@ -1183,6 +1218,7 @@ async def test_pool_lifecycle_single_pool_no_orphan() -> None:
 
 
 # -- L-Unit. Kept Unit-Level Tests (proxy rejection, helpers) ------------------
+
 
 @pytest.mark.asyncio
 async def test_proxy_rejection_options_and_payload(http_driver: HttpRestConnectorDriver) -> None:
@@ -1269,12 +1305,16 @@ async def test_response_header_sanitization_at_driver_level(http_driver: HttpRes
 
     resp_bytes = json.dumps({"status": "ok"}).encode("utf-8")
 
-    with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-        with patch.object(httpx.AsyncClient, "stream") as mock_stream:
-            mock_stream.return_value = MockStreamResponse(
-                [resp_bytes], status_code=200, headers=all_headers,
-            )
-            result = await http_driver.execute_action(req)
+    with (
+        patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+        patch.object(httpx.AsyncClient, "stream") as mock_stream,
+    ):
+        mock_stream.return_value = MockStreamResponse(
+            [resp_bytes],
+            status_code=200,
+            headers=all_headers,
+        )
+        result = await http_driver.execute_action(req)
 
     assert result.status == "SUCCESS"
     res_headers = result.response_payload["headers"]
@@ -1286,17 +1326,30 @@ async def test_response_header_sanitization_at_driver_level(http_driver: HttpRes
 
     # Verify ALL denied headers are absent
     denied_headers = {
-        "set-cookie", "cookie", "authorization", "proxy-authorization",
-        "x-api-key", "api-key", "www-authenticate", "x-internal-debug",
+        "set-cookie",
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "www-authenticate",
+        "x-internal-debug",
         "x-custom-internal",
     }
     for denied in denied_headers:
         assert denied not in lower_keys, f"Denied header '{denied}' found in response"
 
     # Verify secret/credential VALUES never appear in ActionResult
-    secret_values = ["supersecret", "Bearer supersecret", "Basic supersecret",
-                     "session=supersecret", "tracker=supersecret", "secret",
-                     "debug-secret", "internal-value"]
+    secret_values = [
+        "supersecret",
+        "Bearer supersecret",
+        "Basic supersecret",
+        "session=supersecret",
+        "tracker=supersecret",
+        "secret",
+        "debug-secret",
+        "internal-value",
+    ]
     result_str = json.dumps(result.response_payload)
     for secret in secret_values:
         assert secret not in result_str, f"Secret value '{secret}' leaked into ActionResult"

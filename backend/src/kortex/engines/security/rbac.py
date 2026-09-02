@@ -72,7 +72,8 @@ entire codebase were it added here.
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Awaitable, Callable, Optional, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,7 +95,7 @@ class RBACEvaluator:
     """M4 RBAC evaluator. Backs `AuthorizationEngine.evaluate_rbac` over `IDataStore`,
     with an optional `ICacheStore` read-through cache for per-role permission grants."""
 
-    def __init__(self, data_store: IDataStore, cache_store: Optional[ICacheStore] = None) -> None:
+    def __init__(self, data_store: IDataStore, cache_store: ICacheStore | None = None) -> None:
         self._data_store = data_store
         self._cache_store = cache_store
 
@@ -162,7 +163,7 @@ class RBACEvaluator:
 
         return granted
 
-    async def _get_cached_permissions(self, role: str) -> Optional[list[str]]:
+    async def _get_cached_permissions(self, role: str) -> list[str] | None:
         """Read a role's cached permission list. Returns `None` (a cache miss)
         for a missing key, a malformed (non-`list`) cached value, or any
         cache-layer exception — never raises, never trusts unvalidated

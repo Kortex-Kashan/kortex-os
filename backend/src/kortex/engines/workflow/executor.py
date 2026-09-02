@@ -9,6 +9,7 @@ human approval checkpoints, and full transactional outbox lineage.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -56,9 +57,9 @@ class ExternalExecutionManager:
     def __init__(
         self,
         data_store: IDataStore,
-        kernel: Any = None,  # noqa: ANN401
-        approval_manager: DurableApprovalManager | Any = None,  # noqa: ANN401
-        security_engine: Any = None,  # noqa: ANN401
+        kernel: Any = None,
+        approval_manager: DurableApprovalManager | Any = None,
+        security_engine: Any = None,
         outbox_store: OutboxStore | None = None,
     ) -> None:
         self._data_store = data_store
@@ -462,7 +463,7 @@ class ExternalExecutionManager:
         session_token: TokenPayload | None = None,
         idempotency_key: str | None = None,
         correlation_id: str | None = None,
-    ) -> Any:  # noqa: ANN401
+    ) -> Any:
         """Dispatch target operation through Kernel capability boundary or registered engine.
 
         M6.0-4: this previously had a third branch that fabricated
@@ -508,7 +509,6 @@ class ExternalExecutionManager:
             f"Cannot dispatch external execution target '{target}': no Kernel is bound to resolve it."
         )
 
-
     async def get_execution(
         self, execution_id: UUID | str, tenant_id: str | None = None
     ) -> ExternalExecutionRecord | None:
@@ -522,9 +522,7 @@ class ExternalExecutionManager:
         limit: int = 100,
     ) -> list[ExternalExecutionRecord]:
         """List external executions within tenant boundary."""
-        return await self._store.list_executions(
-            tenant_id=tenant_id, status_filter=status, limit=limit
-        )
+        return await self._store.list_executions(tenant_id=tenant_id, status_filter=status, limit=limit)
 
     async def cancel_execution(
         self,
@@ -635,9 +633,7 @@ class ExternalExecutionManager:
                 )
         return recovered
 
-    async def reconcile_stranded_waiting_approvals(
-        self, tenant_id: str | None = None
-    ) -> list[ExternalExecutionRecord]:
+    async def reconcile_stranded_waiting_approvals(self, tenant_id: str | None = None) -> list[ExternalExecutionRecord]:
         """Reconcile WAITING_APPROVAL executions whose ticket already
         resolved while the event that should have propagated it never
         arrived (M6.4-4).
@@ -688,13 +684,10 @@ class ExternalExecutionManager:
             ticket = None
             if self._approval_manager is not None:
                 try:
-                    ticket = await self._approval_manager.get_request(
-                        rec.approval_request_id, tenant_id=rec.tenant_id
-                    )
+                    ticket = await self._approval_manager.get_request(rec.approval_request_id, tenant_id=rec.tenant_id)
                 except Exception as exc:
                     logger.error(
-                        "Failed to look up approval ticket '%s' for execution '%s' during boot "
-                        "reconciliation: %s",
+                        "Failed to look up approval ticket '%s' for execution '%s' during boot reconciliation: %s",
                         rec.approval_request_id,
                         rec.id,
                         exc,
@@ -744,7 +737,7 @@ class ExternalExecutionManager:
 
     # -- Approval Resume Event Handler (M6.3-3) --------------------------------
 
-    async def on_approval_decided(self, event: Any) -> None:  # noqa: ANN401
+    async def on_approval_decided(self, event: Any) -> None:
         """React to a durable approval decision for an external-execution ticket.
 
         Subscribed to the generic `workflow.approval.decided` event (published
@@ -817,7 +810,11 @@ class ExternalExecutionManager:
             retry_policy_json = json.dumps(ctx["retry_policy"]) if ctx["retry_policy"] else None
             session_token = payload.get("decider_session_token")
 
-            try:
+            # Already recorded as FAILED/TIMED_OUT with a full audit trail by
+            # `_run_dispatch_and_record` itself -- the event handler must not
+            # propagate the exception back to the Event Engine's synchronous
+            # dispatch loop.
+            with contextlib.suppress(ExternalExecutionError, ExternalExecutionTimeoutError):
                 await self._run_dispatch_and_record(
                     execution_id=UUID(str(execution_id)),
                     tenant_id=tid,
@@ -832,11 +829,5 @@ class ExternalExecutionManager:
                     correlation_id=ctx["correlation_id"],
                     session_token=session_token,
                 )
-            except (ExternalExecutionError, ExternalExecutionTimeoutError):
-                # Already recorded as FAILED/TIMED_OUT with a full audit
-                # trail by `_run_dispatch_and_record` itself -- the event
-                # handler must not propagate the exception back to the
-                # Event Engine's synchronous dispatch loop.
-                pass
         except Exception as exc:
             logger.error("Failed to process approval decision event for external execution: %s", exc, exc_info=True)

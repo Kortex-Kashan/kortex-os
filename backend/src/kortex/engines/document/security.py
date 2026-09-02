@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from typing import Any, Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,9 +44,7 @@ class IVerificationService(Protocol):
         """Generate HMAC-SHA256 signature for document payload."""
         ...
 
-    async def verify_signature(
-        self, data: bytes, signature: str, secret_key: str | None = None
-    ) -> bool:
+    async def verify_signature(self, data: bytes, signature: str, secret_key: str | None = None) -> bool:
         """Verify HMAC-SHA256 signature for document payload."""
         ...
 
@@ -53,7 +52,10 @@ class IVerificationService(Protocol):
 class DefaultVerificationService(IVerificationService):
     """Default implementation of IVerificationService using SHA256 and HMAC."""
 
-    def __init__(self, default_secret_key: str = "kortex_default_verification_key") -> None:
+    # S107: pre-existing weak default HMAC key. Removing the default would change
+    # this public constructor contract in certified code; recorded as a hardening
+    # follow-up rather than silently changed in a lint pass.
+    def __init__(self, default_secret_key: str = "kortex_default_verification_key") -> None:  # noqa: S107
         self._secret_key = default_secret_key
 
     async def compute_hash(self, data: bytes) -> str:
@@ -76,9 +78,7 @@ class DefaultVerificationService(IVerificationService):
         key = (secret_key or self._secret_key).encode("utf-8")
         return hmac.new(key, data, hashlib.sha256).hexdigest()
 
-    async def verify_signature(
-        self, data: bytes, signature: str, secret_key: str | None = None
-    ) -> bool:
+    async def verify_signature(self, data: bytes, signature: str, secret_key: str | None = None) -> bool:
         """Verify HMAC-SHA256 signature for document payload."""
         if data is None or not signature:
             return False
@@ -100,9 +100,7 @@ class DocumentSecurityVerifier:
         """Return configured IVerificationService instance."""
         return self._verification_service
 
-    def validate_security_classification(
-        self, classification: SecurityClassification | str
-    ) -> SecurityClassification:
+    def validate_security_classification(self, classification: SecurityClassification | str) -> SecurityClassification:
         """Validate and resolve SecurityClassification level.
 
         Args:
@@ -119,9 +117,7 @@ class DocumentSecurityVerifier:
         try:
             return SecurityClassification(str(classification).upper().strip())
         except ValueError as err:
-            raise DocumentSecurityError(
-                f"Invalid security classification level: '{classification}'."
-            ) from err
+            raise DocumentSecurityError(f"Invalid security classification level: '{classification}'.") from err
 
     async def verify_document_integrity(self, data: bytes, expected_hash: str) -> bool:
         """Verify document integrity using SHA256 hash comparison.
@@ -135,9 +131,7 @@ class DocumentSecurityVerifier:
         """
         return await self._verification_service.verify_hash(data, expected_hash)
 
-    def enforce_capability_permission(
-        self, capability: AdapterCapability, granted_permissions: list[str]
-    ) -> bool:
+    def enforce_capability_permission(self, capability: AdapterCapability, granted_permissions: list[str]) -> bool:
         """Check whether capability is authorized under granted permission keys.
 
         Args:
@@ -194,9 +188,7 @@ class DocumentStorageBinder:
         return self._cache_store
 
     # Template file bindings (IFileStore)
-    async def save_template_schema(
-        self, relative_path: str, schema_bytes: bytes
-    ) -> FileMetadata | None:
+    async def save_template_schema(self, relative_path: str, schema_bytes: bytes) -> FileMetadata | None:
         """Write declarative template schema file to sandboxed file storage."""
         if self._file_store is None:
             return None
@@ -221,9 +213,7 @@ class DocumentStorageBinder:
         """Store immutable document output binary blob in object store."""
         if self._object_store is None:
             return None
-        return await self._object_store.put_object(
-            bucket_name, object_key, data, mime_type=mime_type
-        )
+        return await self._object_store.put_object(bucket_name, object_key, data, mime_type=mime_type)
 
     async def retrieve_document_output(self, bucket_name: str, object_key: str) -> bytes | None:
         """Retrieve document output binary blob from object store."""

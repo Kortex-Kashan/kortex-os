@@ -280,9 +280,7 @@ async def test_durable_ticket_creation_and_retrieval(durable_env: ApprovalTestEn
     assert fetched_step.id == ticket.id
 
     # Retrieve by Instance
-    fetched_inst = await durable_env.approval_manager.get_request_by_instance(
-        inst_id, tenant_id="tenant_alpha"
-    )
+    fetched_inst = await durable_env.approval_manager.get_request_by_instance(inst_id, tenant_id="tenant_alpha")
     assert fetched_inst is not None
     assert fetched_inst.id == ticket.id
 
@@ -295,24 +293,16 @@ async def test_durable_ticket_creation_and_retrieval(durable_env: ApprovalTestEn
 @pytest.mark.asyncio
 async def test_tenant_filtered_listing(durable_env: ApprovalTestEnvironment) -> None:
     """Category 3: Verify list_requests filters strictly by tenant and role."""
-    await durable_env.approval_manager.create_request(
-        required_role="FINANCE_MANAGER", tenant_id="tenant_1"
-    )
-    await durable_env.approval_manager.create_request(
-        required_role="HR_MANAGER", tenant_id="tenant_1"
-    )
-    await durable_env.approval_manager.create_request(
-        required_role="FINANCE_MANAGER", tenant_id="tenant_2"
-    )
+    await durable_env.approval_manager.create_request(required_role="FINANCE_MANAGER", tenant_id="tenant_1")
+    await durable_env.approval_manager.create_request(required_role="HR_MANAGER", tenant_id="tenant_1")
+    await durable_env.approval_manager.create_request(required_role="FINANCE_MANAGER", tenant_id="tenant_2")
 
     # Tenant 1 should see 2 tickets
     t1_all = await durable_env.approval_manager.list_requests(tenant_id="tenant_1")
     assert len(t1_all) == 2
 
     # Tenant 1 with role filter
-    t1_fin = await durable_env.approval_manager.list_requests(
-        tenant_id="tenant_1", role_filter="FINANCE_MANAGER"
-    )
+    t1_fin = await durable_env.approval_manager.list_requests(tenant_id="tenant_1", role_filter="FINANCE_MANAGER")
     assert len(t1_fin) == 1
     assert t1_fin[0].required_role == "FINANCE_MANAGER"
 
@@ -331,9 +321,7 @@ async def test_tenant_filtered_listing(durable_env: ApprovalTestEnvironment) -> 
 async def test_approval_and_rejection_decisions(durable_env: ApprovalTestEnvironment) -> None:
     """Categories 4 & 5: Verify valid APPROVED and REJECTED decision submissions."""
     # Test APPROVED
-    req_appr = await durable_env.approval_manager.create_request(
-        required_role="OPERATIONS", tenant_id="tenant_ops"
-    )
+    req_appr = await durable_env.approval_manager.create_request(required_role="OPERATIONS", tenant_id="tenant_ops")
     decision_appr = ApprovalDecision(
         request_id=req_appr.id,
         tenant_id="tenant_ops",
@@ -358,9 +346,7 @@ async def test_approval_and_rejection_decisions(durable_env: ApprovalTestEnviron
     assert persisted_dec.approver_id == "ops_user_1"
 
     # Test REJECTED
-    req_rej = await durable_env.approval_manager.create_request(
-        required_role="LEGAL", tenant_id="tenant_ops"
-    )
+    req_rej = await durable_env.approval_manager.create_request(required_role="LEGAL", tenant_id="tenant_ops")
     decision_rej = ApprovalDecision(
         request_id=req_rej.id,
         tenant_id="tenant_ops",
@@ -393,9 +379,7 @@ async def test_approval_and_rejection_decisions(durable_env: ApprovalTestEnviron
 @pytest.mark.asyncio
 async def test_sequential_double_decision_rejection(durable_env: ApprovalTestEnvironment) -> None:
     """Category 6: Verify second sequential decision submission fails closed with Conflict."""
-    ticket = await durable_env.approval_manager.create_request(
-        required_role="ADMIN", tenant_id="tenant_sec"
-    )
+    ticket = await durable_env.approval_manager.create_request(required_role="ADMIN", tenant_id="tenant_sec")
     decision = ApprovalDecision(
         request_id=ticket.id,
         tenant_id="tenant_sec",
@@ -418,9 +402,7 @@ async def test_sequential_double_decision_rejection(durable_env: ApprovalTestEnv
 @pytest.mark.asyncio
 async def test_concurrent_double_decision_rejection(durable_env: ApprovalTestEnvironment) -> None:
     """Category 7: Verify concurrent competing decisions result in exactly 1 winner and 1 conflict."""
-    ticket = await durable_env.approval_manager.create_request(
-        required_role="FINANCE", tenant_id="tenant_conc"
-    )
+    ticket = await durable_env.approval_manager.create_request(required_role="FINANCE", tenant_id="tenant_conc")
 
     decision_1 = ApprovalDecision(
         request_id=ticket.id,
@@ -820,9 +802,7 @@ async def test_approve_wins_race_against_expire_no_event_published_for_loser(
         tenant_id="tenant_race2",
         roles=["MANAGER"],
     )
-    ticket = await manager.create_request(
-        required_role="MANAGER", tenant_id="tenant_race2", timeout_seconds=-5
-    )
+    ticket = await manager.create_request(required_role="MANAGER", tenant_id="tenant_race2", timeout_seconds=-5)
 
     received: list[Any] = []
     durable_env.kernel.subscribe_event(
@@ -927,9 +907,7 @@ async def test_concurrent_reject_vs_expire_exactly_one_wins(
 @pytest.mark.asyncio
 async def test_strict_multi_tenant_isolation(durable_env: ApprovalTestEnvironment) -> None:
     """Category 18: Tenant A tickets are completely invisible and unmodifiable by Tenant B."""
-    ticket_a = await durable_env.approval_manager.create_request(
-        required_role="SUPERVISOR", tenant_id="tenant_alpha"
-    )
+    ticket_a = await durable_env.approval_manager.create_request(required_role="SUPERVISOR", tenant_id="tenant_alpha")
 
     # Tenant B tries to get Tenant A's ticket -> None
     res = await durable_env.approval_manager.get_request(ticket_a.id, tenant_id="tenant_beta")
@@ -978,9 +956,7 @@ async def test_secret_sanitization_in_snapshots(durable_env: ApprovalTestEnviron
 
     # Read raw JSON from SQLite database row
     async def _action(session: AsyncSession) -> str:
-        stmt = select(ApprovalRequestModel.context_snapshot_json).where(
-            ApprovalRequestModel.id == str(ticket.id)
-        )
+        stmt = select(ApprovalRequestModel.context_snapshot_json).where(ApprovalRequestModel.id == str(ticket.id))
         return await session.scalar(stmt) or "{}"
 
     raw_json = await durable_env.data_store.execute_in_transaction(_action)
@@ -1140,9 +1116,7 @@ async def test_crash_recovery_scenarios(tmp_path: Path) -> None:
         state=WorkflowState.WAITING,
         status=WorkflowStatus.WAITING_APPROVAL,
     )
-    inst_exp.compensation_stack.append(
-        CompensationAction(name="rollback_prep", capability_name="noop")
-    )
+    inst_exp.compensation_stack.append(CompensationAction(name="rollback_prep", capability_name="noop"))
     await workflow_store.save_instance(inst_exp, tenant_id="tenant_rec")
     await appr_mgr.create_request(
         instance_id=inst_exp.id,
@@ -1170,9 +1144,7 @@ async def test_transactional_rollback_and_outbox_atomicity(
     durable_env: ApprovalTestEnvironment,
 ) -> None:
     """Categories 23 & 24: Failed transactions leave zero partial updates and zero outbox events."""
-    ticket = await durable_env.approval_manager.create_request(
-        required_role="AUDIT", tenant_id="tenant_atom"
-    )
+    ticket = await durable_env.approval_manager.create_request(required_role="AUDIT", tenant_id="tenant_atom")
 
     # Initial outbox events count
     initial_events = await durable_env.outbox_store.get_pending_events(tenant_id="tenant_atom")
@@ -1228,6 +1200,7 @@ async def test_all_five_capability_dispatch_paths(tmp_path: Path) -> None:
 
     # Pre-register permissions in RBAC table
     hasher = PasswordHasher()
+
     async def _seed_rbac(session: AsyncSession) -> None:
         session.add(RolePermissionRecord(id=str(uuid4()), role="APPROVER_ROLE", permission="approval:write"))
         session.add(RolePermissionRecord(id=str(uuid4()), role="APPROVER_ROLE", permission="approval:read"))
@@ -1403,9 +1376,7 @@ async def test_adversarial_cross_tenant_and_identity_spoofing(
     durable_env: ApprovalTestEnvironment,
 ) -> None:
     """Phase 5 & 6 Adversarial Audit: Tenant isolation & approver identity spoofing."""
-    ticket = await durable_env.approval_manager.create_request(
-        required_role="FINANCE", tenant_id="tenant_a"
-    )
+    ticket = await durable_env.approval_manager.create_request(required_role="FINANCE", tenant_id="tenant_a")
 
     # 1. Tenant B user attempts to approve Tenant A ticket
     intruder_principal = SecurityPrincipal(
@@ -1421,9 +1392,7 @@ async def test_adversarial_cross_tenant_and_identity_spoofing(
         decision=ApprovalState.APPROVED,
     )
     with pytest.raises(AuthorizationDeniedError, match="does not match ticket tenant"):
-        await durable_env.approval_manager.submit_decision(
-            decision, principal=intruder_principal, tenant_id="tenant_a"
-        )
+        await durable_env.approval_manager.submit_decision(decision, principal=intruder_principal, tenant_id="tenant_a")
 
     # 2. Identity Spoofing: User mallory passes approver_id="alice" in request body
     mallory_principal = SecurityPrincipal(
@@ -1576,9 +1545,7 @@ async def test_adversarial_expiration_race_and_hydration_idempotency(
         decision=ApprovalState.APPROVED,
     )
     with pytest.raises(ApprovalConflictError, match="already in state 'EXPIRED'"):
-        await durable_env.approval_manager.submit_decision(
-            decision, principal=lead_principal, tenant_id="tenant_race"
-        )
+        await durable_env.approval_manager.submit_decision(decision, principal=lead_principal, tenant_id="tenant_race")
 
 
 # ============================================================================
@@ -1671,9 +1638,7 @@ async def test_self_approval_denied_even_with_correct_role(
     )
 
     with pytest.raises(AuthorizationDeniedError, match="cannot decide an approval ticket it itself requested"):
-        await durable_env.approval_manager.submit_decision(
-            decision, principal=requester, tenant_id="tenant_self_appr"
-        )
+        await durable_env.approval_manager.submit_decision(decision, principal=requester, tenant_id="tenant_self_appr")
 
     # The ticket must remain PENDING -- the denied attempt must not have
     # partially mutated its state.
@@ -1806,9 +1771,7 @@ async def test_actor_type_still_human_for_user_principal(durable_env: ApprovalTe
         decision, principal=other_human, tenant_id="tenant_actor_type_human"
     )
 
-    entries = await durable_env.security_engine.audit_manager.get_audit_entries(
-        tenant_id="tenant_actor_type_human"
-    )
+    entries = await durable_env.security_engine.audit_manager.get_audit_entries(tenant_id="tenant_actor_type_human")
     create_entries = [e for e in entries if e.action == "kortex.workflow.approval.create"]
     decide_entries = [e for e in entries if e.action == "kortex.workflow.approval.decide"]
     assert len(create_entries) == 1

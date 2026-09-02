@@ -139,9 +139,7 @@ def test_register_bare_metadata_creates_metadata_only_provider() -> None:
 @pytest.mark.asyncio
 async def test_metadata_only_provider_generation_methods_raise_ai_provider_error() -> None:
     provider = MetadataOnlyAIProvider(_metadata(provider_id="p1"))
-    request = LLMRequest(
-        request_id="r1", tenant_id="t1", user_id="u1", conversation_id="c1", prompt="hi"
-    )
+    request = LLMRequest(request_id="r1", tenant_id="t1", user_id="u1", conversation_id="c1", prompt="hi")
     with pytest.raises(AIProviderError):
         await provider.generate_text(request)
     with pytest.raises(AIProviderError):

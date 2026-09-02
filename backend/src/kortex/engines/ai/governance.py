@@ -58,7 +58,7 @@ class IDurableApprovalBridge(Protocol):
 
     async def create_request(
         self,
-        instance_id: str,
+        instance_id: str | None,
         step_id: str,
         required_role: str,
         tenant_id: str,
@@ -100,7 +100,6 @@ class IGovernanceStore(IQuotaStore, Protocol):
         user_id: str | None = None,
         task_id: str | None = None,
     ) -> list[AIDecisionAuditRecord]: ...
-
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +148,7 @@ class AIGovernancePolicy(BaseModel):
     allowed_tools: list[str] | None = Field(
         default=None, description="Explicit allowlist of tool names (None = all non-blocked allowed)"
     )
-    blocked_tools: list[str] = Field(
-        default_factory=list, description="Explicit blocklist of forbidden tool names"
-    )
+    blocked_tools: list[str] = Field(default_factory=list, description="Explicit blocklist of forbidden tool names")
     max_tokens_per_request: int = Field(
         default=4096, ge=128, le=32768, description="Maximum token generation limit per request"
     )
@@ -176,9 +173,7 @@ class AITenantQuota(BaseModel):
     monthly_token_limit: int = Field(default=25_000_000, ge=0)
     daily_tokens_consumed: int = Field(default=0, ge=0)
     monthly_tokens_consumed: int = Field(default=0, ge=0)
-    last_reset_date: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
-    )
+    last_reset_date: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d"))
     max_concurrent_agents: int = Field(default=5, ge=1)
     max_concurrent_generations: int = Field(default=10, ge=1)
 
@@ -205,9 +200,7 @@ class AIDecisionAuditRecord(BaseModel):
     tool_calls_requested: list[dict[str, Any]] = Field(default_factory=list)
     approval_request_id: UUID | None = Field(default=None, description="Linked approval ticket UUID")
     policy_violations: list[str] = Field(default_factory=list)
-    created_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC)
-    )
+    created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC))
 
 
 class GuardrailEvaluationResult(BaseModel):
@@ -463,7 +456,7 @@ class KernelDurableApprovalBridge:
 
     async def create_request(
         self,
-        instance_id: str,
+        instance_id: str | None,
         step_id: str,
         required_role: str,
         tenant_id: str,
@@ -612,7 +605,6 @@ class AIGovernanceManager:
         self._memory_policies: dict[str, AIGovernancePolicy] = {}
         self._quota_manager = TenantQuotaManager(governance_store)
 
-
     @property
     def quota_manager(self) -> TenantQuotaManager:
         return self._quota_manager
@@ -695,8 +687,7 @@ class AIGovernanceManager:
 
         usage = token_usage or TokenUsage()
         raw_tools = [
-            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
-            for c in (tool_calls or [])
+            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))} for c in (tool_calls or [])
         ]
 
         record = AIDecisionAuditRecord(

@@ -8,10 +8,10 @@ Recipe Engine NEVER executes recipes directly.
 """
 
 import pytest
+
 from kortex.engines.recipe.engine import RecipeEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.models import WorkflowState
-
 
 SAMPLE_RECIPE_INTEGRATION_YAML = """
 manifest:

@@ -100,7 +100,6 @@ def test_compute_next_cron_run_day_of_week() -> None:
     assert next_run.weekday() == 0
 
 
-
 def test_compute_next_cron_run_year_rollover() -> None:
     base = datetime.datetime(2026, 12, 31, 23, 50, 0, tzinfo=UTC)
     next_run = compute_next_cron_run("0 0 1 1 *", after_dt=base)

@@ -16,11 +16,9 @@ from kortex.core.db import DatabaseEngineManager
 from kortex.engines.document.exceptions import DocumentLifecycleError
 from kortex.engines.document.interfaces import (
     IDocumentLifecycleManager,
-    IDocumentRepository,
 )
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
 from kortex.engines.document.models import (
-    Document,
     DocumentLifecycleState,
     DocumentMetadata,
     DocumentVersion,
@@ -83,6 +81,7 @@ def repo_lifecycle_manager(repository: DocumentRepository) -> DocumentLifecycleM
 # 1. Protocol Compliance & Invariants
 # =============================================================================
 
+
 def test_protocol_compliance(
     memory_lifecycle_manager: DocumentLifecycleManager,
     repo_lifecycle_manager: DocumentLifecycleManager,
@@ -131,6 +130,7 @@ def test_semver_patch_derivation(memory_lifecycle_manager: DocumentLifecycleMana
 # =============================================================================
 # 2. State Machine Transitions & Immutability
 # =============================================================================
+
 
 def test_valid_transitions_matrix(memory_lifecycle_manager: DocumentLifecycleManager) -> None:
     """Verify all valid transitions in the state machine matrix."""
@@ -194,6 +194,7 @@ def test_invalid_transitions_matrix(memory_lifecycle_manager: DocumentLifecycleM
 # =============================================================================
 # 3. In-Memory Lifecycle Operations
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_in_memory_root_and_child_version_creation(
@@ -275,7 +276,7 @@ async def test_in_memory_rejections_and_edge_cases(
     mgr = memory_lifecycle_manager
 
     # 1. Missing parent version
-    with pytest.raises(DocumentLifecycleError, match="not found|does not exist"):
+    with pytest.raises(DocumentLifecycleError, match=r"not found|does not exist"):
         await mgr.create_child_version(parent_version_id="missing-parent")
 
     # 2. Duplicate version ID
@@ -288,7 +289,7 @@ async def test_in_memory_rejections_and_edge_cases(
         await mgr.create_version(document_id="doc-dup", version_id="ver-2", version_number="1.0.0")
 
     # 4. Soft-deleted parent derivation rejection
-    v_root = await mgr.create_version(document_id="doc-del", version_id="ver-del")
+    await mgr.create_version(document_id="doc-del", version_id="ver-del")
     await mgr.transition_state("doc-del", "ver-del", DocumentLifecycleState.LOGICAL_DELETE)
     with pytest.raises(DocumentLifecycleError, match="Cannot create child version from soft-deleted"):
         await mgr.create_child_version(parent_version_id="ver-del", document_id="doc-del")
@@ -301,6 +302,7 @@ async def test_in_memory_rejections_and_edge_cases(
 # =============================================================================
 # 4. Repository-Backed Lifecycle Operations
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_repository_backed_lifecycle_flow(
@@ -406,7 +408,7 @@ async def test_repository_backed_tenant_isolation(
         )
 
     # Tenant Beta attempts to derive from Tenant Alpha's version
-    with pytest.raises(DocumentLifecycleError, match="not found|does not exist"):
+    with pytest.raises(DocumentLifecycleError, match=r"not found|does not exist"):
         await mgr.create_child_version(
             parent_version_id="ver-a-1",
             document_id="doc-tenant-iso",
@@ -418,6 +420,7 @@ async def test_repository_backed_tenant_isolation(
 # 5. Concurrency Race & CAS Gate Proof
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_competing_publication_race_cas_rejection(
     repository: DocumentRepository,
@@ -427,7 +430,7 @@ async def test_competing_publication_race_cas_rejection(
     mgr = repo_lifecycle_manager
 
     # 1. Setup V1 as PUBLISHED
-    v1 = await mgr.create_version(
+    await mgr.create_version(
         document_id="doc-race-1",
         title="Base Version",
         version_id="ver-base-1",
@@ -465,7 +468,7 @@ async def test_competing_publication_race_cas_rejection(
 
     # 4. Transaction B attempts to publish V3 with stale predecessor V1
     # Because V1 is now SUPERSEDED and current_version_id is V2, CAS and parent state checks reject B
-    with pytest.raises(DocumentLifecycleError, match="expected 'PUBLISHED'|Concurrent publication collision"):
+    with pytest.raises(DocumentLifecycleError, match=r"expected 'PUBLISHED'|Concurrent publication collision"):
         await mgr.transition_state(
             document_id="doc-race-1",
             version_id=v3.version_id,
@@ -509,7 +512,7 @@ async def test_additional_semver_and_lifecycle_edge_cases(
         )
 
     # Invalid SemVer in child version creation
-    v_root = await memory_lifecycle_manager.create_version(
+    await memory_lifecycle_manager.create_version(
         document_id="doc-semver-child-inv",
         version_id="ver-semver-root",
         tenant_id="tenant-edge",
@@ -534,7 +537,7 @@ async def test_additional_semver_and_lifecycle_edge_cases(
         )
 
     # 2. create_version with soft-deleted parent in repo mode
-    v_orig = await repo_mgr.create_version(
+    await repo_mgr.create_version(
         document_id="doc-edge-del",
         version_id="ver-edge-del",
         tenant_id="tenant-edge",
@@ -553,7 +556,7 @@ async def test_additional_semver_and_lifecycle_edge_cases(
         )
 
     # 3. transition_state with document ID mismatch
-    with pytest.raises(DocumentLifecycleError, match="not found|Document ID mismatch"):
+    with pytest.raises(DocumentLifecycleError, match=r"not found|Document ID mismatch"):
         await repo_mgr.transition_state(
             document_id="wrong-doc-id",
             version_id="ver-edge-del",
@@ -562,7 +565,7 @@ async def test_additional_semver_and_lifecycle_edge_cases(
         )
 
     # 4. transition_state idempotent same-state in repo mode
-    v_active = await repo_mgr.create_version(
+    await repo_mgr.create_version(
         document_id="doc-edge-idemp",
         version_id="ver-edge-idemp",
         tenant_id="tenant-edge",
@@ -725,12 +728,16 @@ async def test_additional_semver_and_lifecycle_edge_cases(
     mem_cross_tenant._versions["ver-child-bad-tenant"] = v_child_bad_tenant
     mem_cross_tenant._document_chains["doc-tenant-test"] = ["ver-child-bad-tenant"]
     with pytest.raises(DocumentLifecycleError, match="belongs to tenant 'tenant-beta', expected 'tenant-alpha'"):
-        await mem_cross_tenant.transition_state("doc-tenant-test", "ver-child-bad-tenant", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-alpha")
+        await mem_cross_tenant.transition_state(
+            "doc-tenant-test", "ver-child-bad-tenant", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-alpha"
+        )
 
     # D. In-memory parent not published
     mem_not_pub = memory_lifecycle_manager
     await mem_not_pub.create_version(document_id="doc-not-pub", version_id="ver-np-1")
-    await mem_not_pub.create_child_version(parent_version_id="ver-np-1", document_id="doc-not-pub", version_id="ver-np-2", version_number="1.0.1")
+    await mem_not_pub.create_child_version(
+        parent_version_id="ver-np-1", document_id="doc-not-pub", version_id="ver-np-2", version_number="1.0.1"
+    )
     with pytest.raises(DocumentLifecycleError, match="expected 'PUBLISHED'"):
         await mem_not_pub.transition_state("doc-not-pub", "ver-np-2", DocumentLifecycleState.PUBLISHED)
 
@@ -738,10 +745,14 @@ async def test_additional_semver_and_lifecycle_edge_cases(
     mem_cas = memory_lifecycle_manager
     await mem_cas.create_version(document_id="doc-mem-cas", version_id="ver-cas-p")
     await mem_cas.transition_state("doc-mem-cas", "ver-cas-p", DocumentLifecycleState.PUBLISHED)
-    await mem_cas.create_child_version(parent_version_id="ver-cas-p", document_id="doc-mem-cas", version_id="ver-cas-c1", version_number="1.0.1")
-    await mem_cas.create_child_version(parent_version_id="ver-cas-p", document_id="doc-mem-cas", version_id="ver-cas-c2", version_number="1.0.2")
+    await mem_cas.create_child_version(
+        parent_version_id="ver-cas-p", document_id="doc-mem-cas", version_id="ver-cas-c1", version_number="1.0.1"
+    )
+    await mem_cas.create_child_version(
+        parent_version_id="ver-cas-p", document_id="doc-mem-cas", version_id="ver-cas-c2", version_number="1.0.2"
+    )
     await mem_cas.transition_state("doc-mem-cas", "ver-cas-c1", DocumentLifecycleState.PUBLISHED)
-    with pytest.raises(DocumentLifecycleError, match="Cannot supersede parent version.*expected 'PUBLISHED'"):
+    with pytest.raises(DocumentLifecycleError, match=r"Cannot supersede parent version.*expected 'PUBLISHED'"):
         await mem_cas.transition_state("doc-mem-cas", "ver-cas-c2", DocumentLifecycleState.PUBLISHED)
 
     # F. In-memory publication CAS collision on genesis
@@ -756,7 +767,9 @@ async def test_additional_semver_and_lifecycle_edge_cases(
     mem_cas_parent = memory_lifecycle_manager
     await mem_cas_parent.create_version(document_id="doc-cas-p", version_id="ver-cp-1")
     await mem_cas_parent.transition_state("doc-cas-p", "ver-cp-1", DocumentLifecycleState.PUBLISHED)
-    await mem_cas_parent.create_child_version(parent_version_id="ver-cp-1", document_id="doc-cas-p", version_id="ver-cp-2", version_number="1.0.1")
+    await mem_cas_parent.create_child_version(
+        parent_version_id="ver-cp-1", document_id="doc-cas-p", version_id="ver-cp-2", version_number="1.0.1"
+    )
     # Reset parent state back to PUBLISHED to isolate the current_versions mismatch on line 400
     p_rec = mem_cas_parent._versions["ver-cp-1"]
     mem_cas_parent._versions["ver-cp-1"] = p_rec.model_copy(
@@ -860,14 +873,14 @@ async def test_concurrent_genesis_publication_via_manager(
     mgr_a = DocumentLifecycleManager(repository=repo_a)
     mgr_b = DocumentLifecycleManager(repository=repo_b)
 
-    vA = await mgr_a.create_version(
+    await mgr_a.create_version(
         document_id="doc-conc-mgr-gen",
         title="Gen A",
         version_id="ver-mgr-gen-A",
         version_number="1.0.0",
         tenant_id="tenant-mgr",
     )
-    vB = await mgr_a.create_version(
+    await mgr_a.create_version(
         document_id="doc-conc-mgr-gen",
         title="Gen B",
         version_id="ver-mgr-gen-B",
@@ -876,8 +889,12 @@ async def test_concurrent_genesis_publication_via_manager(
     )
 
     results = await asyncio.gather(
-        mgr_a.transition_state("doc-conc-mgr-gen", "ver-mgr-gen-A", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"),
-        mgr_b.transition_state("doc-conc-mgr-gen", "ver-mgr-gen-B", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"),
+        mgr_a.transition_state(
+            "doc-conc-mgr-gen", "ver-mgr-gen-A", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"
+        ),
+        mgr_b.transition_state(
+            "doc-conc-mgr-gen", "ver-mgr-gen-B", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"
+        ),
         return_exceptions=True,
     )
 
@@ -910,22 +927,24 @@ async def test_concurrent_sibling_publication_via_manager(
     mgr_a = DocumentLifecycleManager(repository=repo_a)
     mgr_b = DocumentLifecycleManager(repository=repo_b)
 
-    v1 = await mgr_a.create_version(
+    await mgr_a.create_version(
         document_id="doc-conc-mgr-sib",
         title="Root Parent",
         version_id="ver-mgr-parent",
         tenant_id="tenant-mgr",
     )
-    await mgr_a.transition_state("doc-conc-mgr-sib", "ver-mgr-parent", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr")
+    await mgr_a.transition_state(
+        "doc-conc-mgr-sib", "ver-mgr-parent", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"
+    )
 
-    v2A = await mgr_a.create_child_version(
+    await mgr_a.create_child_version(
         parent_version_id="ver-mgr-parent",
         document_id="doc-conc-mgr-sib",
         version_id="ver-mgr-child-A",
         version_number="1.0.1",
         tenant_id="tenant-mgr",
     )
-    v2B = await mgr_a.create_child_version(
+    await mgr_a.create_child_version(
         parent_version_id="ver-mgr-parent",
         document_id="doc-conc-mgr-sib",
         version_id="ver-mgr-child-B",
@@ -934,8 +953,12 @@ async def test_concurrent_sibling_publication_via_manager(
     )
 
     results = await asyncio.gather(
-        mgr_a.transition_state("doc-conc-mgr-sib", "ver-mgr-child-A", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"),
-        mgr_b.transition_state("doc-conc-mgr-sib", "ver-mgr-child-B", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"),
+        mgr_a.transition_state(
+            "doc-conc-mgr-sib", "ver-mgr-child-A", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"
+        ),
+        mgr_b.transition_state(
+            "doc-conc-mgr-sib", "ver-mgr-child-B", DocumentLifecycleState.PUBLISHED, tenant_id="tenant-mgr"
+        ),
         return_exceptions=True,
     )
 
@@ -971,6 +994,7 @@ async def test_concurrent_sibling_publication_via_manager(
 # 5. Milestone 7: SHA256 Integrity Hashing on Publish
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_in_memory_publish_computes_sha256_hash_from_payload(
     memory_lifecycle_manager: DocumentLifecycleManager,
@@ -1001,9 +1025,7 @@ async def test_in_memory_publish_without_payload_leaves_hash_none(
     mgr = memory_lifecycle_manager
 
     await mgr.create_version(document_id="doc-hash-none", version_id="ver-hash-none")
-    meta = await mgr.transition_state(
-        "doc-hash-none", "ver-hash-none", DocumentLifecycleState.PUBLISHED
-    )
+    meta = await mgr.transition_state("doc-hash-none", "ver-hash-none", DocumentLifecycleState.PUBLISHED)
 
     assert meta.sha256_hash is None
 
@@ -1018,9 +1040,7 @@ async def test_repository_backed_publish_computes_and_persists_sha256_hash(
     mgr = repo_lifecycle_manager
     payload = b"[PAYSLIP_PDF_BYTES]"
 
-    await mgr.create_version(
-        document_id="doc-hash-repo", version_id="ver-hash-repo", tenant_id="tenant-hash"
-    )
+    await mgr.create_version(document_id="doc-hash-repo", version_id="ver-hash-repo", tenant_id="tenant-hash")
     meta = await mgr.transition_state(
         "doc-hash-repo",
         "ver-hash-repo",
@@ -1036,9 +1056,7 @@ async def test_repository_backed_publish_computes_and_persists_sha256_hash(
     reread = await mgr.get_version("doc-hash-repo", "ver-hash-repo", tenant_id="tenant-hash")
     assert reread.sha256_hash == expected_hash
 
-    version_record = await repository.get_version(
-        "doc-hash-repo", "ver-hash-repo", tenant_id="tenant-hash"
-    )
+    version_record = await repository.get_version("doc-hash-repo", "ver-hash-repo", tenant_id="tenant-hash")
     assert version_record is not None
     assert version_record.metadata.sha256_hash == expected_hash
 
@@ -1046,6 +1064,7 @@ async def test_repository_backed_publish_computes_and_persists_sha256_hash(
 # =============================================================================
 # 6. Milestone 7: Metadata Cache (read-through + invalidation)
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_metadata_cache_read_through_and_invalidation_on_transition(
@@ -1062,37 +1081,25 @@ async def test_metadata_cache_read_through_and_invalidation_on_transition(
     mgr = DocumentLifecycleManager(repository=repository, cache_store=cache_store)
     assert mgr.cache_store is cache_store
 
-    await mgr.create_version(
-        document_id="doc-cache", version_id="ver-cache", tenant_id="tenant-cache"
-    )
+    await mgr.create_version(document_id="doc-cache", version_id="ver-cache", tenant_id="tenant-cache")
 
     # First read: cache miss, populates cache.
-    first = await mgr.get_version_object(
-        "ver-cache", document_id="doc-cache", tenant_id="tenant-cache"
-    )
+    first = await mgr.get_version_object("ver-cache", document_id="doc-cache", tenant_id="tenant-cache")
     assert first.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
 
-    cache_key = DocumentLifecycleManager._metadata_cache_key(
-        "doc-cache", "ver-cache", "tenant-cache"
-    )
+    cache_key = DocumentLifecycleManager._metadata_cache_key("doc-cache", "ver-cache", "tenant-cache")
     assert await cache_store.get(cache_key) is not None
 
     # Second read: served from cache (same object identity as what was cached).
-    second = await mgr.get_version_object(
-        "ver-cache", document_id="doc-cache", tenant_id="tenant-cache"
-    )
+    second = await mgr.get_version_object("ver-cache", document_id="doc-cache", tenant_id="tenant-cache")
     assert second.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
 
     # Transition invalidates the cache entry.
-    await mgr.transition_state(
-        "doc-cache", "ver-cache", DocumentLifecycleState.REVIEW, tenant_id="tenant-cache"
-    )
+    await mgr.transition_state("doc-cache", "ver-cache", DocumentLifecycleState.REVIEW, tenant_id="tenant-cache")
     assert await cache_store.get(cache_key) is None
 
     # Next read reflects the new state, not a stale cached DRAFT.
-    third = await mgr.get_version_object(
-        "ver-cache", document_id="doc-cache", tenant_id="tenant-cache"
-    )
+    third = await mgr.get_version_object("ver-cache", document_id="doc-cache", tenant_id="tenant-cache")
     assert third.metadata.lifecycle_state == DocumentLifecycleState.REVIEW
 
 
@@ -1105,9 +1112,7 @@ async def test_metadata_cache_publish_invalidates_both_child_and_parent(
     cache_store = MemoryCacheStore()
     mgr = DocumentLifecycleManager(repository=repository, cache_store=cache_store)
 
-    await mgr.create_version(
-        document_id="doc-cache-pub", version_id="ver-cache-parent", tenant_id="tenant-cache-pub"
-    )
+    await mgr.create_version(document_id="doc-cache-pub", version_id="ver-cache-parent", tenant_id="tenant-cache-pub")
     await mgr.transition_state(
         "doc-cache-pub",
         "ver-cache-parent",
@@ -1126,12 +1131,8 @@ async def test_metadata_cache_publish_invalidates_both_child_and_parent(
     await mgr.get_version_object("ver-cache-parent", document_id="doc-cache-pub", tenant_id="tenant-cache-pub")
     await mgr.get_version_object("ver-cache-child", document_id="doc-cache-pub", tenant_id="tenant-cache-pub")
 
-    parent_key = DocumentLifecycleManager._metadata_cache_key(
-        "doc-cache-pub", "ver-cache-parent", "tenant-cache-pub"
-    )
-    child_key = DocumentLifecycleManager._metadata_cache_key(
-        "doc-cache-pub", "ver-cache-child", "tenant-cache-pub"
-    )
+    parent_key = DocumentLifecycleManager._metadata_cache_key("doc-cache-pub", "ver-cache-parent", "tenant-cache-pub")
+    child_key = DocumentLifecycleManager._metadata_cache_key("doc-cache-pub", "ver-cache-child", "tenant-cache-pub")
     assert await cache_store.get(parent_key) is not None
     assert await cache_store.get(child_key) is not None
 

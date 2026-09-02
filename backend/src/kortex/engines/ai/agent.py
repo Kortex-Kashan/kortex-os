@@ -215,12 +215,8 @@ class PersistedAgentTaskRecord(BaseModel):
     resume_token: ResumeToken | None = None
     total_token_usage: TokenUsage = Field(default_factory=TokenUsage)
     version: int = 1
-    created_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC)
-    )
-    updated_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC)
-    )
+    created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC))
+    updated_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC))
 
 
 # ---------------------------------------------------------------------------
@@ -518,32 +514,25 @@ class LLMOutputParser:
         result: list[ToolCall] = []
         for idx, raw in enumerate(response.tool_calls):
             if not isinstance(raw, dict):
-                raise ToolValidationError(
-                    f"Tool call at index {idx} must be a dict, got {type(raw).__name__}."
-                )
+                raise ToolValidationError(f"Tool call at index {idx} must be a dict, got {type(raw).__name__}.")
             name = raw.get("name", "")
             if not isinstance(name, str) or not name.strip():
-                raise ToolValidationError(
-                    f"Tool call at index {idx} missing or blank 'name' field."
-                )
+                raise ToolValidationError(f"Tool call at index {idx} missing or blank 'name' field.")
             if not _TOOL_NAME_PATTERN.match(name):
                 raise ToolValidationError(
-                    f"Tool call at index {idx} has invalid name {name!r}: "
-                    f"must match [a-zA-Z0-9_-]+."
+                    f"Tool call at index {idx} has invalid name {name!r}: must match [a-zA-Z0-9_-]+."
                 )
             arguments: Any = raw.get("arguments", {})
             if not isinstance(arguments, dict):
                 raise ToolValidationError(
-                    f"Tool call at index {idx} 'arguments' must be a dict, "
-                    f"got {type(arguments).__name__}."
+                    f"Tool call at index {idx} 'arguments' must be a dict, got {type(arguments).__name__}."
                 )
             # Enforce byte-size boundary identical to M6's own check.
             try:
                 encoded = json.dumps(arguments, ensure_ascii=False).encode("utf-8")
             except (TypeError, ValueError) as exc:
                 raise ToolValidationError(
-                    f"Tool call at index {idx} 'arguments' is not JSON-serializable: "
-                    f"{type(exc).__name__}."
+                    f"Tool call at index {idx} 'arguments' is not JSON-serializable: {type(exc).__name__}."
                 ) from exc
             if len(encoded) > MAX_TOOL_ARGUMENTS_BYTES:
                 raise ToolValidationError(
@@ -551,13 +540,9 @@ class LLMOutputParser:
                 )
             call_id_raw = raw.get("call_id", "")
             call_id = (
-                call_id_raw
-                if isinstance(call_id_raw, str) and call_id_raw.strip()
-                else f"call-{uuid.uuid4().hex}"
+                call_id_raw if isinstance(call_id_raw, str) and call_id_raw.strip() else f"call-{uuid.uuid4().hex}"
             )
-            result.append(
-                ToolCall(call_id=call_id, tool_name=name, arguments=arguments)
-            )
+            result.append(ToolCall(call_id=call_id, tool_name=name, arguments=arguments))
         return result
 
     def extract_thought(self, response: LLMResponse) -> str | None:
@@ -1094,8 +1079,7 @@ class AgentOrchestrator:
                         steps=steps,
                         start=start,
                         error_message=(
-                            f"Unauthorized tool requested: {disallowed} not permitted "
-                            f"by task allowed_tools."
+                            f"Unauthorized tool requested: {disallowed} not permitted by task allowed_tools."
                         ),
                         version=version,
                         total_token_usage=cumulative_tokens,
@@ -1104,10 +1088,7 @@ class AgentOrchestrator:
             # --- Loop detection ---
             call_hash = _hash_tool_calls(tool_calls)
             recent_hashes.append(call_hash)
-            if (
-                len(recent_hashes) == LOOP_DETECTION_WINDOW
-                and len(set(recent_hashes)) == 1
-            ):
+            if len(recent_hashes) == LOOP_DETECTION_WINDOW and len(set(recent_hashes)) == 1:
                 if self._telemetry and hasattr(self._telemetry, "emit_agent_loop_detected"):
                     try:
                         first_tool_name = tool_calls[0].tool_name if tool_calls else "unknown"

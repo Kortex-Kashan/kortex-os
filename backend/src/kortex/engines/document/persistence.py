@@ -12,9 +12,10 @@ import json
 import logging
 import re
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.document.exceptions import (
@@ -79,16 +80,8 @@ class DocumentRepository(IDocumentRepository):
             except Exception:
                 meta_dict = {}
 
-        created_str = (
-            record.created_at.isoformat()
-            if record.created_at is not None
-            else None
-        )
-        updated_str = (
-            record.updated_at.isoformat()
-            if record.updated_at is not None
-            else None
-        )
+        created_str = record.created_at.isoformat() if record.created_at is not None else None
+        updated_str = record.updated_at.isoformat() if record.updated_at is not None else None
 
         return Document(
             document_id=record.id,
@@ -138,13 +131,9 @@ class DocumentRepository(IDocumentRepository):
         created_str = (
             record.created_at.isoformat()
             if record.created_at is not None
-            else datetime.datetime.now(datetime.timezone.utc).isoformat()
+            else datetime.datetime.now(datetime.UTC).isoformat()
         )
-        published_str = (
-            record.published_at.isoformat()
-            if record.published_at is not None
-            else None
-        )
+        published_str = record.published_at.isoformat() if record.published_at is not None else None
 
         doc_meta = DocumentMetadata(
             document_id=record.document_id,
@@ -231,6 +220,7 @@ class DocumentRepository(IDocumentRepository):
         Raises:
             DocumentValidationError: If document already exists.
         """
+
         async def _action(session: AsyncSession) -> Document:
             # Check for duplicate document ID under same tenant
             stmt = select(DocumentRecord).where(
@@ -273,6 +263,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             Document domain model or None if not found.
         """
+
         async def _action(session: AsyncSession) -> Document | None:
             query = select(DocumentRecord).where(
                 DocumentRecord.id == document_id,
@@ -304,6 +295,7 @@ class DocumentRepository(IDocumentRepository):
         Raises:
             DocumentValidationError: If document is not found.
         """
+
         async def _action(session: AsyncSession) -> Document:
             stmt = select(DocumentRecord).where(
                 DocumentRecord.id == document.document_id,
@@ -314,7 +306,8 @@ class DocumentRepository(IDocumentRepository):
             record = res.scalar_one_or_none()
             if record is None:
                 raise DocumentValidationError(
-                    f"Cannot update non-existent or deleted document '{document.document_id}' for tenant '{document.tenant_id}'."
+                    f"Cannot update non-existent or deleted document '{document.document_id}' for tenant "
+                    f"'{document.tenant_id}'."
                 )
 
             record.title = document.title
@@ -337,6 +330,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             True if document was found and soft-deleted; False otherwise.
         """
+
         async def _action(session: AsyncSession) -> bool:
             stmt = select(DocumentRecord).where(
                 DocumentRecord.id == document_id,
@@ -378,6 +372,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             True if deleted; False if not found.
         """
+
         async def _action(session: AsyncSession) -> bool:
             stmt = select(DocumentRecord).where(
                 DocumentRecord.id == document_id,
@@ -421,6 +416,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             List of Document domain models.
         """
+
         async def _action(session: AsyncSession) -> list[Document]:
             query = select(DocumentRecord).where(DocumentRecord.tenant_id == tenant_id)
             if not include_deleted:
@@ -437,9 +433,7 @@ class DocumentRepository(IDocumentRepository):
 
     # -- Document Version CRUD Operations -------------------------------------
 
-    async def create_version(
-        self, version: DocumentVersion, tenant_id: str = "default"
-    ) -> DocumentVersion:
+    async def create_version(self, version: DocumentVersion, tenant_id: str = "default") -> DocumentVersion:
         """Persist an immutable DocumentVersion snapshot.
 
         Args:
@@ -452,6 +446,7 @@ class DocumentRepository(IDocumentRepository):
         Raises:
             DocumentValidationError: If parent document does not exist or version number conflicts.
         """
+
         async def _action(session: AsyncSession) -> DocumentVersion:
             # 1. Verify parent document exists under tenant
             doc_stmt = select(DocumentRecord).where(
@@ -463,7 +458,8 @@ class DocumentRepository(IDocumentRepository):
             doc_record = doc_res.scalar_one_or_none()
             if doc_record is None:
                 raise DocumentValidationError(
-                    f"Cannot create version for non-existent document '{version.document_id}' under tenant '{tenant_id}'."
+                    f"Cannot create version for non-existent document '{version.document_id}' under tenant "
+                    f"'{tenant_id}'."
                 )
 
             # 2. Validate SemVer 2.0.0 format
@@ -482,7 +478,8 @@ class DocumentRepository(IDocumentRepository):
             ver_res = await session.execute(ver_check_stmt)
             if ver_res.scalar_one_or_none() is not None:
                 raise DocumentLifecycleError(
-                    f"Version '{version.version_number}' already exists for document '{version.document_id}' in tenant '{tenant_id}'."
+                    f"Version '{version.version_number}' already exists for document '{version.document_id}' in tenant "
+                    f"'{tenant_id}'."
                 )
 
             meta = version.metadata
@@ -532,6 +529,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             DocumentVersion domain model or None if not found.
         """
+
         async def _action(session: AsyncSession) -> DocumentVersion | None:
             stmt = select(DocumentVersionRecord).where(
                 DocumentVersionRecord.id == version_id,
@@ -546,9 +544,7 @@ class DocumentRepository(IDocumentRepository):
 
         return await self._data_store.execute_in_transaction(_action)
 
-    async def get_latest_version(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> DocumentVersion | None:
+    async def get_latest_version(self, document_id: str, tenant_id: str = "default") -> DocumentVersion | None:
         """Retrieve most recently created version snapshot for a document.
 
         Note: Returns newest created version (which may be in DRAFT or REVIEW state).
@@ -561,6 +557,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             Latest created DocumentVersion domain model or None if no versions exist.
         """
+
         async def _action(session: AsyncSession) -> DocumentVersion | None:
             stmt = (
                 select(DocumentVersionRecord)
@@ -582,9 +579,7 @@ class DocumentRepository(IDocumentRepository):
 
         return await self._data_store.execute_in_transaction(_action)
 
-    async def list_versions(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> list[DocumentVersion]:
+    async def list_versions(self, document_id: str, tenant_id: str = "default") -> list[DocumentVersion]:
         """List all version snapshots for a document in creation order.
 
         Args:
@@ -594,6 +589,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             List of DocumentVersion domain models.
         """
+
         async def _action(session: AsyncSession) -> list[DocumentVersion]:
             stmt = (
                 select(DocumentVersionRecord)
@@ -625,6 +621,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             DocumentVersion domain model or None if not found.
         """
+
         async def _action(session: AsyncSession) -> DocumentVersion | None:
             stmt = select(DocumentVersionRecord).where(
                 DocumentVersionRecord.document_id == document_id,
@@ -690,7 +687,7 @@ class DocumentRepository(IDocumentRepository):
                 try:
                     record.published_at = datetime.datetime.fromisoformat(published_at)
                 except Exception:
-                    record.published_at = datetime.datetime.now(datetime.timezone.utc)
+                    record.published_at = datetime.datetime.now(datetime.UTC)
 
             await session.flush()
             return self._version_to_domain(record)
@@ -706,7 +703,8 @@ class DocumentRepository(IDocumentRepository):
         tenant_id: str = "default",
         sha256_hash: str | None = None,
     ) -> tuple[DocumentVersion, DocumentVersion | None]:
-        """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document pointer.
+        """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document
+        pointer.
 
         Uses an atomic compare-and-swap (CAS) update on DocumentRecord.current_version_id to guarantee that exactly
         one transaction succeeds in concurrent publication races.
@@ -726,6 +724,7 @@ class DocumentRepository(IDocumentRepository):
             DocumentLifecycleError: If child is missing/invalid state, parent is missing/non-published,
                                     lineage validation fails, or CAS publication gate fails.
         """
+
         async def _action(session: AsyncSession) -> tuple[DocumentVersion, DocumentVersion | None]:
             # 1. Fetch and validate child version
             child_stmt = select(DocumentVersionRecord).where(
@@ -774,11 +773,13 @@ class DocumentRepository(IDocumentRepository):
                 parent_record = parent_res.scalar_one_or_none()
                 if parent_record is None:
                     raise DocumentLifecycleError(
-                        f"Cannot supersede non-existent parent version '{parent_version_id}' for document '{document_id}'."
+                        f"Cannot supersede non-existent parent version '{parent_version_id}' for document "
+                        f"'{document_id}'."
                     )
                 if parent_record.lifecycle_state != DocumentLifecycleState.PUBLISHED.value:
                     raise DocumentLifecycleError(
-                        f"Cannot supersede parent version '{parent_version_id}': parent is in '{parent_record.lifecycle_state}' state, "
+                        f"Cannot supersede parent version '{parent_version_id}': parent is in "
+                        f"'{parent_record.lifecycle_state}' state, "
                         f"expected 'PUBLISHED'."
                     )
 
@@ -804,7 +805,7 @@ class DocumentRepository(IDocumentRepository):
                     .values(current_version_id=version_id)
                 )
 
-            doc_cas_res = await session.execute(doc_cas_stmt)
+            doc_cas_res = cast(CursorResult[Any], await session.execute(doc_cas_stmt))
             if doc_cas_res.rowcount != 1:
                 raise DocumentLifecycleError(
                     f"Concurrent publication collision or invalid predecessor: document '{document_id}' "
@@ -826,9 +827,9 @@ class DocumentRepository(IDocumentRepository):
                 try:
                     child_record.published_at = datetime.datetime.fromisoformat(published_at)
                 except Exception:
-                    child_record.published_at = datetime.datetime.now(datetime.timezone.utc)
+                    child_record.published_at = datetime.datetime.now(datetime.UTC)
             else:
-                child_record.published_at = datetime.datetime.now(datetime.timezone.utc)
+                child_record.published_at = datetime.datetime.now(datetime.UTC)
 
             await session.flush()
 
@@ -872,16 +873,13 @@ class DocumentRepository(IDocumentRepository):
         Raises:
             DocumentEngineError: If request_id already exists.
         """
+
         async def _action(session: AsyncSession) -> None:
             # Check duplicate request_id
-            stmt = select(DocumentOperationHistoryRecord).where(
-                DocumentOperationHistoryRecord.request_id == request_id
-            )
+            stmt = select(DocumentOperationHistoryRecord).where(DocumentOperationHistoryRecord.request_id == request_id)
             res = await session.execute(stmt)
             if res.scalar_one_or_none() is not None:
-                raise DocumentEngineError(
-                    f"Operation history for request_id '{request_id}' already exists."
-                )
+                raise DocumentEngineError(f"Operation history for request_id '{request_id}' already exists.")
 
             val_str = json.dumps(validation_report.model_dump()) if validation_report else None
             err_str = json.dumps(errors) if errors else None
@@ -905,9 +903,7 @@ class DocumentRepository(IDocumentRepository):
 
         await self._data_store.execute_in_transaction(_action)
 
-    async def get_operation_history(
-        self, request_id: str, tenant_id: str = "default"
-    ) -> dict[str, Any] | None:
+    async def get_operation_history(self, request_id: str, tenant_id: str = "default") -> dict[str, Any] | None:
         """Retrieve operation execution history entry by request ID.
 
         Args:
@@ -917,6 +913,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             Dictionary containing sanitized history data, or None if not found.
         """
+
         async def _action(session: AsyncSession) -> dict[str, Any] | None:
             stmt = select(DocumentOperationHistoryRecord).where(
                 DocumentOperationHistoryRecord.request_id == request_id,
@@ -978,20 +975,15 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             List of operation history dictionaries.
         """
+
         async def _action(session: AsyncSession) -> list[dict[str, Any]]:
-            query = select(DocumentOperationHistoryRecord).where(
-                DocumentOperationHistoryRecord.tenant_id == tenant_id
-            )
+            query = select(DocumentOperationHistoryRecord).where(DocumentOperationHistoryRecord.tenant_id == tenant_id)
             if profile_id is not None:
                 query = query.where(DocumentOperationHistoryRecord.profile_id == profile_id)
             if document_id is not None:
                 query = query.where(DocumentOperationHistoryRecord.document_id == document_id)
 
-            query = (
-                query.order_by(DocumentOperationHistoryRecord.created_at.desc())
-                .limit(limit)
-                .offset(offset)
-            )
+            query = query.order_by(DocumentOperationHistoryRecord.created_at.desc()).limit(limit).offset(offset)
             res = await session.execute(query)
             records = res.scalars().all()
 
@@ -1036,6 +1028,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             Persisted DocumentOperationProfile domain model.
         """
+
         async def _action(session: AsyncSession) -> DocumentOperationProfile:
             stmt = select(DocumentOperationProfileRecord).where(
                 DocumentOperationProfileRecord.tenant_id == tenant_id,
@@ -1045,11 +1038,7 @@ class DocumentRepository(IDocumentRepository):
             res = await session.execute(stmt)
             record = res.scalar_one_or_none()
 
-            pipe_str = (
-                json.dumps(profile.adapter_pipeline.model_dump())
-                if profile.adapter_pipeline
-                else None
-            )
+            pipe_str = json.dumps(profile.adapter_pipeline.model_dump()) if profile.adapter_pipeline else None
             perms_str = json.dumps(profile.permissions) if profile.permissions else None
 
             if record is not None:
@@ -1096,6 +1085,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             DocumentOperationProfile domain model or None if not found.
         """
+
         async def _action(session: AsyncSession) -> DocumentOperationProfile | None:
             query = select(DocumentOperationProfileRecord).where(
                 DocumentOperationProfileRecord.tenant_id == tenant_id,
@@ -1133,14 +1123,11 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             List of DocumentOperationProfile domain models.
         """
+
         async def _action(session: AsyncSession) -> list[DocumentOperationProfile]:
-            query = select(DocumentOperationProfileRecord).where(
-                DocumentOperationProfileRecord.tenant_id == tenant_id
-            )
+            query = select(DocumentOperationProfileRecord).where(DocumentOperationProfileRecord.tenant_id == tenant_id)
             if business_operation is not None:
-                query = query.where(
-                    DocumentOperationProfileRecord.business_operation == business_operation
-                )
+                query = query.where(DocumentOperationProfileRecord.business_operation == business_operation)
             if namespace is not None:
                 query = query.where(DocumentOperationProfileRecord.namespace == namespace)
 
@@ -1151,9 +1138,7 @@ class DocumentRepository(IDocumentRepository):
 
         return await self._data_store.execute_in_transaction(_action)
 
-    async def delete_operation_profile(
-        self, profile_id: str, version: str, tenant_id: str = "default"
-    ) -> bool:
+    async def delete_operation_profile(self, profile_id: str, version: str, tenant_id: str = "default") -> bool:
         """Delete an operation profile version record.
 
         Args:
@@ -1164,6 +1149,7 @@ class DocumentRepository(IDocumentRepository):
         Returns:
             True if deleted; False if not found.
         """
+
         async def _action(session: AsyncSession) -> bool:
             stmt = select(DocumentOperationProfileRecord).where(
                 DocumentOperationProfileRecord.tenant_id == tenant_id,
@@ -1197,12 +1183,8 @@ class TemplateRepository(ITemplateRepository):
     def _record_to_domain(record: TemplateSchemaRecord) -> TemplateSchema:
         """Convert a TemplateSchemaRecord ORM entity to a TemplateSchema domain model."""
         placeholders = json.loads(record.placeholders_json) if record.placeholders_json else []
-        required_fields = (
-            json.loads(record.required_fields_json) if record.required_fields_json else []
-        )
-        schema_definition = (
-            json.loads(record.schema_definition_json) if record.schema_definition_json else {}
-        )
+        required_fields = json.loads(record.required_fields_json) if record.required_fields_json else []
+        schema_definition = json.loads(record.schema_definition_json) if record.schema_definition_json else {}
 
         return TemplateSchema(
             template_id=record.template_id,
@@ -1215,9 +1197,7 @@ class TemplateRepository(ITemplateRepository):
             schema_definition=schema_definition,
         )
 
-    async def save_template(
-        self, schema: TemplateSchema, tenant_id: str = "default"
-    ) -> TemplateSchema:
+    async def save_template(self, schema: TemplateSchema, tenant_id: str = "default") -> TemplateSchema:
         """Persist a new declarative TemplateSchema version.
 
         Args:
@@ -1230,6 +1210,7 @@ class TemplateRepository(ITemplateRepository):
         Raises:
             DocumentEngineError: If the template_id + version pair already exists.
         """
+
         async def _action(session: AsyncSession) -> TemplateSchema:
             stmt = select(TemplateSchemaRecord).where(
                 TemplateSchemaRecord.tenant_id == tenant_id,
@@ -1252,12 +1233,8 @@ class TemplateRepository(ITemplateRepository):
                 namespace=schema.namespace,
                 description=schema.description,
                 placeholders_json=json.dumps(schema.placeholders) if schema.placeholders else None,
-                required_fields_json=(
-                    json.dumps(schema.required_fields) if schema.required_fields else None
-                ),
-                schema_definition_json=(
-                    json.dumps(schema.schema_definition) if schema.schema_definition else None
-                ),
+                required_fields_json=(json.dumps(schema.required_fields) if schema.required_fields else None),
+                schema_definition_json=(json.dumps(schema.schema_definition) if schema.schema_definition else None),
             )
             session.add(record)
             await session.flush()
@@ -1281,6 +1258,7 @@ class TemplateRepository(ITemplateRepository):
         Returns:
             TemplateSchema domain model, or None if not found.
         """
+
         async def _action(session: AsyncSession) -> TemplateSchema | None:
             query = select(TemplateSchemaRecord).where(
                 TemplateSchemaRecord.tenant_id == tenant_id,
@@ -1302,9 +1280,7 @@ class TemplateRepository(ITemplateRepository):
 
         return await self._data_store.execute_in_transaction(_action)
 
-    async def list_templates(
-        self, tenant_id: str = "default", namespace: str | None = None
-    ) -> list[TemplateSchema]:
+    async def list_templates(self, tenant_id: str = "default", namespace: str | None = None) -> list[TemplateSchema]:
         """List persisted template versions matching tenant and optional namespace filter.
 
         Args:
@@ -1314,6 +1290,7 @@ class TemplateRepository(ITemplateRepository):
         Returns:
             List of TemplateSchema domain models (all persisted versions, not deduplicated).
         """
+
         async def _action(session: AsyncSession) -> list[TemplateSchema]:
             query = select(TemplateSchemaRecord).where(TemplateSchemaRecord.tenant_id == tenant_id)
             if namespace is not None:
@@ -1326,9 +1303,7 @@ class TemplateRepository(ITemplateRepository):
 
         return await self._data_store.execute_in_transaction(_action)
 
-    async def delete_template(
-        self, template_id: str, version: str, tenant_id: str = "default"
-    ) -> bool:
+    async def delete_template(self, template_id: str, version: str, tenant_id: str = "default") -> bool:
         """Delete a specific persisted template version.
 
         Args:
@@ -1339,6 +1314,7 @@ class TemplateRepository(ITemplateRepository):
         Returns:
             True if deleted; False if not found.
         """
+
         async def _action(session: AsyncSession) -> bool:
             stmt = select(TemplateSchemaRecord).where(
                 TemplateSchemaRecord.tenant_id == tenant_id,

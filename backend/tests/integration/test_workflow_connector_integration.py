@@ -22,17 +22,15 @@ import asyncio
 import logging
 import socket
 import uuid as uuid_module
-from typing import Any, Dict
+from typing import Any
 from unittest.mock import patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpcore
-import httpx
 import pytest
 from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kortex.core.base_engine import EngineState
 from kortex.core.kernel import Kernel
 from kortex.engines.connector.drivers.http_driver import (
     HttpRestConnectorDriver,
@@ -40,7 +38,6 @@ from kortex.engines.connector.drivers.http_driver import (
     SSRFHardenedTransport,
 )
 from kortex.engines.connector.engine import ConnectorEngine
-from kortex.engines.connector.exceptions import ConnectorSecurityError
 from kortex.engines.connector.models import (
     ActionRequest,
     ActionResult,
@@ -51,15 +48,10 @@ from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
-from kortex.engines.workflow.exceptions import WorkflowExecutionError
 from kortex.engines.workflow.models import (
     CompensationAction,
-    ExecutionResult,
     RetryPolicy,
-    WorkflowContext,
     WorkflowDefinition,
-    WorkflowInstance,
-    WorkflowResult,
     WorkflowState,
     WorkflowStatus,
     WorkflowStep,
@@ -89,7 +81,7 @@ def _register_security_engine(kernel: Kernel) -> SecurityEngine:
     return security_engine
 
 
-async def _issue_test_session_token(security_engine: SecurityEngine, data_store: Any) -> tuple[Dict[str, Any], str]:
+async def _issue_test_session_token(security_engine: SecurityEngine, data_store: Any) -> tuple[dict[str, Any], str]:
     """Seed a `PrincipalRecord` directly via `IDataStore` — matching the
     established test-seeding convention in `test_authentication_manager.py`
     (M3 has no provisioning capability) — then authenticate and issue a
@@ -158,6 +150,7 @@ async def _issue_test_session_token(security_engine: SecurityEngine, data_store:
 
 
 # -- Mock HTTP Transport Infrastructure ---------------------------------------
+
 
 class MockNetworkStream(httpcore.AsyncNetworkStream):
     """httpcore AsyncNetworkStream returning configurable mock HTTP responses and capturing request bytes."""
@@ -289,9 +282,12 @@ async def mock_secret_resolver(handle: str, tenant_id: str) -> str:
 
 # -- Test Suite ---------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_e2e_workflow_to_connector_http_execution(tmp_path) -> None:
-    """1. End-to-end integration: WorkflowEngine -> StepEvaluator -> Kernel Capability -> ConnectorEngine -> Driver -> Mock Transport."""
+    """1. End-to-end integration: WorkflowEngine -> StepEvaluator -> Kernel Capability -> ConnectorEngine -> Driver ->
+    Mock Transport.
+    """
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "e2e_storage"))
     workflow_engine = WorkflowEngine()
@@ -428,7 +424,9 @@ async def test_actual_workflow_retry_default(tmp_path) -> None:
         await asyncio.sleep(0.01)
 
     assert instance.state == WorkflowState.COMPLETED
-    assert attempts_tracker == [1, 2, 3], "StepEvaluator must retry up to 3 times by default when retry_policy is omitted"
+    assert attempts_tracker == [1, 2, 3], (
+        "StepEvaluator must retry up to 3 times by default when retry_policy is omitted"
+    )
     assert instance.context.step_outputs["step_no_policy"] == "success_on_attempt_3"
 
     await kernel.shutdown()
@@ -436,7 +434,9 @@ async def test_actual_workflow_retry_default(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> None:
-    """3. Verify actual retry attempt count for default workflow policy (retry_policy=None) x connector retries (max_retries=2)."""
+    """3. Verify actual retry attempt count for default workflow policy (retry_policy=None) x connector retries
+    (max_retries=2).
+    """
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "amp_def_storage"))
     workflow_engine = WorkflowEngine()
@@ -486,10 +486,10 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
 
         async def connect_tcp(self, host: str, port: int, timeout=None, local_address=None, socket_options=None):
             self.connect_tcp_calls.append({"host": host, "port": port})
-            raise socket.error("Connection reset by peer")
+            raise OSError("Connection reset by peer")
 
         async def connect_unix_socket(self, *args, **kwargs):
-            raise socket.error("Connection reset")
+            raise OSError("Connection reset")
 
         async def sleep(self, seconds: float) -> None:
             await asyncio.sleep(0.001)
@@ -506,7 +506,9 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
         kwargs["verify"] = False
         orig_ssrf_init(self_ssrf, pinned_ip, **kwargs)
 
-    p_dns = patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))])
+    p_dns = patch(
+        "socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+    )
     p_pinned = patch.object(PinnedIPNetworkBackend, "__init__", patched_pinned_init)
     p_ssrf = patch.object(SSRFHardenedTransport, "__init__", patched_ssrf_init)
 
@@ -521,7 +523,8 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
     out: ActionResult = instance.context.step_outputs["step_ampdef"]
     assert out.status == "FAILED"
     # ConnectorPipeline catches network exception in execute_with_retry and returns ActionResult(status="FAILED").
-    # StepEvaluator receives ActionResult normally without exception, resulting in 1 workflow attempt * (1 initial + 2 connector retries) = 3 connector attempts.
+    # StepEvaluator receives ActionResult normally without exception, resulting in 1 workflow attempt * (1 initial + 2
+    # connector retries) = 3 connector attempts.
     assert len(fail_backend.connect_tcp_calls) >= 3
 
     await kernel.shutdown()
@@ -529,7 +532,9 @@ async def test_actual_retry_amplification_default_workflow_policy(tmp_path) -> N
 
 @pytest.mark.asyncio
 async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_path) -> None:
-    """4. Verify retry multiplication when capability raises an unhandled exception (workflow max_attempts=3 x connector max_retries=2)."""
+    """4. Verify retry multiplication when capability raises an unhandled exception (workflow max_attempts=3 x connector
+    max_retries=2).
+    """
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "amp_mult_storage"))
     workflow_engine = WorkflowEngine()
@@ -608,10 +613,10 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
 
         async def connect_tcp(self, host: str, port: int, timeout=None, local_address=None, socket_options=None):
             self.connect_tcp_calls.append({"host": host, "port": port})
-            raise socket.error("Connection reset by peer")
+            raise OSError("Connection reset by peer")
 
         async def connect_unix_socket(self, *args, **kwargs):
-            raise socket.error("Connection reset")
+            raise OSError("Connection reset")
 
         async def sleep(self, seconds: float) -> None:
             await asyncio.sleep(0.001)
@@ -628,7 +633,9 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
         kwargs["verify"] = False
         orig_ssrf_init(self_ssrf, pinned_ip, **kwargs)
 
-    p_dns = patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))])
+    p_dns = patch(
+        "socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+    )
     p_pinned = patch.object(PinnedIPNetworkBackend, "__init__", patched_pinned_init)
     p_ssrf = patch.object(SSRFHardenedTransport, "__init__", patched_ssrf_init)
 
@@ -646,7 +653,8 @@ async def test_actual_retry_amplification_explicit_exception_multiplication(tmp_
             await asyncio.sleep(0.01)
 
     assert instance.state == WorkflowState.FAILED
-    # When exception escapes capability handler, Workflow retries 3 times * 3 connector attempts (1 initial + 2 retries) = 9 connector attempts total.
+    # When exception escapes capability handler, Workflow retries 3 times * 3 connector attempts (1 initial + 2 retries)
+    # = 9 connector attempts total.
     assert len(fail_backend.connect_tcp_calls) >= 9
 
     await kernel.shutdown()
@@ -971,7 +979,9 @@ async def test_http_failure_propagates_to_step_failure(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_rbac_capability_permission_denied_before_network(tmp_path) -> None:
-    """10. Verify missing 'kortex.connector.action.execute' permission raises ConnectorSecurityError before network dispatch."""
+    """10. Verify missing 'kortex.connector.action.execute' permission raises ConnectorSecurityError before network
+    dispatch.
+    """
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "rbac_storage"))
     workflow_engine = WorkflowEngine()
@@ -1034,7 +1044,9 @@ async def test_rbac_capability_permission_denied_before_network(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_secret_token_isolation_across_context_logs_and_events(tmp_path, caplog: pytest.LogCaptureFixture) -> None:
+async def test_secret_token_isolation_across_context_logs_and_events(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
     """11. Verify secret token never appears in WorkflowContext, step_outputs, logs, or Kernel event payloads."""
     caplog.set_level(logging.DEBUG)
 
@@ -1236,8 +1248,13 @@ async def test_response_header_sanitization(tmp_path) -> None:
 
     # ASSERTION 2: Denied headers are ABSENT
     denied = {
-        "set-cookie", "authorization", "proxy-authorization",
-        "x-api-key", "api-key", "www-authenticate", "x-internal-debug",
+        "set-cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "www-authenticate",
+        "x-internal-debug",
     }
     for d in denied:
         assert d not in lower_keys, f"Denied header '{d}' found in step_outputs"
@@ -1249,8 +1266,11 @@ async def test_response_header_sanitization(tmp_path) -> None:
     # ASSERTION 4: Secret/credential VALUES do not appear in WorkflowContext
     context_dump = instance.context.model_dump_json()
     secret_values = [
-        "supersecret", "Bearer supersecret", "Basic supersecret",
-        "session=supersecret", "secret",
+        "supersecret",
+        "Bearer supersecret",
+        "Basic supersecret",
+        "session=supersecret",
+        "secret",
     ]
     for sv in secret_values:
         assert sv not in context_dump, f"Secret value '{sv}' leaked into WorkflowContext"
@@ -1332,14 +1352,18 @@ async def test_idempotency_key_header_propagation(tmp_path) -> None:
     captured_headers = stream.get_captured_headers()
 
     assert "idempotency-key" in captured_headers, "Raw HTTP request bytes must contain Idempotency-Key header"
-    assert captured_headers["idempotency-key"] == user_idem_key, "Idempotency-Key header value must match exact user input"
+    assert captured_headers["idempotency-key"] == user_idem_key, (
+        "Idempotency-Key header value must match exact user input"
+    )
 
     await kernel.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_cancellation_and_stream_closure(tmp_path) -> None:
-    """14. Verify task cancellation immediately raises asyncio.CancelledError, closes network stream (closed=True), and halts retries."""
+    """14. Verify task cancellation immediately raises asyncio.CancelledError, closes network stream (closed=True), and
+    halts retries.
+    """
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "cancel_storage"))
     workflow_engine = WorkflowEngine()
@@ -1437,13 +1461,15 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
         kwargs["verify"] = False
         orig_ssrf_init(self_ssrf, pinned_ip, **kwargs)
 
-    p_dns = patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))])
+    p_dns = patch(
+        "socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+    )
     p_pinned = patch.object(PinnedIPNetworkBackend, "__init__", patched_pinned_init)
     p_ssrf = patch.object(SSRFHardenedTransport, "__init__", patched_ssrf_init)
 
     with p_dns, p_pinned, p_ssrf:
         def_id = workflow_engine.register_definition(wf_def)
-        instance = await workflow_engine.start_workflow(def_id, session_token=session_token)
+        await workflow_engine.start_workflow(def_id, session_token=session_token)
         # Find background task executing workflow instance steps
         for _ in range(100):
             if created_streams:
@@ -1462,7 +1488,9 @@ async def test_cancellation_and_stream_closure(tmp_path) -> None:
     assert created_streams[0].closed is True, "Network stream must be closed upon cancellation"
 
     # 3. Verify no additional connector retries occurred after cancellation
-    assert len(slow_backend.connect_tcp_calls) == len(created_streams), "Zero extra retries must execute after cancellation"
+    assert len(slow_backend.connect_tcp_calls) == len(created_streams), (
+        "Zero extra retries must execute after cancellation"
+    )
 
     await kernel.shutdown()
 

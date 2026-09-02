@@ -2,7 +2,6 @@
 Unit tests for KORTEX Recipe Engine Schema, Security, and Checksum Validator.
 """
 
-import pytest
 from kortex.engines.recipe.manifest import RecipeManifestManager
 from kortex.engines.recipe.models import RecipeDefinition, RecipeManifest, RecipeStep
 from kortex.engines.recipe.validator import RecipeValidator

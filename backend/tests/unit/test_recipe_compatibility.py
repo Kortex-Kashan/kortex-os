@@ -3,6 +3,7 @@ Unit tests for KORTEX Recipe Engine SemVer and System Compatibility.
 """
 
 import pytest
+
 from kortex.engines.recipe.compatibility import CompatibilityValidator
 from kortex.engines.recipe.exceptions import RecipeCompatibilityError, RecipeVersionError
 from kortex.engines.recipe.models import RecipeCompatibility, RecipeDefinition, RecipeManifest, RecipeStep
@@ -81,9 +82,11 @@ def test_compatibility_validator_all_components() -> None:
         CompatibilityValidator.validate_compatibility(definition, {**system_ok, "connector_engine": "0.9.0"})
 
     # Missing module
-    with pytest.raises(RecipeCompatibilityError, match="Required module 'kortex.hr' is not installed"):
-        CompatibilityValidator.validate_compatibility(definition, {k: v for k, v in system_ok.items() if k != "kortex.hr"})
+    with pytest.raises(RecipeCompatibilityError, match=r"Required module 'kortex.hr' is not installed"):
+        CompatibilityValidator.validate_compatibility(
+            definition, {k: v for k, v in system_ok.items() if k != "kortex.hr"}
+        )
 
     # Incompatible module
-    with pytest.raises(RecipeCompatibilityError, match="Module 'kortex.hr' version '0.5.0' does not satisfy"):
+    with pytest.raises(RecipeCompatibilityError, match=r"Module 'kortex.hr' version '0.5.0' does not satisfy"):
         CompatibilityValidator.validate_compatibility(definition, {**system_ok, "kortex.hr": "0.5.0"})

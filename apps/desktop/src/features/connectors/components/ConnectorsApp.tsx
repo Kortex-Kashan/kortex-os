@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   Badge,
@@ -12,15 +13,60 @@ import {
 import { ConnectorAccessDeniedError } from "../api";
 import { useConnectors } from "../hooks/useConnectors";
 import type { ConnectorDriver } from "../types";
+import { ConnectionsTab } from "./ConnectionsTab";
 
-/** The Connectors workspace: the connector/driver registry, and nothing
- * else — no install flow, no credential/profile UI, no marketplace. See
+type ConnectorTab = "drivers" | "connections";
+
+const TAB_LABEL: Record<ConnectorTab, string> = {
+  drivers: "Drivers",
+  connections: "Connections",
+};
+
+/** The Connectors workspace: tabbed between the connector/driver registry
+ * (read-only, unchanged since M5) and Connections (M7.3) — where a tenant
+ * admin creates, lists, and deletes the tenant's own connector profiles and
+ * their credentials. No install flow and no marketplace either tab — both
+ * remain explicitly out of scope for this milestone. See
  * `ConnectorAccessDeniedError`'s own docstring for why a `PERMISSION_DENIED`
- * failure renders one unified "access denied" state here rather than
- * branching on session-expired vs. forbidden — the M4.1 session boundary
- * that would own that distinction is not part of this branch yet, and the
- * transport does not carry the underlying HTTP status code today regardless. */
+ * failure renders one unified "access denied" state rather than branching on
+ * session-expired vs. forbidden — the M4.1 session boundary that would own
+ * that distinction is not part of this branch yet, and the transport does
+ * not carry the underlying HTTP status code today regardless. */
 export function ConnectorsApp() {
+  const [activeTab, setActiveTab] = useState<ConnectorTab>("drivers");
+
+  return (
+    <div className="space-y-4">
+      <nav role="tablist" aria-label="Connectors tabs" className="flex gap-1 border-b border-border pb-1">
+        {(["drivers", "connections"] as ConnectorTab[]).map((tab) => (
+          <button
+            key={tab}
+            role="tab"
+            id={`connector-tab-${tab}`}
+            aria-selected={activeTab === tab}
+            aria-controls={`connector-panel-${tab}`}
+            onClick={() => setActiveTab(tab)}
+            className={[
+              "px-3 py-1.5 text-sm rounded-md transition-colors",
+              activeTab === tab
+                ? "bg-primary text-primary-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted",
+            ].join(" ")}
+          >
+            {TAB_LABEL[tab]}
+          </button>
+        ))}
+      </nav>
+
+      <div role="tabpanel" id={`connector-panel-${activeTab}`} aria-labelledby={`connector-tab-${activeTab}`}>
+        {activeTab === "drivers" && <DriverRegistry />}
+        {activeTab === "connections" && <ConnectionsTab />}
+      </div>
+    </div>
+  );
+}
+
+function DriverRegistry() {
   const { data, isPending, isError, error, refetch, isFetching } = useConnectors();
 
   if (isPending) {

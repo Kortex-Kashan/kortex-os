@@ -8,25 +8,8 @@ from __future__ import annotations
 
 from kortex.engines.document.adapters.dummy_adapter import DummyDocumentAdapter
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
-from kortex.engines.document.engine import DocumentEngine
-from kortex.engines.document.loader import DocumentAdapterLoader
-from kortex.engines.document.intelligence import (
-    DefaultDocumentIntelligenceProvider,
-    DefaultDocumentRecommendationProvider,
-    DocumentIntelligenceModel,
-)
-from kortex.engines.document.recovery import (
-    CheckpointState,
-    DocumentRecoveryManager,
-    FailureMetadata,
-)
-from kortex.engines.document.security import (
-    DefaultVerificationService,
-    DocumentSecurityVerifier,
-    DocumentStorageBinder,
-    IVerificationService,
-)
 from kortex.engines.document.diagnostics import DocumentDiagnostics
+from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document.events import (
     DocumentAdapterRegisteredEvent,
     DocumentArchivedEvent,
@@ -52,6 +35,11 @@ from kortex.engines.document.exceptions import (
     DocumentSecurityError,
     DocumentTemplateError,
 )
+from kortex.engines.document.intelligence import (
+    DefaultDocumentIntelligenceProvider,
+    DefaultDocumentRecommendationProvider,
+    DocumentIntelligenceModel,
+)
 from kortex.engines.document.interfaces import (
     IAdapterPipelineExecutor,
     IAdapterSandbox,
@@ -65,6 +53,7 @@ from kortex.engines.document.interfaces import (
     ITemplateBinder,
     ITemplateLibrary,
 )
+from kortex.engines.document.loader import DocumentAdapterLoader
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -86,6 +75,17 @@ from kortex.engines.document.models import (
     SecurityMetadata,
     TemplateSchema,
     ValidationReport,
+)
+from kortex.engines.document.recovery import (
+    CheckpointState,
+    DocumentRecoveryManager,
+    FailureMetadata,
+)
+from kortex.engines.document.security import (
+    DefaultVerificationService,
+    DocumentSecurityVerifier,
+    DocumentStorageBinder,
+    IVerificationService,
 )
 
 __all__ = [

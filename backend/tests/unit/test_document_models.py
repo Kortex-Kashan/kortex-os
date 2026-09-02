@@ -67,7 +67,6 @@ from kortex.engines.document.models import (
     ValidationReport,
 )
 
-
 # --- Test Enums ---
 
 
@@ -351,7 +350,7 @@ class ConcreteTestAdapter(BaseDocumentAdapter):
         binding_context: BindingContext,
         options: dict[str, Any],
     ) -> bytes:
-        return f"OUTPUT_{operation_type.value}".encode("utf-8")
+        return f"OUTPUT_{operation_type.value}".encode()
 
     def validate_schema(self, schema: TemplateSchema) -> bool:
         return True

@@ -11,14 +11,13 @@ import asyncio
 import datetime
 import enum
 import inspect
-import logging
 import uuid
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from kortex.core.base_engine import BaseEngine, EngineState
-from kortex.core.exceptions import EventError, EventSubscriberError
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
@@ -38,15 +37,15 @@ class Event(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique event identifier")
     topic: str = Field(description="Event topic string, e.g. 'payroll.calculated'")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="Event data dictionary")
+    payload: dict[str, Any] = Field(default_factory=dict, description="Event data dictionary")
     sender: str = Field(default="system", description="Identifier of event publisher")
     priority: EventPriority = Field(default=EventPriority.NORMAL, description="Event priority level")
     timestamp: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc),
+        default_factory=lambda: datetime.datetime.now(datetime.UTC),
         description="Event creation timestamp",
     )
     trace_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Distributed tracing ID")
-    headers: Dict[str, str] = Field(default_factory=dict, description="Event header attributes")
+    headers: dict[str, str] = Field(default_factory=dict, description="Event header attributes")
 
 
 class EventDeliveryResult(BaseModel):
@@ -56,7 +55,7 @@ class EventDeliveryResult(BaseModel):
     topic: str
     subscribers_notified: int = 0
     subscribers_failed: int = 0
-    errors: List[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 SubscriberCallback = Callable[[Event], Any]
@@ -86,8 +85,8 @@ class EventEngine(BaseEngine):
     def __init__(self) -> None:
         super().__init__()
         # topic -> list of EventSubscription sorted by priority
-        self._subscriptions: Dict[str, List[EventSubscription]] = {}
-        self._wildcard_subscriptions: List[EventSubscription] = []
+        self._subscriptions: dict[str, list[EventSubscription]] = {}
+        self._wildcard_subscriptions: list[EventSubscription] = []
         self._event_count: int = 0
         self._failed_delivery_count: int = 0
 
@@ -107,7 +106,7 @@ class EventEngine(BaseEngine):
         self._set_state(EngineState.RUNNING)
         self.logger.info("Event Engine running.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Diagnostic health check."""
         total_subscribers = sum(len(subs) for subs in self._subscriptions.values()) + len(self._wildcard_subscriptions)
         return {
@@ -176,7 +175,9 @@ class EventEngine(BaseEngine):
             for i, sub in enumerate(subs):
                 if sub.id == subscription_id:
                     subs.pop(i)
-                    self.logger.debug("Unsubscribed '%s' from topic '%s' (ID: %s)", sub.subscriber_name, topic, subscription_id)
+                    self.logger.debug(
+                        "Unsubscribed '%s' from topic '%s' (ID: %s)", sub.subscriber_name, topic, subscription_id
+                    )
                     return True
 
         return False
@@ -186,10 +187,10 @@ class EventEngine(BaseEngine):
     async def publish(
         self,
         topic: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         sender: str = "system",
         priority: EventPriority = EventPriority.NORMAL,
-        headers: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ) -> EventDeliveryResult:
         """Asynchronously publish an event to all registered topic subscribers.
 
@@ -211,7 +212,7 @@ class EventEngine(BaseEngine):
         result = EventDeliveryResult(event_id=event.id, topic=event.topic)
 
         # Target subscribers + Wildcard subscribers
-        target_subs: List[EventSubscription] = list(self._subscriptions.get(event.topic, []))
+        target_subs: list[EventSubscription] = list(self._subscriptions.get(event.topic, []))
         target_subs.extend(self._wildcard_subscriptions)
         # Sort combined list by priority
         target_subs.sort(key=lambda s: s.priority.value)
@@ -239,7 +240,7 @@ class EventEngine(BaseEngine):
     def publish_sync(
         self,
         topic: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         sender: str = "system",
         priority: EventPriority = EventPriority.NORMAL,
     ) -> EventDeliveryResult:
@@ -256,7 +257,7 @@ class EventEngine(BaseEngine):
         self._event_count += 1
         result = EventDeliveryResult(event_id=event.id, topic=event.topic)
 
-        target_subs: List[EventSubscription] = list(self._subscriptions.get(event.topic, []))
+        target_subs: list[EventSubscription] = list(self._subscriptions.get(event.topic, []))
         target_subs.extend(self._wildcard_subscriptions)
         target_subs.sort(key=lambda s: s.priority.value)
 
@@ -265,7 +266,10 @@ class EventEngine(BaseEngine):
                 if inspect.iscoroutinefunction(sub.handler):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(sub.handler(event))
+
+                        # notification. Retaining task handles would change Event
+                        # Engine delivery semantics; out of scope for a lint fix.
+                        loop.create_task(sub.handler(event))  # noqa: RUF006
                     except RuntimeError:
                         asyncio.run(sub.handler(event))
                 else:

@@ -12,19 +12,20 @@ no decision logic is duplicated or re-implemented here.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 from argon2 import PasswordHasher
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest, _safe_classification
 from kortex.core.exceptions import CapabilityNotFoundError, KernelStateError, ResourceNotFoundError
 from kortex.core.kernel import Kernel
-from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITY
+from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITIES
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError, SecurityEngineError
 from kortex.engines.security.models import (
@@ -99,6 +100,7 @@ async def _seed_principal(
 async def _grant_role_permission(data_store: Any, role: str, permission: str) -> None:
     async def _action(session: AsyncSession) -> None:
         from sqlalchemy import select
+
         existing = await session.scalar(
             select(RolePermissionRecord).where(
                 RolePermissionRecord.role == role,
@@ -129,7 +131,7 @@ class _CallCountingHandler:
 
     def __init__(self) -> None:
         self.call_count = 0
-        self.received: list[Dict[str, Any]] = []
+        self.received: list[dict[str, Any]] = []
 
     async def __call__(self, **kwargs: Any) -> str:
         self.call_count += 1
@@ -221,9 +223,7 @@ async def test_unauthorized_capability_denied_by_rbac(tmp_path: Path) -> None:
 async def test_missing_session_token_denied(tmp_path: Path) -> None:
     kernel, _storage_engine, _security_engine = _build_kernel(tmp_path)
     handler = _CallCountingHandler()
-    kernel.register_capability(
-        name="dispatch.test.needs_token", description="test", provider="test", handler=handler
-    )
+    kernel.register_capability(name="dispatch.test.needs_token", description="test", provider="test", handler=handler)
     await kernel.boot()
 
     request = CapabilityRequest(capability_name="dispatch.test.needs_token", session_token=None)
@@ -475,12 +475,16 @@ async def test_security_engine_unavailable_fails_closed(tmp_path: Path) -> None:
     kernel.register_capability(name="dispatch.test.no_security", description="test", provider="test", handler=handler)
     await kernel.boot()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     request = CapabilityRequest(
         capability_name="dispatch.test.no_security",
         session_token=TokenPayload(
-            token_id="t", principal_id="p", principal_type="USER", tenant_id="t",
-            issued_at_utc=now, expires_at_utc=now,
+            token_id="t",
+            principal_id="p",
+            principal_type="USER",
+            tenant_id="t",
+            issued_at_utc=now,
+            expires_at_utc=now,
         ),
     )
     # Security Engine isn't registered at all -> Kernel.get_engine("security")
@@ -519,15 +523,16 @@ async def test_requires_authentication_false_reserved_for_bootstrap_capability(t
             handler=lambda: None,
             requires_authentication=False,
         )
-    # The one genuinely exempt capability name is accepted.
-    descriptor = kernel.register_capability(
-        name=_BOOTSTRAP_EXEMPT_CAPABILITY,
-        description="test",
-        provider="test",
-        handler=lambda: None,
-        requires_authentication=False,
-    )
-    assert descriptor.requires_authentication is False
+    # Every genuinely exempt capability name in the fixed allowlist is accepted.
+    for exempt_name in _BOOTSTRAP_EXEMPT_CAPABILITIES:
+        descriptor = kernel.register_capability(
+            name=exempt_name,
+            description="test",
+            provider="test",
+            handler=lambda: None,
+            requires_authentication=False,
+        )
+        assert descriptor.requires_authentication is False
 
 
 # -- 18. Invalid security_classification defaults to RESTRICTED -------------
@@ -738,3 +743,201 @@ async def test_dispatch_publishes_typed_security_events(tmp_path: Path) -> None:
     received_topics = {event.topic for event in received}
     assert "kortex.event.security.auth.success" in received_topics
     assert "kortex.event.security.access.granted" in received_topics
+
+
+# -- 19. M7.2: dict-to-Pydantic-model parameter coercion ---------------------
+#
+# Every real caller (Tauri/Rust IPC, the FastAPI HTTP boundary) delivers
+# `request.parameters` as plain JSON-deserialized data — never a live Python
+# object. Before M7.2, a handler whose signature declared a `BaseModel`-typed
+# parameter crashed on its own first attribute access, confirmed for
+# `kortex.ai.response.generate`/`orchestrate_agent`/`resume_agent`/
+# `invoke_tool` and already independently documented for
+# `kortex.knowledge.query.search` (`test_knowledge_capability_dispatch.py`).
+# These tests exercise the fix (`_coerce_model_parameters`) directly through
+# real dispatch, with synthetic capabilities, independent of any specific
+# engine.
+
+
+class _SamplePayload(BaseModel):
+    name: str = Field(min_length=1)
+    count: int = 0
+
+
+class _RecordingModelHandler:
+    """Spy handler with a `BaseModel`-typed parameter — records exactly what
+    it received (object identity, not just equality) so a test can prove
+    coercion produced a real instance without silently double-coercing an
+    already-correct one."""
+
+    def __init__(self) -> None:
+        self.received: list[Any] = []
+
+    async def __call__(self, payload: _SamplePayload) -> str:
+        self.received.append(payload)
+        return "ok"
+
+
+class _RecordingOptionalModelHandler:
+    def __init__(self) -> None:
+        self.received: list[Any] = []
+
+    async def __call__(self, payload: _SamplePayload | None = None) -> str:
+        self.received.append(payload)
+        return "ok"
+
+
+class _RecordingListModelHandler:
+    def __init__(self) -> None:
+        self.received: list[Any] = []
+
+    async def __call__(self, items: list[_SamplePayload]) -> str:
+        self.received.append(items)
+        return "ok"
+
+
+class _RecordingDictHandler:
+    """Control case: a plain `dict[str, Any]` parameter (not a `BaseModel`)
+    must never be coerced/replaced — proves the fix is narrowly scoped."""
+
+    def __init__(self) -> None:
+        self.received: list[Any] = []
+
+    async def __call__(self, raw: dict[str, Any]) -> str:
+        self.received.append(raw)
+        return "ok"
+
+
+async def _authorized_request(tmp_path: Path, capability_name: str, handler: Any, parameters: dict[str, Any]) -> Any:
+    """Shared setup for the coercion tests below: build+boot a kernel with
+    one synthetic capability, seed an authorized principal, dispatch once,
+    and return the raw result."""
+    kernel, storage_engine, security_engine = _build_kernel(tmp_path)
+    kernel.register_capability(
+        name=capability_name,
+        description="test",
+        provider="test",
+        handler=handler,
+        required_permissions=["dispatch.coerce"],
+    )
+    await kernel.boot()
+
+    tenant_id = _tenant(tmp_path)
+    await _seed_principal(storage_engine.data, tenant_id, "principal-1", roles=[_TEST_ROLE])
+    await _grant_role_permission(storage_engine.data, _TEST_ROLE, "dispatch.coerce")
+    token = await _issue_token(security_engine, tenant_id, "principal-1")
+
+    request = CapabilityRequest(
+        capability_name=capability_name,
+        session_token=token,
+        parameters=parameters,
+        context={"resource_tenant_id": tenant_id},
+    )
+    return await kernel.invoke_capability(request)
+
+
+@pytest.mark.asyncio
+async def test_dict_parameter_coerced_into_declared_model_type(tmp_path: Path) -> None:
+    handler = _RecordingModelHandler()
+    await _authorized_request(
+        tmp_path, "dispatch.test.coerce.model", handler, {"payload": {"name": "alice", "count": 3}}
+    )
+
+    assert len(handler.received) == 1
+    assert isinstance(handler.received[0], _SamplePayload)
+    assert handler.received[0].name == "alice"
+    assert handler.received[0].count == 3
+
+
+@pytest.mark.asyncio
+async def test_already_live_instance_is_never_recoerced(tmp_path: Path) -> None:
+    """A caller that already constructed the real model (e.g. a same-process
+    test, or a future non-JSON caller) must see the identical object pass
+    through untouched — proves coercion is a no-op for already-correct
+    input, not a blind re-validate-everything step."""
+    handler = _RecordingModelHandler()
+    original = _SamplePayload(name="bob", count=7)
+
+    await _authorized_request(tmp_path, "dispatch.test.coerce.identity", handler, {"payload": original})
+
+    assert len(handler.received) == 1
+    assert handler.received[0] is original
+
+
+@pytest.mark.asyncio
+async def test_optional_model_parameter_dict_is_coerced(tmp_path: Path) -> None:
+    handler = _RecordingOptionalModelHandler()
+    await _authorized_request(
+        tmp_path, "dispatch.test.coerce.optional", handler, {"payload": {"name": "carol", "count": 1}}
+    )
+
+    assert isinstance(handler.received[0], _SamplePayload)
+    assert handler.received[0].name == "carol"
+
+
+@pytest.mark.asyncio
+async def test_optional_model_parameter_none_is_left_alone(tmp_path: Path) -> None:
+    handler = _RecordingOptionalModelHandler()
+    await _authorized_request(tmp_path, "dispatch.test.coerce.optional_none", handler, {"payload": None})
+
+    assert handler.received == [None]
+
+
+@pytest.mark.asyncio
+async def test_list_of_model_parameter_is_coerced_element_wise(tmp_path: Path) -> None:
+    handler = _RecordingListModelHandler()
+    await _authorized_request(
+        tmp_path,
+        "dispatch.test.coerce.list",
+        handler,
+        {"items": [{"name": "d1", "count": 1}, {"name": "d2", "count": 2}]},
+    )
+
+    assert len(handler.received) == 1
+    items = handler.received[0]
+    assert all(isinstance(item, _SamplePayload) for item in items)
+    assert [item.name for item in items] == ["d1", "d2"]
+
+
+@pytest.mark.asyncio
+async def test_list_of_model_parameter_preserves_already_live_instances(tmp_path: Path) -> None:
+    handler = _RecordingListModelHandler()
+    already_live = _SamplePayload(name="e1", count=9)
+
+    await _authorized_request(
+        tmp_path,
+        "dispatch.test.coerce.list_mixed",
+        handler,
+        {"items": [already_live, {"name": "e2", "count": 2}]},
+    )
+
+    items = handler.received[0]
+    assert items[0] is already_live
+    assert isinstance(items[1], _SamplePayload) and items[1] is not already_live
+
+
+@pytest.mark.asyncio
+async def test_malformed_dict_still_fails_validation_not_silently_accepted(tmp_path: Path) -> None:
+    """The fix solves the transport-shape problem; it must never weaken
+    Pydantic's own field validation — a dict missing a required field (or
+    with a value outside a declared constraint) must still raise."""
+    handler = _RecordingModelHandler()
+
+    with pytest.raises(Exception):  # noqa: B017 - real Pydantic ValidationError, propagated unmodified
+        await _authorized_request(
+            tmp_path, "dispatch.test.coerce.invalid", handler, {"payload": {"name": "", "count": 1}}
+        )
+
+    assert handler.received == []
+
+
+@pytest.mark.asyncio
+async def test_plain_dict_typed_parameter_is_never_coerced(tmp_path: Path) -> None:
+    """A parameter genuinely typed `dict[str, Any]` (not a BaseModel) must
+    stay a plain dict — proves the fix cannot mis-fire on a parameter that
+    is supposed to remain a raw mapping (e.g. `ToolCall.arguments`)."""
+    handler = _RecordingDictHandler()
+    await _authorized_request(tmp_path, "dispatch.test.coerce.rawdict", handler, {"raw": {"anything": "goes"}})
+
+    assert handler.received == [{"anything": "goes"}]
+    assert type(handler.received[0]) is dict

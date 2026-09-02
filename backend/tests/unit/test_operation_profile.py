@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.engines.document.adapter_pipeline import AdapterPipelineExecutor
 from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
 from kortex.engines.document.adapter_sandbox import AdapterSandbox
@@ -30,7 +31,6 @@ from kortex.engines.document.models import (
 from kortex.engines.document.operation_profile import DocumentOperationProfileManager
 from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
 from kortex.engines.document.template_library import TemplateLibrary
-from kortex.core.db import DatabaseEngineManager
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 
 
@@ -238,7 +238,9 @@ async def test_duplicate_profile_version_rejection() -> None:
 
 @pytest.mark.asyncio
 async def test_version_lookups_and_semver_ordering() -> None:
-    """7. Exact version lookup, 8. Latest stable lookup, 9. Pre-release handling, 10. SemVer ordering, 33. Stable > Prerelease."""
+    """7. Exact version lookup, 8. Latest stable lookup, 9. Pre-release handling, 10. SemVer ordering, 33. Stable >
+    Prerelease.
+    """
     mgr = DocumentOperationProfileManager()
 
     v1_alpha = create_sample_profile(version="1.0.0-alpha")
@@ -313,7 +315,9 @@ async def test_required_template_validation() -> None:
 
 @pytest.mark.asyncio
 async def test_adapter_pipeline_and_capability_validation() -> None:
-    """15. Pipeline validation, 16. Duplicate stage ID, 17. Invalid adapter ref, 18. Unsupported capability, 19. Capability validation."""
+    """15. Pipeline validation, 16. Duplicate stage ID, 17. Invalid adapter ref, 18. Unsupported capability, 19.
+    Capability validation.
+    """
     reg = DocumentAdapterRegistry()
     adapter = DummyProfileAdapter(adapter_id="kortex.adapter.pdf")
     reg.register_adapter(adapter)
@@ -323,18 +327,31 @@ async def test_adapter_pipeline_and_capability_validation() -> None:
     valid_pipeline = AdapterPipelineDefinition(
         pipeline_id="pipe-valid",
         profile_id="p.pipe",
-        stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            )
+        ],
     )
     p_valid = create_sample_profile(profile_id="p.pipe", pipeline=valid_pipeline)
     await mgr.register_profile(p_valid)
 
     # Pipeline missing pipeline_id
     with pytest.raises(DocumentOperationError, match="missing pipeline_id"):
-        mgr.validate_profile(create_sample_profile(profile_id="p.err1", pipeline=AdapterPipelineDefinition(pipeline_id="", profile_id="p")))
+        mgr.validate_profile(
+            create_sample_profile(
+                profile_id="p.err1", pipeline=AdapterPipelineDefinition(pipeline_id="", profile_id="p")
+            )
+        )
 
     # Pipeline missing stages
     with pytest.raises(DocumentOperationError, match="contains no stages"):
-        mgr.validate_profile(create_sample_profile(profile_id="p.err2", pipeline=AdapterPipelineDefinition(pipeline_id="pipe-empty", profile_id="p", stages=[])))
+        mgr.validate_profile(
+            create_sample_profile(
+                profile_id="p.err2",
+                pipeline=AdapterPipelineDefinition(pipeline_id="pipe-empty", profile_id="p", stages=[]),
+            )
+        )
 
     # Pipeline missing stage_id
     with pytest.raises(DocumentOperationError, match="missing stage_id"):
@@ -342,7 +359,9 @@ async def test_adapter_pipeline_and_capability_validation() -> None:
             create_sample_profile(
                 profile_id="p.err3",
                 pipeline=AdapterPipelineDefinition(
-                    pipeline_id="p1", profile_id="p", stages=[PipelineStage(stage_id="", adapter_id="a", required_capability=AdapterCapability.GENERATE)]
+                    pipeline_id="p1",
+                    profile_id="p",
+                    stages=[PipelineStage(stage_id="", adapter_id="a", required_capability=AdapterCapability.GENERATE)],
                 ),
             )
         )
@@ -356,8 +375,16 @@ async def test_adapter_pipeline_and_capability_validation() -> None:
                     pipeline_id="p1",
                     profile_id="p",
                     stages=[
-                        PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
-                        PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE),
+                        PipelineStage(
+                            stage_id="s1",
+                            adapter_id="kortex.adapter.pdf",
+                            required_capability=AdapterCapability.GENERATE,
+                        ),
+                        PipelineStage(
+                            stage_id="s1",
+                            adapter_id="kortex.adapter.pdf",
+                            required_capability=AdapterCapability.GENERATE,
+                        ),
                     ],
                 ),
             )
@@ -369,7 +396,11 @@ async def test_adapter_pipeline_and_capability_validation() -> None:
             create_sample_profile(
                 profile_id="p.err5",
                 pipeline=AdapterPipelineDefinition(
-                    pipeline_id="p1", profile_id="p", stages=[PipelineStage(stage_id="s1", adapter_id="", required_capability=AdapterCapability.GENERATE)]
+                    pipeline_id="p1",
+                    profile_id="p",
+                    stages=[
+                        PipelineStage(stage_id="s1", adapter_id="", required_capability=AdapterCapability.GENERATE)
+                    ],
                 ),
             )
         )
@@ -380,7 +411,13 @@ async def test_adapter_pipeline_and_capability_validation() -> None:
             create_sample_profile(
                 profile_id="p.err6",
                 pipeline=AdapterPipelineDefinition(
-                    pipeline_id="p1", profile_id="p", stages=[PipelineStage(stage_id="s1", adapter_id="missing.adapter", required_capability=AdapterCapability.GENERATE)]
+                    pipeline_id="p1",
+                    profile_id="p",
+                    stages=[
+                        PipelineStage(
+                            stage_id="s1", adapter_id="missing.adapter", required_capability=AdapterCapability.GENERATE
+                        )
+                    ],
                 ),
             )
         )
@@ -391,7 +428,13 @@ async def test_adapter_pipeline_and_capability_validation() -> None:
             create_sample_profile(
                 profile_id="p.err7",
                 pipeline=AdapterPipelineDefinition(
-                    pipeline_id="p1", profile_id="p", stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.OCR)]
+                    pipeline_id="p1",
+                    profile_id="p",
+                    stages=[
+                        PipelineStage(
+                            stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.OCR
+                        )
+                    ],
                 ),
             )
         )
@@ -442,7 +485,7 @@ async def test_unregistration_and_unknown_profile_handling() -> None:
     with pytest.raises(DocumentProfileNotFoundError, match="not found"):
         await mgr.get_profile("profile.payslip.v1")
 
-    with pytest.raises(DocumentProfileNotFoundError, match="version '1.0.0' not found"):
+    with pytest.raises(DocumentProfileNotFoundError, match=r"version '1.0.0' not found"):
         p_temp = create_sample_profile(profile_id="p.single", version="2.0.0")
         await mgr.register_profile(p_temp)
         await mgr.get_profile("p.single", version="1.0.0")
@@ -460,7 +503,9 @@ async def test_unregistration_and_unknown_profile_handling() -> None:
 
 @pytest.mark.asyncio
 async def test_immutability_and_security_guarantees() -> None:
-    """24. No execution during registration, 25-29. No storage/FS/network/subprocess/eval, 30. Input immutability, 31. Internal-state immutability."""
+    """24. No execution during registration, 25-29. No storage/FS/network/subprocess/eval, 30. Input immutability, 31.
+    Internal-state immutability.
+    """
     mgr = DocumentOperationProfileManager()
     profile = create_sample_profile()
 
@@ -490,7 +535,11 @@ async def test_regression_compatibility_across_milestones() -> None:
     pipeline_def = AdapterPipelineDefinition(
         pipeline_id="pipe-full",
         profile_id="profile.payslip.v1",
-        stages=[PipelineStage(stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE)],
+        stages=[
+            PipelineStage(
+                stage_id="s1", adapter_id="kortex.adapter.pdf", required_capability=AdapterCapability.GENERATE
+            )
+        ],
     )
 
     profile = create_sample_profile(required_template_id="payslip.declarative.v1", pipeline=pipeline_def)
@@ -528,9 +577,7 @@ async def test_required_template_validation_with_repository_backed_library(
     )
 
     mgr = DocumentOperationProfileManager(template_library=tmpl_lib)
-    profile = create_sample_profile(
-        profile_id="p.repo.tmpl", required_template_id="repo.only.tmpl"
-    )
+    profile = create_sample_profile(profile_id="p.repo.tmpl", required_template_id="repo.only.tmpl")
 
     # This is the exact regression the old `req_tmpl_id not in self._template_library._templates`
     # check would have failed: the template is real and registered, but only via the repository.
@@ -638,12 +685,8 @@ async def test_tenant_isolation_list_and_delete_scoped_per_call(
 ) -> None:
     """list_profiles/unregister_profile only affect the calling tenant's persisted profiles."""
     mgr = DocumentOperationProfileManager(repository=repository)
-    await mgr.register_profile(
-        create_sample_profile(profile_id="p.tenant.a.only"), tenant_id="tenant-a"
-    )
-    await mgr.register_profile(
-        create_sample_profile(profile_id="p.tenant.b.only"), tenant_id="tenant-b"
-    )
+    await mgr.register_profile(create_sample_profile(profile_id="p.tenant.a.only"), tenant_id="tenant-a")
+    await mgr.register_profile(create_sample_profile(profile_id="p.tenant.b.only"), tenant_id="tenant-b")
 
     tenant_a_list = await mgr.list_profiles(tenant_id="tenant-a")
     tenant_a_ids = {p.id for p in tenant_a_list}
@@ -664,9 +707,7 @@ async def test_tenant_isolation_falls_back_to_constructor_default(
     repository: DocumentRepository,
 ) -> None:
     """Omitting tenant_id on a per-call operation falls back to the constructor's tenant_id."""
-    mgr = DocumentOperationProfileManager(
-        repository=repository, tenant_id="tenant-default-fallback"
-    )
+    mgr = DocumentOperationProfileManager(repository=repository, tenant_id="tenant-default-fallback")
     profile = create_sample_profile(profile_id="p.fallback")
 
     await mgr.register_profile(profile)
@@ -690,7 +731,7 @@ async def test_repository_mode_not_found_and_listing_branches(
 
     # get_profile with an explicit version that doesn't exist.
     await mgr.register_profile(create_sample_profile(profile_id="p.notfound.v1"))
-    with pytest.raises(DocumentProfileNotFoundError, match="version '9.9.9' not found"):
+    with pytest.raises(DocumentProfileNotFoundError, match=r"version '9.9.9' not found"):
         await mgr.get_profile("p.notfound.v1", version="9.9.9")
 
     # get_latest_version for a profile_id that was never registered.
@@ -701,9 +742,7 @@ async def test_repository_mode_not_found_and_listing_branches(
     assert await mgr.unregister_profile("p.notfound.v1", version="9.9.9") is False
 
     # list_all_profile_versions, find_by_business_operation, find_by_namespace in repository mode.
-    await mgr.register_profile(
-        create_sample_profile(profile_id="p.notfound.v1", version="2.0.0")
-    )
+    await mgr.register_profile(create_sample_profile(profile_id="p.notfound.v1", version="2.0.0"))
     all_versions = await mgr.list_all_profile_versions()
     assert len([p for p in all_versions if p.id == "p.notfound.v1"]) == 2
 

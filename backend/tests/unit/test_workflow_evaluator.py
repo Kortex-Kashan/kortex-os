@@ -5,12 +5,12 @@ Unit tests for KORTEX StepEvaluator, retries, capability dispatch, and compensat
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from kortex.engines.workflow.approval import MemoryApprovalManager
 from kortex.engines.workflow.evaluator import StepEvaluator
 from kortex.engines.workflow.models import (
-    ApprovalState,
     CompensationAction,
     RetryPolicy,
     WorkflowInstance,

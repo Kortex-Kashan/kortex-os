@@ -17,12 +17,12 @@ from kortex.engines.storage.interfaces import (
 from kortex.engines.storage.models import BucketConfig, FileMetadata, ObjectMetadata
 
 __all__ = [
+    "BucketConfig",
+    "FileMetadata",
+    "ICacheStore",
     "IDataStore",
+    "IEngineDiagnostics",
     "IFileStore",
     "IObjectStore",
-    "ICacheStore",
-    "IEngineDiagnostics",
     "ObjectMetadata",
-    "FileMetadata",
-    "BucketConfig",
 ]

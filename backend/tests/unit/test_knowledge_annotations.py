@@ -10,7 +10,7 @@ annotations — proving the documented Milestone M4 scope boundary is real.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,7 +26,7 @@ from kortex.engines.knowledge.models import (
     KnowledgeAnnotationType,
 )
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _annotation(
@@ -122,9 +122,7 @@ async def test_add_annotation_rejects_supersedes_reference_to_a_different_target
     manager = KnowledgeAnnotationManager()
     await manager.add_annotation(_annotation("a1", target_record_id="rec-1"))
     with pytest.raises(KnowledgeAnnotationNotFoundError):
-        await manager.add_annotation(
-            _annotation("a2", target_record_id="rec-2", supersedes_annotation_id="a1")
-        )
+        await manager.add_annotation(_annotation("a2", target_record_id="rec-2", supersedes_annotation_id="a1"))
 
 
 @pytest.mark.asyncio
@@ -146,9 +144,7 @@ async def test_add_annotation_rejects_supersedes_reference_across_tenants() -> N
     manager = KnowledgeAnnotationManager()
     await manager.add_annotation(_annotation("a1", tenant_id="tenant-a"))
     with pytest.raises(KnowledgeAnnotationNotFoundError):
-        await manager.add_annotation(
-            _annotation("a2", tenant_id="tenant-b", supersedes_annotation_id="a1")
-        )
+        await manager.add_annotation(_annotation("a2", tenant_id="tenant-b", supersedes_annotation_id="a1"))
 
 
 # -- list_annotations ----------------------------------------------------------------
@@ -237,9 +233,7 @@ async def test_correction_annotation_never_mutates_or_references_any_record_mana
     assert not hasattr(manager, "_record_manager")
     assert not hasattr(manager, "_lineage_manager")
 
-    correction = await manager.add_annotation(
-        _annotation("a1", annotation_type=KnowledgeAnnotationType.CORRECTION)
-    )
+    correction = await manager.add_annotation(_annotation("a1", annotation_type=KnowledgeAnnotationType.CORRECTION))
     assert correction.annotation_type == KnowledgeAnnotationType.CORRECTION
     # No exception, no side effect beyond storage — proven by successful retrieval.
     assert await manager.list_annotations("rec-1", "tenant-a") == [correction]

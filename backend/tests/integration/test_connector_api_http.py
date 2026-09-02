@@ -7,7 +7,8 @@ M5 requires:
 
     no Authorization header                    -> 401
     valid session token, missing permission     -> 403
-    valid session token, "connector:read"       -> 200, payload.result == []
+    valid session token, "connector:read"       -> 200, payload.result lists the
+                                                   production-registered drivers (M7.3-W1)
 
 No mocking of Kernel, Security Engine, or Connector Engine: this boots the
 real production `build_and_boot_kernel()` path against isolated per-test
@@ -161,9 +162,13 @@ async def test_authenticated_without_permission_returns_403(kernel: Kernel, clie
 
 
 @pytest.mark.asyncio
-async def test_authenticated_with_permission_returns_200_and_empty_registry(
+async def test_authenticated_with_permission_returns_200_and_registered_drivers(
     kernel: Kernel, client: httpx.AsyncClient
 ) -> None:
+    """M7.3-W1: the real production boot path now registers
+    `connector-dummy`/`connector-http-rest` automatically -- prior to M7.3
+    this asserted an empty registry, since nothing in production ever
+    registered a driver."""
     storage = kernel.get_engine("storage")
     assert isinstance(storage, StorageEngine)
     tenant_id = _tenant()
@@ -176,4 +181,5 @@ async def test_authenticated_with_permission_returns_200_and_empty_registry(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "SUCCESS"
-    assert body["payload"]["result"] == []
+    driver_ids = {d["driver_id"] for d in body["payload"]["result"]}
+    assert driver_ids == {"connector-dummy", "connector-http-rest"}

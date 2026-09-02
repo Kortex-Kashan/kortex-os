@@ -21,7 +21,7 @@ Protocol rather than import a shared one.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from kortex.engines.security.models import (
     AccessDecision,
@@ -32,7 +32,6 @@ from kortex.engines.security.models import (
     TokenPayload,
     UniversalAuditEntry,
 )
-
 
 
 @runtime_checkable
@@ -146,7 +145,7 @@ class IAuthenticationManager(Protocol):
     explicit M3 non-goal (short-lived tokens only).
     """
 
-    async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
+    async def authenticate(self, credentials: dict[str, Any]) -> SecurityPrincipal:
         """Verify credentials and return the resulting `SecurityPrincipal`."""
         ...
 
@@ -163,9 +162,7 @@ class IAuthenticationManager(Protocol):
 class IAuthorizationEngine(Protocol):
     """Permission and policy evaluation protocol. Implemented as of M4 (`authorization.py`)."""
 
-    async def evaluate_rbac(
-        self, principal: SecurityPrincipal, requirement: PermissionRequirement
-    ) -> AccessDecision:
+    async def evaluate_rbac(self, principal: SecurityPrincipal, requirement: PermissionRequirement) -> AccessDecision:
         """Evaluate a static role-to-permission matrix against `requirement`."""
         ...
 
@@ -173,7 +170,7 @@ class IAuthorizationEngine(Protocol):
         self,
         principal: SecurityPrincipal,
         requirement: PermissionRequirement,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> AccessDecision:
         """Evaluate dynamic attribute-based rules against `requirement` and `context`."""
         ...
@@ -192,13 +189,13 @@ class IAuditManager(Protocol):
         tenant_id: str,
         limit: int = 100,
         offset: int = 0,
-        action: Optional[str] = None,
-        actor_id: Optional[str] = None,
-    ) -> List[UniversalAuditEntry]:
+        action: str | None = None,
+        actor_id: str | None = None,
+    ) -> list[UniversalAuditEntry]:
         """Query immutable audit entries for a tenant."""
         ...
 
-    async def get_audit_entry(self, audit_id: str, tenant_id: str) -> Optional[UniversalAuditEntry]:
+    async def get_audit_entry(self, audit_id: str, tenant_id: str) -> UniversalAuditEntry | None:
         """Retrieve a specific audit entry by ID."""
         ...
 
@@ -207,7 +204,7 @@ class IAuditManager(Protocol):
 class ISecurityEngine(Protocol):
     """Primary Security Engine facade protocol. Implemented as of Milestone M6."""
 
-    async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
+    async def authenticate(self, credentials: dict[str, Any]) -> SecurityPrincipal:
         """Authenticate a caller."""
         ...
 
@@ -215,7 +212,7 @@ class ISecurityEngine(Protocol):
         self,
         principal: SecurityPrincipal,
         requirement: PermissionRequirement,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> AccessDecision:
         """Authorize a caller's requested capability."""
         ...
@@ -229,20 +226,19 @@ class ISecurityEngine(Protocol):
         ...
 
 
-
 @runtime_checkable
 class IEngineDiagnostics(Protocol):
     """Standardized diagnostics interface exposed by all KORTEX System Engines."""
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return operational health status and diagnostic checks."""
         ...
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return runtime performance and throughput metrics."""
         ...
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics and system environment details."""
         ...
 
@@ -254,6 +250,6 @@ class IEngineDiagnostics(Protocol):
         """Return semantic version string of the engine."""
         ...
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of capability strings registered by the engine."""
         ...

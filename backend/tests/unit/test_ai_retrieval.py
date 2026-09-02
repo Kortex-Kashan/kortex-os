@@ -135,9 +135,7 @@ def test_document_defaults_and_frozen() -> None:
 
 def test_document_carries_classification_and_provenance_verbatim() -> None:
     """Neither field is interpreted or rewritten at construction."""
-    document = RetrievedDocument(
-        content="body", classification="  confidential ", source_id="rec-1"
-    )
+    document = RetrievedDocument(content="body", classification="  confidential ", source_id="rec-1")
     assert document.classification == "  confidential "
     assert document.source_id == "rec-1"
 

@@ -33,7 +33,6 @@ from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.db import DatabaseEngineManager
-from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
@@ -127,14 +126,14 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": _TENANT, "principal_id": principal_id, "password": password}
     )
 
 
-async def _submit_paused_execution(kernel: Kernel, requester_principal, profile_id: str = "prof-ext-appr"):  # noqa: ANN001
+async def _submit_paused_execution(kernel: Kernel, requester_principal, profile_id: str = "prof-ext-appr"):
     workflow_engine: WorkflowEngine = kernel.get_engine("workflow")
     executor = workflow_engine.external_executor
     assert executor is not None

@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -161,8 +161,8 @@ class KnowledgeNode(BaseModel):
     tenant_id: str = Field(..., min_length=1)
     entity_type: str = Field(..., min_length=1)
     label: str = Field(..., min_length=1)
-    properties: Dict[str, Any] = Field(default_factory=dict)
-    vector_embedding: Optional[List[float]] = None
+    properties: dict[str, Any] = Field(default_factory=dict)
+    vector_embedding: list[float] | None = None
 
 
 class KnowledgeRelationship(BaseModel):
@@ -180,7 +180,7 @@ class KnowledgeRelationship(BaseModel):
     target_node_id: str = Field(..., min_length=1)
     relationship_type: KnowledgeRelationshipType
     weight: float = 1.0
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class KnowledgeRecord(BaseModel):
@@ -207,17 +207,17 @@ class KnowledgeRecord(BaseModel):
     record_id: str = Field(..., min_length=1)
     tenant_id: str = Field(..., min_length=1)
     version_id: str = Field(..., min_length=1)
-    parent_version_id: Optional[str] = None
-    lineage_path: List[str] = Field(default_factory=list)
+    parent_version_id: str | None = None
+    lineage_path: list[str] = Field(default_factory=list)
     record_type: KnowledgeRecordType
-    content: Dict[str, Any] = Field(default_factory=dict)
+    content: dict[str, Any] = Field(default_factory=dict)
     trust_state: KnowledgeTrustState
     classification: KnowledgeClassification = KnowledgeClassification.INTERNAL
     created_by: str = Field(..., min_length=1)
     created_by_type: KnowledgeActorType
     created_at: datetime
     status: KnowledgeRecordStatus = KnowledgeRecordStatus.CURRENT
-    successor_version_id: Optional[str] = None
+    successor_version_id: str | None = None
 
 
 class KnowledgeAnnotation(BaseModel):
@@ -247,7 +247,7 @@ class KnowledgeAnnotation(BaseModel):
     actor_type: KnowledgeActorType
     content: str = Field(..., min_length=1)
     created_at: datetime
-    supersedes_annotation_id: Optional[str] = None
+    supersedes_annotation_id: str | None = None
 
 
 class KnowledgePack(BaseModel):
@@ -266,9 +266,9 @@ class KnowledgePack(BaseModel):
 
     asset_id: str = Field(..., min_length=1)
     tenant_id: str = Field(..., min_length=1)
-    manifest: Dict[str, Any] = Field(default_factory=dict)
+    manifest: dict[str, Any] = Field(default_factory=dict)
     checksum_sha256: str = Field(..., min_length=1)
-    digital_signature: Optional[str] = None
+    digital_signature: str | None = None
     size_bytes: int = Field(..., ge=0)
     mime_type: str = Field(..., min_length=1)
     storage_key: str = Field(..., min_length=1)
@@ -304,15 +304,23 @@ class KnowledgeQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     query_id: str = Field(..., min_length=1)
-    tenant_id: str = Field(..., min_length=1)
+    # M7.5-W3: defaults to "default" (mirrors `document.models.BindingContext.
+    # tenant_id`'s identical precedent) rather than staying required, so a
+    # caller-side construction path that never has a real tenant to supply --
+    # namely the `knowledge_search` AI tool, whose schema must not accept
+    # `tenant_id` at all (the Kernel-verified `principal.tenant_id` is
+    # authoritative and always overrides this via `KnowledgeEngine.search`'s
+    # M7.5-W1 fix) -- can omit it. Every existing direct-construction caller
+    # already supplies a real tenant_id explicitly and is unaffected.
+    tenant_id: str = Field(default="default", min_length=1)
     query_text: str = Field(..., min_length=1)
-    filters: Dict[str, Any] = Field(default_factory=dict)
-    entity_types: List[str] = Field(default_factory=list)
-    max_results: Optional[int] = None
-    trust_states: List[KnowledgeTrustState] = Field(
+    filters: dict[str, Any] = Field(default_factory=dict)
+    entity_types: list[str] = Field(default_factory=list)
+    max_results: int | None = None
+    trust_states: list[KnowledgeTrustState] = Field(
         default_factory=lambda: [KnowledgeTrustState.HUMAN_CONFIRMED, KnowledgeTrustState.HUMAN_CORRECTED]
     )
-    as_of: Optional[datetime] = None
+    as_of: datetime | None = None
 
 
 class KnowledgeQueryResult(BaseModel):
@@ -325,7 +333,7 @@ class KnowledgeQueryResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     query_id: str = Field(..., min_length=1)
-    matching_nodes: List[KnowledgeNode] = Field(default_factory=list)
-    graph_relationships: List[KnowledgeRelationship] = Field(default_factory=list)
-    matching_records: List[KnowledgeRecord] = Field(default_factory=list)
+    matching_nodes: list[KnowledgeNode] = Field(default_factory=list)
+    graph_relationships: list[KnowledgeRelationship] = Field(default_factory=list)
+    matching_records: list[KnowledgeRecord] = Field(default_factory=list)
     execution_time_ms: float = Field(..., ge=0.0)

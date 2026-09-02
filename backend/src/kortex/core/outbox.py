@@ -13,7 +13,7 @@ import enum
 import json
 import logging
 import uuid
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import DateTime, Integer, String, Text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,9 +49,7 @@ class EventOutboxModel(BaseModel):
         index=True,
     )
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_retry_at: Mapped[datetime.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    next_retry_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class OutboxStore:
@@ -87,13 +85,13 @@ class OutboxStore:
         payload: dict[str, Any],
     ) -> EventOutboxModel:
         """Stage an event outbox record in a standalone transaction."""
+
         async def _action(session: AsyncSession) -> EventOutboxModel:
             record = self.stage_event_in_session(session, tenant_id, topic, payload)
             await session.flush()
             return record
 
-        result = await self._data_store.execute_in_transaction(_action)
-        return cast(EventOutboxModel, result)
+        return await self._data_store.execute_in_transaction(_action)
 
     async def get_pending_events(
         self,
@@ -101,6 +99,7 @@ class OutboxStore:
         limit: int = 100,
     ) -> list[EventOutboxModel]:
         """Query pending outbox records, optionally filtered by tenant."""
+
         async def _action(session: AsyncSession) -> list[EventOutboxModel]:
             stmt = (
                 select(EventOutboxModel)
@@ -113,10 +112,9 @@ class OutboxStore:
             res = await session.execute(stmt)
             return list(res.scalars().all())
 
-        result = await self._data_store.execute_in_transaction(_action)
-        return cast(list[EventOutboxModel], result)
+        return await self._data_store.execute_in_transaction(_action)
 
-    async def dispatch_pending(self, event_engine: Any, limit: int = 100) -> int:  # noqa: ANN401
+    async def dispatch_pending(self, event_engine: Any, limit: int = 100) -> int:
         """Sweep PENDING outbox records, publish them to EventEngine, and update status to SENT."""
         pending_records = await self.get_pending_events(limit=limit)
         if not pending_records:

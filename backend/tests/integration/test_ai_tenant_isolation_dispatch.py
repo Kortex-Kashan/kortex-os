@@ -148,7 +148,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, Any, _Record
         await db_manager.disconnect()
 
 
-async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: str):  # noqa: ANN001
+async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: str):
     security_engine: SecurityEngine = kernel.get_engine("security")
     auth = await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": principal_id, "password": password}
@@ -157,7 +157,7 @@ async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: st
 
 
 @pytest.mark.asyncio
-async def test_generate_response_forces_principal_tenant_not_spoofed_request_tenant(kernel_env) -> None:  # noqa: ANN001
+async def test_generate_response_forces_principal_tenant_not_spoofed_request_tenant(kernel_env) -> None:
     """A principal authenticated in tenant B cannot cause a generation to be attributed
     to tenant A merely by setting LLMRequest.tenant_id="tenant_a_ai_iso"."""
     kernel, ai_engine, provider = kernel_env
@@ -204,7 +204,7 @@ async def test_generate_response_forces_principal_tenant_not_spoofed_request_ten
 
 
 @pytest.mark.asyncio
-async def test_generate_response_quota_cannot_be_charged_to_another_tenant(kernel_env) -> None:  # noqa: ANN001
+async def test_generate_response_quota_cannot_be_charged_to_another_tenant(kernel_env) -> None:
     """Real token usage from a spoofed-tenant-A request must debit tenant B's quota
     (the real caller), never tenant A's."""
     kernel, ai_engine, _provider = kernel_env
@@ -238,7 +238,7 @@ async def test_generate_response_quota_cannot_be_charged_to_another_tenant(kerne
 
 
 @pytest.mark.asyncio
-async def test_legitimate_same_tenant_generation_still_works(kernel_env) -> None:  # noqa: ANN001
+async def test_legitimate_same_tenant_generation_still_works(kernel_env) -> None:
     """Regression guard: a principal generating under its own, correctly-stated
     tenant is entirely unaffected by the fix."""
     kernel, ai_engine, provider = kernel_env

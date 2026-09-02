@@ -52,8 +52,7 @@ deliberate choice, not an accident).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import List
+from datetime import UTC, datetime
 
 from kortex.engines.knowledge.exceptions import KnowledgeSourceIngestionError
 from kortex.engines.knowledge.models import (
@@ -77,7 +76,7 @@ class ReferenceSourceProvider:
         effects, same value on every call."""
         return _SOURCE_ID
 
-    async def ingest(self, tenant_id: str) -> List[KnowledgeRecord]:
+    async def ingest(self, tenant_id: str) -> list[KnowledgeRecord]:
         """Return `_RECORD_COUNT` fresh `SOURCE_EVIDENCE` `KnowledgeRecord`s
         scoped to `tenant_id`.
 
@@ -87,13 +86,10 @@ class ReferenceSourceProvider:
         identity input rather than silently returning an empty list.
         """
         if not tenant_id:
-            raise KnowledgeSourceIngestionError(
-                "ingest() requires a non-empty tenant_id; received "
-                f"{tenant_id!r}."
-            )
+            raise KnowledgeSourceIngestionError(f"ingest() requires a non-empty tenant_id; received {tenant_id!r}.")
 
         source_id = self.source_id()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return [
             KnowledgeRecord(
                 record_id=str(uuid.uuid4()),

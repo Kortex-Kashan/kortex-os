@@ -7,7 +7,7 @@ specification (S5).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -161,7 +161,7 @@ def test_secret_entry_rejects_empty_algorithm() -> None:
 
 
 def test_token_payload_valid_construction() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = TokenPayload(
         token_id="tok-1",
         principal_id="user-1",
@@ -175,7 +175,7 @@ def test_token_payload_valid_construction() -> None:
 
 
 def test_token_payload_rejects_empty_token_id() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(ValidationError):
         TokenPayload(
             token_id="",

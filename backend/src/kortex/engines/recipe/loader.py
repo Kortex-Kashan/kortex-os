@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Dict, Optional
 import zipfile
 
 from kortex.engines.recipe.exceptions import RecipePackageError
@@ -20,10 +19,10 @@ from kortex.engines.recipe.parser import RecipeParser
 class RecipeLoader:
     """Loader for recipe folders, ZIP archives, and .kortex-recipe packages."""
 
-    def __init__(self, parser: Optional[RecipeParser] = None) -> None:
+    def __init__(self, parser: RecipeParser | None = None) -> None:
         self.parser = parser or RecipeParser()
 
-    def read_package_files(self, package_bytes: bytes) -> Dict[str, bytes]:
+    def read_package_files(self, package_bytes: bytes) -> dict[str, bytes]:
         """Extract files from a binary ZIP / .kortex-recipe payload.
 
         Args:
@@ -36,7 +35,7 @@ class RecipeLoader:
             RecipePackageError: If package is not a valid ZIP archive.
         """
         try:
-            files: Dict[str, bytes] = {}
+            files: dict[str, bytes] = {}
             with zipfile.ZipFile(io.BytesIO(package_bytes), "r") as zf:
                 for name in zf.namelist():
                     if not name.endswith("/"):  # Ignore directory entries
@@ -56,8 +55,8 @@ class RecipeLoader:
         """
         files = self.read_package_files(package_bytes)
 
-        recipe_content: Optional[str] = None
-        manifest_content: Optional[str] = None
+        recipe_content: str | None = None
+        manifest_content: str | None = None
 
         for path, data in files.items():
             base_name = os.path.basename(path)
@@ -71,10 +70,10 @@ class RecipeLoader:
 
         return self.parser.parse_definition(raw_recipe=recipe_content, raw_manifest=manifest_content)
 
-    def load_from_folder_files(self, files: Dict[str, bytes]) -> RecipeDefinition:
+    def load_from_folder_files(self, files: dict[str, bytes]) -> RecipeDefinition:
         """Load and parse RecipeDefinition from a dictionary of file bytes."""
-        recipe_content: Optional[str] = None
-        manifest_content: Optional[str] = None
+        recipe_content: str | None = None
+        manifest_content: str | None = None
 
         for path, data in files.items():
             base_name = os.path.basename(path)
