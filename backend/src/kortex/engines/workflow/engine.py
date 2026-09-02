@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from kortex.core.base_engine import BaseEngine, EngineState
-from kortex.core.dispatch import CapabilityRequest
+from kortex.core.dispatch import CapabilityExecutionContext, CapabilityRequest
 from kortex.core.exceptions import ResourceNotFoundError
+from kortex.engines.security.exceptions import AuthorizationDeniedError
 from kortex.engines.security.models import SecurityPrincipal, TokenPayload
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.approval import (
@@ -304,6 +305,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 provider=self.name,
                 handler=self.decide_approval_request,
                 required_permissions=["approval:write"],
+                requires_execution_context=True,
             )
             kernel.register_capability(
                 name="kortex.workflow.approval.delegate",
@@ -311,6 +313,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 provider=self.name,
                 handler=self.delegate_approval_role,
                 required_permissions=["approval:write"],
+                requires_execution_context=True,
             )
             kernel.register_capability(
                 name="kortex.workflow.state.get",
@@ -333,6 +336,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 provider=self.name,
                 handler=self.create_schedule,
                 required_permissions=["workflow:schedule"],
+                requires_execution_context=True,
             )
             kernel.register_capability(
                 name="kortex.workflow.schedule.list",
@@ -383,6 +387,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 provider=self.name,
                 handler=self.execute_external_operation,
                 required_permissions=["workflow:execute"],
+                requires_execution_context=True,
             )
             kernel.register_capability(
                 name="kortex.workflow.external.get",
@@ -1203,11 +1208,32 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         public_key_hex: str | None = None,
         decision_data: dict[str, Any] | None = None,
         tenant_id: str | None = None,
-        principal: SecurityPrincipal | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Submit a decision for an approval ticket (kortex.workflow.approval.decide capability)."""
-        tid = tenant_id or "default"
+        """Submit a decision for an approval ticket (kortex.workflow.approval.decide capability).
+
+        KORTEX Platform Security — Capability Identity Propagation: identity
+        comes exclusively from the dispatcher-injected `execution_context`
+        when this handler is reached via real capability dispatch (it always
+        is, in production — `requires_execution_context=True`). This handler
+        no longer independently re-authenticates a `session_token` pulled
+        from its own parameters; that vulnerable pattern is removed, not
+        merely bypassed. A caller-supplied `tenant_id` that disagrees with
+        the authenticated tenant is rejected outright, never silently
+        overridden — a caller cannot make their own tenant claim authoritative
+        by matching it to nothing.
+        """
+        principal = execution_context.principal if execution_context is not None else None
+        if execution_context is not None:
+            tid = execution_context.tenant_id
+            if tenant_id is not None and tenant_id != tid:
+                raise AuthorizationDeniedError(
+                    f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
+                )
+        else:
+            tid = tenant_id or "default"
+
         dec_state: ApprovalState
         if isinstance(decision, ApprovalState):
             dec_state = decision
@@ -1215,31 +1241,6 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             dec_state = ApprovalState(decision)
         else:
             raise WorkflowValidationError(f"Invalid approval decision state: '{decision}'.")
-
-        # Resolve principal from session_token if not directly provided
-        if principal is None and "session_token" in kwargs:
-            raw_token = kwargs["session_token"]
-            sec_eng = None
-            if self._kernel:
-                try:
-                    sec_eng = self._kernel.get_engine("security")
-                except Exception as err:
-                    self.logger.debug("Security engine lookup in decide_approval_request: %s", err)
-            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
-                try:
-                    from kortex.engines.security.models import TokenPayload
-
-                    if isinstance(raw_token, TokenPayload):
-                        principal = await sec_eng.authentication_manager.verify_token(raw_token)
-                    elif isinstance(raw_token, dict):
-                        tok_dict = dict(raw_token)
-                        raw_sig = tok_dict.get("signature")
-                        if isinstance(raw_sig, str):
-                            tok_dict["signature"] = bytes.fromhex(raw_sig)
-                        tok = TokenPayload(**tok_dict)
-                        principal = await sec_eng.authentication_manager.verify_token(tok)
-                except Exception as err:
-                    self.logger.debug("Could not verify session token in decide_approval_request: %s", err)
 
         decision_obj = ApprovalDecision(
             request_id=UUID(str(request_id)),
@@ -1281,42 +1282,27 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         valid_from: str | datetime.datetime,
         valid_until: str | datetime.datetime,
         tenant_id: str | None = None,
-        principal: SecurityPrincipal | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Delegate an approval role to another principal (kortex.workflow.approval.delegate capability)."""
-        tid = tenant_id or "default"
-        dt_from = (
-            datetime.datetime.fromisoformat(valid_from) if isinstance(valid_from, str) else valid_from
-        )
-        dt_until = (
-            datetime.datetime.fromisoformat(valid_until) if isinstance(valid_until, str) else valid_until
-        )
+        """Delegate an approval role to another principal (kortex.workflow.approval.delegate capability).
 
-        # Resolve principal from session_token if not directly provided
-        if principal is None and "session_token" in kwargs:
-            raw_token = kwargs["session_token"]
-            sec_eng = None
-            if self._kernel:
-                try:
-                    sec_eng = self._kernel.get_engine("security")
-                except Exception as err:
-                    self.logger.debug("Security engine lookup in delegate_approval_role: %s", err)
-            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
-                try:
-                    from kortex.engines.security.models import TokenPayload
+        KORTEX Platform Security — Capability Identity Propagation: see
+        `decide_approval_request`'s docstring for the invariant this
+        handler follows identically.
+        """
+        principal = execution_context.principal if execution_context is not None else None
+        if execution_context is not None:
+            tid = execution_context.tenant_id
+            if tenant_id is not None and tenant_id != tid:
+                raise AuthorizationDeniedError(
+                    f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
+                )
+        else:
+            tid = tenant_id or "default"
 
-                    if isinstance(raw_token, TokenPayload):
-                        principal = await sec_eng.authentication_manager.verify_token(raw_token)
-                    elif isinstance(raw_token, dict):
-                        tok_dict = dict(raw_token)
-                        raw_sig = tok_dict.get("signature")
-                        if isinstance(raw_sig, str):
-                            tok_dict["signature"] = bytes.fromhex(raw_sig)
-                        tok = TokenPayload(**tok_dict)
-                        principal = await sec_eng.authentication_manager.verify_token(tok)
-                except Exception as err:
-                    self.logger.debug("Could not verify session token in delegate_approval_role: %s", err)
+        dt_from = datetime.datetime.fromisoformat(valid_from) if isinstance(valid_from, str) else valid_from
+        dt_until = datetime.datetime.fromisoformat(valid_until) if isinstance(valid_until, str) else valid_until
 
         if hasattr(self._approval_manager, "create_delegation"):
             delegation = await self._approval_manager.create_delegation(
@@ -1452,38 +1438,29 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         max_runs: int | None = None,
         timezone: str = "UTC",
         tenant_id: str | None = None,
-        principal: SecurityPrincipal | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Create a workflow execution schedule (kortex.workflow.schedule.create capability)."""
+        """Create a workflow execution schedule (kortex.workflow.schedule.create capability).
+
+        KORTEX Platform Security — Capability Identity Propagation: see
+        `decide_approval_request`'s docstring for the invariant this
+        handler follows identically.
+        """
         if self._scheduler is None:
             raise WorkflowScheduleError("Scheduler subsystem is not initialized.")
 
-        tid = tenant_id or "default"
-        dt_run_at = (
-            datetime.datetime.fromisoformat(run_at)
-            if isinstance(run_at, str)
-            else run_at
-        )
+        principal = execution_context.principal if execution_context is not None else None
+        if execution_context is not None:
+            tid = execution_context.tenant_id
+            if tenant_id is not None and tenant_id != tid:
+                raise AuthorizationDeniedError(
+                    f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
+                )
+        else:
+            tid = tenant_id or "default"
 
-        # Resolve principal from session_token if not provided
-        if principal is None and "session_token" in kwargs:
-            raw_token = kwargs["session_token"]
-            sec_eng = self._kernel.get_engine("security") if self._kernel else None
-            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
-                try:
-                    from kortex.engines.security.models import TokenPayload
-                    if isinstance(raw_token, TokenPayload):
-                        principal = await sec_eng.authentication_manager.verify_token(raw_token)
-                    elif isinstance(raw_token, dict):
-                        tok_dict = dict(raw_token)
-                        raw_sig = tok_dict.get("signature")
-                        if isinstance(raw_sig, str):
-                            tok_dict["signature"] = bytes.fromhex(raw_sig)
-                        tok = TokenPayload(**tok_dict)
-                        principal = await sec_eng.authentication_manager.verify_token(tok)
-                except Exception as err:
-                    self.logger.debug("Could not verify session token in create_schedule: %s", err)
+        dt_run_at = datetime.datetime.fromisoformat(run_at) if isinstance(run_at, str) else run_at
 
         sch = await self._scheduler.create_schedule(
             name=name,
@@ -1654,33 +1631,33 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         idempotency_key: str | None = None,
         correlation_id: str | None = None,
         tenant_id: str | None = None,
-        principal: SecurityPrincipal | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
-        """Execute a governed external operation with safety guards (kortex.workflow.external.execute capability)."""
+        """Execute a governed external operation with safety guards (kortex.workflow.external.execute capability).
+
+        KORTEX Platform Security — Capability Identity Propagation: identity
+        comes exclusively from `execution_context`, never independently
+        re-authenticated from a `session_token` inside this handler's own
+        parameters. `session_token` forwarded to the nested dispatch below is
+        `execution_context.session_token` — the *same*, already-verified
+        token this invocation's own identity was established from — never a
+        caller-suppliable one, so a nested capability call is authenticated
+        as the same real caller, not a value the caller could substitute.
+        """
         if self._external_executor is None:
             raise WorkflowExecutionError("External execution subsystem is not initialized.")
 
-        tid = tenant_id or "default"
-
-        # Resolve principal from session_token if not provided
-        session_token = kwargs.get("session_token")
-        if principal is None and session_token is not None:
-            sec_eng = self._kernel.get_engine("security") if self._kernel else None
-            if sec_eng is not None and hasattr(sec_eng, "authentication_manager"):
-                try:
-                    from kortex.engines.security.models import TokenPayload
-                    if isinstance(session_token, TokenPayload):
-                        principal = await sec_eng.authentication_manager.verify_token(session_token)
-                    elif isinstance(session_token, dict):
-                        tok_dict = dict(session_token)
-                        raw_sig = tok_dict.get("signature")
-                        if isinstance(raw_sig, str):
-                            tok_dict["signature"] = bytes.fromhex(raw_sig)
-                        tok = TokenPayload(**tok_dict)
-                        principal = await sec_eng.authentication_manager.verify_token(tok)
-                except Exception as err:
-                    self.logger.debug("Could not verify session token in execute_external_operation: %s", err)
+        principal = execution_context.principal if execution_context is not None else None
+        session_token = execution_context.session_token if execution_context is not None else None
+        if execution_context is not None:
+            tid = execution_context.tenant_id
+            if tenant_id is not None and tenant_id != tid:
+                raise AuthorizationDeniedError(
+                    f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
+                )
+        else:
+            tid = tenant_id or "default"
 
         pol = RetryPolicy(**retry_policy) if retry_policy else None
 

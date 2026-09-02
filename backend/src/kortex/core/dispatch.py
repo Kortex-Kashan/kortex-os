@@ -74,14 +74,28 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from kortex.core.exceptions import ConcurrentExecutionError
+from kortex.core.exceptions import ConcurrentExecutionError, ReservedParameterError
 from kortex.core.idempotency import ClaimResult, IdempotencyStore, sanitize_for_persistence
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.events import SecurityAuthFailureEvent, SecurityAuthSuccessEvent
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError
-from kortex.engines.security.models import ClassificationLevel, PermissionRequirement, TokenPayload
+from kortex.engines.security.models import (
+    ClassificationLevel,
+    PermissionRequirement,
+    SecurityPrincipal,
+    TokenPayload,
+)
+
+# Reserved `CapabilityRequest.parameters` keys: only `CapabilityDispatcher` may
+# populate these, via `CapabilityExecutionContext` injection (see
+# `_invoke_handler` below). A caller supplying either key is rejected outright
+# — not silently overwritten or discarded — closing the exact ambiguity a
+# conditional ("inject only if absent") check would have left open: a caller
+# cannot win a precedence race against the dispatcher because there is no
+# precedence race at all, only a hard rejection before injection is attempted.
+_RESERVED_PARAMETER_KEYS = frozenset({"execution_context", "principal"})
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
@@ -124,6 +138,42 @@ class CapabilityRequest(BaseModel):
     session_token: TokenPayload | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilityExecutionContext(BaseModel):
+    """Immutable, dispatcher-constructed execution identity for one capability
+    invocation (KORTEX Platform Security — Capability Identity Propagation).
+
+    This is the *only* channel through which a handler may learn "who is
+    calling" or "which tenant is authoritative." It is built exactly once,
+    inside `CapabilityDispatcher.dispatch()`, strictly after authentication
+    and authorization have already succeeded — never from caller-supplied
+    `CapabilityRequest.parameters` or `.context`. A handler must never
+    independently re-authenticate a token or re-derive tenant identity from
+    its own parameters; any identity it needs comes from here.
+
+    `tenant_id` is always `principal.tenant_id` when `principal` is not
+    `None` — it is not an independently settable field, precisely so no code
+    path can construct an internally inconsistent identity (a principal from
+    tenant A paired with a `tenant_id` claiming tenant B).
+
+    `session_token` carries forward the *same* already-verified token this
+    context was built from — not a new or caller-suppliable one — solely so
+    trusted platform code performing a synchronous nested capability
+    dispatch (e.g. Workflow's external-operation executor) can construct a
+    fresh `CapabilityRequest` for the nested call without a handler ever
+    reaching into caller-controlled `parameters` for a credential. It is
+    never sourced from, or writable via, `request.parameters`.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    request_id: str
+    correlation_id: str
+    capability_name: str
+    principal: SecurityPrincipal | None
+    tenant_id: str
+    session_token: TokenPayload | None = None
 
 
 def _safe_classification(value: str) -> ClassificationLevel:
@@ -256,6 +306,20 @@ class CapabilityDispatcher:
             else str(request.context.get("resource_tenant_id", "default"))
         )
 
+        # 3b. Trusted Execution Context — the sole authoritative identity
+        # channel a handler may consume (KORTEX Platform Security: Capability
+        # Identity Propagation). Built strictly from already-verified state
+        # above (`principal`, `tenant_id`), never from caller-supplied
+        # `request.parameters`/`request.context`.
+        execution_context = CapabilityExecutionContext(
+            request_id=request.request_id,
+            correlation_id=request.correlation_id,
+            capability_name=request.capability_name,
+            principal=principal,
+            tenant_id=tenant_id,
+            session_token=request.session_token,
+        )
+
         # 4. Idempotency Gate (ONLY for requests carrying an idempotency_key)
         idempotency_store = self._resolve_idempotency_store()
         idempotency_key = request.idempotency_key
@@ -285,7 +349,7 @@ class CapabilityDispatcher:
         # 5. Handler Invocation with Timing
         start_time = time.monotonic()
         try:
-            result = await self._invoke_handler(request)
+            result = await self._invoke_handler(request, descriptor, execution_context)
             duration_ms = (time.monotonic() - start_time) * 1000
 
             # 6. Idempotency Completion Persistence
@@ -393,7 +457,12 @@ class CapabilityDispatcher:
         except Exception as audit_exc:
             logger.warning("Failed to record dispatch authentication-failure audit entry: %s", audit_exc)
 
-    async def _invoke_handler(self, request: CapabilityRequest) -> Any:  # noqa: ANN401
+    async def _invoke_handler(
+        self,
+        request: CapabilityRequest,
+        descriptor: CapabilityDescriptor,
+        execution_context: CapabilityExecutionContext,
+    ) -> Any:  # noqa: ANN401
         """Resolve and invoke the real handler, awaiting the result only if
         it is actually awaitable.
 
@@ -412,11 +481,37 @@ class CapabilityDispatcher:
         __call__` (which `iscoroutinefunction` misclassifies as sync, since
         it inspects the object itself, not what calling it produces), in
         addition to plain sync and async functions.
+
+        KORTEX Platform Security — Capability Identity Propagation: a
+        reserved key present in `request.parameters` (`execution_context`,
+        `principal`) is REJECTED outright, never conditionally overwritten
+        — a caller cannot win a precedence race against the dispatcher
+        because no such race is ever evaluated. Which reserved key (if any)
+        is then injected is decided entirely by `descriptor` fields set at
+        registration time (`requires_execution_context`,
+        `legacy_principal_bridge`) — never by inspecting the handler's live
+        signature per invocation (see `RegistryEngine.register_capability`
+        for the one-time, boot-time signature validation that replaces
+        per-call reflection).
         """
         handler = self._kernel._registry_engine._resolve_handler(request.capability_name)
         if handler is None:
             raise RuntimeError(f"Capability '{request.capability_name}' has no registered handler.")
-        result = handler(**request.parameters)
+
+        offending_keys = _RESERVED_PARAMETER_KEYS.intersection(request.parameters)
+        if offending_keys:
+            raise ReservedParameterError(
+                f"Capability '{request.capability_name}' request.parameters may not supply "
+                f"reserved key(s) {sorted(offending_keys)} — identity is dispatcher-injected only."
+            )
+
+        kwargs = dict(request.parameters)
+        if descriptor.requires_execution_context:
+            kwargs["execution_context"] = execution_context
+            if descriptor.legacy_principal_bridge:
+                kwargs["principal"] = execution_context.principal
+
+        result = handler(**kwargs)
         if inspect.isawaitable(result):
             return await result
         return result

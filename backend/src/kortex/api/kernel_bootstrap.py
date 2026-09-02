@@ -26,6 +26,7 @@ from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionB
 from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
+from kortex.engines.document_intelligence.engine import DocumentIntelligenceEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
@@ -132,6 +133,16 @@ async def build_and_boot_kernel() -> Kernel:
     # during `initialize()` (see `KnowledgeEngine.initialize`), requiring
     # Storage to already be registered, which it is, above.
     kernel.register_engine(KnowledgeEngine())
+
+    # Phase 4: Document Intelligence Engine — local PDF parsing and local OCR.
+    # No constructor arguments — it self-resolves its Storage Engine object
+    # store from the Kernel IoC container during `initialize()` (see
+    # `DocumentIntelligenceEngine.initialize`), the same deferred-wiring
+    # pattern every engine above already establishes. Architecturally
+    # independent of Document/Knowledge/AI Engine (see `engine.py` module
+    # docstring) — registering it here introduces no new dependency edge
+    # onto any engine registered above.
+    kernel.register_engine(DocumentIntelligenceEngine())
 
     await kernel.boot()
     return kernel

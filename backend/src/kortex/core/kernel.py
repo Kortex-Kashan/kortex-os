@@ -253,6 +253,8 @@ class Kernel:
         required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
+        legacy_principal_bridge: bool = False,
     ) -> CapabilityDescriptor:
         """Register a capability with the Registry Engine.
 
@@ -278,6 +280,8 @@ class Kernel:
             required_permissions=required_permissions,
             requires_authentication=requires_authentication,
             security_classification=security_classification,
+            requires_execution_context=requires_execution_context,
+            legacy_principal_bridge=legacy_principal_bridge,
         )
 
     def get_capability(self, name: str) -> CapabilityDescriptor:

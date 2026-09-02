@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import enum
+import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -89,6 +90,30 @@ class CapabilityDescriptor(BaseModel):
             "the Registry stays independent of Security Engine's `ClassificationLevel` enum. "
             "Interpreted by the Kernel dispatcher, which fails closed to RESTRICTED on any unparseable "
             "value."
+        ),
+    )
+    requires_execution_context: bool = Field(
+        default=False,
+        description=(
+            "KORTEX Platform Security — Capability Identity Propagation: when True, the Kernel "
+            "dispatcher injects a trusted `CapabilityExecutionContext` (containing the dispatcher-"
+            "authenticated principal and authoritative tenant_id) as the `execution_context` keyword "
+            "argument on every invocation of this capability's handler — never conditionally, never "
+            "from caller data. Defaults to False so the hundreds of pre-existing capabilities across "
+            "every other engine are entirely unaffected; only handlers that need to know 'who is "
+            "calling' opt in. Validated once, at registration time, against the handler's actual "
+            "signature (see `register_capability` below) rather than re-inspected on every request."
+        ),
+    )
+    legacy_principal_bridge: bool = Field(
+        default=False,
+        description=(
+            "Transitional-migration flag only, defaulting False. When True (alongside "
+            "requires_execution_context=True), the dispatcher additionally injects "
+            "`execution_context.principal` as a `principal` keyword argument, for handlers not yet "
+            "migrated to read `execution_context.principal` directly. The injected value is always "
+            "the dispatcher-authenticated principal, never caller-suppliable — a caller-supplied "
+            "`principal` key in `parameters` is rejected outright, not overridden."
         ),
     )
 
@@ -256,6 +281,8 @@ class RegistryEngine(BaseEngine):
         required_permissions: Optional[List[str]] = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
+        legacy_principal_bridge: bool = False,
     ) -> CapabilityDescriptor:
         """Register an AI-discoverable capability.
 
@@ -267,6 +294,17 @@ class RegistryEngine(BaseEngine):
         was not enforced anywhere in the platform before this milestone, so
         it is enforced at this single, authoritative capability-registration
         choke point rather than left as an unenforced convention.
+
+        KORTEX Platform Security — Capability Identity Propagation:
+        `requires_execution_context`/`legacy_principal_bridge` are validated
+        against `handler`'s actual signature exactly once, here, at
+        registration time (trusted, boot-time code) — never re-inspected on
+        every invocation. This is deliberate: per-call `inspect.signature()`
+        is fragile against decorators without `functools.wraps`, dynamically
+        constructed callables, etc., and a mis-detection at request time
+        would fail silently, under attacker-influenced timing, in
+        production. A mis-declaration here instead fails loudly, once, at
+        boot, in a fully trusted context — see `_validate_execution_context_binding`.
         """
         if name in self._capabilities:
             raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
@@ -275,6 +313,20 @@ class RegistryEngine(BaseEngine):
             raise ValueError(
                 f"Capability '{name}' cannot register with requires_authentication=False; "
                 f"only '{_BOOTSTRAP_EXEMPT_CAPABILITY}' may bypass authentication."
+            )
+
+        if legacy_principal_bridge and not requires_execution_context:
+            raise ValueError(
+                f"Capability '{name}' set legacy_principal_bridge=True without "
+                f"requires_execution_context=True; the bridge is only meaningful alongside it."
+            )
+
+        if handler is not None and (requires_execution_context or legacy_principal_bridge):
+            self._validate_execution_context_binding(
+                name=name,
+                handler=handler,
+                requires_execution_context=requires_execution_context,
+                legacy_principal_bridge=legacy_principal_bridge,
             )
 
         descriptor = CapabilityDescriptor(
@@ -286,12 +338,52 @@ class RegistryEngine(BaseEngine):
             required_permissions=required_permissions,
             requires_authentication=requires_authentication,
             security_classification=security_classification,
+            requires_execution_context=requires_execution_context,
+            legacy_principal_bridge=legacy_principal_bridge,
         )
         self._capabilities[name] = descriptor
         self._capability_handlers[name] = handler
         self.register_resource(name, RegistryCategory.CAPABILITY, handler, description=description, provider=provider)
         self.logger.info("Registered Capability: '%s' (Provider: %s)", name, provider)
         return descriptor
+
+    @staticmethod
+    def _validate_execution_context_binding(
+        name: str,
+        handler: Callable[..., Any],
+        requires_execution_context: bool,
+        legacy_principal_bridge: bool,
+    ) -> None:
+        """One-time, registration-time (never per-invocation) signature check.
+
+        Fails loudly at boot if a handler declaring `requires_execution_context=True`
+        cannot actually receive the keyword arguments the dispatcher will inject —
+        catching an authoring mistake immediately, in trusted code, rather than as a
+        `TypeError` on the first real (possibly attacker-influenced-timing) invocation.
+        """
+        try:
+            signature = inspect.signature(handler)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Capability '{name}' declares requires_execution_context=True but its handler's "
+                f"signature could not be inspected at registration time: {exc}"
+            ) from exc
+
+        params = signature.parameters
+        accepts_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+        if requires_execution_context and "execution_context" not in params and not accepts_var_kwargs:
+            raise ValueError(
+                f"Capability '{name}' declares requires_execution_context=True but its handler "
+                f"accepts neither an 'execution_context' parameter nor **kwargs — it would raise "
+                f"TypeError on every real invocation."
+            )
+        if legacy_principal_bridge and "principal" not in params and not accepts_var_kwargs:
+            raise ValueError(
+                f"Capability '{name}' declares legacy_principal_bridge=True but its handler accepts "
+                f"neither a 'principal' parameter nor **kwargs — it would raise TypeError on every "
+                f"real invocation."
+            )
 
     def get_capability(self, name: str) -> CapabilityDescriptor:
         """Fetch capability descriptor by name.

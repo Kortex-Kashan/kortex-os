@@ -116,3 +116,11 @@ class ConcurrentExecutionError(DispatchError):
 
 class IdempotencyError(DispatchError):
     """Raised when an idempotency violation or conflict occurs."""
+
+
+class ReservedParameterError(DispatchError):
+    """Raised when a caller-supplied `CapabilityRequest.parameters` dict contains a
+    reserved key (e.g. `execution_context`, `principal`) that only the Kernel's own
+    trusted `CapabilityDispatcher` may populate. Rejected outright rather than
+    silently discarded, so a caller mistake or attack attempt is loud and auditable,
+    not swallowed."""

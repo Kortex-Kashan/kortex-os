@@ -486,26 +486,23 @@ class DurableApprovalManager(ApprovalRepository, ApprovalProvider):
                 f"Invalid decision state '{decision.decision}'. Must be APPROVED or REJECTED."
             )
 
-        # 2. Resolve & Verify Principal Authorization & Delegation
-        if principal is None and self._security_engine is not None:
-            auth_mgr = getattr(self._security_engine, "_authentication_manager", None) or getattr(
-                self._security_engine, "authentication_manager", None
-            )
-            if auth_mgr is not None and hasattr(auth_mgr, "_load_principal"):
-                try:
-                    snap = await auth_mgr._load_principal(tid, decision.approver_id, "USER")
-                    if snap is not None:
-                        principal = SecurityPrincipal(
-                            principal_id=snap.principal_id,
-                            principal_type=snap.principal_type,
-                            tenant_id=snap.tenant_id,
-                            roles=list(snap.roles),
-                            attributes=dict(snap.attributes),
-                            enabled=snap.enabled,
-                        )
-                except Exception as err:
-                    logger.debug("Could not resolve principal for approver '%s': %s", decision.approver_id, err)
-
+        # 2. Verify Principal Authorization & Delegation
+        #
+        # KORTEX Platform Security — Capability Identity Propagation: `principal`
+        # must be the caller's own dispatcher-authenticated identity (forwarded
+        # here by `WorkflowEngine.decide_approval_request` from its
+        # `execution_context`), never one synthesized by looking up the
+        # caller-supplied `decision.approver_id` string. The previous fallback
+        # here loaded a `SecurityPrincipal` BY that string whenever `principal`
+        # was `None`, then compared `principal.principal_id != decision.approver_id`
+        # — a tautological check, since the "principal" being compared was
+        # itself just fetched BY that same string. That let any authenticated
+        # caller submit a decision as any named `approver_id`, authorized
+        # against the *named* identity's roles rather than the real caller's.
+        # Removed outright, not bypassed: `principal is None` now correctly
+        # falls through to the existing `elif ticket.required_role: raise
+        # AuthorizationDeniedError(...)` branch below — "no principal" means
+        # "unauthenticated," never "resolve one from what the caller claims."
         if principal is not None:
             if principal.tenant_id != ticket.tenant_id:
                 raise AuthorizationDeniedError(
