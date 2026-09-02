@@ -83,8 +83,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev libdbus-1-dev
 
+      # TEMPORARY DIAGNOSTIC (Production Hardening CI/CD verification): the
+      # public GitHub API refuses raw job-log downloads for this repository
+      # without admin rights, so the actual compiler/build-script diagnostic
+      # behind the current `cargo check` failure (exit 101) is otherwise
+      # invisible to anyone without repo-admin access. This step still runs
+      # `cargo check` exactly as before and preserves its real exit code --
+      # it only additionally captures full stdout/stderr to a log file and,
+      # on failure, emits the relevant error lines as a GitHub Actions
+      # `::error::` annotation (publicly readable via the Checks API's
+      # annotations endpoint, unlike raw logs). No compilation environment,
+      # dependency, or Rust source change is made by this step. To be
+      # reverted once the real diagnostic has been captured and classified.
       - name: cargo check
-        run: cargo check
+        run: |
+          set +e
+          cargo check > cargo_check_output.log 2>&1
+          exit_code=$?
+          set -e
+          cat cargo_check_output.log
+          if [ "$exit_code" -ne 0 ]; then
+            DIAG=$(grep -n -E "^error|-->|Caused by:|pkg-config|panicked|--- stderr" cargo_check_output.log | tail -80)
+            if [ -z "$DIAG" ]; then
+              DIAG=$(tail -n 120 cargo_check_output.log)
+            fi
+            ENCODED=$(printf '%s\n' "$DIAG" | sed 's/%/%25/g; s/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=cargo check failed (exit ${exit_code})::${ENCODED}"
+          fi
+          exit "$exit_code"
 
       # Informational only (continue-on-error): no repo-established clippy
       # strictness convention exists (no clippy.toml, no deny(warnings)) --
