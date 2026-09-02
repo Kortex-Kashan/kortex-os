@@ -61,60 +61,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # apps/desktop/src-tauri/Cargo.toml declares rust-version = "1.77" --
-      # pinning the toolchain to that exact, repo-declared value rather than
-      # "stable", so CI checks against the same floor the crate itself claims
-      # to support.
-      - uses: dtolnay/rust-toolchain@master
+      # Uses `stable`, NOT the `rust-version = "1.77"` floor declared in
+      # apps/desktop/src-tauri/Cargo.toml. Pinning 1.77 was the cause of this
+      # job's original failure: the locked dependency graph contains
+      # `icu_normalizer 2.3.0`, whose manifest declares `edition = "2024"`,
+      # and Cargo 1.77.2 rejects it outright at manifest-parse time --
+      # "feature `edition2024` is required ... not stabilized in this version
+      # of Cargo" -- before compiling anything. edition2024 stabilized in
+      # Rust 1.85. `stable` is what developers actually build with locally
+      # (verified against cargo 1.98.0), so CI now matches the real toolchain
+      # rather than an MSRV floor the current Cargo.lock no longer satisfies.
+      # NOTE (separate decision, deliberately not changed here): Cargo.toml's
+      # `rust-version = "1.77"` is therefore stale relative to its own
+      # Cargo.lock. Correcting that declaration is application/certified-M7.1
+      # source and needs its own authorization.
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.77"
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
 
-      # Tauri's Linux backend needs webkit2gtk/related system libraries to
-      # even parse its dependency tree for `cargo check`/`clippy` -- these are
-      # standard packages from the Tauri project's own documented Linux
-      # prerequisites, not a KORTEX-specific addition.
+      # Tauri's Linux backend needs webkit2gtk/related system libraries for
+      # `cargo check`/`clippy` -- these are standard packages from the Tauri
+      # project's own documented Linux prerequisites, not KORTEX-specific.
+      # libsoup-3.0-dev and libdbus-1-dev are retained deliberately: they were
+      # added while investigating this job's failure and did NOT fix it (the
+      # cause was the toolchain pin, see above), but Cargo.lock shows they are
+      # genuine build-time requirements once compilation actually proceeds --
+      # `webkit2gtk-sys` depends directly on `soup3-sys`, whose build script
+      # probes libsoup-3.0 via `system-deps`, and `dbus` depends on
+      # `libdbus-sys`, whose build script probes dbus-1 via `pkg-config`.
       - name: Install Tauri Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev libdbus-1-dev
 
-      # TEMPORARY DIAGNOSTIC (Production Hardening CI/CD verification): the
-      # public GitHub API refuses raw job-log downloads for this repository
-      # without admin rights, so the actual compiler/build-script diagnostic
-      # behind the current `cargo check` failure (exit 101) is otherwise
-      # invisible to anyone without repo-admin access. This step still runs
-      # `cargo check` exactly as before and preserves its real exit code --
-      # it only additionally captures full stdout/stderr to a log file and,
-      # on failure, emits the relevant error lines as a GitHub Actions
-      # `::error::` annotation (publicly readable via the Checks API's
-      # annotations endpoint, unlike raw logs). No compilation environment,
-      # dependency, or Rust source change is made by this step. To be
-      # reverted once the real diagnostic has been captured and classified.
       - name: cargo check
-        run: |
-          set +e
-          cargo check > cargo_check_output.log 2>&1
-          exit_code=$?
-          set -e
-          cat cargo_check_output.log
-          if [ "$exit_code" -ne 0 ]; then
-            # Unconditional tail of the whole log: cargo always prints the
-            # failure (error:, failing crate, "failed to run custom build
-            # command", Caused by:, --- stdout/--- stderr, pkg-config output,
-            # linker/compiler/panic text) at the END of its output. The
-            # previous grep-based extraction was too narrow and captured only
-            # the bare "Caused by:" header lines, so no filtering is applied
-            # here at all -- only a size bound.
-            DIAG=$(tail -n 250 cargo_check_output.log)
-            ENCODED=$(printf '%s\n' "$DIAG" | sed 's/%/%25/g; s/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
-            echo "::error title=cargo check failed (exit ${exit_code})::${ENCODED}"
-          fi
-          exit "$exit_code"
+        run: cargo check
 
       # Informational only (continue-on-error): no repo-established clippy
       # strictness convention exists (no clippy.toml, no deny(warnings)) --
