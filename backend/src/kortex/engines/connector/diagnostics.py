@@ -23,16 +23,18 @@ CANONICAL_CAPABILITIES: list[str] = [
     "kortex.connector.profile.get",
 ]
 
-ALLOWED_ERROR_CATEGORIES: frozenset[str] = frozenset({
-    "rate_limit",
-    "authentication",
-    "driver_not_found",
-    "driver_execution",
-    "cancelled",
-    "http_4xx",
-    "http_5xx",
-    "unknown_error",
-})
+ALLOWED_ERROR_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "rate_limit",
+        "authentication",
+        "driver_not_found",
+        "driver_execution",
+        "cancelled",
+        "http_4xx",
+        "http_5xx",
+        "unknown_error",
+    }
+)
 
 
 class ConnectorDiagnostics(IEngineDiagnostics):
@@ -125,9 +127,7 @@ class ConnectorDiagnostics(IEngineDiagnostics):
 
         if action_type:
             a_key = str(action_type).strip().upper()
-            self._per_action_type_executions[a_key] = (
-                self._per_action_type_executions.get(a_key, 0) + 1
-            )
+            self._per_action_type_executions[a_key] = self._per_action_type_executions.get(a_key, 0) + 1
 
         if profile_id and isinstance(profile_id, str) and profile_id.strip():
             p_key = profile_id.strip()
@@ -136,9 +136,7 @@ class ConnectorDiagnostics(IEngineDiagnostics):
             elif len(self._per_profile_executions) < 1000:
                 self._per_profile_executions[p_key] = 1
             else:
-                self._per_profile_executions["__other__"] = (
-                    self._per_profile_executions.get("__other__", 0) + 1
-                )
+                self._per_profile_executions["__other__"] = self._per_profile_executions.get("__other__", 0) + 1
 
     def record_retry(self, count: int = 1) -> None:
         """Record driver/network retry attempts performed."""
@@ -208,10 +206,7 @@ class ConnectorDiagnostics(IEngineDiagnostics):
         if self._profile_manager is not None:
             try:
                 check_fn = getattr(self._profile_manager, "check_health", None)
-                if callable(check_fn):
-                    is_ok = check_fn()
-                else:
-                    is_ok = getattr(self._profile_manager, "is_healthy", True)
+                is_ok = check_fn() if callable(check_fn) else getattr(self._profile_manager, "is_healthy", True)
                 profile_mgr_status = "healthy" if is_ok else "degraded"
             except Exception:
                 profile_mgr_status = "degraded"
@@ -220,10 +215,7 @@ class ConnectorDiagnostics(IEngineDiagnostics):
         if self._rate_limiter is not None:
             try:
                 check_fn = getattr(self._rate_limiter, "check_health", None)
-                if callable(check_fn):
-                    is_ok = check_fn()
-                else:
-                    is_ok = getattr(self._rate_limiter, "is_healthy", True)
+                is_ok = check_fn() if callable(check_fn) else getattr(self._rate_limiter, "is_healthy", True)
                 rate_limiter_status = "healthy" if is_ok else "degraded"
             except Exception:
                 rate_limiter_status = "degraded"
@@ -268,11 +260,7 @@ class ConnectorDiagnostics(IEngineDiagnostics):
         except Exception:
             driver_count = 0
 
-        avg_lat = (
-            round(self._total_latency_ms / self._total_executions, 2)
-            if self._total_executions > 0
-            else 0.0
-        )
+        avg_lat = round(self._total_latency_ms / self._total_executions, 2) if self._total_executions > 0 else 0.0
         success_rate = (
             round((self._successful_executions / self._total_executions) * 100.0, 2)
             if self._total_executions > 0

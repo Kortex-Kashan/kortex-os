@@ -88,9 +88,7 @@ def test_tool_invocation_metrics() -> None:
 
     diag.record_tool_invocation(status="SUCCESS", latency_ms=10.0)
     diag.record_tool_invocation(status="DENIED", latency_ms=5.0)
-    diag.record_tool_invocation(
-        status="FAILED", latency_ms=20.0, error_category="ExecutionError"
-    )
+    diag.record_tool_invocation(status="FAILED", latency_ms=20.0, error_category="ExecutionError")
     diag.record_tool_invocation(status="FAILED", latency_ms=5000.0, is_timeout=True)
 
     metrics = diag.metrics()
@@ -147,9 +145,7 @@ def test_agent_task_metrics() -> None:
 def test_diagnostics_snapshot_isolation() -> None:
     """Verify metrics dictionary is a deep copy and modifying it does not mutate internal state."""
     diag = AIDiagnostics()
-    diag.record_provider_execution(
-        provider_id="ollama-local", status="SUCCESS", latency_ms=100.0
-    )
+    diag.record_provider_execution(provider_id="ollama-local", status="SUCCESS", latency_ms=100.0)
 
     metrics_snap1 = diag.metrics()
     metrics_snap1["providers"]["ollama-local"]["requests"] = 999
@@ -179,10 +175,6 @@ def test_diagnostics_thread_safety() -> None:
     assert metrics["generations"]["total"] == num_threads * iterations
     assert metrics["generations"]["successful"] == num_threads * iterations
     assert metrics["tokens"]["prompt_tokens_total"] == num_threads * iterations * 10
-    assert (
-        metrics["tokens"]["completion_tokens_total"] == num_threads * iterations * 20
-    )
+    assert metrics["tokens"]["completion_tokens_total"] == num_threads * iterations * 20
     assert metrics["tool_invocations"]["total"] == num_threads * iterations
-    assert (
-        metrics["security"]["authorization_denied"] == num_threads * iterations
-    )
+    assert metrics["security"]["authorization_denied"] == num_threads * iterations

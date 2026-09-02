@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,14 +19,10 @@ class SecurityBaseEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    event_id: str = Field(
-        default_factory=lambda: f"sec-evt-{uuid.uuid4().hex}"
-    )
+    event_id: str = Field(default_factory=lambda: f"sec-evt-{uuid.uuid4().hex}")
     event_type: str
     tenant_id: str
-    timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 class SecurityAuditEvent(SecurityBaseEvent):
@@ -37,11 +33,11 @@ class SecurityAuditEvent(SecurityBaseEvent):
     action: str
     actor_id: str
     actor_type: str
-    resource_id: Optional[str] = None
-    previous_state_hash: Optional[str] = None
-    new_state_hash: Optional[str] = None
-    client_ip: Optional[str] = None
-    context: Dict[str, Any] = Field(default_factory=dict)
+    resource_id: str | None = None
+    previous_state_hash: str | None = None
+    new_state_hash: str | None = None
+    client_ip: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class SecurityAuthSuccessEvent(SecurityBaseEvent):

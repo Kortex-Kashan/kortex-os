@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import Date, DateTime, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -32,7 +31,7 @@ class FinanceInvoiceRow(BaseModel):
     customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(precision=18, scale=2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    due_date: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    due_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     invoice_created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -145,15 +145,11 @@ def validate_schema(schema: dict[str, object], data: object, path: str = "") -> 
         if expected_type == "object":
             if not isinstance(data, dict):
                 field_desc = f"at '{path}'" if path else "root"
-                raise ToolValidationError(
-                    f"Invalid argument {field_desc}: expected object, got {type(data).__name__}."
-                )
+                raise ToolValidationError(f"Invalid argument {field_desc}: expected object, got {type(data).__name__}.")
         elif expected_type == "string":
             if not isinstance(data, str):
                 field_desc = f"at '{path}'" if path else "root"
-                raise ToolValidationError(
-                    f"Invalid argument {field_desc}: expected string, got {type(data).__name__}."
-                )
+                raise ToolValidationError(f"Invalid argument {field_desc}: expected string, got {type(data).__name__}.")
         elif expected_type == "integer":
             if isinstance(data, bool) or not isinstance(data, int):
                 field_desc = f"at '{path}'" if path else "root"
@@ -163,9 +159,7 @@ def validate_schema(schema: dict[str, object], data: object, path: str = "") -> 
         elif expected_type == "number":
             if isinstance(data, bool) or not isinstance(data, (int, float)):
                 field_desc = f"at '{path}'" if path else "root"
-                raise ToolValidationError(
-                    f"Invalid argument {field_desc}: expected number, got {type(data).__name__}."
-                )
+                raise ToolValidationError(f"Invalid argument {field_desc}: expected number, got {type(data).__name__}.")
         elif expected_type == "boolean":
             if not isinstance(data, bool):
                 field_desc = f"at '{path}'" if path else "root"
@@ -175,14 +169,10 @@ def validate_schema(schema: dict[str, object], data: object, path: str = "") -> 
         elif expected_type == "array":
             if not isinstance(data, list):
                 field_desc = f"at '{path}'" if path else "root"
-                raise ToolValidationError(
-                    f"Invalid argument {field_desc}: expected array, got {type(data).__name__}."
-                )
+                raise ToolValidationError(f"Invalid argument {field_desc}: expected array, got {type(data).__name__}.")
         elif expected_type == "null" and data is not None:
             field_desc = f"at '{path}'" if path else "root"
-            raise ToolValidationError(
-                f"Invalid argument {field_desc}: expected null, got {type(data).__name__}."
-            )
+            raise ToolValidationError(f"Invalid argument {field_desc}: expected null, got {type(data).__name__}.")
 
     if "enum" in schema and isinstance(schema["enum"], list) and data not in schema["enum"]:
         field_desc = f"at '{path}'" if path else "root"
@@ -194,15 +184,11 @@ def validate_schema(schema: dict[str, object], data: object, path: str = "") -> 
         min_val = schema.get("minimum")
         if isinstance(min_val, (int, float)) and data < min_val:
             field_desc = f"at '{path}'" if path else "root"
-            raise ToolValidationError(
-                f"Invalid argument {field_desc}: value {data} is less than minimum {min_val}."
-            )
+            raise ToolValidationError(f"Invalid argument {field_desc}: value {data} is less than minimum {min_val}.")
         max_val = schema.get("maximum")
         if isinstance(max_val, (int, float)) and data > max_val:
             field_desc = f"at '{path}'" if path else "root"
-            raise ToolValidationError(
-                f"Invalid argument {field_desc}: value {data} is greater than maximum {max_val}."
-            )
+            raise ToolValidationError(f"Invalid argument {field_desc}: value {data} is greater than maximum {max_val}.")
 
     if isinstance(data, str):
         min_len = schema.get("minLength")
@@ -259,9 +245,7 @@ class ToolDefinition(BaseModel):
     @model_validator(mode="after")
     def _validate_name_pattern(self) -> ToolDefinition:
         if not _TOOL_NAME_PATTERN.match(self.name):
-            raise ToolValidationError(
-                f"Invalid tool name '{self.name}': must match pattern '^[a-zA-Z0-9_-]+$'."
-            )
+            raise ToolValidationError(f"Invalid tool name '{self.name}': must match pattern '^[a-zA-Z0-9_-]+$'.")
         return self
 
     def validate_arguments(self, arguments: dict[str, object]) -> None:
@@ -436,14 +420,10 @@ class InMemoryToolExecutionPort(IToolExecutionPort):
         if authorizer is not None:
             is_allowed = await authorizer(capability_name, arguments)
             if not is_allowed:
-                raise ToolAuthorizationError(
-                    f"Authorization denied for capability '{capability_name}'."
-                )
+                raise ToolAuthorizationError(f"Authorization denied for capability '{capability_name}'.")
 
         if capability_name not in self._handlers:
-            raise ToolExecutionError(
-                f"No handler registered for capability '{capability_name}' in test port."
-            )
+            raise ToolExecutionError(f"No handler registered for capability '{capability_name}' in test port.")
 
         handler = self._handlers[capability_name]
         if asyncio.iscoroutinefunction(handler):
@@ -610,9 +590,7 @@ class AIToolInvoker:
     ) -> list[ToolResult]:
         """Invoke a batch of tool calls with ordering guarantee."""
         if len(tool_calls) > MAX_BATCH_SIZE:
-            raise ToolValidationError(
-                f"Batch size {len(tool_calls)} exceeds MAX_BATCH_SIZE ({MAX_BATCH_SIZE})."
-            )
+            raise ToolValidationError(f"Batch size {len(tool_calls)} exceeds MAX_BATCH_SIZE ({MAX_BATCH_SIZE}).")
 
         if sequential:
             results: list[ToolResult] = []

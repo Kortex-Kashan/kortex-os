@@ -70,7 +70,7 @@ from __future__ import annotations
 import abc
 import enum
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.exceptions import EngineStateError
 
@@ -116,7 +116,7 @@ class BaseModule(abc.ABC):
         """Canonical capability namespace this module owns (e.g. `kortex.finance`)."""
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Names of System Engines this module depends on for boot ordering."""
         return []
 
@@ -150,7 +150,7 @@ class BaseModule(abc.ABC):
         transitions state."""
 
     @abc.abstractmethod
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Return diagnostic health information about the module status."""
 
     @abc.abstractmethod

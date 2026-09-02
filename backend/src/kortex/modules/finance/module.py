@@ -37,7 +37,7 @@ it is recorded as a future follow-up rather than fixed in this slice.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.base_module import BaseModule, ModuleState
 from kortex.core.exceptions import KortexError
@@ -49,7 +49,7 @@ from kortex.modules.finance.models import CreateInvoiceRequest, FinanceInvoice
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
 
-_REGISTERED_CAPABILITIES: List[str] = [
+_REGISTERED_CAPABILITIES: list[str] = [
     "kortex.finance.invoice.create",
     "kortex.finance.invoice.get",
 ]
@@ -73,13 +73,13 @@ class FinanceModule(BaseModule):
         return "kortex.finance"
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Prerequisite System Engines this module depends on."""
         return ["storage", "security"]
 
     # -- Lifecycle Implementation ---------------------------------------
 
-    async def initialize(self, kernel: "Kernel") -> None:
+    async def initialize(self, kernel: Kernel) -> None:
         """Resolve the Storage Engine's `IDataStore` and register this
         module's capability with the Kernel -- mirrors Knowledge Engine's
         own `initialize()` resolution pattern exactly."""
@@ -133,7 +133,7 @@ class FinanceModule(BaseModule):
         self._set_state(ModuleState.STOPPED)
         self.logger.info("Finance Module stopped.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Return diagnostic health information."""
         return {
             "module": self.name,
@@ -193,11 +193,11 @@ class FinanceModule(BaseModule):
 
     # -- Common Diagnostics (structurally matches IEngineDiagnostics) ------
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return runtime metrics."""
         return {}
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics."""
         return {
             "module": self.name,
@@ -214,7 +214,7 @@ class FinanceModule(BaseModule):
         """Return semantic version string."""
         return "1.0.0"
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of registered capability strings."""
         return list(_REGISTERED_CAPABILITIES)
 

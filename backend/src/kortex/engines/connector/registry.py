@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import Any
 
 from kortex.engines.connector.base_driver import BaseConnectorDriver
 from kortex.engines.connector.exceptions import (
@@ -72,16 +71,10 @@ class MetadataDriverWrapper(BaseConnectorDriver):
     def metadata(self) -> DriverMetadata:
         return self._metadata
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
-        raise ConnectorOperationError(
-            "Metadata-only driver registration cannot execute actions."
-        )
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
+        raise ConnectorOperationError("Metadata-only driver registration cannot execute actions.")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return False
 
 
@@ -114,41 +107,27 @@ class ConnectorDriverRegistry:
             ConnectorValidationError: If any metadata validation rule is violated.
         """
         if not metadata.driver_id or not metadata.driver_id.strip():
-            raise ConnectorValidationError(
-                "Missing required metadata field: 'driver_id' cannot be empty."
-            )
+            raise ConnectorValidationError("Missing required metadata field: 'driver_id' cannot be empty.")
 
         if not metadata.display_name or not metadata.display_name.strip():
-            raise ConnectorValidationError(
-                "Missing required metadata field: 'display_name' cannot be empty."
-            )
+            raise ConnectorValidationError("Missing required metadata field: 'display_name' cannot be empty.")
 
         if not metadata.vendor or not metadata.vendor.strip():
-            raise ConnectorValidationError(
-                "Missing required metadata field: 'vendor' cannot be empty."
-            )
+            raise ConnectorValidationError("Missing required metadata field: 'vendor' cannot be empty.")
 
         if not metadata.author or not metadata.author.strip():
-            raise ConnectorValidationError(
-                "Missing required metadata field: 'author' cannot be empty."
-            )
+            raise ConnectorValidationError("Missing required metadata field: 'author' cannot be empty.")
 
         if not metadata.license or not metadata.license.strip():
-            raise ConnectorValidationError(
-                "Missing required metadata field: 'license' cannot be empty."
-            )
+            raise ConnectorValidationError("Missing required metadata field: 'license' cannot be empty.")
 
         if not metadata.description or not metadata.description.strip():
-            raise ConnectorValidationError(
-                "Missing required metadata field: 'description' cannot be empty."
-            )
+            raise ConnectorValidationError("Missing required metadata field: 'description' cannot be empty.")
 
         # Validate SemVer version format
         parse_semver(metadata.version)
 
-    def register_driver(
-        self, driver: BaseConnectorDriver | DriverMetadata
-    ) -> BaseConnectorDriver:
+    def register_driver(self, driver: BaseConnectorDriver | DriverMetadata) -> BaseConnectorDriver:
         """Register a BaseConnectorDriver or DriverMetadata instance.
 
         Args:
@@ -174,14 +153,10 @@ class ConnectorDriverRegistry:
             try:
                 meta = driver_obj.metadata
             except Exception as err:
-                raise ConnectorValidationError(
-                    f"Failed to access driver metadata: {err}"
-                ) from err
+                raise ConnectorValidationError(f"Failed to access driver metadata: {err}") from err
 
             if not isinstance(meta, DriverMetadata):
-                raise ConnectorValidationError(
-                    "Driver metadata property must return a DriverMetadata instance."
-                )
+                raise ConnectorValidationError("Driver metadata property must return a DriverMetadata instance.")
 
             self.validate_driver_metadata(meta)
 
@@ -199,9 +174,7 @@ class ConnectorDriverRegistry:
             self._drivers[driver_id][version] = driver_obj
             return driver_obj
 
-    def unregister_driver(
-        self, driver_id: str, version: str | None = None
-    ) -> bool:
+    def unregister_driver(self, driver_id: str, version: str | None = None) -> bool:
         """Unregister a driver or specific driver version from the registry.
 
         Args:
@@ -274,13 +247,9 @@ class ConnectorDriverRegistry:
 
                 return self.get_driver_by_id(target, version=version)
 
-            raise DriverNotFoundError(
-                f"Invalid driver lookup target: {identifier_or_capability}"
-            )
+            raise DriverNotFoundError(f"Invalid driver lookup target: {identifier_or_capability}")
 
-    def get_driver_by_id(
-        self, driver_id: str, version: str | None = None
-    ) -> BaseConnectorDriver:
+    def get_driver_by_id(self, driver_id: str, version: str | None = None) -> BaseConnectorDriver:
         """Retrieve a registered driver by driver_id and optional version.
 
         Args:
@@ -301,9 +270,7 @@ class ConnectorDriverRegistry:
             if version is not None:
                 version = version.strip()
                 if version not in self._drivers[driver_id]:
-                    raise DriverNotFoundError(
-                        f"Driver '{driver_id}' version '{version}' not found in registry."
-                    )
+                    raise DriverNotFoundError(f"Driver '{driver_id}' version '{version}' not found in registry.")
                 return self._drivers[driver_id][version]
 
             return self.get_latest_version(driver_id)
@@ -330,9 +297,7 @@ class ConnectorDriverRegistry:
             latest_version = sorted_versions[0]
             return self._drivers[driver_id][latest_version]
 
-    def get_driver_by_action(
-        self, action_type: ConnectorActionType | str
-    ) -> BaseConnectorDriver:
+    def get_driver_by_action(self, action_type: ConnectorActionType | str) -> BaseConnectorDriver:
         """Retrieve latest registered driver advertising support for an action type.
 
         Args:
@@ -347,14 +312,10 @@ class ConnectorDriverRegistry:
         with self._lock:
             matching = self.find_drivers_for_action(action_type)
             if not matching:
-                raise DriverNotFoundError(
-                    f"No registered driver found supporting action '{action_type}'."
-                )
+                raise DriverNotFoundError(f"No registered driver found supporting action '{action_type}'.")
             return self.get_driver_by_id(matching[0].driver_id)
 
-    def get_driver_by_capability(
-        self, capability: ConnectorCapability | str
-    ) -> BaseConnectorDriver:
+    def get_driver_by_capability(self, capability: ConnectorCapability | str) -> BaseConnectorDriver:
         """Retrieve latest registered driver advertising support for a capability.
 
         Args:
@@ -369,9 +330,7 @@ class ConnectorDriverRegistry:
         with self._lock:
             matching = self.find_drivers_by_capability(capability)
             if not matching:
-                raise DriverNotFoundError(
-                    f"No registered driver found supporting capability '{capability}'."
-                )
+                raise DriverNotFoundError(f"No registered driver found supporting capability '{capability}'.")
             return self.get_driver_by_id(matching[0].driver_id)
 
     def list_drivers(self) -> list[DriverMetadata]:
@@ -388,9 +347,7 @@ class ConnectorDriverRegistry:
                     results.append(latest.metadata)
             return results
 
-    def find_drivers_for_action(
-        self, action_type: ConnectorActionType | str
-    ) -> list[DriverMetadata]:
+    def find_drivers_for_action(self, action_type: ConnectorActionType | str) -> list[DriverMetadata]:
         """Find all registered drivers supporting a specific action type.
 
         Args:
@@ -418,9 +375,7 @@ class ConnectorDriverRegistry:
                         results.append(latest.metadata)
             return results
 
-    def find_drivers_by_capability(
-        self, capability: ConnectorCapability | str
-    ) -> list[DriverMetadata]:
+    def find_drivers_by_capability(self, capability: ConnectorCapability | str) -> list[DriverMetadata]:
         """Find all registered drivers supporting a specific fine-grained capability.
 
         Args:

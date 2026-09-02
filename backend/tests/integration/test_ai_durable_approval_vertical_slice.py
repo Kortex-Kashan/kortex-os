@@ -197,7 +197,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, Any]]:
         await db_manager.disconnect()
 
 
-async def _human_token(kernel: Kernel):  # noqa: ANN202
+async def _human_token(kernel: Kernel):
     security_engine: SecurityEngine = kernel.get_engine("security")
     principal = await security_engine.authentication_manager.authenticate(
         {
@@ -238,10 +238,7 @@ async def test_full_governed_ai_action_vertical_slice(kernel_env: tuple[Kernel, 
             context={"resource_tenant_id": _TENANT},
         )
     )
-    ai_tickets = [
-        t for t in list_result
-        if t["required_role"] == _HUMAN_APPROVER_ROLE
-    ]
+    ai_tickets = [t for t in list_result if t["required_role"] == _HUMAN_APPROVER_ROLE]
     assert len(ai_tickets) == 1
     ticket = ai_tickets[0]
     assert ticket["requester_principal_id"] == AI_SYSTEM_PRINCIPAL_ID
@@ -380,7 +377,7 @@ async def test_expired_ticket_cancels_paused_task_via_real_production_daemon(
 
     # Test-only: shrink the real, already-wired default timeout so this
     # test doesn't need to wait 24 hours. No other behavior is touched.
-    ai_engine.agent_orchestrator._approval_policy._approval_timeout_seconds = 1  # noqa: SLF001
+    ai_engine.agent_orchestrator._approval_policy._approval_timeout_seconds = 1
 
     task = AgentTask(
         task_id="vslice-task-expiry",
@@ -422,8 +419,4 @@ async def test_expired_ticket_cancels_paused_task_via_real_production_daemon(
     assert record.status.value == "CANCELLED"
     # No execution occurred -- the mutating tool's own tool_results never
     # show a completed call.
-    assert all(
-        result.status.value != "SUCCESS"
-        for step in record.steps
-        for result in step.tool_results
-    )
+    assert all(result.status.value != "SUCCESS" for step in record.steps for result in step.tool_results)

@@ -28,9 +28,7 @@ class AIBaseEvent(BaseModel):
 
     event_id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex}")
     event_type: str
-    timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 # ---------------------------------------------------------------------------

@@ -103,9 +103,7 @@ class TemplateBinder:
         """Return the underlying TemplateLibrary instance."""
         return self._library
 
-    async def bind(
-        self, schema: TemplateSchema, context: BindingContext
-    ) -> ValidationReport:
+    async def bind(self, schema: TemplateSchema, context: BindingContext) -> ValidationReport:
         """Validate context data against template placeholders (ITemplateBinder protocol).
 
         Args:
@@ -135,14 +133,10 @@ class TemplateBinder:
         Raises:
             DocumentTemplateError: If template_id or version is not found in library.
         """
-        schema = await self._library.get_template(
-            template_id, version=version, tenant_id=context.tenant_id
-        )
+        schema = await self._library.get_template(template_id, version=version, tenant_id=context.tenant_id)
         return await self.bind_schema(schema, context)
 
-    async def bind_schema(
-        self, schema: TemplateSchema, context: BindingContext
-    ) -> BindingResult:
+    async def bind_schema(self, schema: TemplateSchema, context: BindingContext) -> BindingResult:
         """Bind context data directly against a provided TemplateSchema.
 
         Args:
@@ -193,9 +187,7 @@ class TemplateBinder:
                 try:
                     operator = InvariantOperator(operator_str)
                 except ValueError:
-                    errors.append(
-                        f"Unsupported computed field operator '{operator_str}' for rule '{rule_name}'."
-                    )
+                    errors.append(f"Unsupported computed field operator '{operator_str}' for rule '{rule_name}'.")
                     continue
 
                 operand_values: list[float] = []
@@ -284,16 +276,11 @@ class TemplateBinder:
                 declared_type = field_types.get(ph_clean)
                 if declared_type is not None:
                     expected_python_types = _FIELD_TYPE_PYTHON_TYPES.get(declared_type)
-                    if expected_python_types is not None and not isinstance(
-                        val, expected_python_types
-                    ):
+                    if expected_python_types is not None and not isinstance(val, expected_python_types):
                         type_mismatches.append(
-                            f"Field '{ph_clean}' expected type {declared_type}, "
-                            f"got '{type(val).__name__}'."
+                            f"Field '{ph_clean}' expected type {declared_type}, got '{type(val).__name__}'."
                         )
-                        errors.append(
-                            f"Type mismatch for field '{ph_clean}': expected {declared_type}."
-                        )
+                        errors.append(f"Type mismatch for field '{ph_clean}': expected {declared_type}.")
             else:
                 unresolved_placeholders.append(ph_clean)
                 missing_placeholders.append(ph_clean)

@@ -7,8 +7,8 @@ Milestone M1 domain model.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -250,7 +250,7 @@ def test_knowledge_relationship_serialization_round_trip() -> None:
 
 
 def _make_record(**overrides: object) -> KnowledgeRecord:
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "record_id": "rec-1",
         "tenant_id": "tenant-a",
         "version_id": "v1",
@@ -258,7 +258,7 @@ def _make_record(**overrides: object) -> KnowledgeRecord:
         "trust_state": KnowledgeTrustState.HUMAN_CONFIRMED,
         "created_by": "user-1",
         "created_by_type": KnowledgeActorType.USER,
-        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
     }
     kwargs.update(overrides)
     return KnowledgeRecord(**kwargs)  # type: ignore[arg-type]
@@ -323,7 +323,7 @@ def test_knowledge_record_rejects_missing_trust_state() -> None:
                 "record_type": KnowledgeRecordType.FACT,
                 "created_by": "user-1",
                 "created_by_type": KnowledgeActorType.USER,
-                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 1, 1, tzinfo=UTC),
             }
         )
 
@@ -349,7 +349,7 @@ def test_knowledge_record_serialization_round_trip() -> None:
 
 
 def _make_annotation(**overrides: object) -> KnowledgeAnnotation:
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "annotation_id": "ann-1",
         "tenant_id": "tenant-a",
         "target_record_id": "rec-1",
@@ -357,7 +357,7 @@ def _make_annotation(**overrides: object) -> KnowledgeAnnotation:
         "actor_id": "user-1",
         "actor_type": KnowledgeActorType.USER,
         "content": "This decision was made after the Q3 review.",
-        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
     }
     kwargs.update(overrides)
     return KnowledgeAnnotation(**kwargs)  # type: ignore[arg-type]
@@ -530,7 +530,7 @@ def test_knowledge_query_defaults_as_of_to_none() -> None:
 
 
 def test_knowledge_query_accepts_explicit_trust_states_and_as_of() -> None:
-    as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    as_of = datetime(2026, 1, 1, tzinfo=UTC)
     query = KnowledgeQuery(
         query_id="q-1",
         tenant_id="tenant-a",
@@ -651,7 +651,7 @@ def test_knowledge_query_result_accepts_matching_records() -> None:
         trust_state=KnowledgeTrustState.HUMAN_CONFIRMED,
         created_by="user-1",
         created_by_type=KnowledgeActorType.USER,
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     result = KnowledgeQueryResult(query_id="q-1", matching_records=[record], execution_time_ms=1.0)
     assert result.matching_records == [record]
@@ -666,7 +666,7 @@ def test_knowledge_query_result_serialization_round_trip_with_matching_records()
         trust_state=KnowledgeTrustState.SOURCE_EVIDENCE,
         created_by="user-1",
         created_by_type=KnowledgeActorType.USER,
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     result = KnowledgeQueryResult(query_id="q-1", matching_records=[record], execution_time_ms=1.0)
     restored = KnowledgeQueryResult.model_validate(result.model_dump())

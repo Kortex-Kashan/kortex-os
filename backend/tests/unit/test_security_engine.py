@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
 
 import pytest
 from argon2 import PasswordHasher
@@ -35,7 +34,6 @@ from kortex.engines.security.exceptions import (
     AuthenticationError,
     MasterKeyError,
     SecretNotFoundError,
-    SecurityEngineError,
     SigningKeyError,
 )
 from kortex.engines.security.models import (
@@ -48,7 +46,6 @@ from kortex.engines.security.models import (
 )
 from kortex.engines.security.providers.local_crypto import LocalCrypto
 from kortex.engines.storage.engine import StorageEngine
-
 
 _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.auth.authenticate",
@@ -119,6 +116,7 @@ async def _grant_role_permission(storage_engine: StorageEngine, role: str, permi
 
     async def _action(session: AsyncSession) -> None:
         from sqlalchemy import select
+
         existing = await session.scalar(
             select(RolePermissionRecord).where(
                 RolePermissionRecord.role == role,
@@ -248,7 +246,7 @@ async def test_capabilities_reflects_all_canonical_registrations_after_initializ
 async def test_signature_verify_capability_verifies_real_signature(tmp_path: Path) -> None:
     """`signature.verify` is real as of M6 — verifies valid Ed25519 signatures
     and fails closed (returns False) on invalid/malformed signatures."""
-    kernel, _storage, security_engine = await _boot_kernel_with_security(tmp_path)
+    kernel, _storage, _security_engine = await _boot_kernel_with_security(tmp_path)
     raw_handler = kernel._registry_engine.get_raw_handler_for_testing("kortex.security.signature.verify")
 
     crypto = LocalCrypto()
@@ -274,7 +272,6 @@ async def test_signature_verify_capability_fails_closed_on_malformed_input(tmp_p
 
     assert await raw_handler(data=None, signature=None) is False
     assert await raw_handler(data="text", signature="not_hex", public_key="not_hex") is False
-
 
 
 # -- D2. secret.get is REAL as of M2: delegates to SecretStore, fails closed -------
@@ -542,7 +539,6 @@ async def test_security_engine_diagnostics_lists_not_yet_implemented_subsystems(
     assert "secret_storage" not in detail["not_yet_implemented"]
     assert "authentication" not in detail["not_yet_implemented"]
     assert "authorization" not in detail["not_yet_implemented"]
-
 
 
 def test_security_engine_version_is_stable_string() -> None:

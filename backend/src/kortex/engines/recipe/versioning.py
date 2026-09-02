@@ -8,7 +8,7 @@ resolution, and dependency dependency graph verification.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+
 from kortex.engines.recipe.exceptions import RecipeVersionError
 
 
@@ -18,7 +18,7 @@ class VersionResolver:
     SEMVER_REGEX = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$")
 
     @classmethod
-    def parse_semver(cls, version_str: str) -> Tuple[int, int, int]:
+    def parse_semver(cls, version_str: str) -> tuple[int, int, int]:
         """Parse version string into (major, minor, patch) tuple.
 
         Args:
@@ -32,7 +32,9 @@ class VersionResolver:
         """
         match = cls.SEMVER_REGEX.match(version_str.strip())
         if not match:
-            raise RecipeVersionError(f"Invalid Semantic Version string: '{version_str}'. Must follow MAJOR.MINOR.PATCH format.")
+            raise RecipeVersionError(
+                f"Invalid Semantic Version string: '{version_str}'. Must follow MAJOR.MINOR.PATCH format."
+            )
         return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
     @classmethod
@@ -89,8 +91,8 @@ class VersionResolver:
     @classmethod
     def resolve_dependencies(
         cls,
-        required_dependencies: Dict[str, str],
-        available_assets: Dict[str, str],
+        required_dependencies: dict[str, str],
+        available_assets: dict[str, str],
     ) -> bool:
         """Verify that all required dependencies are satisfied by available assets.
 

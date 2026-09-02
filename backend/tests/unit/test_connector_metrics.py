@@ -8,12 +8,11 @@ IEngineDiagnostics contract output boundaries.
 from __future__ import annotations
 
 import json
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+
 from kortex.engines.connector.diagnostics import (
-    ALLOWED_ERROR_CATEGORIES,
-    CANONICAL_CAPABILITIES,
     ConnectorDiagnostics,
 )
 from kortex.engines.connector.drivers.http_driver import HttpRestConnectorDriver

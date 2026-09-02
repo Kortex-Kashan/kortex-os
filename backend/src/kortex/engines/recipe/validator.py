@@ -8,29 +8,42 @@ Performs NO compilation or execution.
 
 from __future__ import annotations
 
-import hashlib
-from typing import Dict, List, Optional, Set
-from kortex.engines.recipe.exceptions import RecipeValidationError
 from kortex.engines.recipe.manifest import RecipeManifestManager
 from kortex.engines.recipe.models import RecipeDefinition, RecipeValidationResult
 
-FORBIDDEN_EXTENSIONS: Set[str] = {
-    ".py", ".pyc", ".pyd", ".pyo",
-    ".js", ".jsx", ".ts", ".tsx",
+FORBIDDEN_EXTENSIONS: set[str] = {
+    ".py",
+    ".pyc",
+    ".pyd",
+    ".pyo",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
     ".sql",
-    ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".bash",
-    ".exe", ".dll", ".so", ".dylib", ".bin", ".com",
+    ".ps1",
+    ".psm1",
+    ".bat",
+    ".cmd",
+    ".sh",
+    ".bash",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".bin",
+    ".com",
 }
 
 
 class RecipeValidator:
     """Validator inspecting recipe structures, security policies, and checksums."""
 
-    def __init__(self, registered_capabilities: Optional[List[str]] = None) -> None:
+    def __init__(self, registered_capabilities: list[str] | None = None) -> None:
         """Initialize validator with optional list of valid system capabilities."""
         self.registered_capabilities = set(registered_capabilities) if registered_capabilities else None
 
-    def validate_security(self, raw_files: Dict[str, bytes]) -> RecipeValidationResult:
+    def validate_security(self, raw_files: dict[str, bytes]) -> RecipeValidationResult:
         """Verify that a recipe asset package contains NO executable code files.
 
         Args:
@@ -39,8 +52,8 @@ class RecipeValidator:
         Returns:
             RecipeValidationResult detailing validation pass/fail.
         """
-        errors: List[str] = []
-        for filename in raw_files.keys():
+        errors: list[str] = []
+        for filename in raw_files:
             lower_fn = filename.lower()
             for ext in FORBIDDEN_EXTENSIONS:
                 if lower_fn.endswith(ext):
@@ -58,7 +71,7 @@ class RecipeValidator:
         Returns:
             RecipeValidationResult object.
         """
-        errors: List[str] = []
+        errors: list[str] = []
         recipe_id = recipe.manifest.id
 
         if not recipe.manifest.name:
@@ -68,7 +81,7 @@ class RecipeValidator:
         if not recipe.steps:
             errors.append("Recipe must define at least one execution step.")
 
-        step_ids: Set[str] = set()
+        step_ids: set[str] = set()
         for idx, step in enumerate(recipe.steps):
             if not step.id:
                 errors.append(f"Step at index {idx} missing required 'id'.")
@@ -81,9 +94,10 @@ class RecipeValidator:
                 errors.append(f"Step '{step.id}' missing human-readable 'name'.")
 
             # Check capability if registered_capabilities provided
-            if self.registered_capabilities is not None and step.capability:
-                if step.capability not in self.registered_capabilities:
-                    errors.append(f"Step '{step.id}' references unregistered capability '{step.capability}'.")
+            if (
+                self.registered_capabilities is not None and step.capability
+            ) and step.capability not in self.registered_capabilities:
+                errors.append(f"Step '{step.id}' references unregistered capability '{step.capability}'.")
 
         is_valid = len(errors) == 0
         return RecipeValidationResult(is_valid=is_valid, recipe_id=recipe_id, errors=errors)
@@ -104,7 +118,7 @@ class RecipeValidator:
     def validate_recipe(
         self,
         recipe: RecipeDefinition,
-        raw_files: Optional[Dict[str, bytes]] = None,
+        raw_files: dict[str, bytes] | None = None,
     ) -> RecipeValidationResult:
         """Comprehensive validation of recipe schema, security rules, and DSL integrity.
 

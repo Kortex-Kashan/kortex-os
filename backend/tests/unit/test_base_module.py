@@ -10,7 +10,7 @@ implementation boundary.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
@@ -50,7 +50,7 @@ class _FakeModule(BaseModule):
         self._set_state(ModuleState.STOPPING)
         self._set_state(ModuleState.STOPPED)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"module": self.name, "status": "healthy" if self._state == ModuleState.ACTIVE else "unhealthy"}
 
 

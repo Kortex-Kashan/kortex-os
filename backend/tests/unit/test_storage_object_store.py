@@ -87,5 +87,5 @@ async def test_get_missing_object_raises_error(tmp_path) -> None:
     """Test retrieving non-existent object raises ResourceNotFoundError."""
     file_store = LocalFileStore(tmp_path)
     object_store = BlobObjectStore(file_store)
-    with pytest.raises(ResourceNotFoundError, match="Object 'missing.bin' not found in bucket 'test'"):
+    with pytest.raises(ResourceNotFoundError, match=r"Object 'missing.bin' not found in bucket 'test'"):
         await object_store.get_object("test", "missing.bin")

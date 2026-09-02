@@ -566,10 +566,7 @@ async def test_invoke_all_exceeding_max_batch_size_raises(
     invoker_setup: tuple[AIToolInvoker, ToolRegistry, InMemoryToolExecutionPort],
 ) -> None:
     invoker, _, _ = invoker_setup
-    calls = [
-        ToolCall(call_id=f"c{i}", tool_name="tool_1", arguments={})
-        for i in range(MAX_BATCH_SIZE + 1)
-    ]
+    calls = [ToolCall(call_id=f"c{i}", tool_name="tool_1", arguments={}) for i in range(MAX_BATCH_SIZE + 1)]
     with pytest.raises(ToolValidationError) as exc_info:
         await invoker.invoke_all(TENANT_ID, calls)
     assert "exceeds MAX_BATCH_SIZE" in str(exc_info.value)
@@ -777,6 +774,4 @@ def test_invoker_source_contains_no_self_recursion() -> None:
         assert "self.invoke_tool(" not in source or method is AIToolInvoker.invoke, (
             f"{method.__name__} must not re-enter tool invocation"
         )
-        assert "self.invoke_all(" not in source, (
-            f"{method.__name__} must not re-enter batch invocation"
-        )
+        assert "self.invoke_all(" not in source, f"{method.__name__} must not re-enter batch invocation"

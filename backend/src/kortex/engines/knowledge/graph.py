@@ -55,7 +55,6 @@ Relationship integrity / cycle detection (spec §11):
 from __future__ import annotations
 
 from collections import deque
-from typing import Dict, List, Set, Tuple
 
 from kortex.engines.knowledge.exceptions import (
     KnowledgeDuplicateNodeError,
@@ -82,12 +81,12 @@ class KnowledgeGraph:
     """In-memory, tenant-scoped directed Knowledge Graph (spec §8)."""
 
     def __init__(self) -> None:
-        self._nodes: Dict[Tuple[str, str], KnowledgeNode] = {}
-        self._relationships: Dict[Tuple[str, str], KnowledgeRelationship] = {}
+        self._nodes: dict[tuple[str, str], KnowledgeNode] = {}
+        self._relationships: dict[tuple[str, str], KnowledgeRelationship] = {}
         # Outgoing-edge index: (tenant_id, source_node_id) -> [relationship, ...]
-        self._outgoing: Dict[Tuple[str, str], List[KnowledgeRelationship]] = {}
+        self._outgoing: dict[tuple[str, str], list[KnowledgeRelationship]] = {}
 
-    def list_nodes(self, tenant_id: str) -> List[KnowledgeNode]:
+    def list_nodes(self, tenant_id: str) -> list[KnowledgeNode]:
         """Return every node registered for `tenant_id`. Added in Milestone
         M8 so a search coordinator can enumerate candidate nodes without
         reaching into `_nodes` directly — purely additive; `IKnowledgeGraph`'s
@@ -104,9 +103,7 @@ class KnowledgeGraph:
         rejected, never silently overwritten."""
         key = (node.tenant_id, node.node_id)
         if key in self._nodes:
-            raise KnowledgeDuplicateNodeError(
-                f"Node '{node.node_id}' already exists for tenant '{node.tenant_id}'."
-            )
+            raise KnowledgeDuplicateNodeError(f"Node '{node.node_id}' already exists for tenant '{node.tenant_id}'.")
         self._nodes[key] = node
         return node
 
@@ -147,14 +144,15 @@ class KnowledgeGraph:
                 f"'{relationship.source_node_id}', which is invalid for any relationship type."
             )
 
-        if relationship.relationship_type in _HIERARCHICAL_RELATIONSHIP_TYPES:
-            if self._would_create_cycle(tenant_id, relationship):
-                raise KnowledgeGraphCycleError(
-                    f"Adding relationship '{relationship.relationship_id}' "
-                    f"({relationship.relationship_type.value}) from "
-                    f"'{relationship.source_node_id}' to '{relationship.target_node_id}' "
-                    f"would create a cycle for tenant '{tenant_id}'."
-                )
+        if relationship.relationship_type in _HIERARCHICAL_RELATIONSHIP_TYPES and self._would_create_cycle(
+            tenant_id, relationship
+        ):
+            raise KnowledgeGraphCycleError(
+                f"Adding relationship '{relationship.relationship_id}' "
+                f"({relationship.relationship_type.value}) from "
+                f"'{relationship.source_node_id}' to '{relationship.target_node_id}' "
+                f"would create a cycle for tenant '{tenant_id}'."
+            )
 
         self._relationships[rel_key] = relationship
         self._outgoing.setdefault((tenant_id, relationship.source_node_id), []).append(relationship)
@@ -168,7 +166,7 @@ class KnowledgeGraph:
         target = new_relationship.target_node_id
         source = new_relationship.source_node_id
 
-        visited: Set[str] = {target}
+        visited: set[str] = {target}
         queue: deque = deque([target])
         while queue:
             current = queue.popleft()
@@ -182,7 +180,7 @@ class KnowledgeGraph:
                     queue.append(edge.target_node_id)
         return False
 
-    def find_neighbors(self, node_id: str, tenant_id: str) -> List[KnowledgeNode]:
+    def find_neighbors(self, node_id: str, tenant_id: str) -> list[KnowledgeNode]:
         """Return each distinct immediate outgoing-neighbor node of
         `node_id` exactly once, scoped to `tenant_id`. If multiple distinct
         relationships (different `relationship_id`, same or different
@@ -193,8 +191,8 @@ class KnowledgeGraph:
         `tenant_id`."""
         if (tenant_id, node_id) not in self._nodes:
             raise KnowledgeNodeNotFoundError(f"Node '{node_id}' not found for tenant '{tenant_id}'.")
-        seen: Set[str] = set()
-        neighbors: List[KnowledgeNode] = []
+        seen: set[str] = set()
+        neighbors: list[KnowledgeNode] = []
         for edge in self._outgoing.get((tenant_id, node_id), []):
             if edge.target_node_id in seen:
                 continue
@@ -202,7 +200,7 @@ class KnowledgeGraph:
             neighbors.append(self._nodes[(tenant_id, edge.target_node_id)])
         return neighbors
 
-    def traverse(self, node_id: str, tenant_id: str, max_hops: int) -> List[KnowledgeNode]:
+    def traverse(self, node_id: str, tenant_id: str, max_hops: int) -> list[KnowledgeNode]:
         """Breadth-first traversal up to `max_hops` outgoing hops from
         `node_id`, scoped to `tenant_id`. Cycle-safe (never revisits a
         node) since `RELATES_TO`/`REFERENCES` edges may legitimately form
@@ -217,12 +215,12 @@ class KnowledgeGraph:
         if (tenant_id, node_id) not in self._nodes:
             raise KnowledgeNodeNotFoundError(f"Node '{node_id}' not found for tenant '{tenant_id}'.")
 
-        visited: Set[str] = {node_id}
-        result: List[KnowledgeNode] = []
-        frontier: List[str] = [node_id]
+        visited: set[str] = {node_id}
+        result: list[KnowledgeNode] = []
+        frontier: list[str] = [node_id]
         hops = 0
         while frontier and hops < max_hops:
-            next_frontier: List[str] = []
+            next_frontier: list[str] = []
             for current in frontier:
                 for edge in self._outgoing.get((tenant_id, current), []):
                     neighbor_id = edge.target_node_id

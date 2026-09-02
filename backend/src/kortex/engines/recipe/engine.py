@@ -10,7 +10,7 @@ Contains strictly ZERO execution, ZERO direct parsing, and ZERO direct compilati
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.recipe.compiler import RecipeCompiler
@@ -19,7 +19,6 @@ from kortex.engines.recipe.exceptions import RecipeError
 from kortex.engines.recipe.installer import RecipeInstaller
 from kortex.engines.recipe.interfaces import IEngineDiagnostics
 from kortex.engines.recipe.loader import RecipeLoader
-from kortex.engines.recipe.manifest import RecipeManifestManager
 from kortex.engines.recipe.models import (
     RecipeCompilationResult,
     RecipeDefinition,
@@ -66,7 +65,7 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
         return "recipe"
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Names of prerequisite system engines."""
         return ["configuration", "registry", "storage", "workflow"]
 
@@ -178,13 +177,13 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
         self._set_state(EngineState.STOPPED)
         self.logger.info("Recipe Engine stopped cleanly.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Return diagnostic health check dict."""
         return self.health()
 
     # -- Facade Capability Methods (Delegated to internal services) ----------
 
-    def parse(self, raw_recipe: str, raw_manifest: Optional[str] = None) -> RecipeDefinition:
+    def parse(self, raw_recipe: str, raw_manifest: str | None = None) -> RecipeDefinition:
         """Parse raw recipe YAML string."""
         self._diagnostics_provider.increment_metric("recipes_parsed")
         return self.parser.parse_definition(raw_recipe, raw_manifest)
@@ -197,7 +196,7 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
     def compile(
         self,
         recipe: RecipeDefinition,
-        input_parameters: Optional[Dict[str, Any]] = None,
+        input_parameters: dict[str, Any] | None = None,
     ) -> RecipeCompilationResult:
         """Compile RecipeDefinition into WorkflowDefinition."""
         self._diagnostics_provider.increment_metric("recipes_compiled")
@@ -207,7 +206,7 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
         """Load recipe from binary .kortex-recipe payload."""
         return self.loader.load_from_package(package_bytes)
 
-    def package(self, files: Dict[str, bytes], manifest: RecipeManifest) -> RecipePackage:
+    def package(self, files: dict[str, bytes], manifest: RecipeManifest) -> RecipePackage:
         """Assemble .kortex-recipe archive package."""
         self._diagnostics_provider.increment_metric("packages_created")
         return self.packager.create_package(files, manifest)
@@ -237,27 +236,27 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
         """Uninstall recipe version."""
         return await self.installer.remove(recipe_id, version)
 
-    def search(self, query: str) -> List[RecipeDefinition]:
+    def search(self, query: str) -> list[RecipeDefinition]:
         """Search registered recipes."""
         return self.registry.search(query)
 
-    def list_recipes(self) -> List[RecipeDefinition]:
+    def list_recipes(self) -> list[RecipeDefinition]:
         """List registered recipes."""
         return self.registry.list_all()
 
-    def info(self, recipe_id: str, version: Optional[str] = None) -> Optional[RecipeDefinition]:
+    def info(self, recipe_id: str, version: str | None = None) -> RecipeDefinition | None:
         """Lookup registered recipe by ID."""
         return self.registry.find_by_id(recipe_id, version)
 
     # -- Common Diagnostics Interface --------------------------------------
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         return self._diagnostics_provider.health()
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         return self._diagnostics_provider.metrics()
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         return self._diagnostics_provider.diagnostics()
 
     def status(self) -> str:
@@ -266,5 +265,5 @@ class RecipeEngine(BaseEngine, IEngineDiagnostics):
     def version(self) -> str:
         return self._diagnostics_provider.version()
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         return self._diagnostics_provider.capabilities()

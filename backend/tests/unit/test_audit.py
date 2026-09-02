@@ -18,18 +18,19 @@ Covers:
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
-from typing import Any, Awaitable, Callable, List, NoReturn, Optional, cast
 import uuid
-
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any, NoReturn, cast
 
 import pytest
+from argon2 import PasswordHasher
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.kernel import Kernel
 from kortex.engines.event.engine import Event, EventEngine
 from kortex.engines.security.audit import AuditManager
-from kortex.engines.security.models import RolePermissionRecord
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.events import (
     SecurityAccessDeniedEvent,
@@ -41,20 +42,18 @@ from kortex.engines.security.events import (
     SecuritySecretModifiedEvent,
     SecuritySignatureVerifiedEvent,
 )
-from kortex.engines.security.exceptions import AuditError, SecurityEngineError
+from kortex.engines.security.exceptions import AuditError, AuthenticationError, SecurityEngineError
 from kortex.engines.security.models import (
-    AccessDecision,
-    AuditRecord,
     CryptographicSignature,
     PermissionRequirement,
     PrincipalRecord,
     PrincipalType,
+    RolePermissionRecord,
     SecurityPrincipal,
     UniversalAuditEntry,
 )
 from kortex.engines.security.providers.local_crypto import LocalCrypto
 from kortex.engines.storage.engine import StorageEngine
-from argon2 import PasswordHasher
 
 _TEST_MASTER_KEY = b"\x11" * 32
 _TEST_SIGNING_KEY = b"\x22" * 32
@@ -62,14 +61,14 @@ _TEST_SIGNING_KEY = b"\x22" * 32
 
 async def _make_test_env(
     tmp_path: Path, with_event_engine: bool = True
-) -> tuple[Kernel, StorageEngine, Optional[EventEngine], AuditManager]:
+) -> tuple[Kernel, StorageEngine, EventEngine | None, AuditManager]:
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "audit_test_storage"))
     kernel.register_engine(storage_engine)
     await storage_engine.initialize(kernel)
     await storage_engine.start()
 
-    event_engine: Optional[EventEngine] = None
+    event_engine: EventEngine | None = None
     if with_event_engine:
         event_engine = kernel.get_engine("event")  # type: ignore[assignment]
         await event_engine.initialize(kernel)
@@ -77,7 +76,6 @@ async def _make_test_env(
 
     await kernel.db.connect()
     await kernel.db.create_all_tables()
-
 
     audit_mgr = AuditManager(
         data_store=storage_engine.data,
@@ -116,7 +114,7 @@ def test_universal_audit_entry_immutability_and_defaults() -> None:
     assert entry.tenant_id == "tenant_alpha"
 
     # Verify immutability
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         entry.action = "tampered.action"  # type: ignore[misc]
 
 
@@ -131,7 +129,7 @@ def test_security_events_immutability() -> None:
     assert event.event_type == "kortex.event.security.audit"
     assert event.event_id.startswith("sec-evt-")
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         event.actor_id = "tampered"  # type: ignore[misc]
 
     # Specific event models
@@ -141,10 +139,14 @@ def test_security_events_immutability() -> None:
     auth_fail = SecurityAuthFailureEvent(tenant_id="t1", principal_id="p1", reason="bad_pass")
     assert auth_fail.event_type == "kortex.event.security.auth.failure"
 
-    acc_grant = SecurityAccessGrantedEvent(tenant_id="t1", principal_id="p1", capability_name="cap1", decision_code="ALLOW")
+    acc_grant = SecurityAccessGrantedEvent(
+        tenant_id="t1", principal_id="p1", capability_name="cap1", decision_code="ALLOW"
+    )
     assert acc_grant.event_type == "kortex.event.security.access.granted"
 
-    acc_deny = SecurityAccessDeniedEvent(tenant_id="t1", principal_id="p1", capability_name="cap1", reason="no_role", decision_code="DENY")
+    acc_deny = SecurityAccessDeniedEvent(
+        tenant_id="t1", principal_id="p1", capability_name="cap1", reason="no_role", decision_code="DENY"
+    )
     assert acc_deny.event_type == "kortex.event.security.access.denied"
 
     sec_acc = SecuritySecretAccessedEvent(tenant_id="t1", secret_handle="sec:key")
@@ -175,10 +177,10 @@ def test_compute_state_hash() -> None:
 
 @pytest.mark.asyncio
 async def test_record_audit_entry_and_event_publishing(tmp_path: Path) -> None:
-    kernel, storage, event_engine, audit_mgr = await _make_test_env(tmp_path, with_event_engine=True)
+    _kernel, _storage, event_engine, audit_mgr = await _make_test_env(tmp_path, with_event_engine=True)
     assert event_engine is not None
 
-    received_events: List[Event] = []
+    received_events: list[Event] = []
 
     async def _on_audit_event(evt: Event) -> None:
         received_events.append(evt)
@@ -210,7 +212,7 @@ async def test_record_audit_entry_and_event_publishing(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_event_subscriber_error_does_not_abort_audit_record(tmp_path: Path) -> None:
-    kernel, storage, event_engine, audit_mgr = await _make_test_env(tmp_path, with_event_engine=True)
+    _kernel, _storage, event_engine, audit_mgr = await _make_test_env(tmp_path, with_event_engine=True)
     assert event_engine is not None
 
     async def _failing_subscriber(evt: Event) -> NoReturn:
@@ -233,7 +235,7 @@ async def test_event_subscriber_error_does_not_abort_audit_record(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_record_audit_validation_failures(tmp_path: Path) -> None:
-    kernel, storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
+    _kernel, _storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
 
     with pytest.raises(AuditError, match="tenant_id"):
         await audit_mgr.record_audit_entry(
@@ -263,7 +265,6 @@ async def test_record_audit_validation_failures(tmp_path: Path) -> None:
         )
 
 
-
 @pytest.mark.asyncio
 async def test_storage_failure_normalizes_to_audit_error() -> None:
     failing_mgr = AuditManager(data_store=_FailingDataStore())  # type: ignore[arg-type]
@@ -288,14 +289,14 @@ async def test_storage_failure_normalizes_to_audit_error() -> None:
 
 @pytest.mark.asyncio
 async def test_audit_tenant_isolation(tmp_path: Path) -> None:
-    kernel, storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
+    _kernel, _storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
     uid = uuid.uuid4().hex
     tenant_a = f"tenant_a_{uid}"
     tenant_b = f"tenant_b_{uid}"
 
     # Seed entries for Tenant A and Tenant B
     e_a1 = await audit_mgr.record_event("action.1", "user_a", "USER", tenant_a)
-    e_a2 = await audit_mgr.record_event("action.2", "user_a", "USER", tenant_a)
+    await audit_mgr.record_event("action.2", "user_a", "USER", tenant_a)
     e_b1 = await audit_mgr.record_event("action.1", "user_b", "USER", tenant_b)
 
     # Query Tenant A
@@ -321,7 +322,7 @@ async def test_audit_tenant_isolation(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_audit_filtering_and_pagination(tmp_path: Path) -> None:
-    kernel, storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
+    _kernel, _storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
     tenant_corp = f"tenant_corp_{uuid.uuid4().hex}"
 
     for i in range(15):
@@ -331,7 +332,6 @@ async def test_audit_filtering_and_pagination(tmp_path: Path) -> None:
 
     all_corp = await audit_mgr.get_audit_entries(tenant_corp, limit=50)
     assert len(all_corp) == 15
-
 
     # Filter by action
     creates = await audit_mgr.get_audit_entries(tenant_corp, action="doc.create")
@@ -351,10 +351,9 @@ async def test_audit_filtering_and_pagination(tmp_path: Path) -> None:
     assert page1_ids.isdisjoint(page2_ids)
 
 
-
 @pytest.mark.asyncio
 async def test_query_validation_errors(tmp_path: Path) -> None:
-    kernel, storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
+    _kernel, _storage, _, audit_mgr = await _make_test_env(tmp_path, with_event_engine=False)
 
     with pytest.raises(AuditError, match="tenant_id"):
         await audit_mgr.get_audit_entries("")
@@ -388,7 +387,6 @@ async def test_security_engine_audit_and_diagnostics(tmp_path: Path) -> None:
     await event.start()
     await kernel.db.connect()
     await kernel.db.create_all_tables()
-
 
     # Before initialize, property access raises
     uninit_engine = SecurityEngine()
@@ -532,12 +530,17 @@ async def test_authenticate_success_records_audit_entry_and_publishes_event(tmp_
     tenant_id = f"tenant-auth-ok-{uuid.uuid4().hex}"
     await _seed_auth_principal(storage, tenant_id, "principal-1", "correct-password")
 
-    received: List[Event] = []
+    received: list[Event] = []
     event_engine = cast(EventEngine, kernel.get_engine("event"))
     event_engine.subscribe("kortex.event.security.auth.success", lambda evt: received.append(evt))
 
     principal = await security_engine.authenticate(
-        {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": "principal-1", "password": "correct-password"}
+        {
+            "principal_type": "USER",
+            "tenant_id": tenant_id,
+            "principal_id": "principal-1",
+            "password": "correct-password",
+        }
     )
     assert principal.principal_id == "principal-1"
 
@@ -558,13 +561,18 @@ async def test_authenticate_failure_records_audit_entry_and_publishes_event(tmp_
     tenant_id = f"tenant-auth-fail-{uuid.uuid4().hex}"
     await _seed_auth_principal(storage, tenant_id, "principal-1", "correct-password")
 
-    received: List[Event] = []
+    received: list[Event] = []
     event_engine = cast(EventEngine, kernel.get_engine("event"))
     event_engine.subscribe("kortex.event.security.auth.failure", lambda evt: received.append(evt))
 
-    with pytest.raises(Exception):
+    with pytest.raises(AuthenticationError):
         await security_engine.authenticate(
-            {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": "principal-1", "password": "wrong-password"}
+            {
+                "principal_type": "USER",
+                "tenant_id": tenant_id,
+                "principal_id": "principal-1",
+                "password": "wrong-password",
+            }
         )
 
     entries = await security_engine.audit_manager.get_audit_entries(tenant_id)
@@ -586,7 +594,10 @@ async def test_authorize_capability_dispatch_records_audit_entry_on_grant_and_de
 
     tenant_id = f"tenant-authz-{uuid.uuid4().hex}"
     principal = SecurityPrincipal(
-        principal_id="p1", principal_type=PrincipalType.USER, tenant_id=tenant_id, roles=[role],
+        principal_id="p1",
+        principal_type=PrincipalType.USER,
+        tenant_id=tenant_id,
+        roles=[role],
         attributes={"clearance_level": "INTERNAL"},
     )
     allowed_req = PermissionRequirement(capability_name="document.write", required_permissions=["document.write"])
@@ -614,7 +625,7 @@ async def test_authenticate_facade_fails_closed_for_non_dict_credentials(
     must not itself crash (e.g. `AttributeError` from calling `.get()` on a
     non-dict) ahead of `AuthenticationManager.authenticate`'s own required
     fail-closed `AuthenticationError` for malformed credential shapes."""
-    kernel, _storage, security_engine = await _boot_kernel_with_security_and_event(tmp_path)
+    _kernel, _storage, security_engine = await _boot_kernel_with_security_and_event(tmp_path)
 
     from kortex.engines.security.exceptions import AuthenticationError
 
@@ -623,11 +634,13 @@ async def test_authenticate_facade_fails_closed_for_non_dict_credentials(
 
 
 @pytest.mark.asyncio
-async def test_audit_persistence_failure_does_not_break_authenticate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_audit_persistence_failure_does_not_break_authenticate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An audit-store outage must not become a fail-closed lockout of
     authentication — audit recording is best-effort (Milestone M6 design
     decision, not a frozen mandate)."""
-    kernel, storage, security_engine = await _boot_kernel_with_security_and_event(tmp_path)
+    _kernel, storage, security_engine = await _boot_kernel_with_security_and_event(tmp_path)
     tenant_id = f"tenant-auditfail-{uuid.uuid4().hex}"
     await _seed_auth_principal(storage, tenant_id, "principal-1", "correct-password")
 
@@ -637,6 +650,11 @@ async def test_audit_persistence_failure_does_not_break_authenticate(tmp_path: P
     monkeypatch.setattr(security_engine.audit_manager, "record_event", _broken_record_event)
 
     principal = await security_engine.authenticate(
-        {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": "principal-1", "password": "correct-password"}
+        {
+            "principal_type": "USER",
+            "tenant_id": tenant_id,
+            "principal_id": "principal-1",
+            "password": "correct-password",
+        }
     )
     assert principal.principal_id == "principal-1"

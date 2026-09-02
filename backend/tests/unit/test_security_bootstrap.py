@@ -49,9 +49,7 @@ _TEST_SIGNING_KEY = b"\x66" * 32
 @pytest.fixture(autouse=True)
 def _isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KORTEX_STORAGE_DIR", str(tmp_path / "bootstrap_storage"))
-    monkeypatch.setenv(
-        "KORTEX_DATABASE_URL", f"sqlite+aiosqlite:///{(tmp_path / 'bootstrap_test.db').as_posix()}"
-    )
+    monkeypatch.setenv("KORTEX_DATABASE_URL", f"sqlite+aiosqlite:///{(tmp_path / 'bootstrap_test.db').as_posix()}")
 
 
 async def _minimal_security_kernel(tmp_path: Path) -> tuple[Kernel, SecurityEngine]:
@@ -145,13 +143,19 @@ async def test_second_bootstrap_attempt_is_rejected(tmp_path: Path) -> None:
     kernel, security_engine = await _minimal_security_kernel(tmp_path)
     try:
         await security_engine.authentication_manager.bootstrap_first_admin(
-            tenant_id="acme", principal_id="owner", password="correct horse battery staple",
-            roles=["admin"], permissions=[],
+            tenant_id="acme",
+            principal_id="owner",
+            password="correct horse battery staple",
+            roles=["admin"],
+            permissions=[],
         )
         with pytest.raises(BootstrapClosedError):
             await security_engine.authentication_manager.bootstrap_first_admin(
-                tenant_id="other-corp", principal_id="second-admin", password="another-strong-password",
-                roles=["admin"], permissions=[],
+                tenant_id="other-corp",
+                principal_id="second-admin",
+                password="another-strong-password",
+                roles=["admin"],
+                permissions=[],
             )
         # The rejected second attempt must not have created anything.
         with pytest.raises(AuthenticationError):
@@ -176,12 +180,18 @@ async def test_concurrent_bootstrap_attempts_only_one_wins(tmp_path: Path) -> No
     try:
         results = await asyncio.gather(
             security_engine.authentication_manager.bootstrap_first_admin(
-                tenant_id="tenant-a", principal_id="admin-a", password="password-number-one",
-                roles=["admin"], permissions=[],
+                tenant_id="tenant-a",
+                principal_id="admin-a",
+                password="password-number-one",
+                roles=["admin"],
+                permissions=[],
             ),
             security_engine.authentication_manager.bootstrap_first_admin(
-                tenant_id="tenant-b", principal_id="admin-b", password="password-number-two",
-                roles=["admin"], permissions=[],
+                tenant_id="tenant-b",
+                principal_id="admin-b",
+                password="password-number-two",
+                roles=["admin"],
+                permissions=[],
             ),
             return_exceptions=True,
         )
@@ -211,8 +221,11 @@ async def test_bootstrap_rejects_invalid_input_without_creating_anything(
     try:
         with pytest.raises(BootstrapValidationError):
             await security_engine.authentication_manager.bootstrap_first_admin(
-                tenant_id=tenant_id, principal_id=principal_id, password=password,
-                roles=["admin"], permissions=[],
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                password=password,
+                roles=["admin"],
+                permissions=[],
             )
         # Validation failure must never close bootstrap.
         assert await security_engine.authentication_manager.is_bootstrap_required() is True
@@ -367,8 +380,11 @@ async def test_bootstrap_lock_sentinel_can_never_authenticate(tmp_path: Path) ->
     kernel, security_engine = await _minimal_security_kernel(tmp_path)
     try:
         await security_engine.authentication_manager.bootstrap_first_admin(
-            tenant_id="acme", principal_id="owner", password="correct horse battery staple",
-            roles=["admin"], permissions=[],
+            tenant_id="acme",
+            principal_id="owner",
+            password="correct horse battery staple",
+            roles=["admin"],
+            permissions=[],
         )
         with pytest.raises(AuthenticationError):
             await security_engine.authentication_manager.authenticate(

@@ -76,9 +76,7 @@ def apply_invariant_operator(
     return abs(target_value - expected) <= tolerance
 
 
-def compute_invariant_target(
-    operator: InvariantOperator, operand_values: list[float]
-) -> float:
+def compute_invariant_target(operator: InvariantOperator, operand_values: list[float]) -> float:
     """Derive the target value implied by operator over operand_values.
 
     Args:
@@ -95,9 +93,7 @@ def compute_invariant_target(
         return float(sum(operand_values))
     if operator == InvariantOperator.DIFFERENCE_EQUALS:
         if not operand_values:
-            raise DocumentTemplateError(
-                "DIFFERENCE_EQUALS invariant requires at least one operand field."
-            )
+            raise DocumentTemplateError("DIFFERENCE_EQUALS invariant requires at least one operand field.")
         return float(operand_values[0] - sum(operand_values[1:]))
     raise DocumentTemplateError(f"Unsupported invariant operator: '{operator}'.")
 
@@ -200,12 +196,9 @@ class DocumentOntology(BaseModel):
             expected_types = _PYTHON_TYPE_CHECKS[field.field_type]
             if not isinstance(value, expected_types):
                 type_mismatches.append(
-                    f"Field '{field.name}' expected type {field.field_type.value}, "
-                    f"got '{type(value).__name__}'."
+                    f"Field '{field.name}' expected type {field.field_type.value}, got '{type(value).__name__}'."
                 )
-                errors.append(
-                    f"Type mismatch for field '{field.name}': expected {field.field_type.value}."
-                )
+                errors.append(f"Type mismatch for field '{field.name}': expected {field.field_type.value}.")
 
         for structure_name, structure_fields in self.child_structures.items():
             found, structure_value = _resolve_field(data, structure_name)
@@ -229,12 +222,9 @@ class DocumentOntology(BaseModel):
                 if not isinstance(sub_value, expected_types):
                     qualified = f"{structure_name}.{field.name}"
                     type_mismatches.append(
-                        f"Field '{qualified}' expected type {field.field_type.value}, "
-                        f"got '{type(sub_value).__name__}'."
+                        f"Field '{qualified}' expected type {field.field_type.value}, got '{type(sub_value).__name__}'."
                     )
-                    errors.append(
-                        f"Type mismatch for field '{qualified}': expected {field.field_type.value}."
-                    )
+                    errors.append(f"Type mismatch for field '{qualified}': expected {field.field_type.value}.")
 
         return ValidationReport(
             is_valid=len(errors) == 0,
@@ -282,9 +272,7 @@ class DocumentOntology(BaseModel):
             if operand_missing:
                 continue
 
-            if not apply_invariant_operator(
-                rule.operator, float(target_value), operand_values, rule.tolerance
-            ):
+            if not apply_invariant_operator(rule.operator, float(target_value), operand_values, rule.tolerance):
                 errors.append(
                     f"Invariant '{rule.name}' violated: field '{rule.target_field}' "
                     f"does not satisfy {rule.operator.value} over {rule.operand_fields}."
@@ -349,16 +337,13 @@ class OntologyRegistry:
 
         if entity_name in self._ontologies and version in self._ontologies[entity_name]:
             raise DocumentTemplateError(
-                f"Duplicate ontology registration: '{entity_name}' version '{version}' "
-                f"is already registered."
+                f"Duplicate ontology registration: '{entity_name}' version '{version}' is already registered."
             )
 
         self._ontologies.setdefault(entity_name, {})[version] = ontology
         return ontology
 
-    async def get_ontology(
-        self, entity_name: str, version: str | None = None
-    ) -> DocumentOntology:
+    async def get_ontology(self, entity_name: str, version: str | None = None) -> DocumentOntology:
         """Retrieve a DocumentOntology by entity name and optional version.
 
         Args:
@@ -378,9 +363,7 @@ class OntologyRegistry:
         if version is not None:
             version = version.strip()
             if version not in self._ontologies[entity_name]:
-                raise DocumentTemplateError(
-                    f"Ontology '{entity_name}' version '{version}' not found."
-                )
+                raise DocumentTemplateError(f"Ontology '{entity_name}' version '{version}' not found.")
             return self._ontologies[entity_name][version]
 
         versions = list(self._ontologies[entity_name].keys())

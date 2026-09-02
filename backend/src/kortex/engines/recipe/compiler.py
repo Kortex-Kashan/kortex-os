@@ -13,7 +13,8 @@ Enforces pure determinism:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from kortex.engines.recipe.exceptions import RecipeCompilationError
 from kortex.engines.recipe.models import RecipeCompilationResult, RecipeDefinition
 from kortex.engines.workflow.models import (
@@ -32,7 +33,7 @@ class RecipeCompiler:
     def compile(
         self,
         recipe: RecipeDefinition,
-        input_parameters: Optional[Dict[str, Any]] = None,
+        input_parameters: dict[str, Any] | None = None,
     ) -> RecipeCompilationResult:
         """Compile a RecipeDefinition into an executable WorkflowDefinition.
 
@@ -47,7 +48,7 @@ class RecipeCompiler:
             input_params = input_parameters or {}
 
             # Validate required recipe inputs
-            merged_inputs: Dict[str, Any] = {}
+            merged_inputs: dict[str, Any] = {}
             for inp in recipe.inputs:
                 if inp.name in input_params:
                     merged_inputs[inp.name] = input_params[inp.name]
@@ -58,10 +59,10 @@ class RecipeCompiler:
                         f"Missing mandatory input parameter '{inp.name}' for recipe '{recipe.manifest.id}'."
                     )
 
-            compiled_steps: List[WorkflowStep] = []
+            compiled_steps: list[WorkflowStep] = []
             for step in recipe.steps:
                 # Interpolate parameters deterministically
-                step_params: Dict[str, Any] = {}
+                step_params: dict[str, Any] = {}
                 for k, v in step.parameters.items():
                     if isinstance(v, str) and v.startswith("${inputs.") and v.endswith("}"):
                         var_name = v[9:-1]
@@ -70,7 +71,7 @@ class RecipeCompiler:
                         step_params[k] = v
 
                 # Build deterministic retry policy
-                retry_policy: Optional[RetryPolicy] = None
+                retry_policy: RetryPolicy | None = None
                 if step.retry_attempts is not None:
                     backoff = step.retry_backoff if step.retry_backoff is not None else 2.0
                     retry_policy = RetryPolicy(
@@ -81,7 +82,7 @@ class RecipeCompiler:
                     )
 
                 # Build deterministic compensation action
-                compensation_action: Optional[CompensationAction] = None
+                compensation_action: CompensationAction | None = None
                 if step.compensation:
                     comp_cap = step.compensation.get("capability")
                     comp_params = step.compensation.get("parameters", {})

@@ -5,9 +5,6 @@ Target: 100% pass rate, 100% line coverage for kortex.engines.connector.drivers.
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
 import pytest
 from pydantic import ValidationError
 
@@ -22,7 +19,6 @@ from kortex.engines.connector.models import (
     ConnectorActionType,
     ConnectorCapability,
     ConnectorProfile,
-    DriverMetadata,
 )
 from kortex.engines.connector.registry import ConnectorDriverRegistry
 
@@ -189,9 +185,7 @@ async def test_test_connection() -> None:
     assert await driver.test_connection(prof_active) is True
 
     # Inactive profile
-    prof_inactive = ConnectorProfile(
-        profile_id="p2", name="Inactive", driver_id="connector-dummy", is_active=False
-    )
+    prof_inactive = ConnectorProfile(profile_id="p2", name="Inactive", driver_id="connector-dummy", is_active=False)
     assert await driver.test_connection(prof_inactive) is False
 
     # Simulated connection failure option

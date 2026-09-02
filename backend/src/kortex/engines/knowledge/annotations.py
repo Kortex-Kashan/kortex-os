@@ -103,7 +103,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -123,10 +123,10 @@ class KnowledgeAnnotationManager:
     """Tenant-scoped annotation manager (Milestone M4), optionally durable
     via `IDataStore` (Milestone M7)."""
 
-    def __init__(self, data_store: Optional[IDataStore] = None) -> None:
-        self._annotations: Dict[Tuple[str, str], KnowledgeAnnotation] = {}
+    def __init__(self, data_store: IDataStore | None = None) -> None:
+        self._annotations: dict[tuple[str, str], KnowledgeAnnotation] = {}
         # (tenant_id, target_record_id) -> [annotation_id, ...] in insertion order.
-        self._by_target: Dict[Tuple[str, str], List[str]] = {}
+        self._by_target: dict[tuple[str, str], list[str]] = {}
         self._data_store = data_store
         # See module docstring's Milestone M7 concurrency finding.
         self._lock = asyncio.Lock()
@@ -141,9 +141,7 @@ class KnowledgeAnnotationManager:
         except KnowledgeEngineError:
             raise
         except Exception as exc:
-            raise KnowledgePersistenceError(
-                f"Knowledge annotation persistence operation failed: {exc}"
-            ) from exc
+            raise KnowledgePersistenceError(f"Knowledge annotation persistence operation failed: {exc}") from exc
 
     async def load(self) -> None:
         """Hydrate in-memory state from the configured `IDataStore`
@@ -154,7 +152,7 @@ class KnowledgeAnnotationManager:
         if self._data_store is None:
             return
 
-        async def _action(session: AsyncSession) -> List[KnowledgeAnnotationRow]:
+        async def _action(session: AsyncSession) -> list[KnowledgeAnnotationRow]:
             result = await session.execute(
                 select(KnowledgeAnnotationRow).order_by(KnowledgeAnnotationRow.insertion_sequence)
             )
@@ -219,8 +217,7 @@ class KnowledgeAnnotationManager:
             key = (annotation.tenant_id, annotation.annotation_id)
             if key in self._annotations:
                 raise KnowledgeDuplicateAnnotationError(
-                    f"Annotation '{annotation.annotation_id}' already exists for tenant "
-                    f"'{annotation.tenant_id}'."
+                    f"Annotation '{annotation.annotation_id}' already exists for tenant '{annotation.tenant_id}'."
                 )
 
             if annotation.supersedes_annotation_id is not None:
@@ -240,7 +237,7 @@ class KnowledgeAnnotationManager:
             self._by_target.setdefault(target_key, []).append(annotation.annotation_id)
             return annotation
 
-    async def list_annotations(self, target_record_id: str, tenant_id: str) -> List[KnowledgeAnnotation]:
+    async def list_annotations(self, target_record_id: str, tenant_id: str) -> list[KnowledgeAnnotation]:
         """Return every annotation attached to `target_record_id`, scoped to
         `tenant_id`, in insertion order. Returns an empty list if none
         exist — an unrecognized `target_record_id` is not an error here,

@@ -26,7 +26,7 @@ class _FakeClock:
         return self.now
 
 
-def _make_identity(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock):  # noqa: ANN001
+def _make_identity(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock):
     monkeypatch.setattr("kortex.engines.ai.identity.time.monotonic", clock)
 
     provisioned: list[str] = []
@@ -35,7 +35,7 @@ def _make_identity(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock):  # noqa:
     async def _provisioner(tenant_id: str) -> None:
         provisioned.append(tenant_id)
 
-    async def _authenticator(tenant_id: str):  # noqa: ANN202
+    async def _authenticator(tenant_id: str):
         authenticated.append(tenant_id)
         return f"token-for-{tenant_id}-{len(authenticated)}"
 

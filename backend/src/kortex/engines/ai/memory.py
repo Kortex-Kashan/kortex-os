@@ -195,31 +195,21 @@ class AIMemoryManager:
         """Effective (clamped) retained-turn limit."""
         return self._max_history_turns
 
-    async def get_turns(
-        self, tenant_id: str, conversation_id: str, offset: int = 0
-    ) -> list[ConversationTurn]:
+    async def get_turns(self, tenant_id: str, conversation_id: str, offset: int = 0) -> list[ConversationTurn]:
         """Return the most recent turns, oldest-first, with optional offset pagination."""
         require_identifier(tenant_id, "tenant_id")
         require_identifier(conversation_id, "conversation_id")
         if offset > 0:
-            return await self._store.recent_turns(
-                tenant_id, conversation_id, self._max_history_turns, offset=offset
-            )
-        return await self._store.recent_turns(
-            tenant_id, conversation_id, self._max_history_turns
-        )
+            return await self._store.recent_turns(tenant_id, conversation_id, self._max_history_turns, offset=offset)
+        return await self._store.recent_turns(tenant_id, conversation_id, self._max_history_turns)
 
-    async def get_context(
-        self, tenant_id: str, conversation_id: str, offset: int = 0
-    ) -> list[str]:
+    async def get_context(self, tenant_id: str, conversation_id: str, offset: int = 0) -> list[str]:
         """Return the rendered form of exactly what `get_turns` returns."""
         turns = await self.get_turns(tenant_id, conversation_id, offset=offset)
         rendered: list[str] = []
         for turn in turns:
             rendered.append(f"{USER_MARKER}\n{sanitize_context_content(turn.user_content)}")
-            rendered.append(
-                f"{ASSISTANT_MARKER}\n{sanitize_context_content(turn.assistant_content)}"
-            )
+            rendered.append(f"{ASSISTANT_MARKER}\n{sanitize_context_content(turn.assistant_content)}")
         return rendered
 
     async def append_history(

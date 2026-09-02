@@ -10,14 +10,11 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import pathlib
-from collections.abc import AsyncIterator
 
 import pytest
 
 from kortex.engines.ai.agent import (
-    AgentExecutionResult,
     AgentOrchestrator,
     AgentStatus,
     AgentStep,
@@ -32,18 +29,14 @@ from kortex.engines.ai.agent import (
 from kortex.engines.ai.engine import (
     AIOrchestrationEngine,
     EngineAgentContextPort,
-    KernelSecurityApprovalPolicy,
-    RouterLLMExecutionPort,
 )
 from kortex.engines.ai.exceptions import (
     AgentStateConflictError,
     TenantQuotaExceededError,
 )
 from kortex.engines.ai.memory import AIMemoryManager, InMemoryConversationStore
-from kortex.engines.ai.models import LLMRequest, LLMResponse, TokenUsage
+from kortex.engines.ai.models import LLMResponse, TokenUsage
 from kortex.engines.ai.pipeline import ContextComposer, PromptPipeline
-from kortex.engines.ai.registry import MetadataOnlyAIProvider, ProviderRegistry
-from kortex.engines.ai.router import ModelRouter, RoutingContext
 from kortex.engines.ai.throttling import TenantConcurrencyThrottler
 from kortex.engines.ai.tools import (
     AIToolInvoker,
@@ -54,7 +47,6 @@ from kortex.engines.ai.tools import (
     ToolRegistry,
     ToolResult,
 )
-
 
 # ===========================================================================
 # 1. Tenant Concurrency Throttling Tests
@@ -102,11 +94,13 @@ async def test_throttler_rejects_exceeded_agent_quota() -> None:
 async def test_throttler_tenant_isolation() -> None:
     throttler = TenantConcurrencyThrottler(max_concurrent_generations=1)
 
-    async with throttler.acquire_generation_slot("tenant-a"):
-        # Tenant B is not blocked by Tenant A reaching quota
-        async with throttler.acquire_generation_slot("tenant-b"):
-            assert throttler.get_active_generations("tenant-a") == 1
-            assert throttler.get_active_generations("tenant-b") == 1
+    # Tenant B is not blocked by Tenant A reaching quota
+    async with (
+        throttler.acquire_generation_slot("tenant-a"),
+        throttler.acquire_generation_slot("tenant-b"),
+    ):
+        assert throttler.get_active_generations("tenant-a") == 1
+        assert throttler.get_active_generations("tenant-b") == 1
 
 
 # ===========================================================================
@@ -345,7 +339,7 @@ async def test_agent_orchestrator_aggregates_multi_step_token_usage() -> None:
 @pytest.mark.asyncio
 async def test_agent_task_cancellation_and_resumption_blocking() -> None:
     task_store = InMemoryAgentTaskStore()
-    throttler = TenantConcurrencyThrottler()
+    TenantConcurrencyThrottler()
 
     task = AgentTask(
         task_id="task-cancel-1",
@@ -436,7 +430,6 @@ async def test_ai_engine_facade_task_lifecycle_and_throttling() -> None:
 
 @pytest.mark.asyncio
 async def test_bootstrap_wires_m12_configuration(tmp_path: pathlib.Path) -> None:
-    import pathlib
     from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 
     config = AIEngineRuntimeConfig(
@@ -450,4 +443,3 @@ async def test_bootstrap_wires_m12_configuration(tmp_path: pathlib.Path) -> None
 
     assert engine.throttler.max_concurrent_generations == 7
     assert engine.throttler.max_concurrent_agents == 3
-

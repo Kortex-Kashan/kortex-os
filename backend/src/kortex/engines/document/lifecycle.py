@@ -13,7 +13,7 @@ import datetime
 import logging
 import re
 import uuid
-from typing import Any, cast
+from typing import ClassVar, cast
 
 from kortex.engines.document.exceptions import DocumentLifecycleError
 from kortex.engines.document.interfaces import (
@@ -45,7 +45,8 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
     """Manager for document version creation, lifecycle state transitions, lineage tracking, and immutability.
 
     Strictly enforces:
-    1. Valid lifecycle state machine transitions (DRAFT -> REVIEW -> PUBLISHED -> SUPERSEDED -> ARCHIVED / LOGICAL_DELETE).
+    1. Valid lifecycle state machine transitions (DRAFT -> REVIEW -> PUBLISHED -> SUPERSEDED -> ARCHIVED /
+    LOGICAL_DELETE).
     2. Immutability of PUBLISHED, SUPERSEDED, ARCHIVED, and LOGICAL_DELETE versions.
     3. Parent-child version chain integrity and lineage traversal.
     4. Deterministic SemVer patch derivation (e.g. 1.0.0 -> 1.0.1 -> 1.0.2).
@@ -53,7 +54,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
     6. Multi-tenant boundary isolation across all lifecycle operations.
     """
 
-    VALID_TRANSITIONS: dict[DocumentLifecycleState, set[DocumentLifecycleState]] = {
+    VALID_TRANSITIONS: ClassVar[dict[DocumentLifecycleState, set[DocumentLifecycleState]]] = {
         DocumentLifecycleState.DRAFT: {
             DocumentLifecycleState.REVIEW,
             DocumentLifecycleState.PUBLISHED,
@@ -79,7 +80,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         DocumentLifecycleState.LOGICAL_DELETE: set(),
     }
 
-    IMMUTABLE_STATES: set[DocumentLifecycleState] = {
+    IMMUTABLE_STATES: ClassVar[set[DocumentLifecycleState]] = {
         DocumentLifecycleState.PUBLISHED,
         DocumentLifecycleState.SUPERSEDED,
         DocumentLifecycleState.ARCHIVED,
@@ -128,16 +129,12 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         """Build the Metadata Cache key for a specific document version."""
         return f"doc_engine:{tenant_id}:metadata:{document_id}:{version_id}"
 
-    async def _invalidate_metadata_cache(
-        self, document_id: str, version_id: str, tenant_id: str
-    ) -> None:
+    async def _invalidate_metadata_cache(self, document_id: str, version_id: str, tenant_id: str) -> None:
         """Invalidate the Metadata Cache entry for a specific document version, if caching is enabled."""
         if self._cache_store is not None:
             await self._cache_store.delete(self._metadata_cache_key(document_id, version_id, tenant_id))
 
-    def validate_transition(
-        self, current_state: DocumentLifecycleState, target_state: DocumentLifecycleState
-    ) -> bool:
+    def validate_transition(self, current_state: DocumentLifecycleState, target_state: DocumentLifecycleState) -> bool:
         """Validate whether a state transition from current_state to target_state is permitted.
 
         Args:
@@ -231,9 +228,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                     parent_version_id, document_id=document_id, tenant_id=tenant_id
                 )
                 if parent_version is None:
-                    raise DocumentLifecycleError(
-                        f"Parent version ID '{parent_version_id}' does not exist."
-                    )
+                    raise DocumentLifecycleError(f"Parent version ID '{parent_version_id}' does not exist.")
 
                 if document_id is not None and parent_version.document_id != document_id:
                     raise DocumentLifecycleError(
@@ -247,7 +242,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                     )
 
                 target_version_id = version_id or str(uuid.uuid4())
-                lineage_path = list(parent_version.metadata.lineage_path) + [target_version_id]
+                lineage_path = [*list(parent_version.metadata.lineage_path), target_version_id]
                 if version_number is not None:
                     if not SEMVER_REGEX.match(version_number.strip()):
                         raise DocumentLifecycleError(
@@ -256,9 +251,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                         )
                     effective_version_number = version_number
                 else:
-                    effective_version_number = self.derive_next_version_number(
-                        parent_version.version_number
-                    )
+                    effective_version_number = self.derive_next_version_number(parent_version.version_number)
             else:
                 target_document_id = document_id or str(uuid.uuid4())
                 target_version_id = version_id or str(uuid.uuid4())
@@ -273,7 +266,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                 else:
                     effective_version_number = "1.0.0"
 
-            timestamp = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+            timestamp = created_at or datetime.datetime.now(datetime.UTC).isoformat()
 
             metadata = DocumentMetadata(
                 document_id=target_document_id,
@@ -301,9 +294,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
 
             if self._repository is not None:
                 # Ensure root document record exists
-                doc = await self._repository.get_document(
-                    target_document_id, tenant_id=tenant_id, include_deleted=True
-                )
+                doc = await self._repository.get_document(target_document_id, tenant_id=tenant_id, include_deleted=True)
                 if doc is None:
                     await self._repository.create_document(
                         Document(
@@ -316,17 +307,18 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                 return await self._repository.create_version(doc_version, tenant_id=tenant_id)
             else:
                 if target_version_id in self._versions:
-                    raise DocumentLifecycleError(
-                        f"Duplicate version ID '{target_version_id}' already exists."
-                    )
+                    raise DocumentLifecycleError(f"Duplicate version ID '{target_version_id}' already exists.")
                 # Enforce version_number uniqueness per document in in-memory mode
                 existing_chain = self._document_chains.get(target_document_id, [])
                 for existing_vid in existing_chain:
-                    if existing_vid in self._versions:
-                        if self._versions[existing_vid].version_number == effective_version_number:
-                            raise DocumentLifecycleError(
-                                f"Duplicate version number '{effective_version_number}' for document '{target_document_id}'."
-                            )
+                    if (
+                        existing_vid in self._versions
+                        and self._versions[existing_vid].version_number == effective_version_number
+                    ):
+                        raise DocumentLifecycleError(
+                            f"Duplicate version number '{effective_version_number}' for document "
+                            f"'{target_document_id}'."
+                        )
 
                 self._versions[target_version_id] = doc_version
                 if target_document_id not in self._document_chains:
@@ -360,9 +352,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         Returns:
             The created child DocumentVersion instance.
         """
-        parent = await self.get_version_object(
-            parent_version_id, document_id=document_id, tenant_id=tenant_id
-        )
+        parent = await self.get_version_object(parent_version_id, document_id=document_id, tenant_id=tenant_id)
         effective_title = title if title is not None else parent.metadata.title
         effective_sec = security_metadata or parent.metadata.security_metadata
 
@@ -410,9 +400,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                                     or publication CAS gate collision occurs.
         """
         async with self._lock:
-            version = await self.get_version_object(
-                version_id, document_id=document_id, tenant_id=tenant_id
-            )
+            version = await self.get_version_object(version_id, document_id=document_id, tenant_id=tenant_id)
 
             current_state = version.metadata.lifecycle_state
             self.validate_transition(current_state, target_state)
@@ -436,30 +424,32 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                     )
                     await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
                     if version.parent_version_id is not None:
-                        await self._invalidate_metadata_cache(
-                            document_id, version.parent_version_id, tenant_id
-                        )
+                        await self._invalidate_metadata_cache(document_id, version.parent_version_id, tenant_id)
                     return child_ver.metadata
                 else:
                     # In-memory atomic publication with CAS check
-                    timestamp = published_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    timestamp = published_at or datetime.datetime.now(datetime.UTC).isoformat()
                     if version.parent_version_id is not None:
                         parent = self._versions.get(version.parent_version_id)
                         if parent is None:
                             raise DocumentLifecycleError(
-                                f"Cannot supersede non-existent parent version '{version.parent_version_id}' for document '{document_id}'."
+                                f"Cannot supersede non-existent parent version '{version.parent_version_id}' for "
+                                f"document '{document_id}'."
                             )
                         if parent.document_id != document_id:
                             raise DocumentLifecycleError(
-                                f"Parent version '{version.parent_version_id}' belongs to document '{parent.document_id}', expected '{document_id}'."
+                                f"Parent version '{version.parent_version_id}' belongs to document "
+                                f"'{parent.document_id}', expected '{document_id}'."
                             )
                         if parent.metadata.security_metadata.tenant_id != tenant_id:
                             raise DocumentLifecycleError(
-                                f"Parent version '{version.parent_version_id}' belongs to tenant '{parent.metadata.security_metadata.tenant_id}', expected '{tenant_id}'."
+                                f"Parent version '{version.parent_version_id}' belongs to tenant "
+                                f"'{parent.metadata.security_metadata.tenant_id}', expected '{tenant_id}'."
                             )
                         if parent.metadata.lifecycle_state != DocumentLifecycleState.PUBLISHED:
                             raise DocumentLifecycleError(
-                                f"Cannot supersede parent version '{version.parent_version_id}': parent is in '{parent.metadata.lifecycle_state.value}' state, expected 'PUBLISHED'."
+                                f"Cannot supersede parent version '{version.parent_version_id}': parent is in "
+                                f"'{parent.metadata.lifecycle_state.value}' state, expected 'PUBLISHED'."
                             )
                         if self._current_versions.get(document_id) != version.parent_version_id:
                             raise DocumentLifecycleError(
@@ -497,9 +487,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                     )
                     await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
                     if version.parent_version_id is not None:
-                        await self._invalidate_metadata_cache(
-                            document_id, version.parent_version_id, tenant_id
-                        )
+                        await self._invalidate_metadata_cache(document_id, version.parent_version_id, tenant_id)
                     return child_meta
             else:
                 new_is_immutable = target_state in self.IMMUTABLE_STATES
@@ -527,9 +515,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
                     await self._invalidate_metadata_cache(document_id, version_id, tenant_id)
                     return updated_meta
 
-    async def get_version(
-        self, document_id: str, version_id: str, tenant_id: str = "default"
-    ) -> DocumentMetadata:
+    async def get_version(self, document_id: str, version_id: str, tenant_id: str = "default") -> DocumentMetadata:
         """Retrieve DocumentMetadata for a specific version.
 
         Args:
@@ -543,9 +529,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         Raises:
             DocumentLifecycleError: If version missing or document ID mismatch.
         """
-        version = await self.get_version_object(
-            version_id, document_id=document_id, tenant_id=tenant_id
-        )
+        version = await self.get_version_object(version_id, document_id=document_id, tenant_id=tenant_id)
         return version.metadata
 
     async def get_version_object(
@@ -572,14 +556,13 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
             if cached_version is not None:
                 return cast(DocumentVersion, cached_version)
 
-        version = await self._get_version_internal(
-            version_id, document_id=document_id, tenant_id=tenant_id
-        )
+        version = await self._get_version_internal(version_id, document_id=document_id, tenant_id=tenant_id)
         if version is None:
             raise DocumentLifecycleError(f"Document version ID '{version_id}' not found.")
         if document_id is not None and version.document_id != document_id:
             raise DocumentLifecycleError(
-                f"Document ID mismatch for version '{version_id}': expected '{document_id}', got '{version.document_id}'."
+                f"Document ID mismatch for version '{version_id}': expected '{document_id}', got "
+                f"'{version.document_id}'."
             )
 
         if cache_key is not None and cache_store is not None:
@@ -593,9 +576,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         """Internal lookup for DocumentVersion without throwing if not found."""
         if self._repository is not None:
             if document_id is not None:
-                return await self._repository.get_version(
-                    document_id, version_id, tenant_id=tenant_id
-                )
+                return await self._repository.get_version(document_id, version_id, tenant_id=tenant_id)
             else:
                 # Search all versions in repository or query by version_id
                 # In DocumentRepository, get_version requires document_id. If document_id is None,
@@ -605,9 +586,7 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         else:
             return self._versions.get(version_id)
 
-    async def get_latest_version(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> DocumentMetadata:
+    async def get_latest_version(self, document_id: str, tenant_id: str = "default") -> DocumentMetadata:
         """Retrieve the newest / most recently created version metadata for a document entity.
 
         Note: This returns the latest created version in the lineage chain (which may be in DRAFT or REVIEW state).
@@ -626,21 +605,15 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         if self._repository is not None:
             ver = await self._repository.get_latest_version(document_id, tenant_id=tenant_id)
             if ver is None:
-                raise DocumentLifecycleError(
-                    f"No document versions found for document ID '{document_id}'."
-                )
+                raise DocumentLifecycleError(f"No document versions found for document ID '{document_id}'.")
             return ver.metadata
         else:
             if document_id not in self._document_chains or not self._document_chains[document_id]:
-                raise DocumentLifecycleError(
-                    f"No document versions found for document ID '{document_id}'."
-                )
+                raise DocumentLifecycleError(f"No document versions found for document ID '{document_id}'.")
             latest_version_id = self._document_chains[document_id][-1]
             return self._versions[latest_version_id].metadata
 
-    async def get_lineage(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> list[DocumentMetadata]:
+    async def get_lineage(self, document_id: str, tenant_id: str = "default") -> list[DocumentMetadata]:
         """Retrieve full version lineage chain for a document entity in creation order.
 
         Args:
@@ -656,24 +629,14 @@ class DocumentLifecycleManager(IDocumentLifecycleManager):
         if self._repository is not None:
             versions = await self._repository.list_versions(document_id, tenant_id=tenant_id)
             if not versions:
-                raise DocumentLifecycleError(
-                    f"No document lineage found for document ID '{document_id}'."
-                )
+                raise DocumentLifecycleError(f"No document lineage found for document ID '{document_id}'.")
             return [v.metadata for v in versions]
         else:
             if document_id not in self._document_chains or not self._document_chains[document_id]:
-                raise DocumentLifecycleError(
-                    f"No document lineage found for document ID '{document_id}'."
-                )
-            return [
-                self._versions[vid].metadata
-                for vid in self._document_chains[document_id]
-                if vid in self._versions
-            ]
+                raise DocumentLifecycleError(f"No document lineage found for document ID '{document_id}'.")
+            return [self._versions[vid].metadata for vid in self._document_chains[document_id] if vid in self._versions]
 
-    async def is_immutable(
-        self, document_id: str, version_id: str, tenant_id: str = "default"
-    ) -> bool:
+    async def is_immutable(self, document_id: str, version_id: str, tenant_id: str = "default") -> bool:
         """Check whether a document version is locked against edits.
 
         Args:

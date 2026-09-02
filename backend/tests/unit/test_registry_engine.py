@@ -4,8 +4,8 @@ Unit tests for Registry Engine.
 
 import pytest
 
-from kortex.engines.registry.engine import RegistryCategory, RegistryEngine
 from kortex.core.exceptions import CapabilityNotFoundError, ResourceAlreadyExistsError, ResourceNotFoundError
+from kortex.engines.registry.engine import RegistryCategory, RegistryEngine
 
 
 class DummyModule:
@@ -18,7 +18,9 @@ async def test_registry_register_and_get_resource() -> None:
     registry = RegistryEngine()
     dummy = DummyModule("finance")
 
-    registry.register_resource("finance", RegistryCategory.MODULE, dummy, description="Finance Module", provider="kortex")
+    registry.register_resource(
+        "finance", RegistryCategory.MODULE, dummy, description="Finance Module", provider="kortex"
+    )
 
     meta = registry.get_resource("finance", RegistryCategory.MODULE)
     assert meta.name == "finance"

@@ -8,8 +8,10 @@ in accordance with the Connector Engine Specification.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any
 
 from kortex.engines.connector.exceptions import (
     ConnectorOperationError,
@@ -62,16 +64,12 @@ class ConnectorPipeline(IConnectorPipeline):
         """Helper to invoke a diagnostic recording method safely without altering execution flow."""
         if self._diagnostics is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             fn = getattr(self._diagnostics, record_fn_name, None)
             if callable(fn):
                 fn(*args, **kwargs)
-        except Exception:
-            pass
 
-    async def execute(
-        self, request: ActionRequest, profile: ConnectorProfile
-    ) -> ActionResult:
+    async def execute(self, request: ActionRequest, profile: ConnectorProfile) -> ActionResult:
         """Execute a multi-stage pipeline for an action request through target ConnectorProfile.
 
         Stages:
@@ -205,9 +203,7 @@ class ConnectorPipeline(IConnectorPipeline):
 
         attempts = 0
 
-        async def _tracked_driver_execute(
-            req: ActionRequest, secret_token: str | None = None
-        ) -> ActionResult:
+        async def _tracked_driver_execute(req: ActionRequest, secret_token: str | None = None) -> ActionResult:
             nonlocal attempts
             attempts += 1
             return await driver.execute_action(req, secret_token=secret_token)

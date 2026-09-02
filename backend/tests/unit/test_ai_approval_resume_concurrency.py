@@ -141,9 +141,7 @@ class _FakeAgentOrchestrator:
             raise self.resume_exception
         record = self._records.get((task.tenant_id, task.task_id))
         if record is not None:
-            self._records[(task.tenant_id, task.task_id)] = record.model_copy(
-                update={"status": AgentStatus.COMPLETED}
-            )
+            self._records[(task.tenant_id, task.task_id)] = record.model_copy(update={"status": AgentStatus.COMPLETED})
         assert self.resume_result is not None
         return self.resume_result
 

@@ -132,7 +132,7 @@ class CapabilityRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
-def _resolve_model_target(annotation: Any) -> tuple[type[BaseModel], bool] | None:  # noqa: ANN401
+def _resolve_model_target(annotation: Any) -> tuple[type[BaseModel], bool] | None:
     """If `annotation` denotes a Pydantic `BaseModel` — directly, wrapped in
     `Optional`/`X | None`, as `list[X]`, or as `Optional[list[X]]` — return
     `(model_type, is_list)`. Otherwise `None`.
@@ -166,7 +166,7 @@ def _resolve_model_target(annotation: Any) -> tuple[type[BaseModel], bool] | Non
     return None
 
 
-def _coerce_model_parameters(handler: Any, call_kwargs: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN401
+def _coerce_model_parameters(handler: Any, call_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Coerce plain-dict `call_kwargs` values into the real Pydantic model
     instances a handler's own type-annotated parameters declare (M7.2).
 
@@ -224,9 +224,7 @@ def _coerce_model_parameters(handler: Any, call_kwargs: dict[str, Any]) -> dict[
             if not isinstance(value, list):
                 continue
             call_kwargs[name] = [
-                model_type.model_validate(item)
-                if isinstance(item, dict) and not isinstance(item, model_type)
-                else item
+                model_type.model_validate(item) if isinstance(item, dict) and not isinstance(item, model_type) else item
                 for item in value
             ]
         else:
@@ -306,7 +304,7 @@ class CapabilityDispatcher:
 
         return None
 
-    async def dispatch(self, request: CapabilityRequest) -> Any:  # noqa: ANN401
+    async def dispatch(self, request: CapabilityRequest) -> Any:
         """Resolve, authenticate, authorize, enforce idempotency, then invoke.
 
         Execution ordering (Milestone M5.2):
@@ -361,9 +359,7 @@ class CapabilityDispatcher:
 
         # 3. Tenant Determination
         tenant_id = (
-            principal.tenant_id
-            if principal is not None
-            else str(request.context.get("resource_tenant_id", "default"))
+            principal.tenant_id if principal is not None else str(request.context.get("resource_tenant_id", "default"))
         )
 
         # 4. Idempotency Gate (ONLY for requests carrying an idempotency_key)
@@ -460,7 +456,9 @@ class CapabilityDispatcher:
             raise
 
     async def _audit_authentication_success(
-        self, security_engine: SecurityEngine, principal: Any  # noqa: ANN401
+        self,
+        security_engine: SecurityEngine,
+        principal: Any,
     ) -> None:
         """Best-effort audit recording for a successful token verification.
         Never raises — an audit-store outage must not block a security
@@ -517,9 +515,7 @@ class CapabilityDispatcher:
         except Exception as audit_exc:
             logger.warning("Failed to record dispatch authentication-failure audit entry: %s", audit_exc)
 
-    async def _invoke_handler(
-        self, request: CapabilityRequest, principal: SecurityPrincipal | None
-    ) -> Any:  # noqa: ANN401
+    async def _invoke_handler(self, request: CapabilityRequest, principal: SecurityPrincipal | None) -> Any:
         """Resolve and invoke the real handler, awaiting the result only if
         it is actually awaitable.
 
@@ -581,12 +577,12 @@ class CapabilityDispatcher:
     async def _audit_execution(
         self,
         security_engine: SecurityEngine,
-        principal: Any | None,  # noqa: ANN401
+        principal: Any | None,
         request: CapabilityRequest,
         tenant_id: str,
         status: str,
         duration_ms: float,
-        result: Any | None = None,  # noqa: ANN401
+        result: Any | None = None,
         error: BaseException | None = None,
     ) -> None:
         """Best-effort audit recording of capability execution outcome (Milestone M5.2).

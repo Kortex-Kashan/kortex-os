@@ -7,17 +7,19 @@ diagnostic failure isolation, cancellation safety, and single-counting ownership
 from __future__ import annotations
 
 import asyncio
-import json
-import pytest
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from kortex.core.base_engine import EngineState, EngineStateError
 from kortex.engines.connector.diagnostics import ConnectorDiagnostics
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
+from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.exceptions import (
-    ConnectorOperationError,
+    ConnectorProfileNotFoundError,
+    ConnectorSecurityError,
     DriverExecutionError,
-    DriverNotFoundError,
 )
 from kortex.engines.connector.models import (
     ActionRequest,
@@ -57,9 +59,7 @@ class MockableDriver(DummyConnectorDriver):
             supported_capabilities=[],
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return await self._mock(request, secret_token)
 
 
@@ -575,6 +575,7 @@ async def test_non_cancelled_base_exception_propagates_uncaught(
     sample_request: ActionRequest,
 ) -> None:
     """19. Verify non-CancelledError BaseException propagates uncaught without being converted to ActionResult."""
+
     class CustomBaseException(BaseException):
         pass
 
@@ -597,10 +598,6 @@ async def test_non_cancelled_base_exception_propagates_uncaught(
 # =============================================================================
 # ConnectorEngine Top-Level Execution & Cancellation Metrics Tests (10.5.2b)
 # =============================================================================
-
-from kortex.core.base_engine import EngineState, EngineStateError
-from kortex.engines.connector.engine import ConnectorEngine
-from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError, ConnectorSecurityError
 
 
 @pytest.mark.asyncio
@@ -1175,9 +1172,8 @@ async def test_engine_metrics_scenario_s_diagnostic_cancellation_recording_failu
     await engine.initialize(MagicMock())
     await engine.start()
 
-    with caplog.at_level("WARNING"):
-        with pytest.raises(asyncio.CancelledError):
-            await engine.execute_action(sample_request)
+    with caplog.at_level("WARNING"), pytest.raises(asyncio.CancelledError):
+        await engine.execute_action(sample_request)
 
     assert "Failed to record connector cancellation metric." in caplog.text
     assert "SECRET_CANCEL_FAIL_999" not in caplog.text
@@ -1191,6 +1187,7 @@ async def test_engine_metrics_scenario_t_base_exception_propagation(
     sample_request: ActionRequest,
 ) -> None:
     """Scenario T: Custom BaseException (non-CancelledError) bubbles up without being caught by except Exception."""
+
     class CustomProcessExit(BaseException):
         pass
 
@@ -1232,7 +1229,6 @@ async def test_safe_record_helpers_when_diagnostics_is_none(
 
     dummy_result = ActionResult(request_id="req-test-1", status="SUCCESS")
     await engine._record_action_history(sample_request, dummy_result)
-
 
 
 @pytest.mark.asyncio

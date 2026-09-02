@@ -37,7 +37,6 @@ real `DummyConnectorDriver`, real AIOrchestrationEngine production wiring.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -58,7 +57,6 @@ from kortex.engines.ai.identity import AI_SYSTEM_PRINCIPAL_ID, AI_SYSTEM_ROLE
 from kortex.engines.ai.models import AIProviderMetadata, LLMRequest, LLMResponse
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
-from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
 from kortex.engines.storage.engine import StorageEngine
@@ -110,9 +108,7 @@ class _ScriptedProvider(BaseAIProvider):
         return True
 
 
-async def _build_kernel(
-    tmp_path: Path, provider: BaseAIProvider
-) -> tuple[Kernel, Any, ConnectorEngine]:
+async def _build_kernel(tmp_path: Path, provider: BaseAIProvider) -> tuple[Kernel, Any, ConnectorEngine]:
     db_path = (tmp_path / f"kortex_ai_connector_{uuid4().hex[:8]}.db").as_posix()
     db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_path}")
     await db_manager.connect()
@@ -190,7 +186,7 @@ async def _build_kernel(
     return kernel, ai_engine, connector_engine
 
 
-async def _human_token(kernel: Kernel, tenant_id: str, principal_id: str):  # noqa: ANN202
+async def _human_token(kernel: Kernel, tenant_id: str, principal_id: str):
     security_engine: SecurityEngine = kernel.get_engine("security")
     principal = await security_engine.authentication_manager.authenticate(
         {
@@ -476,7 +472,7 @@ async def test_duplicate_approval_decided_event_does_not_dispatch_the_connector_
         # Re-deliver the exact same, real event a second time -- simulating
         # at-least-once event delivery -- directly to the handler (the same
         # seam `EventEngine` itself would call it through).
-        await ai_engine._on_approval_decided(captured_events[0])  # noqa: SLF001
+        await ai_engine._on_approval_decided(captured_events[0])
 
         # No second dispatch occurred: the task is still COMPLETED with the
         # same single resolved step, and conversation history still records
@@ -561,11 +557,7 @@ async def test_rejected_mutating_tool_call_never_dispatches(tmp_path: Path) -> N
 
         # No connector dispatch ever succeeded -- the pipeline was never
         # reached for the rejected tool call.
-        assert all(
-            result.status.value != "SUCCESS"
-            for step in record.steps
-            for result in step.tool_results
-        )
+        assert all(result.status.value != "SUCCESS" for step in record.steps for result in step.tool_results)
     finally:
         await kernel.shutdown()
 

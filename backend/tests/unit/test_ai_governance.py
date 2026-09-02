@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -214,24 +215,30 @@ def test_content_safety_pii_redaction() -> None:
 
 def test_tool_governance_allowlist_and_blocklist() -> None:
     reg = ToolRegistry()
-    reg.register_tool(ToolDefinition(
-        name="read_file",
-        description="Read file",
-        canonical_capability="kortex.file.read",
-        is_mutation=False,
-    ))
-    reg.register_tool(ToolDefinition(
-        name="delete_file",
-        description="Delete file",
-        canonical_capability="kortex.file.delete",
-        is_mutation=True,
-    ))
-    reg.register_tool(ToolDefinition(
-        name="write_file",
-        description="Write file",
-        canonical_capability="kortex.file.write",
-        is_mutation=True,
-    ))
+    reg.register_tool(
+        ToolDefinition(
+            name="read_file",
+            description="Read file",
+            canonical_capability="kortex.file.read",
+            is_mutation=False,
+        )
+    )
+    reg.register_tool(
+        ToolDefinition(
+            name="delete_file",
+            description="Delete file",
+            canonical_capability="kortex.file.delete",
+            is_mutation=True,
+        )
+    )
+    reg.register_tool(
+        ToolDefinition(
+            name="write_file",
+            description="Write file",
+            canonical_capability="kortex.file.write",
+            is_mutation=True,
+        )
+    )
 
     evaluator = ToolGovernanceEvaluator(reg)
 
@@ -265,12 +272,14 @@ def test_tool_governance_allowlist_and_blocklist() -> None:
 @pytest.mark.asyncio
 async def test_durable_ai_approval_policy_evaluates_and_gates() -> None:
     reg = ToolRegistry()
-    reg.register_tool(ToolDefinition(
-        name="transfer_funds",
-        description="Transfer funds",
-        canonical_capability="kortex.finance.transfer",
-        is_mutation=True,
-    ))
+    reg.register_tool(
+        ToolDefinition(
+            name="transfer_funds",
+            description="Transfer funds",
+            canonical_capability="kortex.finance.transfer",
+            is_mutation=True,
+        )
+    )
 
     policy = AIGovernancePolicy(
         tenant_id="tenant_alpha",
@@ -430,9 +439,7 @@ async def test_durable_ai_approval_policy_honors_explicit_timeout_override() -> 
         )
     )
     bridge = _RecordingApprovalBridge()
-    approval_policy = DurableAIApprovalPolicy(
-        tool_registry=reg, approval_manager=bridge, approval_timeout_seconds=60
-    )
+    approval_policy = DurableAIApprovalPolicy(tool_registry=reg, approval_manager=bridge, approval_timeout_seconds=60)
 
     task = AgentTask(
         task_id="task_timeout_override",
@@ -923,13 +930,9 @@ async def test_generate_response_enforces_quota_before_calling_provider() -> Non
     """M5-A3: once a tenant's already-recorded consumption is at or past
     its configured daily budget, the NEXT generation must be rejected
     before the provider is ever called."""
-    provider = _SpyProvider(
-        token_usage={"prompt_tokens": 400, "completion_tokens": 400, "total_tokens": 800}
-    )
+    provider = _SpyProvider(token_usage={"prompt_tokens": 400, "completion_tokens": 400, "total_tokens": 800})
     governance = AIGovernanceManager()
-    await governance.set_policy(
-        AIGovernancePolicy(tenant_id="tenant_quota", max_daily_budget_tokens=1000)
-    )
+    await governance.set_policy(AIGovernancePolicy(tenant_id="tenant_quota", max_daily_budget_tokens=1000))
     engine = _build_generation_engine(provider, governance_manager=governance)
 
     # Call 1: pre-flight sees 0 consumed, proceeds; post-call debit commits
@@ -956,9 +959,7 @@ async def test_generate_response_enforces_quota_before_calling_provider() -> Non
 async def test_generate_response_quota_is_tenant_isolated() -> None:
     """M5-A3: one tenant exceeding its budget must have zero effect on a
     different tenant's quota or ability to generate."""
-    provider = _SpyProvider(
-        token_usage={"prompt_tokens": 600, "completion_tokens": 600, "total_tokens": 1200}
-    )
+    provider = _SpyProvider(token_usage={"prompt_tokens": 600, "completion_tokens": 600, "total_tokens": 1200})
     governance = AIGovernanceManager()
     await governance.set_policy(AIGovernancePolicy(tenant_id="tenant_a", max_daily_budget_tokens=1000))
     await governance.set_policy(AIGovernancePolicy(tenant_id="tenant_b", max_daily_budget_tokens=1000))
@@ -999,14 +1000,13 @@ async def test_concurrent_quota_consumption_is_atomic_no_lost_updates(tmp_path: 
     concurrency = 10
 
     async def _consume_one() -> None:
-        try:
+        # budget is generous enough not to trigger this; tolerated defensively
+        with contextlib.suppress(AIGovernanceQuotaExceededError):
             await quota_manager.check_and_record_consumption(
                 tenant_id,
                 TokenUsage(prompt_tokens=per_call_tokens, completion_tokens=0, total_tokens=per_call_tokens),
                 AIGovernancePolicy(tenant_id=tenant_id, max_daily_budget_tokens=10_000),
             )
-        except AIGovernanceQuotaExceededError:
-            pass  # budget is generous enough not to trigger this; tolerated defensively
 
     await asyncio.gather(*(_consume_one() for _ in range(concurrency)))
 
@@ -1044,14 +1044,12 @@ async def test_invoke_tool_denies_blocklisted_tool_at_execution_time() -> None:
     from kortex.engines.ai.tools import AIToolInvoker, InMemoryToolExecutionPort
 
     class _CountingExecutionPort(InMemoryToolExecutionPort):
-        async def execute_tool(self, tenant_id, capability_name, arguments, authorizer=None):  # noqa: ANN001
+        async def execute_tool(self, tenant_id, capability_name, arguments, authorizer=None):
             executed["count"] += 1
             return await super().execute_tool(tenant_id, capability_name, arguments, authorizer)
 
     governance = AIGovernanceManager(tool_registry=tool_registry)
-    await governance.set_policy(
-        AIGovernancePolicy(tenant_id="tenant_blocked_tool", blocked_tools=["dangerous_tool"])
-    )
+    await governance.set_policy(AIGovernancePolicy(tenant_id="tenant_blocked_tool", blocked_tools=["dangerous_tool"]))
     tool_invoker = AIToolInvoker(registry=tool_registry, execution_port=_CountingExecutionPort())
     engine = AIOrchestrationEngine(
         tool_registry=tool_registry,

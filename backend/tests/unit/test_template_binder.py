@@ -9,7 +9,7 @@ import pytest
 
 from kortex.engines.document.exceptions import DocumentTemplateError
 from kortex.engines.document.models import BindingContext, TemplateSchema, ValidationReport
-from kortex.engines.document.template_binder import BindingResult, TemplateBinder, resolve_dotted_path
+from kortex.engines.document.template_binder import TemplateBinder, resolve_dotted_path
 from kortex.engines.document.template_library import TemplateLibrary
 
 
@@ -607,9 +607,7 @@ async def test_computed_field_sum_equals_rule() -> None:
             ]
         },
     )
-    context = BindingContext(
-        context_id="ctx-computed-sum", data={"subtotal": 100, "tax_amount": 15}
-    )
+    context = BindingContext(context_id="ctx-computed-sum", data={"subtotal": 100, "tax_amount": 15})
 
     result = await binder.bind_schema(schema, context)
     assert result.validation_report.is_valid is True
@@ -734,9 +732,7 @@ async def test_computed_field_difference_equals_requires_operand_reports_error()
 
     result = await binder.bind_schema(schema, context)
     assert result.validation_report.is_valid is False
-    assert any(
-        "net_salary_rule" in e and "failed" in e for e in result.validation_report.errors
-    )
+    assert any("net_salary_rule" in e and "failed" in e for e in result.validation_report.errors)
 
 
 @pytest.mark.asyncio
@@ -791,9 +787,7 @@ async def test_computed_field_rules_do_not_chain() -> None:
     """A rule cannot consume another rule's derived output within the same binding pass."""
     binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
     schema = _chained_rules_schema([_RULE_A, _RULE_B])
-    context = BindingContext(
-        context_id="ctx-chain-1", data={"a": 10, "b": 20, "tax": 5}
-    )
+    context = BindingContext(context_id="ctx-chain-1", data={"a": 10, "b": 20, "tax": 5})
 
     result = await binder.bind_schema(schema, context)
 
@@ -812,23 +806,15 @@ async def test_computed_field_rules_do_not_chain() -> None:
 async def test_computed_field_rule_order_does_not_change_result() -> None:
     """Reversing the declared rule order produces an identical binding result."""
     binder = TemplateBinder(template_library=TemplateLibrary(load_defaults=False))
-    context = BindingContext(
-        context_id="ctx-chain-order", data={"a": 10, "b": 20, "tax": 5}
-    )
+    context = BindingContext(context_id="ctx-chain-order", data={"a": 10, "b": 20, "tax": 5})
 
     forward = await binder.bind_schema(_chained_rules_schema([_RULE_A, _RULE_B]), context)
-    reversed_order = await binder.bind_schema(
-        _chained_rules_schema([_RULE_B, _RULE_A]), context
-    )
+    reversed_order = await binder.bind_schema(_chained_rules_schema([_RULE_B, _RULE_A]), context)
 
     assert forward.resolved_values == reversed_order.resolved_values
+    assert forward.validation_report.missing_placeholders == reversed_order.validation_report.missing_placeholders
     assert (
-        forward.validation_report.missing_placeholders
-        == reversed_order.validation_report.missing_placeholders
-    )
-    assert (
-        forward.validation_report.computed_fields_resolved
-        == reversed_order.validation_report.computed_fields_resolved
+        forward.validation_report.computed_fields_resolved == reversed_order.validation_report.computed_fields_resolved
     )
 
 
@@ -894,10 +880,7 @@ async def test_computed_field_invalid_operand_type_reports_explicit_error() -> N
     result = await binder.bind_schema(schema, context)
 
     assert result.validation_report.is_valid is False
-    assert any(
-        "invalid type" in err and "total_rule" in err
-        for err in result.validation_report.errors
-    )
+    assert any("invalid type" in err and "total_rule" in err for err in result.validation_report.errors)
     assert "total" not in result.resolved_values
 
 
@@ -923,9 +906,7 @@ async def test_computed_field_mixed_valid_and_invalid_operands_reports_error() -
             ]
         },
     )
-    context = BindingContext(
-        context_id="ctx-mixed-operands", data={"gross": 1000, "deduction": [1, 2, 3]}
-    )
+    context = BindingContext(context_id="ctx-mixed-operands", data={"gross": 1000, "deduction": [1, 2, 3]})
 
     result = await binder.bind_schema(schema, context)
 
@@ -1014,9 +995,7 @@ async def test_computed_field_direct_context_supplied_value_unchanged_when_no_ru
         description="Confirms direct computed_fields values are untouched by rule evaluation",
         placeholders=["tax_amount"],
     )
-    context = BindingContext(
-        context_id="ctx-direct-unchanged", computed_fields={"tax_amount": 12000}
-    )
+    context = BindingContext(context_id="ctx-direct-unchanged", computed_fields={"tax_amount": 12000})
 
     result = await binder.bind_schema(schema, context)
 

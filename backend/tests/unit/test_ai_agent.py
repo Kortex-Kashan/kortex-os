@@ -78,10 +78,7 @@ from kortex.engines.ai.tools import (
 # Helpers / Fixtures
 # ---------------------------------------------------------------------------
 
-_AGENT_PY = (
-    Path(__file__).parent.parent.parent
-    / "src" / "kortex" / "engines" / "ai" / "agent.py"
-)
+_AGENT_PY = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / "agent.py"
 
 
 def _make_task(
@@ -223,9 +220,7 @@ def test_agent_py_does_not_import_forbidden_namespace(forbidden: str) -> None:
     """AST quarantine: agent.py must not directly import any forbidden namespace."""
     imports = _collect_imports(_AGENT_PY)
     violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
-    assert violations == [], (
-        f"agent.py illegally imports forbidden namespace {forbidden!r}: {violations}"
-    )
+    assert violations == [], f"agent.py illegally imports forbidden namespace {forbidden!r}: {violations}"
 
 
 def test_agent_py_does_not_call_append_history() -> None:
@@ -243,16 +238,20 @@ def test_agent_py_does_not_call_append_history() -> None:
 
 def test_agent_orchestration_error_is_ai_orchestration_error() -> None:
     from kortex.engines.ai.exceptions import AIOrchestrationError
+
     assert issubclass(AgentOrchestrationError, AIOrchestrationError)
 
 
-@pytest.mark.parametrize("exc_cls", [
-    AgentValidationError,
-    AgentExecutionTimeoutError,
-    AgentStepLimitExceededError,
-    AgentLoopDetectedError,
-    AgentCancelledError,
-])
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        AgentValidationError,
+        AgentExecutionTimeoutError,
+        AgentStepLimitExceededError,
+        AgentLoopDetectedError,
+        AgentCancelledError,
+    ],
+)
 def test_agent_exception_leaf_types_inherit_base(exc_cls: type) -> None:
     assert issubclass(exc_cls, AgentOrchestrationError)
 
@@ -320,6 +319,7 @@ async def test_agent_exception_messages_never_contain_task_goal_or_tenant_values
 
 def test_agent_task_is_frozen() -> None:
     from pydantic import ValidationError
+
     task = _make_task()
     with pytest.raises((ValidationError, TypeError)):
         task.goal = "new goal"  # type: ignore[misc]
@@ -327,52 +327,74 @@ def test_agent_task_is_frozen() -> None:
 
 def test_agent_task_requires_non_empty_goal() -> None:
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         AgentTask(
-            task_id="t-1", tenant_id="x", user_id="u", conversation_id="c",
+            task_id="t-1",
+            tenant_id="x",
+            user_id="u",
+            conversation_id="c",
             goal="",  # empty
         )
 
 
 def test_agent_task_max_steps_bounded() -> None:
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         AgentTask(
-            task_id="t-1", tenant_id="x", user_id="u", conversation_id="c",
-            goal="g", max_steps=0,
+            task_id="t-1",
+            tenant_id="x",
+            user_id="u",
+            conversation_id="c",
+            goal="g",
+            max_steps=0,
         )
     with pytest.raises(ValidationError):
         AgentTask(
-            task_id="t-1", tenant_id="x", user_id="u", conversation_id="c",
-            goal="g", max_steps=31,
+            task_id="t-1",
+            tenant_id="x",
+            user_id="u",
+            conversation_id="c",
+            goal="g",
+            max_steps=31,
         )
 
 
 def test_agent_task_timeout_bounded() -> None:
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         AgentTask(
-            task_id="t-1", tenant_id="x", user_id="u", conversation_id="c",
-            goal="g", timeout_seconds=0.5,
+            task_id="t-1",
+            tenant_id="x",
+            user_id="u",
+            conversation_id="c",
+            goal="g",
+            timeout_seconds=0.5,
         )
     with pytest.raises(ValidationError):
         AgentTask(
-            task_id="t-1", tenant_id="x", user_id="u", conversation_id="c",
-            goal="g", timeout_seconds=601.0,
+            task_id="t-1",
+            tenant_id="x",
+            user_id="u",
+            conversation_id="c",
+            goal="g",
+            timeout_seconds=601.0,
         )
 
 
 def test_agent_execution_result_is_frozen() -> None:
     from pydantic import ValidationError
-    result = AgentExecutionResult(
-        task_id="t", tenant_id="n", status=AgentStatus.COMPLETED
-    )
+
+    result = AgentExecutionResult(task_id="t", tenant_id="n", status=AgentStatus.COMPLETED)
     with pytest.raises((ValidationError, TypeError)):
         result.status = AgentStatus.FAILED  # type: ignore[misc]
 
 
 def test_agent_step_is_frozen() -> None:
     from pydantic import ValidationError
+
     step = AgentStep(step_number=1)
     with pytest.raises((ValidationError, TypeError)):
         step.step_number = 2  # type: ignore[misc]
@@ -380,8 +402,11 @@ def test_agent_step_is_frozen() -> None:
 
 def test_resume_token_is_frozen() -> None:
     from pydantic import ValidationError
+
     token = ResumeToken(
-        task_id="t", step_count_at_pause=0, pending_call_hash="abc",
+        task_id="t",
+        step_count_at_pause=0,
+        pending_call_hash="abc",
         issued_at="2026-01-01T00:00:00+00:00",
         expires_at="2026-01-01T01:00:00+00:00",
     )
@@ -414,10 +439,14 @@ async def test_run_task_rejects_blank_conversation_id() -> None:
 async def test_run_task_rejects_blank_task_id() -> None:
     """Pydantic min_length=1 prevents blank task_id at construction time."""
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         AgentTask(
             task_id="",
-            tenant_id="x", user_id="u", conversation_id="c", goal="g",
+            tenant_id="x",
+            user_id="u",
+            conversation_id="c",
+            goal="g",
         )
 
 
@@ -458,6 +487,7 @@ def test_parser_preserves_call_id_when_present(parser: LLMOutputParser) -> None:
 
 def test_parser_missing_name_raises(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
+
     response = _llm_response(tool_calls=[{"arguments": {}}])
     with pytest.raises(ToolValidationError, match="missing or blank"):
         parser.parse_tool_calls(response)
@@ -465,6 +495,7 @@ def test_parser_missing_name_raises(parser: LLMOutputParser) -> None:
 
 def test_parser_blank_name_raises(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
+
     response = _llm_response(tool_calls=[{"name": "   "}])
     with pytest.raises(ToolValidationError, match="missing or blank"):
         parser.parse_tool_calls(response)
@@ -472,6 +503,7 @@ def test_parser_blank_name_raises(parser: LLMOutputParser) -> None:
 
 def test_parser_invalid_name_pattern_raises(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
+
     response = _llm_response(tool_calls=[{"name": "bad name!"}])
     with pytest.raises(ToolValidationError, match="invalid name"):
         parser.parse_tool_calls(response)
@@ -479,6 +511,7 @@ def test_parser_invalid_name_pattern_raises(parser: LLMOutputParser) -> None:
 
 def test_parser_arguments_not_dict_raises(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
+
     response = _llm_response(tool_calls=[{"name": "tool", "arguments": ["list"]}])
     with pytest.raises(ToolValidationError, match="must be a dict"):
         parser.parse_tool_calls(response)
@@ -486,16 +519,16 @@ def test_parser_arguments_not_dict_raises(parser: LLMOutputParser) -> None:
 
 def test_parser_raw_call_not_dict_raises(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
+
     # LLMResponse.tool_calls is list[dict], so we force a non-dict entry via model_construct
-    response = LLMResponse.model_construct(
-        request_id="r1", text_content="", tool_calls=["not-a-dict"]
-    )
+    response = LLMResponse.model_construct(request_id="r1", text_content="", tool_calls=["not-a-dict"])
     with pytest.raises(ToolValidationError, match="must be a dict"):
         parser.parse_tool_calls(response)
 
 
 def test_parser_oversized_arguments_raises(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
+
     # Build a payload that exceeds MAX_TOOL_ARGUMENTS_BYTES
     big_value = "x" * (MAX_TOOL_ARGUMENTS_BYTES + 100)
     response = _llm_response(tool_calls=[{"name": "tool", "arguments": {"k": big_value}}])
@@ -521,10 +554,13 @@ def test_parser_extract_thought_returns_stripped_text(parser: LLMOutputParser) -
 
 def test_parser_malformed_at_index_1_raises_with_index(parser: LLMOutputParser) -> None:
     from kortex.engines.ai.exceptions import ToolValidationError
-    response = _llm_response(tool_calls=[
-        {"name": "ok_tool"},
-        {"name": ""},   # malformed
-    ])
+
+    response = _llm_response(
+        tool_calls=[
+            {"name": "ok_tool"},
+            {"name": ""},  # malformed
+        ]
+    )
     with pytest.raises(ToolValidationError, match="index 1"):
         parser.parse_tool_calls(response)
 
@@ -548,10 +584,12 @@ async def test_run_task_completes_with_text_response() -> None:
 @pytest.mark.asyncio
 async def test_run_task_tool_then_complete() -> None:
     """One tool call followed by a terminal response → COMPLETED with two steps."""
-    orch = _make_orchestrator([
-        _tool_response("get_data"),
-        _terminal_response(),
-    ])
+    orch = _make_orchestrator(
+        [
+            _tool_response("get_data"),
+            _terminal_response(),
+        ]
+    )
     task = _make_task(max_steps=5)
     result = await orch.run_task(task)
     assert result.status == AgentStatus.COMPLETED
@@ -560,11 +598,13 @@ async def test_run_task_tool_then_complete() -> None:
 
 @pytest.mark.asyncio
 async def test_run_task_step_count_increments_correctly() -> None:
-    orch = _make_orchestrator([
-        _tool_response("get_data"),
-        _tool_response("get_data"),
-        _terminal_response(),
-    ])
+    orch = _make_orchestrator(
+        [
+            _tool_response("get_data"),
+            _tool_response("get_data"),
+            _terminal_response(),
+        ]
+    )
     task = _make_task(max_steps=10)
     result = await orch.run_task(task)
     assert result.total_steps == 3
@@ -642,8 +682,10 @@ async def test_loop_detection_does_not_trigger_with_varied_calls() -> None:
         )
     port = InMemoryToolExecutionPort()
     for name in ("get_data", "save_data", "list_data"):
+
         async def _h(args: dict[str, Any]) -> dict[str, Any]:
             return {"ok": True}
+
         port.register_handler(f"kortex.ai.tool.{name}", _h)
     full_invoker = AIToolInvoker(registry=registry, execution_port=port)
 
@@ -786,7 +828,8 @@ def test_resume_token_hash_matches_canonical_serialization() -> None:
     expected = hashlib.sha256(
         json.dumps(
             [{"tool_name": c.tool_name, "arguments": c.arguments} for c in calls],
-            sort_keys=True, ensure_ascii=True,
+            sort_keys=True,
+            ensure_ascii=True,
         ).encode("utf-8")
     ).hexdigest()
     assert token.pending_call_hash == expected
@@ -874,18 +917,14 @@ async def test_resume_task_completes_after_approval() -> None:
     shared_store = InMemoryAgentTaskStore()
 
     # Step 1: run_task pauses
-    orch = _make_orchestrator(
-        [_tool_response("get_data")], policy=AlwaysDenyPolicy(), task_store=shared_store
-    )
+    orch = _make_orchestrator([_tool_response("get_data")], policy=AlwaysDenyPolicy(), task_store=shared_store)
     task = _make_task()
     paused = await orch.run_task(task)
     assert paused.status == AgentStatus.PAUSED_FOR_APPROVAL
     assert paused.resume_token is not None
 
     # Step 2: resume_task with same approved calls and valid token
-    orch2 = _make_orchestrator(
-        [_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store
-    )
+    orch2 = _make_orchestrator([_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store)
     resumed = await orch2.resume_task(
         task=task,
         resume_token=paused.resume_token,
@@ -926,16 +965,12 @@ async def test_approval_token_cannot_be_replayed_after_a_successful_resume() -> 
     prevent for critical operations.
     """
     shared_store = InMemoryAgentTaskStore()
-    orch = _make_orchestrator(
-        [_tool_response("get_data")], policy=AlwaysDenyPolicy(), task_store=shared_store
-    )
+    orch = _make_orchestrator([_tool_response("get_data")], policy=AlwaysDenyPolicy(), task_store=shared_store)
     task = _make_task()
     paused = await orch.run_task(task)
     assert paused.resume_token is not None
 
-    first = _make_orchestrator(
-        [_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store
-    )
+    first = _make_orchestrator([_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store)
     resumed = await first.resume_task(
         task=task,
         resume_token=paused.resume_token,
@@ -944,9 +979,7 @@ async def test_approval_token_cannot_be_replayed_after_a_successful_resume() -> 
     assert resumed.status == AgentStatus.COMPLETED
 
     # Replaying the very same token against the same store must be refused.
-    second = _make_orchestrator(
-        [_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store
-    )
+    second = _make_orchestrator([_terminal_response()], policy=AlwaysApprovePolicy(), task_store=shared_store)
     with pytest.raises(AgentStateConflictError):
         await second.resume_task(
             task=task,
@@ -1030,10 +1063,12 @@ async def test_step_callback_called_for_each_step() -> None:
     async def _callback(step: AgentStep) -> None:
         step_records.append(step)
 
-    orch = _make_orchestrator([
-        _tool_response("get_data"),
-        _terminal_response(),
-    ])
+    orch = _make_orchestrator(
+        [
+            _tool_response("get_data"),
+            _terminal_response(),
+        ]
+    )
     task = _make_task(max_steps=10)
     await orch.run_task(task, step_callback=_callback)
     # Step 1: tool call + results; Step 2: final text response
@@ -1199,14 +1234,27 @@ def test_init_exports_m7_symbols() -> None:
     import kortex.engines.ai as pkg
 
     for name in [
-        "AgentTask", "AgentStep", "AgentStatus", "AgentExecutionResult",
-        "AgentOrchestrator", "ResumeToken", "LLMOutputParser",
-        "ILLMExecutionPort", "IAgentContextPort", "IApprovalPolicy",
-        "InMemoryLLMExecutionPort", "InMemoryAgentContextPort",
-        "AlwaysApprovePolicy", "AlwaysDenyPolicy",
-        "AgentOrchestrationError", "AgentValidationError",
-        "AgentExecutionTimeoutError", "AgentStepLimitExceededError",
-        "AgentLoopDetectedError", "AgentCancelledError",
-        "LOOP_DETECTION_WINDOW", "RESUME_TOKEN_TTL_SECONDS",
+        "AgentTask",
+        "AgentStep",
+        "AgentStatus",
+        "AgentExecutionResult",
+        "AgentOrchestrator",
+        "ResumeToken",
+        "LLMOutputParser",
+        "ILLMExecutionPort",
+        "IAgentContextPort",
+        "IApprovalPolicy",
+        "InMemoryLLMExecutionPort",
+        "InMemoryAgentContextPort",
+        "AlwaysApprovePolicy",
+        "AlwaysDenyPolicy",
+        "AgentOrchestrationError",
+        "AgentValidationError",
+        "AgentExecutionTimeoutError",
+        "AgentStepLimitExceededError",
+        "AgentLoopDetectedError",
+        "AgentCancelledError",
+        "LOOP_DETECTION_WINDOW",
+        "RESUME_TOKEN_TTL_SECONDS",
     ]:
         assert hasattr(pkg, name), f"kortex.engines.ai missing M7 export: {name}"

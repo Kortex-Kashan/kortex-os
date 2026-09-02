@@ -198,7 +198,7 @@ async def _build_kernel(tmp_path: Path, provider: BaseAIProvider) -> tuple[Kerne
     return kernel, ai_engine, document_engine
 
 
-async def _human_token(kernel: Kernel, tenant_id: str, principal_id: str):  # noqa: ANN202
+async def _human_token(kernel: Kernel, tenant_id: str, principal_id: str):
     security_engine: SecurityEngine = kernel.get_engine("security")
     principal = await security_engine.authentication_manager.authenticate(
         {
@@ -416,7 +416,7 @@ async def test_duplicate_approval_decided_event_does_not_dispatch_the_document_g
         assert record_after_first is not None
         assert record_after_first.status.value == "COMPLETED"
 
-        await ai_engine._on_approval_decided(captured_events[0])  # noqa: SLF001
+        await ai_engine._on_approval_decided(captured_events[0])
 
         record_after_replay = await ai_engine.agent_orchestrator.get_task(task.task_id, _TENANT_A)
         assert record_after_replay is not None
@@ -496,11 +496,7 @@ async def test_rejected_document_generation_never_dispatches(tmp_path: Path) -> 
         history = await ai_engine.get_conversation_history(_TENANT_A, "conv-reject-1")
         assert history == []
 
-        assert all(
-            result.status.value != "SUCCESS"
-            for step in record.steps
-            for result in step.tool_results
-        )
+        assert all(result.status.value != "SUCCESS" for step in record.steps for result in step.tool_results)
     finally:
         await kernel.shutdown()
 

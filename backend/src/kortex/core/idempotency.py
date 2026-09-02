@@ -61,7 +61,7 @@ SENSITIVE_KEY_NAMES: set[str] = {
 }
 
 
-def sanitize_for_persistence(value: Any) -> Any:  # noqa: ANN401
+def sanitize_for_persistence(value: Any) -> Any:
     """Recursively scrub sensitive credential tokens and passwords before JSON persistence."""
     if value is None:
         return None
@@ -107,9 +107,7 @@ class IdempotencyRecordModel(BaseModel):
     """
 
     __tablename__ = "idempotency_records"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "idempotency_key", name="uq_idempotency_tenant_key"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "idempotency_key", name="uq_idempotency_tenant_key"),)
 
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
@@ -313,7 +311,7 @@ class IdempotencyStore:
         self,
         tenant_id: str,
         idempotency_key: str,
-        response_payload: Any,  # noqa: ANN401
+        response_payload: Any,
     ) -> None:
         """Transition idempotency record to COMPLETED and persist sanitized response payload."""
         sanitized = sanitize_for_persistence(response_payload)
@@ -379,10 +377,9 @@ class IdempotencyStore:
             with contextlib.suppress(Exception):
                 await self._cache_store.delete(self._cache_key(tenant_id, idempotency_key))
 
-    async def get_record(
-        self, tenant_id: str, idempotency_key: str
-    ) -> IdempotencyRecordModel | None:
+    async def get_record(self, tenant_id: str, idempotency_key: str) -> IdempotencyRecordModel | None:
         """Retrieve the raw IdempotencyRecordModel for inspection."""
+
         async def _action(session: AsyncSession) -> IdempotencyRecordModel | None:
             stmt = select(IdempotencyRecordModel).where(
                 IdempotencyRecordModel.tenant_id == tenant_id,

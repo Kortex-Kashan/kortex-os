@@ -352,7 +352,7 @@ async def test_delete_non_existent_template() -> None:
     )
     await lib.register_template(v1)
 
-    with pytest.raises(DocumentTemplateError, match="version '9.9.9' not found"):
+    with pytest.raises(DocumentTemplateError, match=r"version '9.9.9' not found"):
         await lib.delete_template("exist.tmpl", version="9.9.9")
 
 
@@ -409,7 +409,7 @@ async def test_get_template_non_existent() -> None:
     )
     await lib.register_template(schema)
 
-    with pytest.raises(DocumentTemplateError, match="version '2.0.0' not found"):
+    with pytest.raises(DocumentTemplateError, match=r"version '2.0.0' not found"):
         await lib.get_template("known.template", version="2.0.0")
 
 
@@ -462,9 +462,7 @@ async def test_repository_mode_register_and_get_survives_fresh_instance(
     )
     await lib.register_template(schema)
 
-    fresh_lib = TemplateLibrary(
-        load_defaults=False, repository=TemplateRepository(data_store=data_store)
-    )
+    fresh_lib = TemplateLibrary(load_defaults=False, repository=TemplateRepository(data_store=data_store))
     fetched = await fresh_lib.get_template("persisted.custom.v1")
     assert fetched.template_id == "persisted.custom.v1"
     assert fetched.namespace == "kortex.custom.persisted"
@@ -592,7 +590,7 @@ async def test_repository_mode_delete_missing_version_raises(
     )
     await lib.register_template(schema)
 
-    with pytest.raises(DocumentTemplateError, match="version '2.0.0' not found"):
+    with pytest.raises(DocumentTemplateError, match=r"version '2.0.0' not found"):
         await lib.delete_template("persisted.delete_ver.v1", version="2.0.0")
 
 
@@ -822,6 +820,7 @@ async def test_tenant_isolation_falls_back_to_constructor_default(
 # Milestone 7: Template Schema Cache
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_template_schema_cache_read_through_on_latest_lookup() -> None:
     """Test that a latest-version get_template() populates the Template Schema Cache
@@ -944,4 +943,3 @@ async def test_template_schema_cache_absent_preserves_uncached_behavior() -> Non
 
     tmpl = await lib.get_template("invoice.declarative.v1")
     assert tmpl.name == "Standard Invoice Template"
-

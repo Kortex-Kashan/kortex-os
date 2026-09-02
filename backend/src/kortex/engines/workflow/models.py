@@ -205,7 +205,8 @@ class ApprovalRequest(BaseModel):
         default=None, description="PrincipalType of the requester, e.g. 'AGENT' or 'USER' (M6.2-3, additive)"
     )
     correlation_id: str | None = Field(
-        default=None, description="Cross-system correlation ID linking this ticket to its originating action (M6.2-3, additive)"
+        default=None,
+        description="Cross-system correlation ID linking this ticket to its originating action (M6.2-3, additive)",
     )
     action_fingerprint: str | None = Field(
         default=None,
@@ -279,13 +280,10 @@ class WorkflowSettings(BaseModel):
     # opted into CRON scheduling for other reasons. Defaults enabled so a
     # timed-out approval ticket always eventually propagates without
     # requiring any additional configuration.
-    approval_sweep_enabled: bool = Field(
-        default=True, description="Enable the background approval-expiry sweep loop"
-    )
+    approval_sweep_enabled: bool = Field(default=True, description="Enable the background approval-expiry sweep loop")
     approval_sweep_interval_seconds: float = Field(
         default=30.0, ge=0.1, description="Approval-expiry sweep polling interval"
     )
-
 
 
 # ============================================================================

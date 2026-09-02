@@ -7,7 +7,6 @@ Contains ZERO execution or runtime capability dispatch logic.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
 from kortex.engines.recipe.exceptions import RecipeValidationError
 from kortex.engines.recipe.models import (
     RecipeCompatibility,
@@ -27,12 +26,12 @@ class RecipeDSL:
     def __init__(
         self,
         manifest: RecipeManifest,
-        inputs: Optional[List[RecipeInput]] = None,
-        steps: Optional[List[RecipeStep]] = None,
-        outputs: Optional[List[RecipeOutput]] = None,
-        settings: Optional[RecipeSettings] = None,
-        permissions: Optional[List[RecipePermission]] = None,
-        compatibility: Optional[RecipeCompatibility] = None,
+        inputs: list[RecipeInput] | None = None,
+        steps: list[RecipeStep] | None = None,
+        outputs: list[RecipeOutput] | None = None,
+        settings: RecipeSettings | None = None,
+        permissions: list[RecipePermission] | None = None,
+        compatibility: RecipeCompatibility | None = None,
     ) -> None:
         self.manifest = manifest
         self.inputs = inputs or []

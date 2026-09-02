@@ -11,7 +11,7 @@ slice -- no evidence a first pilot capability needs one.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +37,7 @@ class FinanceInvoiceManager:
         because `CreateInvoiceRequest` never carries one (see models.py).
         """
         invoice_id = str(uuid.uuid4())
-        created_at = datetime.now(timezone.utc)
+        created_at = datetime.now(UTC)
 
         async def _action(session: AsyncSession) -> None:
             session.add(

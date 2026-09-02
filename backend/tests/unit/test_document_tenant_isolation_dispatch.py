@@ -186,9 +186,7 @@ async def test_execute_profile_cross_tenant_attempt_fails_closed_even_with_spoof
     kernel, storage_engine, security_engine, document_engine = await _boot_kernel(tmp_path)
     tenant_a = _tenant(tmp_path, "-a")
     tenant_b = _tenant(tmp_path, "-b")
-    await document_engine.profile_manager.register_profile(
-        _profile("shared-guessable-profile-id"), tenant_id=tenant_a
-    )
+    await document_engine.profile_manager.register_profile(_profile("shared-guessable-profile-id"), tenant_id=tenant_a)
 
     token_b = await _authorized_token(storage_engine, security_engine, tenant_b, "principal-b", "document:execute")
     with pytest.raises(DocumentProfileNotFoundError):

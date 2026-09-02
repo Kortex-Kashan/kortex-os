@@ -70,9 +70,7 @@ class AIProviderMetadata(BaseModel):
         from declaring that it needs a credential while carrying none.
         """
         if self.credential_requirement != "none" and not self.secret_handle:
-            raise ValueError(
-                "secret_handle is required when credential_requirement is not 'none'"
-            )
+            raise ValueError("secret_handle is required when credential_requirement is not 'none'")
         return self
 
 

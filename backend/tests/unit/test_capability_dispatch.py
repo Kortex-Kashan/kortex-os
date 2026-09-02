@@ -12,9 +12,9 @@ no decision logic is duplicated or re-implemented here.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 from argon2 import PasswordHasher
@@ -100,6 +100,7 @@ async def _seed_principal(
 async def _grant_role_permission(data_store: Any, role: str, permission: str) -> None:
     async def _action(session: AsyncSession) -> None:
         from sqlalchemy import select
+
         existing = await session.scalar(
             select(RolePermissionRecord).where(
                 RolePermissionRecord.role == role,
@@ -130,7 +131,7 @@ class _CallCountingHandler:
 
     def __init__(self) -> None:
         self.call_count = 0
-        self.received: list[Dict[str, Any]] = []
+        self.received: list[dict[str, Any]] = []
 
     async def __call__(self, **kwargs: Any) -> str:
         self.call_count += 1
@@ -222,9 +223,7 @@ async def test_unauthorized_capability_denied_by_rbac(tmp_path: Path) -> None:
 async def test_missing_session_token_denied(tmp_path: Path) -> None:
     kernel, _storage_engine, _security_engine = _build_kernel(tmp_path)
     handler = _CallCountingHandler()
-    kernel.register_capability(
-        name="dispatch.test.needs_token", description="test", provider="test", handler=handler
-    )
+    kernel.register_capability(name="dispatch.test.needs_token", description="test", provider="test", handler=handler)
     await kernel.boot()
 
     request = CapabilityRequest(capability_name="dispatch.test.needs_token", session_token=None)
@@ -476,12 +475,16 @@ async def test_security_engine_unavailable_fails_closed(tmp_path: Path) -> None:
     kernel.register_capability(name="dispatch.test.no_security", description="test", provider="test", handler=handler)
     await kernel.boot()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     request = CapabilityRequest(
         capability_name="dispatch.test.no_security",
         session_token=TokenPayload(
-            token_id="t", principal_id="p", principal_type="USER", tenant_id="t",
-            issued_at_utc=now, expires_at_utc=now,
+            token_id="t",
+            principal_id="p",
+            principal_type="USER",
+            tenant_id="t",
+            issued_at_utc=now,
+            expires_at_utc=now,
         ),
     )
     # Security Engine isn't registered at all -> Kernel.get_engine("security")
@@ -805,9 +808,7 @@ class _RecordingDictHandler:
         return "ok"
 
 
-async def _authorized_request(
-    tmp_path: Path, capability_name: str, handler: Any, parameters: dict[str, Any]
-) -> Any:
+async def _authorized_request(tmp_path: Path, capability_name: str, handler: Any, parameters: dict[str, Any]) -> Any:
     """Shared setup for the coercion tests below: build+boot a kernel with
     one synthetic capability, seed an authorized principal, dispatch once,
     and return the raw result."""

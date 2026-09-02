@@ -7,7 +7,6 @@ in accordance with Section 16 and Milestone 8 of the Document Engine Implementat
 from __future__ import annotations
 
 import datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,11 +16,9 @@ class DocumentBaseEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    event_id: str = Field(default_factory=lambda: f"evt-{datetime.datetime.now(datetime.timezone.utc).timestamp()}")
+    event_id: str = Field(default_factory=lambda: f"evt-{datetime.datetime.now(datetime.UTC).timestamp()}")
     event_type: str
-    timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 class DocumentCreatedEvent(DocumentBaseEvent):

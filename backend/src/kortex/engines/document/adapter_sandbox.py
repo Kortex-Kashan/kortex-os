@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import os
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -22,8 +20,6 @@ from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
 from kortex.engines.document.base_adapter import BaseDocumentAdapter
 from kortex.engines.document.exceptions import (
     AdapterExecutionError,
-    AdapterNotFoundError,
-    DocumentAdapterError,
     DocumentSecurityError,
 )
 from kortex.engines.document.models import (
@@ -219,7 +215,7 @@ class AdapterSandbox:
         self.validate_capability_policy(adapter, capability, effective_config)
 
         start_time = time.perf_counter()
-        start_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        start_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
 
         # Create isolated temporary workspace directory
         temp_dir_obj = tempfile.TemporaryDirectory(prefix="kortex_sandbox_")
@@ -241,7 +237,7 @@ class AdapterSandbox:
                 )
 
                 duration_ms = (time.perf_counter() - start_time) * 1000.0
-                end_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                end_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
 
                 audit_meta = {
                     "adapter_id": adapter.adapter_id,
@@ -269,9 +265,9 @@ class AdapterSandbox:
                     audit_metadata=audit_meta,
                 )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 duration_ms = (time.perf_counter() - start_time) * 1000.0
-                end_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                end_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
                 err_msg = f"Adapter '{adapter.adapter_id}' timed out after {effective_config.timeout_seconds}s."
 
                 audit_meta = {

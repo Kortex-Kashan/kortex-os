@@ -36,15 +36,11 @@ class IBaseConnectorDriver(Protocol):
         """Return list of supported action types."""
         ...
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         """Execute a connector action and return execution result."""
         ...
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         """Test connection to target system using profile configuration."""
         ...
 
@@ -97,9 +93,7 @@ class IConnectorDriverRegistry(Protocol):
         """Return metadata for all registered connector drivers."""
         ...
 
-    def find_drivers_for_action(
-        self, action_type: ConnectorActionType
-    ) -> list[DriverMetadata]:
+    def find_drivers_for_action(self, action_type: ConnectorActionType) -> list[DriverMetadata]:
         """Find drivers advertising support for a specific action type."""
         ...
 
@@ -151,9 +145,7 @@ class IConnectorDriverLoader(Protocol):
 class IConnectorPipeline(Protocol):
     """Interface for executing multi-stage Connector Pipelines."""
 
-    async def execute(
-        self, request: ActionRequest, profile: ConnectorProfile
-    ) -> ActionResult:
+    async def execute(self, request: ActionRequest, profile: ConnectorProfile) -> ActionResult:
         """Execute multi-stage pipeline for an action request."""
         ...
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from sqlalchemy import select
 
 from kortex.core.db import DatabaseEngineManager
 from kortex.engines.knowledge.annotations import KnowledgeAnnotationManager
+from kortex.engines.knowledge.exceptions import KnowledgePersistenceError
 from kortex.engines.knowledge.graph import KnowledgeGraph
 from kortex.engines.knowledge.lineage import KnowledgeLineageManager
 from kortex.engines.knowledge.models import (
@@ -34,11 +35,10 @@ from kortex.engines.knowledge.models import (
     KnowledgeRecordType,
     KnowledgeTrustState,
 )
-from kortex.engines.knowledge.exceptions import KnowledgePersistenceError
 from kortex.engines.knowledge.persistence import KnowledgeRecordRow
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 async def _build_data_store(tmp_path: Path, name: str = "m7") -> RelationalDataStore:

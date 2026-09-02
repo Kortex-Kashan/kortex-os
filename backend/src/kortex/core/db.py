@@ -11,8 +11,8 @@ import datetime
 import enum
 import logging
 import os
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator, Optional
 
 from sqlalchemy import DateTime, String, func
 from sqlalchemy.ext.asyncio import (
@@ -47,14 +47,14 @@ class BaseModel(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        default=lambda: datetime.datetime.now(datetime.UTC),
         server_default=func.now(),
         nullable=False,
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.datetime.now(datetime.timezone.utc),
-        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        default=lambda: datetime.datetime.now(datetime.UTC),
+        onupdate=lambda: datetime.datetime.now(datetime.UTC),
         server_default=func.now(),
         nullable=False,
     )
@@ -117,7 +117,7 @@ class DatabaseEngineManager:
     Provides PostgreSQL adapter interface for enterprise server deployments.
     """
 
-    def __init__(self, connection_url: Optional[str] = None, dialect: DatabaseDialect = DatabaseDialect.SQLITE) -> None:
+    def __init__(self, connection_url: str | None = None, dialect: DatabaseDialect = DatabaseDialect.SQLITE) -> None:
         self._dialect = dialect
         # Precedence: explicit constructor argument > KORTEX_DATABASE_URL
         # environment variable > safe computed default. This is the one
@@ -125,8 +125,8 @@ class DatabaseEngineManager:
         # which branch was taken.
         self._url = connection_url or os.environ.get("KORTEX_DATABASE_URL") or _default_sqlite_url()
 
-        self._engine: Optional[AsyncEngine] = None
-        self._session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = None
 
     @property
     def dialect(self) -> DatabaseDialect:

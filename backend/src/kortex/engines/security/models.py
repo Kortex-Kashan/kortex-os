@@ -22,12 +22,15 @@ implemented — it is not a permanent duplicate.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import JSON, LargeBinary, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
 
+from kortex.core.db import BaseModel as SQLAlchemyBaseModel
 
 
 class PrincipalType(str, Enum):
@@ -65,8 +68,8 @@ class SecurityPrincipal(BaseModel):
     principal_id: str = Field(min_length=1, description="Unique identifier of the authenticated principal.")
     principal_type: PrincipalType
     tenant_id: str = Field(min_length=1, description="Multi-tenant organization identifier.")
-    roles: List[str] = Field(default_factory=list, description="RBAC role names assigned to this principal.")
-    attributes: Dict[str, Any] = Field(
+    roles: list[str] = Field(default_factory=list, description="RBAC role names assigned to this principal.")
+    attributes: dict[str, Any] = Field(
         default_factory=dict, description="ABAC attribute context (e.g. environment, resource ownership)."
     )
 
@@ -78,7 +81,7 @@ class PermissionRequirement(BaseModel):
     """
 
     capability_name: str = Field(min_length=1, description="Canonical capability string being requested.")
-    required_permissions: List[str] = Field(
+    required_permissions: list[str] = Field(
         default_factory=list, description="RBAC permission keys required to execute the capability."
     )
     security_classification: ClassificationLevel = Field(
@@ -99,7 +102,7 @@ class AccessDecision(BaseModel):
     is_allowed: bool
     decision_code: str = Field(min_length=1, description="Machine-readable decision code (e.g. PERMISSION_DENIED).")
     reason: str = Field(min_length=1, description="Human-readable justification for the decision.")
-    evaluated_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    evaluated_at_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class SecretEntry(BaseModel):
@@ -113,8 +116,8 @@ class SecretEntry(BaseModel):
     secret_handle: str = Field(min_length=1, description="Opaque handle string, e.g. 'secret:kortex/smtp_pass'.")
     encrypted_payload: bytes = Field(description="Full AEAD envelope bytes. Never plaintext.")
     algorithm: str = Field(min_length=1, description="Cryptographic algorithm identifier, e.g. 'aes-256-gcm'.")
-    created_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class TokenPayload(BaseModel):
@@ -151,7 +154,7 @@ class CryptographicSignature(BaseModel):
     algorithm: str = Field(min_length=1, description="Signature algorithm identifier, e.g. 'ed25519'.")
     signature: bytes = Field(description="Raw signature bytes.")
     public_key: bytes = Field(description="Raw public key bytes used to verify this signature.")
-    signed_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    signed_at_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class SecurityMetadata(BaseModel):
@@ -162,16 +165,11 @@ class SecurityMetadata(BaseModel):
     """
 
     classification: ClassificationLevel = ClassificationLevel.INTERNAL
-    compliance_flags: List[str] = Field(default_factory=list)
+    compliance_flags: list[str] = Field(default_factory=list)
     encryption_required: bool = False
 
 
 # -- SQLAlchemy ORM Model for IDataStore Persistence (Milestone M2) ----------
-
-from sqlalchemy import JSON, LargeBinary, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
-
-from kortex.core.db import BaseModel as SQLAlchemyBaseModel
 
 
 class SecretRecord(SQLAlchemyBaseModel):
@@ -184,9 +182,7 @@ class SecretRecord(SQLAlchemyBaseModel):
     """
 
     __tablename__ = "security_secrets"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "secret_handle", name="uq_security_secrets_tenant_handle"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "secret_handle", name="uq_security_secrets_tenant_handle"),)
 
     tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     secret_handle: Mapped[str] = mapped_column(String(512), index=True, nullable=False)
@@ -217,9 +213,7 @@ class PrincipalRecord(SQLAlchemyBaseModel):
 
     __tablename__ = "security_principals"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "principal_id", "principal_type", name="uq_security_principals_tenant_principal"
-        ),
+        UniqueConstraint("tenant_id", "principal_id", "principal_type", name="uq_security_principals_tenant_principal"),
     )
 
     tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
@@ -255,9 +249,7 @@ class RolePermissionRecord(SQLAlchemyBaseModel):
     """
 
     __tablename__ = "security_role_permissions"
-    __table_args__ = (
-        UniqueConstraint("role", "permission", name="uq_security_role_permissions_role_permission"),
-    )
+    __table_args__ = (UniqueConstraint("role", "permission", name="uq_security_role_permissions_role_permission"),)
 
     role: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     permission: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -273,8 +265,10 @@ class UniversalAuditEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    audit_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique UUID identifying audit record.")
-    timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of action.")
+    audit_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()), description="Unique UUID identifying audit record."
+    )
+    timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Timestamp of action.")
     action: str = Field(min_length=1, description="Canonical capability or action name executed.")
     actor_id: str = Field(min_length=1, description="Identifier of actor performing action (User/Agent/System).")
     actor_type: str = Field(
@@ -288,11 +282,13 @@ class UniversalAuditEntry(BaseModel):
         ),
     )
     tenant_id: str = Field(min_length=1, description="Multi-tenant organization identifier.")
-    resource_id: Optional[str] = Field(default=None, description="Identifier of target resource acted upon.")
-    previous_state_hash: Optional[str] = Field(default=None, description="SHA256 content hash of resource prior to action.")
-    new_state_hash: Optional[str] = Field(default=None, description="SHA256 content hash of resource after action.")
-    client_ip: Optional[str] = Field(default=None, description="Optional client IP or node location.")
-    context: Dict[str, Any] = Field(default_factory=dict, description="Structured execution context data.")
+    resource_id: str | None = Field(default=None, description="Identifier of target resource acted upon.")
+    previous_state_hash: str | None = Field(
+        default=None, description="SHA256 content hash of resource prior to action."
+    )
+    new_state_hash: str | None = Field(default=None, description="SHA256 content hash of resource after action.")
+    client_ip: str | None = Field(default=None, description="Optional client IP or node location.")
+    context: dict[str, Any] = Field(default_factory=dict, description="Structured execution context data.")
 
 
 class AuditRecord(SQLAlchemyBaseModel):

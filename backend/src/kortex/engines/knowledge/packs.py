@@ -91,8 +91,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,10 +115,10 @@ class KnowledgePackManager:
     """Tenant-scoped Knowledge Pack loader/verifier. Optionally durable via
     `IDataStore`, matching `KnowledgeLineageManager`/`KnowledgeAnnotationManager`."""
 
-    def __init__(self, object_store: IObjectStore, data_store: Optional[IDataStore] = None) -> None:
+    def __init__(self, object_store: IObjectStore, data_store: IDataStore | None = None) -> None:
         self._object_store = object_store
         self._data_store = data_store
-        self._packs: Dict[Tuple[str, str], KnowledgePack] = {}
+        self._packs: dict[tuple[str, str], KnowledgePack] = {}
         # See module docstring's concurrency note.
         self._lock = asyncio.Lock()
 
@@ -141,7 +141,7 @@ class KnowledgePackManager:
         if self._data_store is None:
             return
 
-        async def _action(session: AsyncSession) -> List[KnowledgePackRow]:
+        async def _action(session: AsyncSession) -> list[KnowledgePackRow]:
             result = await session.execute(select(KnowledgePackRow))
             return list(result.scalars().all())
 
@@ -205,8 +205,7 @@ class KnowledgePackManager:
             key = (pack.tenant_id, pack.asset_id)
             if key in self._packs:
                 raise KnowledgeDuplicatePackError(
-                    f"Knowledge pack '{pack.asset_id}' has already been loaded for tenant "
-                    f"'{pack.tenant_id}'."
+                    f"Knowledge pack '{pack.asset_id}' has already been loaded for tenant '{pack.tenant_id}'."
                 )
 
             if not pack.manifest:
@@ -234,20 +233,20 @@ class KnowledgePackManager:
                     f"'{pack.checksum_sha256}', computed '{computed_checksum}'."
                 )
 
-            loaded_at = datetime.now(timezone.utc)
+            loaded_at = datetime.now(UTC)
             await self._persist_pack(pack, loaded_at)
 
             self._packs[key] = pack
             return pack
 
-    async def get_loaded_pack(self, asset_id: str, tenant_id: str) -> Optional[KnowledgePack]:
+    async def get_loaded_pack(self, asset_id: str, tenant_id: str) -> KnowledgePack | None:
         """Return the loaded pack for `(tenant_id, asset_id)`, or `None` if
         it was never loaded (a normal, non-exceptional outcome, matching
         `KnowledgeLineageManager.get_current`'s own `Optional`-return
         convention)."""
         return self._packs.get((tenant_id, asset_id))
 
-    def list_loaded_packs(self, tenant_id: str) -> List[KnowledgePack]:
+    def list_loaded_packs(self, tenant_id: str) -> list[KnowledgePack]:
         """Return every pack loaded for `tenant_id`. Additive helper (not on
         any frozen Protocol), matching `graph.py::list_nodes`/
         `lineage.py::list_current_records`'s own precedent for a

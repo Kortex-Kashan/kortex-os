@@ -10,7 +10,7 @@ Implementation Specification (Version 3.0.0).
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.document.adapter_pipeline import AdapterPipelineExecutor
@@ -71,7 +71,7 @@ from kortex.engines.storage.interfaces import IDataStore, IEngineDiagnostics
 
 # RBAC permission requirements per Document Engine capability, keyed by the
 # same capability names returned by `DocumentDiagnostics.capabilities()`.
-_DOCUMENT_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
+_DOCUMENT_CAPABILITY_PERMISSIONS: dict[str, list[str]] = {
     "kortex.document.operation.execute": ["document:execute"],
     "kortex.document.lifecycle.transition": ["document:write"],
     "kortex.document.template.bind": ["document:write"],
@@ -108,21 +108,13 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
     ) -> None:
         """Initialize DocumentEngine facade using Dependency Injection."""
         super().__init__()
-        self._adapter_registry = (
-            adapter_registry if adapter_registry is not None else DocumentAdapterRegistry()
-        )
-        self._sandbox = (
-            sandbox if sandbox is not None else AdapterSandbox(registry=self._adapter_registry)
-        )
+        self._adapter_registry = adapter_registry if adapter_registry is not None else DocumentAdapterRegistry()
+        self._sandbox = sandbox if sandbox is not None else AdapterSandbox(registry=self._adapter_registry)
         self._template_library = (
             template_library if template_library is not None else TemplateLibrary(load_defaults=True)
         )
-        self._template_binder = (
-            template_binder if template_binder is not None else TemplateBinder()
-        )
-        self._lifecycle_manager = (
-            lifecycle_manager if lifecycle_manager is not None else DocumentLifecycleManager()
-        )
+        self._template_binder = template_binder if template_binder is not None else TemplateBinder()
+        self._lifecycle_manager = lifecycle_manager if lifecycle_manager is not None else DocumentLifecycleManager()
         self._data_store: IDataStore | None = None
         self._profile_manager = (
             profile_manager
@@ -132,9 +124,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                 adapter_registry=self._adapter_registry,
             )
         )
-        self._recovery_manager = (
-            recovery_manager if recovery_manager is not None else DocumentRecoveryManager()
-        )
+        self._recovery_manager = recovery_manager if recovery_manager is not None else DocumentRecoveryManager()
         if pipeline_executor is not None:
             self._pipeline_executor = pipeline_executor
             if self._pipeline_executor.recovery_manager is None:
@@ -146,21 +136,13 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                 profile_manager=self._profile_manager,
                 recovery_manager=self._recovery_manager,
             )
-        self._security_verifier = (
-            security_verifier if security_verifier is not None else DocumentSecurityVerifier()
-        )
-        self._storage_binder = (
-            storage_binder if storage_binder is not None else DocumentStorageBinder()
-        )
+        self._security_verifier = security_verifier if security_verifier is not None else DocumentSecurityVerifier()
+        self._storage_binder = storage_binder if storage_binder is not None else DocumentStorageBinder()
         self._intelligence_provider = (
-            intelligence_provider
-            if intelligence_provider is not None
-            else DefaultDocumentIntelligenceProvider()
+            intelligence_provider if intelligence_provider is not None else DefaultDocumentIntelligenceProvider()
         )
         self._recommendation_provider = (
-            recommendation_provider
-            if recommendation_provider is not None
-            else DefaultDocumentRecommendationProvider()
+            recommendation_provider if recommendation_provider is not None else DefaultDocumentRecommendationProvider()
         )
 
         self._diagnostics = DocumentDiagnostics(
@@ -270,9 +252,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     sender=self.name,
                 )
             except Exception:
-                self.logger.debug(
-                    "Failed to publish event '%s' to Kernel Event Engine.", event.event_type
-                )
+                self.logger.debug("Failed to publish event '%s' to Kernel Event Engine.", event.event_type)
 
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
@@ -291,17 +271,11 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     if self._data_store is None:
                         self._data_store = storage_engine.data
                     if self._lifecycle_manager.repository is None and self._data_store is not None:
-                        self._lifecycle_manager._repository = DocumentRepository(
-                            data_store=self._data_store
-                        )
+                        self._lifecycle_manager._repository = DocumentRepository(data_store=self._data_store)
                     if self._template_library.repository is None and self._data_store is not None:
-                        self._template_library._repository = TemplateRepository(
-                            data_store=self._data_store
-                        )
+                        self._template_library._repository = TemplateRepository(data_store=self._data_store)
                     if self._profile_manager.repository is None and self._data_store is not None:
-                        self._profile_manager._repository = DocumentRepository(
-                            data_store=self._data_store
-                        )
+                        self._profile_manager._repository = DocumentRepository(data_store=self._data_store)
 
                 # Resolve IFileStore/IObjectStore/ICacheStore alongside the IDataStore already
                 # resolved above, and populate the DocumentStorageBinder plus every subsystem's
@@ -465,20 +439,14 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
             raise DocumentOperationError("Invalid OperationRequest: request_id missing.")
 
         # Emit operation started event
-        await self._emit_event(
-            DocumentOperationStartedEvent(request_id=request.request_id, profile_id=profile_id)
-        )
+        await self._emit_event(DocumentOperationStartedEvent(request_id=request.request_id, profile_id=profile_id))
 
-        binding_context = request.binding_context or BindingContext(
-            context_id=f"ctx-{request.request_id}"
-        )
+        binding_context = request.binding_context or BindingContext(context_id=f"ctx-{request.request_id}")
         if principal is not None:
             binding_context = binding_context.model_copy(update={"tenant_id": principal.tenant_id})
 
         # 1. Resolve profile
-        profile = await self._profile_manager.get_profile(
-            profile_id, tenant_id=binding_context.tenant_id
-        )
+        profile = await self._profile_manager.get_profile(profile_id, tenant_id=binding_context.tenant_id)
 
         # 2. Template Resolution & Binding
         if profile.required_template_id:
@@ -531,8 +499,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     )
                 except Exception:
                     self.logger.debug(
-                        "Object storage output persistence failed for request '%s'; "
-                        "OperationResult is unaffected.",
+                        "Object storage output persistence failed for request '%s'; OperationResult is unaffected.",
                         request.request_id,
                     )
 
@@ -670,9 +637,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
                     )
                 )
         elif target_state == DocumentLifecycleState.ARCHIVED:
-            await self._emit_event(
-                DocumentArchivedEvent(document_id=document_id, version_id=version_id)
-            )
+            await self._emit_event(DocumentArchivedEvent(document_id=document_id, version_id=version_id))
 
         return new_meta
 
@@ -695,9 +660,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         schema = await self._template_library.get_template(template_id, tenant_id=context.tenant_id)
         return await self._template_binder.bind(schema, context)
 
-    async def generate_preview(
-        self, request_id: str, options: PreviewOptions
-    ) -> PreviewResult:
+    async def generate_preview(self, request_id: str, options: PreviewOptions) -> PreviewResult:
         """Generate a preview thumbnail for a document operation page (IDocumentEngine protocol)."""
         if options is None or not request_id:
             return PreviewResult(
@@ -748,9 +711,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         `register_template`/`install_template` are ever exposed)."""
         return await self._template_library.list_templates()
 
-    async def list_profiles(
-        self, principal: SecurityPrincipal | None = None
-    ) -> list[DocumentOperationProfile]:
+    async def list_profiles(self, principal: SecurityPrincipal | None = None) -> list[DocumentOperationProfile]:
         """List the tenant's registered Document Operation Profiles (M7.4-W2).
 
         Backs capability `kortex.document.profile.list`. Closes the gap
@@ -768,9 +729,7 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         tenant_id = principal.tenant_id if principal is not None else None
         return await self._profile_manager.list_profiles(tenant_id=tenant_id)
 
-    async def register_adapter(
-        self, adapter: BaseDocumentAdapter | AdapterMetadata
-    ) -> BaseDocumentAdapter:
+    async def register_adapter(self, adapter: BaseDocumentAdapter | AdapterMetadata) -> BaseDocumentAdapter:
         """Register a new document adapter into DocumentAdapterRegistry.
 
         Backs capability `kortex.document.adapter.register` (Section 17, item 7). Emits
@@ -846,12 +805,8 @@ class DocumentEngine(BaseEngine, IEngineDiagnostics):
         Returns:
             Structured DocumentIntelligenceModel.
         """
-        model = await self._intelligence_provider.analyze_document(
-            document_id, version_id, ontology=ontology
-        )
-        await self._emit_event(
-            DocumentIntelligenceUpdatedEvent(document_id=document_id, version_id=version_id)
-        )
+        model = await self._intelligence_provider.analyze_document(document_id, version_id, ontology=ontology)
+        await self._emit_event(DocumentIntelligenceUpdatedEvent(document_id=document_id, version_id=version_id))
         return model
 
     async def get_recommendation(self, recommendation_type: str, **kwargs: Any) -> Any:

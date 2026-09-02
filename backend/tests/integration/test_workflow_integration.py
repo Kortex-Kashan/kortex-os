@@ -66,9 +66,7 @@ async def test_workflow_engine_kernel_integration(tmp_path: Path) -> None:
     hasher = PasswordHasher()
 
     async def _seed_supervisor(session: AsyncSession) -> None:
-        session.add(
-            RolePermissionRecord(id=str(uuid.uuid4()), role="SUPERVISOR", permission="workflow:approve")
-        )
+        session.add(RolePermissionRecord(id=str(uuid.uuid4()), role="SUPERVISOR", permission="workflow:approve"))
         session.add(
             PrincipalRecord(
                 id=str(uuid.uuid4()),
@@ -159,10 +157,9 @@ async def test_workflow_engine_kernel_integration(tmp_path: Path) -> None:
     )
     await kernel.invoke_capability(approve_request)
     for _ in range(20):
-        if (
-            workflow_engine.get_instance(instance.id).state == WorkflowState.COMPLETED
-            and "workflow.completed" in [e.topic for e in received_events]
-        ):
+        if workflow_engine.get_instance(instance.id).state == WorkflowState.COMPLETED and "workflow.completed" in [
+            e.topic for e in received_events
+        ]:
             break
         await asyncio.sleep(0.05)
 

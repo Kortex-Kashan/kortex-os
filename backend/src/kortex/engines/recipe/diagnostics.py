@@ -7,10 +7,11 @@ health check monitoring, active metric tracking, and diagnostic inspection.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
+
 from kortex.engines.recipe.interfaces import IEngineDiagnostics
 
-RECIPE_CAPABILITIES: List[str] = [
+RECIPE_CAPABILITIES: list[str] = [
     "kortex.recipe.load",
     "kortex.recipe.validate",
     "kortex.recipe.compile",
@@ -29,7 +30,7 @@ class RecipeDiagnostics(IEngineDiagnostics):
 
     def __init__(self, engine_state_provider: Any) -> None:
         self._engine_state_provider = engine_state_provider
-        self._metrics: Dict[str, Any] = {
+        self._metrics: dict[str, Any] = {
             "recipes_parsed": 0,
             "recipes_validated": 0,
             "recipes_compiled": 0,
@@ -45,7 +46,7 @@ class RecipeDiagnostics(IEngineDiagnostics):
         else:
             self._metrics[key] = amount
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return diagnostic health checks."""
         current_state = self.status()
         is_healthy = current_state in ("READY", "RUNNING")
@@ -56,11 +57,11 @@ class RecipeDiagnostics(IEngineDiagnostics):
             "error_count": self._metrics.get("errors", 0),
         }
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return operational runtime metrics."""
         return dict(self._metrics)
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return complete deep diagnostic report."""
         return {
             "engine": "recipe",
@@ -81,6 +82,6 @@ class RecipeDiagnostics(IEngineDiagnostics):
         """Return semantic version string of the engine."""
         return "1.0.0"
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return canonical capability list registered by Recipe Engine."""
         return list(RECIPE_CAPABILITIES)

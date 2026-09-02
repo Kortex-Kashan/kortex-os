@@ -6,5 +6,3 @@ Place project-wide fixtures, hooks, and configuration here.
 """
 
 from __future__ import annotations
-
-import pytest

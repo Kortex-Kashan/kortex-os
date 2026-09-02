@@ -39,7 +39,7 @@ local copy rather than import a common definition.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from kortex.engines.knowledge.models import (
     KnowledgeActorType,
@@ -66,11 +66,11 @@ class IKnowledgeGraph(Protocol):
         """Add a directed relationship between two existing nodes."""
         ...
 
-    def find_neighbors(self, node_id: str, tenant_id: str) -> List[KnowledgeNode]:
+    def find_neighbors(self, node_id: str, tenant_id: str) -> list[KnowledgeNode]:
         """Return the immediate neighbor nodes of `node_id`, scoped to `tenant_id`."""
         ...
 
-    def traverse(self, node_id: str, tenant_id: str, max_hops: int) -> List[KnowledgeNode]:
+    def traverse(self, node_id: str, tenant_id: str, max_hops: int) -> list[KnowledgeNode]:
         """Traverse up to `max_hops` from `node_id`, scoped to `tenant_id`."""
         ...
 
@@ -85,17 +85,15 @@ class IKnowledgeRecordManager(Protocol):
         """Create a new `KnowledgeRecord` version."""
         ...
 
-    async def get_current(self, record_id: str, tenant_id: str) -> Optional[KnowledgeRecord]:
+    async def get_current(self, record_id: str, tenant_id: str) -> KnowledgeRecord | None:
         """Return the current version of `record_id`, scoped to `tenant_id`."""
         ...
 
-    async def get_lineage(self, record_id: str, tenant_id: str) -> List[KnowledgeRecord]:
+    async def get_lineage(self, record_id: str, tenant_id: str) -> list[KnowledgeRecord]:
         """Return the full ordered version history of `record_id`, scoped to `tenant_id`."""
         ...
 
-    async def supersede(
-        self, record_id: str, tenant_id: str, new_version: KnowledgeRecord
-    ) -> KnowledgeRecord:
+    async def supersede(self, record_id: str, tenant_id: str, new_version: KnowledgeRecord) -> KnowledgeRecord:
         """Atomically supersede the current version of `record_id` with `new_version`."""
         ...
 
@@ -126,7 +124,7 @@ class IKnowledgeAnnotationManager(Protocol):
         """Attach a new, non-destructive annotation to a `KnowledgeRecord`."""
         ...
 
-    async def list_annotations(self, target_record_id: str, tenant_id: str) -> List[KnowledgeAnnotation]:
+    async def list_annotations(self, target_record_id: str, tenant_id: str) -> list[KnowledgeAnnotation]:
         """Return all annotations attached to `target_record_id`, scoped to `tenant_id`."""
         ...
 
@@ -139,7 +137,7 @@ class IKnowledgeSourceProvider(Protocol):
         """Return the unique identifier of this source provider."""
         ...
 
-    async def ingest(self, tenant_id: str) -> List[KnowledgeRecord]:
+    async def ingest(self, tenant_id: str) -> list[KnowledgeRecord]:
         """Ingest entities from this source into `SOURCE_EVIDENCE`-trust-state
         `KnowledgeRecord`s (not raw `KnowledgeNode`s — ingestion produces
         evidence-level assertions, per the redesigned M1 scope)."""
@@ -172,7 +170,7 @@ class IKnowledgeEngine(Protocol):
         """Execute a knowledge query."""
         ...
 
-    async def index_source(self, source_id: str, tenant_id: str) -> List[KnowledgeRecord]:
+    async def index_source(self, source_id: str, tenant_id: str) -> list[KnowledgeRecord]:
         """Index a registered knowledge source, delegating to that source's
         `IKnowledgeSourceProvider.ingest()`. Returns the same
         `SOURCE_EVIDENCE`-trust-state `KnowledgeRecord`s `ingest()` produces
@@ -193,15 +191,15 @@ class IKnowledgeEngine(Protocol):
 class IEngineDiagnostics(Protocol):
     """Standardized diagnostics interface exposed by all KORTEX System Engines."""
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return operational health status and diagnostic checks."""
         ...
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return runtime performance and throughput metrics."""
         ...
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics and system environment details."""
         ...
 
@@ -213,6 +211,6 @@ class IEngineDiagnostics(Protocol):
         """Return semantic version string of the engine."""
         ...
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of capability strings registered by the engine."""
         ...

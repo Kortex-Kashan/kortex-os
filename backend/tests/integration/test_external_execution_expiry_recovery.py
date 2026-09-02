@@ -112,14 +112,14 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": _TENANT, "principal_id": principal_id, "password": password}
     )
 
 
-async def _submit_paused_execution(kernel: Kernel, requester_principal):  # noqa: ANN001
+async def _submit_paused_execution(kernel: Kernel, requester_principal):
     workflow_engine: WorkflowEngine = kernel.get_engine("workflow")
     executor = workflow_engine.external_executor
     assert executor is not None
@@ -163,7 +163,7 @@ async def test_stranded_waiting_execution_with_expired_ticket_is_cancelled_on_re
     # Directly force the ticket to EXPIRED at the store level -- simulating
     # "the DB transition happened, but the event never reached the handler"
     # without needing to wait on a real timeout.
-    await workflow_engine.approval_manager._store.atomic_expire_request(  # noqa: SLF001
+    await workflow_engine.approval_manager._store.atomic_expire_request(
         request_id=record.approval_request_id, tenant_id=_TENANT, outbox_store=None
     )
     ticket = await workflow_engine.approval_manager.get_request(record.approval_request_id, tenant_id=_TENANT)
@@ -205,11 +205,11 @@ async def test_stranded_waiting_execution_with_missing_ticket_fails_closed(kerne
         approval_request_id=uuid4(),  # a ticket id that was never actually created
         created_by="SYSTEM",
     )
-    await executor._store.save_execution(  # noqa: SLF001
+    await executor._store.save_execution(
         record=orphan,
         parameters={"request": {"request_id": "orphan", "profile_id": "prof-ext-recovery", "action_type": "FETCH"}},
         tenant_id=_TENANT,
-        outbox_store=executor._outbox_store,  # noqa: SLF001
+        outbox_store=executor._outbox_store,
     )
 
     reconciled = await executor.reconcile_stranded_waiting_approvals(tenant_id=_TENANT)
@@ -245,7 +245,7 @@ async def test_stranded_waiting_execution_with_approved_ticket_is_never_auto_res
     only on_approval_decided's own real event-driven path may do that."""
     kernel = kernel_env
     requester = await _principal(kernel, "user_recovery_requester")
-    approver = await _principal(kernel, "user_recovery_requester")  # reused; role is what matters here
+    await _principal(kernel, "user_recovery_requester")  # reused; role is what matters here
     workflow_engine: WorkflowEngine = kernel.get_engine("workflow")
     executor, record = await _submit_paused_execution(kernel, requester)
 
@@ -260,7 +260,7 @@ async def test_stranded_waiting_execution_with_approved_ticket_is_never_auto_res
         approver_id="someone_else",
         decision=ApprovalState.APPROVED,
     )
-    await workflow_engine.approval_manager._store.atomic_submit_decision(  # noqa: SLF001
+    await workflow_engine.approval_manager._store.atomic_submit_decision(
         decision=decision, tenant_id=_TENANT, outbox_store=None
     )
     ticket = await workflow_engine.approval_manager.get_request(record.approval_request_id, tenant_id=_TENANT)

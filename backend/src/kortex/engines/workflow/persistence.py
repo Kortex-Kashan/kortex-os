@@ -76,7 +76,6 @@ logger = logging.getLogger("kortex.engines.workflow.persistence")
 SCHEDULE_CLAIM_LEASE_SECONDS = 120
 
 
-
 # ============================================================================
 # 1. SQLAlchemy ORM Models (IDataStore / SQLite)
 # ============================================================================
@@ -86,9 +85,7 @@ class WorkflowDefinitionModel(BaseModel):
     """SQLAlchemy ORM model for persisting Workflow Definitions."""
 
     __tablename__ = "workflow_definitions"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "id", "version", name="uq_workflow_definition_tenant_id_version"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "id", "version", name="uq_workflow_definition_tenant_id_version"),)
 
     # BaseModel provides id: Mapped[str] = mapped_column(String(36), primary_key=True)
     # We override id to String(64) to support both UUIDs and human-readable IDs
@@ -107,9 +104,7 @@ class WorkflowInstanceModel(BaseModel):
     """SQLAlchemy ORM model for persisting Workflow Instances with optimistic locking."""
 
     __tablename__ = "workflow_instances"
-    __table_args__ = (
-        Index("ix_workflow_instances_tenant_state", "tenant_id", "state"),
-    )
+    __table_args__ = (Index("ix_workflow_instances_tenant_state", "tenant_id", "state"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     definition_id: Mapped[str] = mapped_column(
@@ -134,9 +129,7 @@ class WorkflowStepRunModel(BaseModel):
     """SQLAlchemy ORM model for the Workflow Step Execution Ledger."""
 
     __tablename__ = "workflow_step_runs"
-    __table_args__ = (
-        Index("ix_workflow_step_runs_lookup", "instance_id", "step_id"),
-    )
+    __table_args__ = (Index("ix_workflow_step_runs_lookup", "instance_id", "step_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     instance_id: Mapped[str] = mapped_column(
@@ -181,9 +174,7 @@ class ApprovalDecisionModel(BaseModel):
     """SQLAlchemy ORM model for persisting Human Approval Decisions."""
 
     __tablename__ = "approval_decisions"
-    __table_args__ = (
-        UniqueConstraint("request_id", name="uq_approval_decisions_request_id"),
-    )
+    __table_args__ = (UniqueConstraint("request_id", name="uq_approval_decisions_request_id"),)
 
     request_id: Mapped[str] = mapped_column(
         String(36),
@@ -204,9 +195,7 @@ class ApprovalDelegationModel(BaseModel):
     """SQLAlchemy ORM model for persisting Human Approver Role Delegations."""
 
     __tablename__ = "approval_delegations"
-    __table_args__ = (
-        Index("ix_approval_delegations_lookup", "tenant_id", "delegatee_id", "role", "is_active"),
-    )
+    __table_args__ = (Index("ix_approval_delegations_lookup", "tenant_id", "delegatee_id", "role", "is_active"),)
 
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
     delegator_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -293,7 +282,6 @@ class ExternalExecutionModel(BaseModel):
 # ============================================================================
 
 
-
 def _sanitize_context_json(context: WorkflowContext) -> str:
     """Serialize workflow context to JSON, omitting raw session tokens and ephemeral credentials."""
     payload = context.model_dump(mode="json")
@@ -309,9 +297,7 @@ def _sanitize_context_json(context: WorkflowContext) -> str:
         "bearer_token",
     }
     if "variables" in payload and isinstance(payload["variables"], dict):
-        payload["variables"] = {
-            k: v for k, v in payload["variables"].items() if k.lower() not in sensitive_keys
-        }
+        payload["variables"] = {k: v for k, v in payload["variables"].items() if k.lower() not in sensitive_keys}
     return json.dumps(payload)
 
 
@@ -350,14 +336,10 @@ def _definition_to_model(definition: WorkflowDefinition, tenant_id: str = "defau
         version=definition.version,
         description=definition.description,
         trigger_type=(
-            definition.trigger.value
-            if isinstance(definition.trigger, WorkflowTrigger)
-            else str(definition.trigger)
+            definition.trigger.value if isinstance(definition.trigger, WorkflowTrigger) else str(definition.trigger)
         ),
         priority=(
-            definition.priority.value
-            if isinstance(definition.priority, WorkflowPriority)
-            else str(definition.priority)
+            definition.priority.value if isinstance(definition.priority, WorkflowPriority) else str(definition.priority)
         ),
         timeout_seconds=definition.timeout_seconds,
         steps_json=json.dumps(steps_data),
@@ -583,11 +565,7 @@ def _schedule_to_model(schedule: WorkflowSchedule, tenant_id: str = "default") -
         if isinstance(schedule.schedule_type, ScheduleType)
         else str(schedule.schedule_type)
     )
-    status_val = (
-        schedule.status.value
-        if isinstance(schedule.status, ScheduleStatus)
-        else str(schedule.status)
-    )
+    status_val = schedule.status.value if isinstance(schedule.status, ScheduleStatus) else str(schedule.status)
     ctx_json = json.dumps(sanitize_for_persistence(schedule.initial_context or {}))
     return WorkflowScheduleModel(
         id=str(schedule.id),
@@ -617,11 +595,7 @@ def _model_to_schedule(row: WorkflowScheduleModel) -> WorkflowSchedule:
         if row.schedule_type in ScheduleType._value2member_map_
         else ScheduleType.INTERVAL
     )
-    status = (
-        ScheduleStatus(row.status)
-        if row.status in ScheduleStatus._value2member_map_
-        else ScheduleStatus.ACTIVE
-    )
+    status = ScheduleStatus(row.status) if row.status in ScheduleStatus._value2member_map_ else ScheduleStatus.ACTIVE
     try:
         ctx = json.loads(row.initial_context_json) if row.initial_context_json else {}
     except Exception:
@@ -670,11 +644,7 @@ def _execution_to_model(
     itself, so they are threaded through here only.
     """
     tid = record.tenant_id or tenant_id
-    status_val = (
-        record.status.value
-        if isinstance(record.status, ExternalExecutionStatus)
-        else str(record.status)
-    )
+    status_val = record.status.value if isinstance(record.status, ExternalExecutionStatus) else str(record.status)
     params_json = json.dumps(sanitize_for_persistence(parameters or {}))
     out_json = json.dumps(sanitize_for_persistence(record.output)) if record.output is not None else None
     return ExternalExecutionModel(
@@ -745,7 +715,6 @@ def _model_to_execution(row: ExternalExecutionModel) -> ExternalExecutionRecord:
 # ============================================================================
 
 
-
 class WorkflowStore:
     """Encapsulates all relational database operations for WorkflowEngine via IDataStore."""
 
@@ -789,6 +758,7 @@ class WorkflowStore:
 
     async def get_definition(self, definition_id: str, tenant_id: str | None = None) -> WorkflowDefinition | None:
         """Retrieve a WorkflowDefinition by ID, optionally filtered by tenant."""
+
         async def _action(session: AsyncSession) -> WorkflowDefinitionModel | None:
             stmt = select(WorkflowDefinitionModel).where(WorkflowDefinitionModel.id == definition_id)
             if tenant_id:
@@ -807,6 +777,7 @@ class WorkflowStore:
 
     async def list_definitions(self, tenant_id: str | None = None) -> list[WorkflowDefinition]:
         """List all WorkflowDefinitions, optionally filtered by tenant."""
+
         async def _action(session: AsyncSession) -> list[WorkflowDefinitionModel]:
             stmt = select(WorkflowDefinitionModel)
             if tenant_id:
@@ -917,6 +888,7 @@ class WorkflowStore:
 
     async def get_instance(self, instance_id: UUID, tenant_id: str | None = None) -> WorkflowInstance | None:
         """Retrieve a WorkflowInstance by UUID, strictly enforcing tenant boundary if provided."""
+
         async def _action(session: AsyncSession) -> WorkflowInstanceModel | None:
             stmt = select(WorkflowInstanceModel).where(WorkflowInstanceModel.id == str(instance_id))
             if tenant_id:
@@ -939,6 +911,7 @@ class WorkflowStore:
         state_filter: WorkflowState | None = None,
     ) -> list[WorkflowInstance]:
         """List WorkflowInstances matching optional tenant and state filters."""
+
         async def _action(session: AsyncSession) -> list[WorkflowInstanceModel]:
             stmt = select(WorkflowInstanceModel)
             if tenant_id:
@@ -961,9 +934,7 @@ class WorkflowStore:
         terminal_states = [WorkflowState.COMPLETED.value, WorkflowState.FAILED.value, WorkflowState.CANCELLED.value]
 
         async def _action(session: AsyncSession) -> list[WorkflowInstanceModel]:
-            stmt = select(WorkflowInstanceModel).where(
-                WorkflowInstanceModel.state.notin_(terminal_states)
-            )
+            stmt = select(WorkflowInstanceModel).where(WorkflowInstanceModel.state.notin_(terminal_states))
             if tenant_id:
                 stmt = stmt.where(WorkflowInstanceModel.tenant_id == tenant_id)
             result = await session.execute(stmt)
@@ -1172,6 +1143,7 @@ class WorkflowStore:
 
     async def list_step_runs(self, instance_id: UUID) -> list[dict[str, Any]]:
         """Retrieve the execution ledger of all step runs for an instance."""
+
         async def _action(session: AsyncSession) -> list[WorkflowStepRunModel]:
             stmt = (
                 select(WorkflowStepRunModel)
@@ -1318,6 +1290,7 @@ class ApprovalStore:
         state_filter: str | None = None,
     ) -> list[ApprovalRequest]:
         """List approval requests matching criteria within a tenant boundary."""
+
         async def _action(session: AsyncSession) -> list[ApprovalRequestModel]:
             stmt = select(ApprovalRequestModel).where(ApprovalRequestModel.tenant_id == tenant_id)
             if role_filter is not None:
@@ -1401,6 +1374,7 @@ class ApprovalStore:
         is_active: bool | None = None,
     ) -> list[ApprovalDelegation]:
         """List delegations matching criteria within a tenant boundary."""
+
         async def _action(session: AsyncSession) -> list[ApprovalDelegationModel]:
             stmt = select(ApprovalDelegationModel).where(ApprovalDelegationModel.tenant_id == tenant_id)
             if delegator_id is not None:
@@ -1474,9 +1448,7 @@ class ApprovalStore:
                 raise WorkflowApprovalError(f"Approval request ticket '{r_id}' not found.")
 
             if ticket.state != "PENDING":
-                raise ApprovalConflictError(
-                    f"Approval request ticket '{r_id}' is already in state '{ticket.state}'."
-                )
+                raise ApprovalConflictError(f"Approval request ticket '{r_id}' is already in state '{ticket.state}'.")
 
             # 2. Atomically transition state, re-checking PENDING at write
             # time -- closes the race window between the read above and
@@ -1494,8 +1466,7 @@ class ApprovalStore:
             res = cast(CursorResult[Any], await session.execute(stmt))
             if res.rowcount == 0:
                 raise ApprovalConflictError(
-                    f"Approval request ticket '{r_id}' was concurrently decided or expired "
-                    f"by another operation."
+                    f"Approval request ticket '{r_id}' was concurrently decided or expired by another operation."
                 )
             await session.refresh(ticket)
 
@@ -1667,9 +1638,7 @@ class SchedulerStore:
                 f"Schedule with name '{schedule.name}' already exists in tenant '{tid}'."
             ) from exc
 
-    async def get_schedule(
-        self, schedule_id: UUID | str, tenant_id: str | None = None
-    ) -> WorkflowSchedule | None:
+    async def get_schedule(self, schedule_id: UUID | str, tenant_id: str | None = None) -> WorkflowSchedule | None:
         """Retrieve a schedule by UUID with optional tenant boundary."""
         s_id = str(schedule_id)
 
@@ -1682,10 +1651,9 @@ class SchedulerStore:
         row = await self._data_store.execute_in_transaction(_action)
         return _model_to_schedule(row) if row else None
 
-    async def get_schedule_by_name(
-        self, name: str, tenant_id: str = "default"
-    ) -> WorkflowSchedule | None:
+    async def get_schedule_by_name(self, name: str, tenant_id: str = "default") -> WorkflowSchedule | None:
         """Retrieve a schedule by unique name within a tenant."""
+
         async def _action(session: AsyncSession) -> WorkflowScheduleModel | None:
             stmt = select(WorkflowScheduleModel).where(
                 WorkflowScheduleModel.name == name,
@@ -1702,10 +1670,9 @@ class SchedulerStore:
         status_filter: str | None = None,
     ) -> list[WorkflowSchedule]:
         """List schedules matching criteria in a tenant boundary."""
+
         async def _action(session: AsyncSession) -> list[WorkflowScheduleModel]:
-            stmt = select(WorkflowScheduleModel).where(
-                WorkflowScheduleModel.tenant_id == tenant_id
-            )
+            stmt = select(WorkflowScheduleModel).where(WorkflowScheduleModel.tenant_id == tenant_id)
             if status_filter:
                 stmt = stmt.where(WorkflowScheduleModel.status == status_filter)
             stmt = stmt.order_by(WorkflowScheduleModel.created_at.desc())
@@ -2018,10 +1985,9 @@ class ExternalExecutionStore:
         limit: int = 100,
     ) -> list[ExternalExecutionRecord]:
         """List external execution records within a tenant boundary."""
+
         async def _action(session: AsyncSession) -> list[ExternalExecutionModel]:
-            stmt = select(ExternalExecutionModel).where(
-                ExternalExecutionModel.tenant_id == tenant_id
-            )
+            stmt = select(ExternalExecutionModel).where(ExternalExecutionModel.tenant_id == tenant_id)
             if status_filter:
                 stmt = stmt.where(ExternalExecutionModel.status == status_filter)
             stmt = stmt.order_by(ExternalExecutionModel.created_at.desc()).limit(limit)
@@ -2042,6 +2008,7 @@ class ExternalExecutionStore:
         returns the original outcome instead of executing (or re-queuing for
         approval) a second time.
         """
+
         async def _action(session: AsyncSession) -> ExternalExecutionModel | None:
             stmt = select(ExternalExecutionModel).where(
                 ExternalExecutionModel.tenant_id == tenant_id,
@@ -2065,6 +2032,7 @@ class ExternalExecutionStore:
         was making may or may not have already landed, so blindly re-running
         it risks a real duplicate action against the external system.
         """
+
         async def _action(session: AsyncSession) -> list[ExternalExecutionModel]:
             stmt = select(ExternalExecutionModel).where(
                 ExternalExecutionModel.status == ExternalExecutionStatus.RUNNING.value
@@ -2093,6 +2061,7 @@ class ExternalExecutionStore:
         state. This query is the read side of that boot-time reconciliation
         (`ExternalExecutionManager.reconcile_stranded_waiting_approvals`).
         """
+
         async def _action(session: AsyncSession) -> list[ExternalExecutionModel]:
             stmt = select(ExternalExecutionModel).where(
                 ExternalExecutionModel.status == ExternalExecutionStatus.WAITING_APPROVAL.value
@@ -2110,9 +2079,8 @@ class ExternalExecutionStore:
         execution_id: UUID | str,
         status: str,
         tenant_id: str,
-        output: Any | None = None,  # noqa: ANN401
+        output: Any | None = None,
         error: str | None = None,
-
         status_code: int | None = None,
         attempts: int = 1,
         execution_time_ms: float = 0.0,
@@ -2144,9 +2112,7 @@ class ExternalExecutionStore:
 
             if outbox_store is not None:
                 topic = (
-                    "workflow.external.completed"
-                    if status == "COMPLETED"
-                    else f"workflow.external.{status.lower()}"
+                    "workflow.external.completed" if status == "COMPLETED" else f"workflow.external.{status.lower()}"
                 )
                 outbox_store.stage_event_in_session(
                     session=session,

@@ -30,9 +30,7 @@ class DocumentIntelligenceModel(BaseModel):
     field_values: dict[str, Any] = Field(default_factory=dict)
     confidence_scores: dict[str, float] = Field(default_factory=dict)
     knowledge_references: list[str] = Field(default_factory=list)
-    analysis_timestamp: str = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
+    analysis_timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
 
 class DefaultDocumentIntelligenceProvider(IDocumentIntelligenceProvider):
@@ -42,9 +40,7 @@ class DefaultDocumentIntelligenceProvider(IDocumentIntelligenceProvider):
     active LLM calls or cloud API connections.
     """
 
-    async def extract_concepts(
-        self, document_id: str, version_id: str
-    ) -> dict[str, Any]:
+    async def extract_concepts(self, document_id: str, version_id: str) -> dict[str, Any]:
         """Extract semantic concepts and structural relationships from document.
 
         Args:
@@ -80,7 +76,7 @@ class DefaultDocumentIntelligenceProvider(IDocumentIntelligenceProvider):
         ontology_data = dict(ontology) if ontology is not None else {}
         extracted_fields = ontology_data.get("fields", {})
 
-        scores = {k: 1.0 for k in extracted_fields} if extracted_fields else {"overall": 1.0}
+        scores = dict.fromkeys(extracted_fields, 1.0) if extracted_fields else {"overall": 1.0}
         refs = [f"knowledge.entity.{document_id}"]
 
         return DocumentIntelligenceModel(
@@ -125,9 +121,7 @@ class DefaultDocumentIntelligenceProvider(IDocumentIntelligenceProvider):
 class DefaultDocumentRecommendationProvider(IDocumentRecommendationProvider):
     """Default provider for template, profile, and pipeline process recommendations."""
 
-    async def recommend_template(
-        self, user_intent: str, data_schema: dict[str, Any]
-    ) -> list[str]:
+    async def recommend_template(self, user_intent: str, data_schema: dict[str, Any]) -> list[str]:
         """Recommend template schema IDs based on user intent and input data.
 
         Args:
@@ -146,9 +140,7 @@ class DefaultDocumentRecommendationProvider(IDocumentRecommendationProvider):
             return ["contract.declarative.v1"]
         return ["invoice.declarative.v1", "payslip.declarative.v1"]
 
-    async def recommend_operation_profile(
-        self, business_operation: str, user_context: dict[str, Any]
-    ) -> str:
+    async def recommend_operation_profile(self, business_operation: str, user_context: dict[str, Any]) -> str:
         """Recommend optimal DocumentOperationProfile ID for a business operation.
 
         Args:
@@ -165,9 +157,7 @@ class DefaultDocumentRecommendationProvider(IDocumentRecommendationProvider):
             return "profile.invoice.v1"
         return "profile.default.v1"
 
-    async def recommend_adapter_pipeline(
-        self, profile_id: str, installed_adapters: list[AdapterMetadata]
-    ) -> list[str]:
+    async def recommend_adapter_pipeline(self, profile_id: str, installed_adapters: list[AdapterMetadata]) -> list[str]:
         """Recommend optimal adapter pipeline stage configuration.
 
         Args:

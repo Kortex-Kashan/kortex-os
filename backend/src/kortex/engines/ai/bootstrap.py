@@ -69,12 +69,14 @@ from kortex.engines.ai.tools import (
 
 logger = logging.getLogger("kortex.engines.ai.bootstrap")
 
-REQUIRED_STARTUP_DEPENDENCIES: Final[frozenset[str]] = frozenset({
-    "configuration",
-    "registry",
-    "event",
-    "storage",
-})
+REQUIRED_STARTUP_DEPENDENCIES: Final[frozenset[str]] = frozenset(
+    {
+        "configuration",
+        "registry",
+        "event",
+        "storage",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -123,9 +125,7 @@ class KernelProductionBootstrap:
             )
         return True
 
-    def validate_production_wiring(
-        self, kernel_bridge: IKernelBridge | None, data_store: object | None
-    ) -> None:
+    def validate_production_wiring(self, kernel_bridge: IKernelBridge | None, data_store: object | None) -> None:
         """Refuse to assemble a production engine backed by non-durable test doubles.
 
         Implements the M9 architecture spec's "Production Engine Wiring
@@ -172,7 +172,7 @@ class KernelProductionBootstrap:
     def create_ai_engine(
         self,
         kernel_bridge: IKernelBridge | None = None,
-        data_store: Any | None = None,  # noqa: ANN401
+        data_store: Any | None = None,
         custom_providers: list[BaseAIProvider] | None = None,
         registered_engines: set[str] | list[str] | None = None,
         exporter: ITelemetryExporter | None = None,
@@ -373,7 +373,6 @@ class KernelProductionBootstrap:
             governance_manager=governance_manager,
             default_generation_timeout_seconds=self._config.default_generation_timeout_seconds,
         )
-
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")
         return engine

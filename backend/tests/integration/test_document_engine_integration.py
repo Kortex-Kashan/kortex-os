@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 import kortex.engines.document
 from kortex.core.base_engine import EngineState
@@ -29,11 +30,7 @@ from kortex.engines.document.exceptions import (
     DocumentOperationError,
     DocumentProfileNotFoundError,
 )
-from kortex.engines.document.adapters.macro_adapter import MacroAdapter
 from kortex.engines.document.lifecycle import DocumentLifecycleManager
-from kortex.engines.document.operation_profile import DocumentOperationProfileManager
-from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
-from kortex.engines.document.recovery import DocumentRecoveryManager
 from kortex.engines.document.models import (
     AdapterCapability,
     AdapterMetadata,
@@ -49,6 +46,9 @@ from kortex.engines.document.models import (
     SecurityMetadata,
     TemplateSchema,
 )
+from kortex.engines.document.operation_profile import DocumentOperationProfileManager
+from kortex.engines.document.persistence import DocumentRepository, TemplateRepository
+from kortex.engines.document.recovery import DocumentRecoveryManager
 from kortex.engines.document.security import DocumentStorageBinder
 from kortex.engines.document.template_library import TemplateLibrary
 from kortex.engines.storage.engine import StorageEngine
@@ -368,7 +368,7 @@ async def test_template_integration_and_immutability(tmp_path) -> None:
     assert len(report.errors) == 0
 
     # Immutability check: modifying schema raises exception
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         schema.template_id = "mutated.id"  # type: ignore[misc]
 
 
@@ -425,9 +425,7 @@ async def test_adapter_loader_registers_dummy_adapter_on_kernel_boot(tmp_path) -
     adapters = document_engine.list_adapters()
     assert any(a.adapter_id == "kortex.document.dummy.v1" for a in adapters)
 
-    preview_result = await document_engine.generate_preview(
-        "req-boot-preview", PreviewOptions(page_number=1)
-    )
+    preview_result = await document_engine.generate_preview("req-boot-preview", PreviewOptions(page_number=1))
     assert preview_result.image_bytes is not None
 
     await kernel.shutdown()
@@ -439,22 +437,16 @@ async def test_lifecycle_versioning_and_lineage_rules(tmp_path) -> None:
     engine = DocumentEngine()
 
     # Create root version (Draft)
-    v1 = await engine.lifecycle_manager.create_version(
-        document_id="doc-lineage-1", title="Lineage Test Doc"
-    )
+    v1 = await engine.lifecycle_manager.create_version(document_id="doc-lineage-1", title="Lineage Test Doc")
     assert v1.metadata.lifecycle_state == DocumentLifecycleState.DRAFT
 
     # Transition to Published
-    meta_pub = await engine.transition_lifecycle(
-        "doc-lineage-1", v1.version_id, DocumentLifecycleState.PUBLISHED
-    )
+    meta_pub = await engine.transition_lifecycle("doc-lineage-1", v1.version_id, DocumentLifecycleState.PUBLISHED)
     assert meta_pub.is_immutable is True
 
     # Reject transition from Published back to Draft
     with pytest.raises(DocumentLifecycleError):
-        await engine.transition_lifecycle(
-            "doc-lineage-1", v1.version_id, DocumentLifecycleState.DRAFT
-        )
+        await engine.transition_lifecycle("doc-lineage-1", v1.version_id, DocumentLifecycleState.DRAFT)
 
     # Create child version from published parent
     v2 = await engine.lifecycle_manager.create_version(
@@ -552,9 +544,7 @@ async def test_document_lifecycle_persistence_survives_fresh_session(tmp_path) -
 
     # Simulate a fresh session: a brand-new manager/repository pairing, sharing no Python
     # object state with the original engine, reading through the same underlying store.
-    fresh_manager = DocumentLifecycleManager(
-        repository=DocumentRepository(data_store=data_store)
-    )
+    fresh_manager = DocumentLifecycleManager(repository=DocumentRepository(data_store=data_store))
     reread_meta = await fresh_manager.get_version(version.document_id, version.version_id)
     assert reread_meta.lifecycle_state == DocumentLifecycleState.PUBLISHED
     assert reread_meta.is_immutable is True
@@ -602,9 +592,7 @@ async def test_template_library_persistence_survives_fresh_session(tmp_path) -> 
     data_store = storage_engine.data
     await kernel.shutdown()
 
-    fresh_library = TemplateLibrary(
-        load_defaults=False, repository=TemplateRepository(data_store=data_store)
-    )
+    fresh_library = TemplateLibrary(load_defaults=False, repository=TemplateRepository(data_store=data_store))
     reread = await fresh_library.get_template(unique_id)
     assert reread.namespace == "kortex.integration.custom"
 
@@ -656,9 +644,7 @@ async def test_operation_profile_persistence_survives_fresh_session(tmp_path) ->
     data_store = storage_engine.data
     await kernel.shutdown()
 
-    fresh_manager = DocumentOperationProfileManager(
-        repository=DocumentRepository(data_store=data_store)
-    )
+    fresh_manager = DocumentOperationProfileManager(repository=DocumentRepository(data_store=data_store))
     reread = await fresh_manager.get_profile(unique_id)
     assert reread.namespace == "kortex.integration.profile"
     assert reread.adapter_pipeline is not None
@@ -844,9 +830,7 @@ async def test_failure_and_boundary_verification(tmp_path) -> None:
 # bullet 4). These patterns scan Document Engine's own source tree — never test files — and
 # back the five checks in test_architecture_compliance_assertions below. Each check fails the
 # test the moment the real rule is violated; none of them are presence/snapshot checks.
-_ENGINE_IMPORT_RE = re.compile(
-    r"^\s*(?:from|import)\s+kortex\.engines\.(?P<engine>\w+)(?:\.(?P<submodule>\w+))?"
-)
+_ENGINE_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+kortex\.engines\.(?P<engine>\w+)(?:\.(?P<submodule>\w+))?")
 _STORAGE_PRIMITIVE_RE = re.compile(
     r"\bimport\s+sqlite3\b|\bimport\s+asyncpg\b|\bimport\s+aiosqlite\b|"
     r"\bcreate_engine\s*\(|\bcreate_async_engine\s*\(|(?<![\w.])open\s*\("
@@ -908,9 +892,7 @@ async def test_architecture_compliance_assertions(tmp_path) -> None:
             if import_match is not None:
                 engine, submodule = import_match.group("engine"), import_match.group("submodule")
                 if engine not in declared_dependencies:
-                    allowed_undeclared_submodules = _ALWAYS_ALLOWED_UNDECLARED_ENGINE_SUBMODULES.get(
-                        engine, set()
-                    )
+                    allowed_undeclared_submodules = _ALWAYS_ALLOWED_UNDECLARED_ENGINE_SUBMODULES.get(engine, set())
                     if submodule not in allowed_undeclared_submodules:
                         import_violations.append(
                             f"{path.name}:{lineno}: imports 'kortex.engines.{engine}', which is "
@@ -938,12 +920,9 @@ async def test_architecture_compliance_assertions(tmp_path) -> None:
 
     assert not import_violations, "Import boundary violated:\n" + "\n".join(import_violations)
     assert not storage_access_violations, (
-        "Storage-access boundary violated (raw DB/file I/O primitive found):\n"
-        + "\n".join(storage_access_violations)
+        "Storage-access boundary violated (raw DB/file I/O primitive found):\n" + "\n".join(storage_access_violations)
     )
-    assert not print_violations, (
-        "print() statement found in Document Engine source:\n" + "\n".join(print_violations)
-    )
+    assert not print_violations, "print() statement found in Document Engine source:\n" + "\n".join(print_violations)
 
     # Rule 3: Capability naming. Every live, currently-declared capability must conform to
     # kortex.<domain>.<resource>.<action> — checked against the real capabilities() list, not
@@ -952,9 +931,7 @@ async def test_architecture_compliance_assertions(tmp_path) -> None:
     live_capabilities = DocumentEngine().capabilities()
     assert live_capabilities, "DocumentEngine.capabilities() returned no capabilities to verify."
     for cap_name in live_capabilities:
-        assert capability_name_re.match(cap_name), (
-            f"Capability name violates naming convention: '{cap_name}'"
-        )
+        assert capability_name_re.match(cap_name), f"Capability name violates naming convention: '{cap_name}'"
 
     # Rule 4: Tenant isolation. Real Kernel + real StorageEngine + real DocumentEngine boot,
     # verifying the actual, already-established repository-level tenant boundary
@@ -968,8 +945,7 @@ async def test_architecture_compliance_assertions(tmp_path) -> None:
     await kernel.boot()
 
     assert document_engine.lifecycle_manager.repository is not None, (
-        "Tenant isolation check requires the repository-backed path; Kernel wiring did not "
-        "auto-configure a repository."
+        "Tenant isolation check requires the repository-backed path; Kernel wiring did not auto-configure a repository."
     )
 
     version = await document_engine.lifecycle_manager.create_version(
@@ -1025,7 +1001,8 @@ class TransientIntegrationAdapter(BaseDocumentAdapter):
 
 @pytest.mark.asyncio
 async def test_document_engine_recovery_execution_path_integration(tmp_path) -> None:
-    """Exercise checkpointing, retry re-dispatch, and rollback through the real DocumentEngine.execute_profile() path."""
+    """Exercise checkpointing, retry re-dispatch, and rollback through the real
+    DocumentEngine.execute_profile() path."""
     kernel = Kernel()
     storage_engine = StorageEngine(base_directory=str(tmp_path / "storage_recovery_integ"))
     document_engine = DocumentEngine()
@@ -1149,6 +1126,7 @@ async def test_document_engine_recovery_execution_path_integration(tmp_path) -> 
 # =============================================================================
 # Milestone 7: Storage Integration
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_storage_binder_and_cache_stores_auto_wired_on_kernel_boot(tmp_path) -> None:
@@ -1282,9 +1260,7 @@ async def test_publish_then_verify_sha256_integrity_flow(tmp_path) -> None:
     assert published_meta.sha256_hash is not None
     assert len(published_meta.sha256_hash) == 64
 
-    is_valid = await document_engine.security_verifier.verify_document_integrity(
-        payload, published_meta.sha256_hash
-    )
+    is_valid = await document_engine.security_verifier.verify_document_integrity(payload, published_meta.sha256_hash)
     assert is_valid is True
 
     tampered_payload = payload + b"TAMPERED"

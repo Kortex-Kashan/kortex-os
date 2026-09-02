@@ -238,7 +238,7 @@ async def test_orchestrate_agent_via_real_dispatch_forces_principal_tenant(
 ) -> None:
     """A principal authenticated in tenant B cannot cause an agent task to
     be attributed to tenant A merely by setting AgentTask.tenant_id."""
-    kernel, provider = kernel_env_no_approval
+    kernel, _provider = kernel_env_no_approval
     storage_engine: StorageEngine = kernel.get_engine("storage")
 
     # The shared fixture's tenant-B principal deliberately has no

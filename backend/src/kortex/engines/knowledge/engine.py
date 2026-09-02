@@ -100,7 +100,7 @@ distinction between them.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.exceptions import KortexError
@@ -132,7 +132,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("kortex.engines.knowledge")
 
-_REGISTERED_CAPABILITIES: List[str] = [
+_REGISTERED_CAPABILITIES: list[str] = [
     "kortex.knowledge.query.search",
     "kortex.knowledge.graph.traverse",
     "kortex.knowledge.graph.list",
@@ -147,16 +147,16 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
     def __init__(self) -> None:
         super().__init__()
         self._graph = KnowledgeGraph()
-        self._lineage_manager: Optional[KnowledgeLineageManager] = None
-        self._annotation_manager: Optional[KnowledgeAnnotationManager] = None
-        self._search_engine: Optional[KnowledgeSearchEngine] = None
-        self._pack_manager: Optional[KnowledgePackManager] = None
+        self._lineage_manager: KnowledgeLineageManager | None = None
+        self._annotation_manager: KnowledgeAnnotationManager | None = None
+        self._search_engine: KnowledgeSearchEngine | None = None
+        self._pack_manager: KnowledgePackManager | None = None
         default_provider = ReferenceSourceProvider()
-        self._source_providers: Dict[str, IKnowledgeSourceProvider] = {
+        self._source_providers: dict[str, IKnowledgeSourceProvider] = {
             default_provider.source_id(): default_provider,
         }
-        self._kernel: Optional["Kernel"] = None
-        self._metrics: Dict[str, Any] = {
+        self._kernel: Kernel | None = None
+        self._metrics: dict[str, Any] = {
             "sources_indexed": 0,
             "records_ingested": 0,
             "packs_loaded": 0,
@@ -169,7 +169,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         return "knowledge"
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Names of prerequisite foundation engines."""
         return ["storage", "registry"]
 
@@ -183,7 +183,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
 
     # -- Lifecycle Implementation --------------------------------------------
 
-    async def initialize(self, kernel: "Kernel") -> None:
+    async def initialize(self, kernel: Kernel) -> None:
         """Wire real managers from the resolved Storage Engine and register
         capabilities with the Kernel."""
         self._set_state(EngineState.INITIALIZING)
@@ -268,7 +268,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         self._set_state(EngineState.STOPPED)
         self.logger.info("Knowledge Engine stopped cleanly.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Perform diagnostic health check."""
         return self.health()
 
@@ -296,7 +296,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         source_id: str,
         tenant_id: str,
         principal: SecurityPrincipal | None = None,
-    ) -> List[KnowledgeRecord]:
+    ) -> list[KnowledgeRecord]:
         """Index a registered knowledge source: resolve `source_id`, call
         its `ingest()`, persist every returned record via
         `KnowledgeLineageManager.create_record()`. See module docstring for
@@ -322,13 +322,11 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
             tenant_id = principal.tenant_id
         provider = self._source_providers.get(source_id)
         if provider is None:
-            raise KnowledgeSourceNotFoundError(
-                f"No knowledge source provider registered for source_id={source_id!r}."
-            )
+            raise KnowledgeSourceNotFoundError(f"No knowledge source provider registered for source_id={source_id!r}.")
 
         assert self._lineage_manager is not None
         ingested = await provider.ingest(tenant_id)
-        created: List[KnowledgeRecord] = []
+        created: list[KnowledgeRecord] = []
         for record in ingested:
             created.append(await self._lineage_manager.create_record(record))
 
@@ -339,9 +337,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         )
         return created
 
-    async def load_pack(
-        self, pack: KnowledgePack, principal: SecurityPrincipal | None = None
-    ) -> KnowledgePack:
+    async def load_pack(self, pack: KnowledgePack, principal: SecurityPrincipal | None = None) -> KnowledgePack:
         """Verify and durably register a `.kortex-knowledge` pack — delegates
         entirely to `KnowledgePackManager.load_pack()` (see `packs.py`).
 
@@ -358,9 +354,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         await self._emit_event(KnowledgePackLoadedEvent(tenant_id=loaded.tenant_id, asset_id=loaded.asset_id))
         return loaded
 
-    async def search(
-        self, query: KnowledgeQuery, principal: SecurityPrincipal | None = None
-    ) -> KnowledgeQueryResult:
+    async def search(self, query: KnowledgeQuery, principal: SecurityPrincipal | None = None) -> KnowledgeQueryResult:
         """Execute a multi-modal knowledge search — delegates to
         `KnowledgeSearchEngine.search_hybrid()` (see `search.py`, M8).
 
@@ -398,7 +392,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         tenant_id: str,
         max_hops: int,
         principal: SecurityPrincipal | None = None,
-    ) -> List[KnowledgeNode]:
+    ) -> list[KnowledgeNode]:
         """Backs the `kortex.knowledge.graph.traverse` capability (spec
         §13). `IKnowledgeEngine`'s frozen Protocol has no `traverse` method
         of its own — purely additive, matching the established pattern of
@@ -414,9 +408,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
             tenant_id = principal.tenant_id
         return self._graph.traverse(node_id, tenant_id, max_hops)
 
-    def list_nodes(
-        self, tenant_id: str, principal: SecurityPrincipal | None = None
-    ) -> List[KnowledgeNode]:
+    def list_nodes(self, tenant_id: str, principal: SecurityPrincipal | None = None) -> list[KnowledgeNode]:
         """Backs the `kortex.knowledge.graph.list` capability (Slice 4.7).
 
         `kortex.knowledge.query.search`'s handler (`self.search`) expects a
@@ -443,7 +435,7 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
 
     # -- Common Diagnostics Interface (IEngineDiagnostics) -----------------------
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return diagnostic health checks."""
         return {
             "engine": self.name,
@@ -455,11 +447,11 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
             "pack_manager_implemented": self._pack_manager is not None,
         }
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return operational runtime metrics."""
         return dict(self._metrics)
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics."""
         return {
             "engine": self.name,
@@ -478,6 +470,6 @@ class KnowledgeEngine(BaseEngine, IKnowledgeEngine, IEngineDiagnostics):
         """Return semantic version string."""
         return "1.0.0"
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of capability strings registered by this engine."""
         return list(_REGISTERED_CAPABILITIES)

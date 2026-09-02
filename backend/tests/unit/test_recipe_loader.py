@@ -4,7 +4,9 @@ Unit tests for KORTEX Recipe Engine Loader.
 
 import io
 import zipfile
+
 import pytest
+
 from kortex.engines.recipe.exceptions import RecipePackageError
 from kortex.engines.recipe.loader import RecipeLoader
 
@@ -27,7 +29,9 @@ def test_loader_from_package_bytes() -> None:
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
-        zf.writestr("manifest.yaml", "id: r_pkg\nname: Pkg Recipe\nnamespace: kortex.pkg\nversion: 1.0.0\nchecksum: 123")
+        zf.writestr(
+            "manifest.yaml", "id: r_pkg\nname: Pkg Recipe\nnamespace: kortex.pkg\nversion: 1.0.0\nchecksum: 123"
+        )
         zf.writestr("recipe.yaml", "steps:\n  - id: s_pkg\n    name: Pkg Step")
 
     package_bytes = buffer.getvalue()
@@ -38,5 +42,5 @@ def test_loader_from_package_bytes() -> None:
 
 def test_loader_invalid_zip() -> None:
     loader = RecipeLoader()
-    with pytest.raises(RecipePackageError, match="Invalid .kortex-recipe package archive"):
+    with pytest.raises(RecipePackageError, match=r"Invalid .kortex-recipe package archive"):
         loader.load_from_package(b"not a zip file")

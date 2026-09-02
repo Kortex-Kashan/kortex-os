@@ -11,8 +11,9 @@ exercising code paths.
 from __future__ import annotations
 
 import base64
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, NoReturn
+from typing import Any, NoReturn
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession

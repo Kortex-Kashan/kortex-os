@@ -5,8 +5,6 @@ Target: 100% pass rate, 100% code coverage across Milestone 1 production files.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from pydantic import ValidationError
 
@@ -26,13 +24,7 @@ from kortex.engines.connector.exceptions import (
 )
 from kortex.engines.connector.interfaces import (
     IBaseConnectorDriver,
-    IConnectorDriverLoader,
-    IConnectorDriverRegistry,
     IConnectorEngine,
-    IConnectorPipeline,
-    IConnectorProfileManager,
-    IEngineDiagnostics,
-    IRateLimiter,
 )
 from kortex.engines.connector.models import (
     ActionRequest,
@@ -260,18 +252,14 @@ class ConcreteDummyDriver(BaseConnectorDriver):
             supported_capabilities=[ConnectorCapability.SEND],
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(
             request_id=request.request_id,
             status="SUCCESS",
             response_payload={"echo": request.payload},
         )
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 

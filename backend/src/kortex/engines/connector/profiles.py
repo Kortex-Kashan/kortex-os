@@ -8,10 +8,10 @@ with the Connector Engine Specification.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Any
-
+import contextlib
 import json
+from datetime import UTC, datetime
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,23 +58,18 @@ class ConnectorProfileManager(IConnectorProfileManager):
             ConnectorValidationError: If any profile field validation rule is violated.
         """
         if not profile.profile_id or not profile.profile_id.strip():
-            raise ConnectorValidationError(
-                "Invalid profile: 'profile_id' cannot be empty or whitespace."
-            )
+            raise ConnectorValidationError("Invalid profile: 'profile_id' cannot be empty or whitespace.")
 
         if not profile.name or not profile.name.strip():
-            raise ConnectorValidationError(
-                "Invalid profile: 'name' cannot be empty or whitespace."
-            )
+            raise ConnectorValidationError("Invalid profile: 'name' cannot be empty or whitespace.")
 
         if not profile.driver_id or not profile.driver_id.strip():
-            raise ConnectorValidationError(
-                "Invalid profile: 'driver_id' cannot be empty or whitespace."
-            )
+            raise ConnectorValidationError("Invalid profile: 'driver_id' cannot be empty or whitespace.")
 
         if profile.rate_limit_per_sec <= 0.0:
             raise ConnectorValidationError(
-                f"Invalid profile: 'rate_limit_per_sec' must be strictly positive (> 0.0), got {profile.rate_limit_per_sec}."
+                f"Invalid profile: 'rate_limit_per_sec' must be strictly positive (> 0.0), got "
+                f"{profile.rate_limit_per_sec}."
             )
 
         if profile.max_retries < 0:
@@ -98,7 +93,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
         self.validate_profile(profile)
 
         profile_id = profile.profile_id.strip()
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         async with self._lock:
             existing = self._profiles.get(profile_id)
@@ -121,6 +116,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
 
             # 1. Durable persistence via Storage Engine IDataStore
             if self._data_store is not None:
+
                 async def _save_to_db(session: AsyncSession) -> None:
                     stmt = select(ConnectorProfileModel).where(ConnectorProfileModel.id == profile_id)
                     res = await session.execute(stmt)
@@ -150,21 +146,17 @@ class ConnectorProfileManager(IConnectorProfileManager):
                         )
                         session.add(model)
 
-                try:
+                with contextlib.suppress(Exception):  # Resilience: continue on DB exception with local fallback
                     await self._data_store.execute_in_transaction(_save_to_db)
-                except Exception:
-                    pass  # Resilience: continue on DB exception with local fallback
 
             # 2. Ephemeral caching via Storage Engine ICacheStore
             if self._cache_store is not None:
-                try:
+                with contextlib.suppress(Exception):  # Resilience: continue on cache failure
                     await self._cache_store.set(
                         self._get_cache_key(profile_id),
                         updated_profile.model_dump(),
                         ttl_seconds=3600,
                     )
-                except Exception:
-                    pass  # Resilience: continue on cache failure
 
     async def get_profile(self, profile_id: str, tenant_id: str | None = None) -> ConnectorProfile:
         """Retrieve Connector Profile by profile ID across CacheStore, DataStore, and local state.
@@ -198,15 +190,14 @@ class ConnectorProfileManager(IConnectorProfileManager):
 
         # 1. Check ICacheStore
         if resolved is None and self._cache_store is not None:
-            try:
+            with contextlib.suppress(Exception):  # Fall through on cache error
                 cached = await self._cache_store.get(self._get_cache_key(pid))
                 if isinstance(cached, dict):
                     resolved = ConnectorProfile.model_validate(cached)
-            except Exception:
-                pass  # Fall through on cache error
 
         # 2. Check IDataStore
         if resolved is None and self._data_store is not None:
+
             async def _read_from_db(session: AsyncSession) -> ConnectorProfile | None:
                 stmt = select(ConnectorProfileModel).where(ConnectorProfileModel.id == pid)
                 res = await session.execute(stmt)
@@ -228,15 +219,13 @@ class ConnectorProfileManager(IConnectorProfileManager):
                     )
                 return None
 
-            try:
+            with contextlib.suppress(Exception):
                 db_profile = await self._data_store.execute_in_transaction(_read_from_db)
                 if db_profile is not None:
                     resolved = db_profile
                     # Update local state cache
                     async with self._lock:
                         self._profiles[pid] = db_profile
-            except Exception:
-                pass
 
         # 3. Check local in-memory fallback
         if resolved is None:
@@ -278,6 +267,7 @@ class ConnectorProfileManager(IConnectorProfileManager):
 
         # 1. Query IDataStore if available
         if self._data_store is not None:
+
             async def _list_from_db(session: AsyncSession) -> list[ConnectorProfile]:
                 stmt = select(ConnectorProfileModel)
                 res = await session.execute(stmt)
@@ -340,15 +330,14 @@ class ConnectorProfileManager(IConnectorProfileManager):
 
         # 1. Delete from IDataStore if available
         if self._data_store is not None:
+
             async def _delete_from_db(session: AsyncSession) -> bool:
                 stmt = delete(ConnectorProfileModel).where(ConnectorProfileModel.id == pid)
                 res = await session.execute(stmt)
                 return (res.rowcount or 0) > 0
 
-            try:
+            with contextlib.suppress(Exception):
                 deleted = await self._data_store.execute_in_transaction(_delete_from_db)
-            except Exception:
-                pass
 
         # 2. Delete from local state
         async with self._lock:
@@ -358,10 +347,8 @@ class ConnectorProfileManager(IConnectorProfileManager):
 
         # 3. Delete from ICacheStore
         if self._cache_store is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._cache_store.delete(self._get_cache_key(pid))
-            except Exception:
-                pass
 
         return deleted
 

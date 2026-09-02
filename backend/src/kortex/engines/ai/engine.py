@@ -192,9 +192,7 @@ class EngineAgentContextPort(IAgentContextPort):
         """Assemble an `LLMRequest` for the next reasoning step with prompt, RAG, and history."""
         # 1. Slide window over the most recent steps
         windowed_steps = (
-            steps[-self._max_step_history_window:]
-            if len(steps) > self._max_step_history_window
-            else steps
+            steps[-self._max_step_history_window :] if len(steps) > self._max_step_history_window else steps
         )
 
         history_lines: list[str] = []
@@ -203,15 +201,11 @@ class EngineAgentContextPort(IAgentContextPort):
             for s in windowed_steps:
                 history_lines.append(f"Step {s.step_number}:")
                 if s.thought:
-                    sanitized_thought = sanitize_context_content(
-                        scrub_secrets_from_text(s.thought)
-                    )
+                    sanitized_thought = sanitize_context_content(scrub_secrets_from_text(s.thought))
                     history_lines.append(f"  Thought: {sanitized_thought}")
                 for tc in s.tool_calls:
                     tc_args_str = json.dumps(tc.arguments, default=str)
-                    sanitized_args = sanitize_context_content(
-                        scrub_secrets_from_text(tc_args_str)
-                    )
+                    sanitized_args = sanitize_context_content(scrub_secrets_from_text(tc_args_str))
                     history_lines.append(f"  Tool Call: {tc.tool_name}({sanitized_args})")
                 for tr in s.tool_results:
                     raw_out = str(tr.output) if tr.output is not None else "null"
@@ -222,19 +216,13 @@ class EngineAgentContextPort(IAgentContextPort):
                         )
                     scrubbed_out = scrub_secrets_from_text(raw_out)
                     sanitized_out = sanitize_context_content(scrubbed_out)
-                    history_lines.append(
-                        f"  Tool Result: status={tr.status.value}, output={sanitized_out}"
-                    )
+                    history_lines.append(f"  Tool Result: status={tr.status.value}, output={sanitized_out}")
                 if s.response_text:
-                    sanitized_resp = sanitize_context_content(
-                        scrub_secrets_from_text(s.response_text)
-                    )
+                    sanitized_resp = sanitize_context_content(scrub_secrets_from_text(s.response_text))
                     history_lines.append(f"  Response: {sanitized_resp}")
 
         history_block = "\n".join(history_lines)
-        full_prompt = (
-            f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
-        )
+        full_prompt = f"Goal: {task.goal}\n{history_block}" if history_block else f"Goal: {task.goal}"
 
         raw_request = LLMRequest(
             request_id=f"req-{uuid.uuid4().hex}",
@@ -321,6 +309,7 @@ class KernelToolExecutionPort(IToolExecutionPort):
             is_allowed = await authorizer(capability_name, arguments)
             if not is_allowed:
                 from kortex.engines.ai.exceptions import ToolAuthorizationError
+
                 raise ToolAuthorizationError(f"Authorization denied for capability '{capability_name}'.")
 
         session_token = None
@@ -366,20 +355,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         super().__init__()
         self._default_generation_timeout_seconds = default_generation_timeout_seconds
         self._throttler = throttler if throttler is not None else TenantConcurrencyThrottler()
-        self._provider_registry = (
-            provider_registry if provider_registry is not None else ProviderRegistry()
-        )
-        self._model_router = (
-            model_router if model_router is not None else ModelRouter(registry=self._provider_registry)
-        )
+        self._provider_registry = provider_registry if provider_registry is not None else ProviderRegistry()
+        self._model_router = model_router if model_router is not None else ModelRouter(registry=self._provider_registry)
         self._memory_manager = (
-            memory_manager
-            if memory_manager is not None
-            else AIMemoryManager(store=InMemoryConversationStore())
+            memory_manager if memory_manager is not None else AIMemoryManager(store=InMemoryConversationStore())
         )
-        self._tool_registry = (
-            tool_registry if tool_registry is not None else ToolRegistry()
-        )
+        self._tool_registry = tool_registry if tool_registry is not None else ToolRegistry()
         self._tool_invoker = (
             tool_invoker
             if tool_invoker is not None
@@ -406,11 +387,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 tool_registry=self._tool_registry,
             )
         )
-        self._telemetry = (
-            telemetry
-            if telemetry is not None
-            else AITelemetryEmitter(diagnostics=self._diagnostics)
-        )
+        self._telemetry = telemetry if telemetry is not None else AITelemetryEmitter(diagnostics=self._diagnostics)
         self._governance_manager = (
             governance_manager
             if governance_manager is not None
@@ -440,7 +417,6 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
 
         self._kernel: IKernelBridge | None = None
-
 
     @property
     def name(self) -> str:
@@ -768,11 +744,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         governance/quota/persistence/audit-tested) is unaffected by this
         fix without further changes.
         """
-        effective_timeout = (
-            timeout_seconds
-            if timeout_seconds is not None
-            else self._default_generation_timeout_seconds
-        )
+        effective_timeout = timeout_seconds if timeout_seconds is not None else self._default_generation_timeout_seconds
         start_time = time.perf_counter()
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
@@ -812,9 +784,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 quota_manager = self._governance_manager.quota_manager
                 pre_quota = await quota_manager.get_or_create_quota(request.tenant_id)
                 today = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
-                already_consumed = (
-                    pre_quota.daily_tokens_consumed if pre_quota.last_reset_date == today else 0
-                )
+                already_consumed = pre_quota.daily_tokens_consumed if pre_quota.last_reset_date == today else 0
                 if already_consumed >= policy.max_daily_budget_tokens:
                     raise AIGovernanceQuotaExceededError(
                         request.tenant_id,
@@ -848,8 +818,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     )
                 except ConversationStoreError as exc:
                     self.logger.critical(
-                        "Conversation history write failed after successful generation "
-                        "for request '%s': %s",
+                        "Conversation history write failed after successful generation for request '%s': %s",
                         request.request_id,
                         exc,
                     )
@@ -925,9 +894,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
 
             except TimeoutError as exc:
                 latency_ms = (time.perf_counter() - start_time) * 1000.0
-                timeout_err = AIProviderTimeoutError(
-                    f"Global AI generation timeout exceeded ({effective_timeout}s)."
-                )
+                timeout_err = AIProviderTimeoutError(f"Global AI generation timeout exceeded ({effective_timeout}s).")
                 await self._telemetry.emit_generation_failed(
                     tenant_id=request.tenant_id,
                     user_id=request.user_id,
@@ -1071,9 +1038,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         """Cancel an active or paused agent task across local and durable task stores."""
         return await self._agent_orchestrator.cancel_task(task_id, tenant_id)
 
-    async def get_agent_task(
-        self, task_id: str, tenant_id: str
-    ) -> PersistedAgentTaskRecord | None:
+    async def get_agent_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
         """Retrieve a persisted agent task record by identity."""
         return await self._agent_orchestrator.get_task(task_id, tenant_id)
 
@@ -1343,7 +1308,6 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             self._governance_manager.quota_manager._memory_quotas[q.tenant_id] = q
         return q.model_dump(mode="json")
 
-
     async def query_decision_records(
         self,
         tenant_id: str,
@@ -1417,7 +1381,6 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         }
 
     def register_provider(self, provider: BaseAIProvider) -> None:
-
         """Register an AI provider in the provider registry."""
         self._provider_registry.register(provider)
 
@@ -1451,8 +1414,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         (scrubbed args, `sort_keys=True`) or a legitimate approval would
         spuriously fail re-verification here."""
         calls_summary = [
-            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
-            for c in tool_calls
+            {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))} for c in tool_calls
         ]
         return hashlib.sha256(json.dumps(calls_summary, sort_keys=True).encode("utf-8")).hexdigest()
 

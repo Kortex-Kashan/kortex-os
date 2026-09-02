@@ -54,8 +54,6 @@ async def kernel(tmp_path: Path) -> AsyncGenerator[Kernel, None]:
     await db_manager.connect()
     await db_manager.create_all_tables()
 
-
-
     k = Kernel()
     k._db_manager = db_manager
 
@@ -87,8 +85,6 @@ async def kernel(tmp_path: Path) -> AsyncGenerator[Kernel, None]:
 
     await k.shutdown()
     await db_manager.disconnect()
-
-
 
 
 @pytest.mark.asyncio
@@ -359,8 +355,9 @@ async def test_stale_triggering_schedule_is_reclaimed_after_lease_expiry(kernel:
         tenant_id="tenant_reclaim_sched",
     )
 
-    from kortex.engines.workflow.persistence import SCHEDULE_CLAIM_LEASE_SECONDS, WorkflowScheduleModel
     from sqlalchemy import update as sa_update
+
+    from kortex.engines.workflow.persistence import SCHEDULE_CLAIM_LEASE_SECONDS, WorkflowScheduleModel
 
     stale_updated_at = datetime.now(UTC) - timedelta(seconds=SCHEDULE_CLAIM_LEASE_SECONDS + 30)
 
@@ -416,9 +413,7 @@ async def test_cron_schedule_respects_configured_timezone(kernel: Kernel) -> Non
         timezone="America/New_York",
     )
     assert next_run is not None
-    assert (next_run.hour, next_run.minute) == (14, 0), (
-        f"9am EST must be 14:00 UTC, got {next_run.isoformat()}"
-    )
+    assert (next_run.hour, next_run.minute) == (14, 0), f"9am EST must be 14:00 UTC, got {next_run.isoformat()}"
 
     # July: US/Eastern is EDT (UTC-4), DST in effect — same cron
     # expression must now compute a DIFFERENT UTC hour, proving DST is
@@ -600,7 +595,6 @@ async def test_missed_occurrence_count_is_estimated_not_silently_dropped(kernel:
     assert on_time_missed >= 1
 
 
-
 @pytest.mark.asyncio
 async def test_schedule_transactional_outbox_integration(kernel: Kernel) -> None:
     wf_engine: WorkflowEngine = kernel.get_engine("workflow")
@@ -680,9 +674,6 @@ async def test_schedule_capability_dispatch_flow(kernel: Kernel) -> None:
         session.add_all([r1, r2, r3, p1])
         await session.flush()
 
-
-
-
     await storage.data.execute_in_transaction(_seed_rbac)
 
     p_auth = await security_engine.authentication_manager.authenticate(
@@ -696,7 +687,6 @@ async def test_schedule_capability_dispatch_flow(kernel: Kernel) -> None:
     token = await security_engine.authentication_manager.issue_token(p_auth)
 
     # 1. Create schedule via capability
-
 
     req_create = CapabilityRequest(
         capability_name="kortex.workflow.schedule.create",
@@ -743,8 +733,6 @@ async def test_schedule_capability_dispatch_flow(kernel: Kernel) -> None:
     )
     res_trig = await kernel.invoke_capability(req_trig)
     assert "instance_id" in res_trig
-
-
 
 
 def test_schedule_api_error_mapping() -> None:

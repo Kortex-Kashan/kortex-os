@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-from kortex.engines.connector.exceptions import RateLimitExceededError
 from kortex.engines.connector.interfaces import IRateLimiter
 from kortex.engines.connector.rate_limiter import (
     TokenBucketRateLimiter,

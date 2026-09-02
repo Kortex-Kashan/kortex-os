@@ -8,41 +8,12 @@ TokenBucketRateLimiter, ConnectorPipeline, ConnectorDiagnostics, and system even
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
-from kortex.core.base_engine import BaseEngine, EngineState
-from kortex.engines.connector.diagnostics import ConnectorDiagnostics
-from kortex.engines.connector.events import (
-    ConnectorActionCompletedEvent,
-    ConnectorActionFailedEvent,
-    ConnectorActionStartedEvent,
-    ConnectorBaseEvent,
-    ConnectorDriverRegisteredEvent,
-)
-from kortex.engines.connector.interfaces import (
-    IBaseConnectorDriver,
-    IEngineDiagnostics,
-)
-from kortex.engines.connector.models import (
-    ActionRequest,
-    ActionResult,
-    ConnectorProfile,
-    DriverMetadata,
-)
-from kortex.engines.connector.pipeline import ConnectorPipeline
-from kortex.engines.connector.profiles import ConnectorProfileManager
-from kortex.engines.connector.rate_limiter import TokenBucketRateLimiter
-from kortex.engines.connector.registry import ConnectorDriverRegistry
-
-if TYPE_CHECKING:
-    from kortex.core.kernel import Kernel
-
-logger = logging.getLogger("kortex.engines.connector")
-
-
-import json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.base_engine import BaseEngine, EngineState
@@ -118,9 +89,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         self._profile_manager = (
             profile_manager if profile_manager is not None else ConnectorProfileManager(data_store=data_store)
         )
-        self._rate_limiter = (
-            rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
-        )
+        self._rate_limiter = rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
         self._secret_resolver = secret_resolver
         self._diagnostics = (
             diagnostics
@@ -403,9 +372,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         is_success = False
         resolved_driver_id: str | None = None
         action_type_str = (
-            request.action_type.value
-            if hasattr(request.action_type, "value")
-            else str(request.action_type)
+            request.action_type.value if hasattr(request.action_type, "value") else str(request.action_type)
         )
         executed_recorded = False
 
@@ -426,9 +393,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
 
             # RBAC Capability Permission Verification
             granted_permissions = request.options.get("granted_permissions")
-            if granted_permissions is not None and isinstance(
-                granted_permissions, (list, set, tuple)
-            ):
+            if granted_permissions is not None and isinstance(granted_permissions, (list, set, tuple)):
                 required_perm = "kortex.connector.action.execute"
                 if required_perm not in granted_permissions:
                     raise ConnectorSecurityError(
@@ -445,9 +410,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             await self._publish_event(started_evt)
 
             # 2. Resolve profile, tenant-scoped (M6.3-1)
-            profile = await self._profile_manager.get_profile(
-                request.profile_id, tenant_id=request.tenant_id
-            )
+            profile = await self._profile_manager.get_profile(request.profile_id, tenant_id=request.tenant_id)
             resolved_driver_id = profile.driver_id
 
             # 3. Execute action through pipeline
@@ -530,9 +493,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             driver_id=meta.driver_id,
             driver_name=meta.display_name,
             version=meta.version,
-            supported_actions=tuple(
-                act.value if hasattr(act, "value") else str(act) for act in meta.supported_actions
-            ),
+            supported_actions=tuple(act.value if hasattr(act, "value") else str(act) for act in meta.supported_actions),
         )
         self._safe_schedule_event(evt)
 
@@ -606,9 +567,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         """
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
         tid = principal.tenant_id if principal is not None else tenant_id
-        return await self._profile_manager.list_profiles(
-            driver_id=driver_id, active_only=active_only, tenant_id=tid
-        )
+        return await self._profile_manager.list_profiles(driver_id=driver_id, active_only=active_only, tenant_id=tid)
 
     async def delete_profile(
         self,
@@ -649,9 +608,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             err_json = json.dumps(result.error_details)
 
         action_type_str = (
-            request.action_type.value
-            if hasattr(request.action_type, "value")
-            else str(request.action_type)
+            request.action_type.value if hasattr(request.action_type, "value") else str(request.action_type)
         )
 
         async def _save_history(session: AsyncSession) -> None:
@@ -691,11 +648,12 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         """Safely schedule event publication from a synchronous context if an active loop exists."""
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._publish_event(event))
+
+            # task reference would require new engine-level task bookkeeping and
+            # change Connector dispatch semantics; out of scope for a lint fix.
+            loop.create_task(self._publish_event(event))  # noqa: RUF006
         except RuntimeError:
-            self.logger.debug(
-                "No active event loop running to dispatch event '%s'", event.event_type
-            )
+            self.logger.debug("No active event loop running to dispatch event '%s'", event.event_type)
 
 
 __all__ = ["ConnectorEngine"]

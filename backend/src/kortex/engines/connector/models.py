@@ -10,6 +10,10 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import Boolean, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from kortex.core.db import BaseModel as SQLAlchemyBaseModel
 
 
 class ConnectorActionType(str, Enum):
@@ -140,11 +144,6 @@ class ConnectorPipelineDefinition(BaseModel):
 
 
 # -- SQLAlchemy ORM Models for IDataStore Persistence -------------------------
-
-from sqlalchemy import Boolean, Float, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
-
-from kortex.core.db import BaseModel as SQLAlchemyBaseModel
 
 
 class ConnectorProfileModel(SQLAlchemyBaseModel):

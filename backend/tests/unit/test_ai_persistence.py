@@ -53,8 +53,9 @@ def store(data_store: RelationalDataStore) -> StorageConversationStore:
     return StorageConversationStore(data_store)
 
 
-async def _append(store: IConversationStore, text: str, tenant: str = TENANT,
-                  conversation: str = CONVERSATION) -> ConversationTurn:
+async def _append(
+    store: IConversationStore, text: str, tenant: str = TENANT, conversation: str = CONVERSATION
+) -> ConversationTurn:
     return await store.append(
         tenant_id=tenant,
         conversation_id=conversation,
@@ -112,16 +113,27 @@ async def test_reads_order_by_sequence_not_created_at(
         # sequence 1 written with a LATER clock than sequence 2.
         session.add(
             AIConversationTurnRow(
-                id=str(uuid.uuid4()), tenant_id=TENANT, conversation_id=CONVERSATION,
-                sequence=1, user_content="first", assistant_content="a1",
-                request_id="r1", user_id="user-1", created_at=now,
+                id=str(uuid.uuid4()),
+                tenant_id=TENANT,
+                conversation_id=CONVERSATION,
+                sequence=1,
+                user_content="first",
+                assistant_content="a1",
+                request_id="r1",
+                user_id="user-1",
+                created_at=now,
             )
         )
         session.add(
             AIConversationTurnRow(
-                id=str(uuid.uuid4()), tenant_id=TENANT, conversation_id=CONVERSATION,
-                sequence=2, user_content="second", assistant_content="a2",
-                request_id="r2", user_id="user-1",
+                id=str(uuid.uuid4()),
+                tenant_id=TENANT,
+                conversation_id=CONVERSATION,
+                sequence=2,
+                user_content="second",
+                assistant_content="a2",
+                request_id="r2",
+                user_id="user-1",
                 created_at=now - datetime.timedelta(hours=5),
             )
         )
@@ -210,9 +222,7 @@ async def test_history_survives_reconnecting_the_database(tmp_path: pathlib.Path
     second = DatabaseEngineManager(connection_url=url)
     await second.connect()
     try:
-        turns = await StorageConversationStore(RelationalDataStore(second)).recent_turns(
-            TENANT, CONVERSATION, limit=10
-        )
+        turns = await StorageConversationStore(RelationalDataStore(second)).recent_turns(TENANT, CONVERSATION, limit=10)
         assert [t.user_content for t in turns] == ["u-durable"]
     finally:
         await second.disconnect()
@@ -226,8 +236,15 @@ async def test_history_survives_reconnecting_the_database(tmp_path: pathlib.Path
 def test_row_stores_no_provider_or_model_column() -> None:
     columns = set(AIConversationTurnRow.__table__.columns.keys())
     assert not {c for c in columns if "provider" in c or "model" in c or "vendor" in c}
-    assert {"tenant_id", "conversation_id", "sequence", "user_content",
-            "assistant_content", "request_id", "user_id"} <= columns
+    assert {
+        "tenant_id",
+        "conversation_id",
+        "sequence",
+        "user_content",
+        "assistant_content",
+        "request_id",
+        "user_id",
+    } <= columns
 
 
 def test_row_has_sequence_unique_constraint() -> None:
@@ -250,9 +267,7 @@ async def test_concurrent_appends_never_duplicate_an_ordinal(
 ) -> None:
     """Either every append succeeds with a contiguous sequence, or a losing
     racer raises — never a silently duplicated ordinal."""
-    results = await asyncio.gather(
-        *(_append(store, str(i)) for i in range(12)), return_exceptions=True
-    )
+    results = await asyncio.gather(*(_append(store, str(i)) for i in range(12)), return_exceptions=True)
     succeeded = [r for r in results if isinstance(r, ConversationTurn)]
     failed = [r for r in results if isinstance(r, BaseException)]
 
@@ -274,9 +289,14 @@ async def test_failed_transaction_leaves_no_row(
     async def _add_then_fail(session: AsyncSession) -> None:
         session.add(
             AIConversationTurnRow(
-                id=str(uuid.uuid4()), tenant_id=TENANT, conversation_id=CONVERSATION,
-                sequence=99, user_content="doomed", assistant_content="doomed",
-                request_id="r", user_id="user-1",
+                id=str(uuid.uuid4()),
+                tenant_id=TENANT,
+                conversation_id=CONVERSATION,
+                sequence=99,
+                user_content="doomed",
+                assistant_content="doomed",
+                request_id="r",
+                user_id="user-1",
                 created_at=datetime.datetime.now(datetime.UTC),
             )
         )
@@ -336,9 +356,7 @@ async def test_failure_message_never_leaks_content(
 
 
 @pytest.fixture(params=["in_memory", "storage"])
-def any_store(
-    request: pytest.FixtureRequest, data_store: RelationalDataStore
-) -> IConversationStore:
+def any_store(request: pytest.FixtureRequest, data_store: RelationalDataStore) -> IConversationStore:
     if request.param == "in_memory":
         return InMemoryConversationStore()
     return StorageConversationStore(data_store)
@@ -376,8 +394,11 @@ async def test_parity_through_the_manager(any_store: IConversationStore) -> None
             TENANT,
             CONVERSATION,
             LLMRequest(
-                request_id=f"r{index}", tenant_id=TENANT, user_id="user-1",
-                conversation_id=CONVERSATION, prompt=f"u{index}",
+                request_id=f"r{index}",
+                tenant_id=TENANT,
+                user_id="user-1",
+                conversation_id=CONVERSATION,
+                prompt=f"u{index}",
             ),
             LLMResponse(request_id=f"r{index}", text_content=f"a{index}"),
         )
@@ -392,9 +413,7 @@ async def test_parity_through_the_manager(any_store: IConversationStore) -> None
 # --------------------------------------------------------------------------
 
 
-async def test_store_is_the_only_writer(
-    store: StorageConversationStore, data_store: RelationalDataStore
-) -> None:
+async def test_store_is_the_only_writer(store: StorageConversationStore, data_store: RelationalDataStore) -> None:
     await _append(store, "one")
 
     async def _count(session: AsyncSession) -> int:

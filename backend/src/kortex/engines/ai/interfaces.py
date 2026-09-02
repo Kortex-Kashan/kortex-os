@@ -93,9 +93,7 @@ class IModelRouter(Protocol):
     is Milestone 3 scope; only the selection signature is fixed here.
     """
 
-    async def select_model(
-        self, request: LLMRequest, context: dict[str, Any]
-    ) -> AIProviderMetadata:
+    async def select_model(self, request: LLMRequest, context: dict[str, Any]) -> AIProviderMetadata:
         """Select the provider/model that should handle the given request."""
         ...
 
@@ -128,9 +126,7 @@ class IAIToolInvoker(Protocol):
     `authorizer` is mandatory, not optional — see `ToolAuthorizer` above.
     """
 
-    async def invoke(
-        self, tool_call: dict[str, Any], authorizer: ToolAuthorizer
-    ) -> dict[str, Any]:
+    async def invoke(self, tool_call: dict[str, Any], authorizer: ToolAuthorizer) -> dict[str, Any]:
         """Invoke a tool/capability call after confirming authorization via `authorizer`."""
         ...
 

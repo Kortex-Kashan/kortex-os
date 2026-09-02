@@ -6,7 +6,6 @@ Target: 100% test pass rate, 100% line coverage for engine.py.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,10 +15,8 @@ from kortex.core.exceptions import EngineStateError
 from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError
-from kortex.engines.connector.interfaces import IEngineDiagnostics
 from kortex.engines.connector.models import (
     ActionRequest,
-    ActionResult,
     ConnectorProfile,
 )
 

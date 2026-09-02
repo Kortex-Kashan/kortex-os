@@ -67,7 +67,7 @@ async def kernel(tmp_path: Path) -> AsyncGenerator[Kernel, None]:
 
     hasher = PasswordHasher()
 
-    async def _seed(session) -> None:  # noqa: ANN001
+    async def _seed(session) -> None:
         perms = [
             "workflow:start",
             "workflow:read",
@@ -119,7 +119,7 @@ async def kernel(tmp_path: Path) -> AsyncGenerator[Kernel, None]:
     await db_manager.disconnect()
 
 
-async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: str):  # noqa: ANN001
+async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: str):
     security_engine: SecurityEngine = kernel.get_engine("security")
     auth = await security_engine.authentication_manager.authenticate(
         {
@@ -132,7 +132,7 @@ async def _token(kernel: Kernel, tenant_id: str, principal_id: str, password: st
     return await security_engine.authentication_manager.issue_token(auth)
 
 
-async def _tokens(kernel: Kernel):  # noqa: ANN001
+async def _tokens(kernel: Kernel):
     token_alpha = await _token(kernel, _ALPHA, "user_alpha", "pass-alpha")
     token_beta = await _token(kernel, _BETA, "user_beta", "pass-beta")
     return token_alpha, token_beta

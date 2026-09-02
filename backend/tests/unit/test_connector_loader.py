@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-import types
 from pathlib import Path
 from typing import Any
 
@@ -39,14 +38,10 @@ class ValidDynamicDriver(BaseConnectorDriver):
             description="Dynamic driver for loader unit test",
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -67,14 +62,10 @@ class BrokenInitDriver(BaseConnectorDriver):
             description="Desc",
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -85,14 +76,10 @@ class FaultyMetadataLoaderDriver(BaseConnectorDriver):
     def metadata(self) -> DriverMetadata:
         raise RuntimeError("Metadata error in loader")
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -103,14 +90,10 @@ class InvalidMetadataDriver(BaseConnectorDriver):
     def metadata(self) -> Any:
         return "Not a DriverMetadata object"
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -128,14 +111,10 @@ class IncompleteMetadataDriver(BaseConnectorDriver):
             description="Desc",
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -224,7 +203,7 @@ def test_load_abstract_driver_class() -> None:
         pass
 
     current_mod = sys.modules[__name__]
-    setattr(current_mod, "AbstractDriver", AbstractDriver)
+    current_mod.AbstractDriver = AbstractDriver
 
     loader = ConnectorDriverLoader()
     with pytest.raises(DriverLoadError) as exc_info:

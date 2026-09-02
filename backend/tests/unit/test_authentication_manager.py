@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import base64
 import uuid
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable, NoReturn
+from typing import Any, NoReturn
 
 import pytest
 from argon2 import PasswordHasher
@@ -122,8 +123,12 @@ def _sign_custom_token(
     """Build a validly-signed `TokenPayload` with caller-chosen timestamps —
     used to test expiry/future-dating without waiting on a real clock."""
     payload_bytes = manager._build_signing_payload(
-        token_id, principal.principal_id, principal.principal_type.value, principal.tenant_id,
-        issued_at_utc, expires_at_utc,
+        token_id,
+        principal.principal_id,
+        principal.principal_type.value,
+        principal.tenant_id,
+        issued_at_utc,
+        expires_at_utc,
     )
     signature = manager._verification_service.sign(
         payload_bytes, manager._signing_private_key, manager._signing_public_key
@@ -156,18 +161,24 @@ class _FailingDataStore:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("principal_type", "field"), _PRINCIPAL_TYPES_AND_FIELDS)
-async def test_authenticate_succeeds_for_valid_credential(
-    tmp_path: Path, principal_type: str, field: str
-) -> None:
+async def test_authenticate_succeeds_for_valid_credential(tmp_path: Path, principal_type: str, field: str) -> None:
     tenant_a = _tenant_a(tmp_path)
     _kernel, storage, manager = await _make_manager(tmp_path)
     await _seed_principal(
-        storage.data, tenant_a, "principal-1", principal_type, "correct-secret",
-        roles=["role-a"], attributes={"env": "prod"},
+        storage.data,
+        tenant_a,
+        "principal-1",
+        principal_type,
+        "correct-secret",
+        roles=["role-a"],
+        attributes={"env": "prod"},
     )
 
     credentials = {
-        "principal_type": principal_type, "tenant_id": tenant_a, "principal_id": "principal-1", field: "correct-secret"
+        "principal_type": principal_type,
+        "tenant_id": tenant_a,
+        "principal_id": "principal-1",
+        field: "correct-secret",
     }
     principal = await manager.authenticate(credentials)
 
@@ -368,10 +379,15 @@ async def test_verify_token_round_trip_returns_correct_principal(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_verify_token_with_no_signature_denied(tmp_path: Path) -> None:
     _kernel, _storage, manager = await _make_manager(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     token = TokenPayload(
-        token_id="t1", principal_id="p1", principal_type=PrincipalType.USER, tenant_id=_tenant_a(tmp_path),
-        issued_at_utc=now, expires_at_utc=now + timedelta(minutes=15), signature=None,
+        token_id="t1",
+        principal_id="p1",
+        principal_type=PrincipalType.USER,
+        tenant_id=_tenant_a(tmp_path),
+        issued_at_utc=now,
+        expires_at_utc=now + timedelta(minutes=15),
+        signature=None,
     )
 
     with pytest.raises(InvalidTokenError):
@@ -433,7 +449,7 @@ async def test_verify_token_expired_denied(tmp_path: Path) -> None:
     principal = await manager.authenticate(
         {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "principal-1", "password": "secret"}
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expired_token = _sign_custom_token(
         manager, principal, issued_at_utc=now - timedelta(hours=1), expires_at_utc=now - timedelta(minutes=1)
     )
@@ -450,7 +466,7 @@ async def test_verify_token_future_dated_denied(tmp_path: Path) -> None:
     principal = await manager.authenticate(
         {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "principal-1", "password": "secret"}
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     future_token = _sign_custom_token(
         manager, principal, issued_at_utc=now + timedelta(hours=1), expires_at_utc=now + timedelta(hours=2)
     )

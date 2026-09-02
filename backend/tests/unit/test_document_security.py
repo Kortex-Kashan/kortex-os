@@ -5,7 +5,9 @@ Target: 100% pass rate, 100% line coverage for security.py.
 
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Callable, List, Optional
+from collections.abc import AsyncGenerator, Callable
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,7 +69,7 @@ class MockFileStore(IFileStore):
     async def file_exists(self, relative_path: str) -> bool:
         return relative_path in self.files
 
-    async def list_files(self, relative_path: str = "") -> List[FileMetadata]:
+    async def list_files(self, relative_path: str = "") -> list[FileMetadata]:
         return []
 
     async def get_metadata(self, relative_path: str) -> FileMetadata:
@@ -122,7 +124,7 @@ class MockObjectStore(IObjectStore):
     async def object_exists(self, bucket_name: str, object_key: str) -> bool:
         return f"{bucket_name}/{object_key}" in self.objects
 
-    async def list_objects(self, bucket_name: str, prefix: Optional[str] = None) -> List[ObjectMetadata]:
+    async def list_objects(self, bucket_name: str, prefix: str | None = None) -> list[ObjectMetadata]:
         return []
 
 
@@ -130,10 +132,10 @@ class MockCacheStore(ICacheStore):
     def __init__(self) -> None:
         self.cache: dict[str, Any] = {}
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         return self.cache.get(key)
 
-    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
         self.cache[key] = value
         return True
 

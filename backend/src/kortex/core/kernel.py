@@ -163,7 +163,10 @@ class Kernel:
             # Publish system startup event
             await self.publish_event(
                 "system.started",
-                payload={"version": self._config_engine.settings.version, "environment": self._config_engine.settings.environment},
+                payload={
+                    "version": self._config_engine.settings.version,
+                    "environment": self._config_engine.settings.environment,
+                },
                 sender="kernel",
             )
         except Exception as e:

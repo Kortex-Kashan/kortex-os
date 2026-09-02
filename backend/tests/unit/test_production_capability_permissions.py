@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 from argon2 import PasswordHasher
@@ -39,7 +39,7 @@ _TEST_SIGNING_KEY = b"\x44" * 32
 # milestone. Kept as an explicit literal here (not re-derived from source) so
 # a future accidental change to any engine's registration call is caught as
 # a real test failure rather than silently drifting.
-_EXPECTED_PERMISSIONS: Dict[str, list[str] | None] = {
+_EXPECTED_PERMISSIONS: dict[str, list[str] | None] = {
     "kortex.security.auth.authenticate": None,
     "kortex.security.access.authorize": ["security:read"],
     "kortex.security.secret.get": ["security:read"],
@@ -167,8 +167,7 @@ async def test_production_capability_permission_matrix(tmp_path: Path) -> None:
         assert name in descriptors, f"expected capability '{name}' to be registered"
         descriptor = descriptors[name]
         assert descriptor.required_permissions == expected_permissions, (
-            f"{name}: expected required_permissions={expected_permissions}, "
-            f"got {descriptor.required_permissions}"
+            f"{name}: expected required_permissions={expected_permissions}, got {descriptor.required_permissions}"
         )
         checked += 1
     assert checked == len(_EXPECTED_PERMISSIONS)
@@ -179,8 +178,7 @@ async def test_production_capability_permission_matrix(tmp_path: Path) -> None:
             assert descriptor.requires_authentication is False
         else:
             assert descriptor.requires_authentication is True, (
-                f"{name} must require authentication; only "
-                f"{sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may be exempt"
+                f"{name} must require authentication; only {sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may be exempt"
             )
 
 

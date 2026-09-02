@@ -2,7 +2,6 @@
 Unit tests for KORTEX Recipe Engine Pydantic v2 domain models.
 """
 
-import pytest
 from kortex.engines.recipe.models import (
     RecipeCompatibility,
     RecipeDefinition,

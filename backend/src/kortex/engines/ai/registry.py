@@ -49,8 +49,7 @@ class MetadataOnlyAIProvider(BaseAIProvider):
 
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         raise AIProviderError(
-            f"Provider '{self.provider_id}' is registered as metadata only; "
-            "it has no implementation to generate text."
+            f"Provider '{self.provider_id}' is registered as metadata only; it has no implementation to generate text."
         )
 
     async def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
@@ -147,20 +146,14 @@ class ProviderRegistry:
             try:
                 metadata = provider_obj.metadata
             except Exception as err:
-                raise ProviderValidationError(
-                    f"Failed to access provider metadata: {err}"
-                ) from err
+                raise ProviderValidationError(f"Failed to access provider metadata: {err}") from err
 
             if not isinstance(metadata, AIProviderMetadata):
-                raise ProviderValidationError(
-                    "Provider metadata property must return an AIProviderMetadata instance."
-                )
+                raise ProviderValidationError("Provider metadata property must return an AIProviderMetadata instance.")
 
             provider_id = metadata.provider_id
             if not provider_id or not provider_id.strip():
-                raise ProviderValidationError(
-                    "Missing required metadata field: 'provider_id' cannot be empty."
-                )
+                raise ProviderValidationError("Missing required metadata field: 'provider_id' cannot be empty.")
             if provider_id != provider_id.strip():
                 raise ProviderValidationError(
                     f"provider_id must not contain leading or trailing whitespace: {provider_id!r}"

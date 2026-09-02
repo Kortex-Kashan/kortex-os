@@ -243,7 +243,7 @@ async def test_register_profile_ignores_caller_supplied_tenant_id(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_list_profiles_returns_only_the_callers_tenant(tmp_path: Path) -> None:
-    kernel, storage_engine, security_engine, connector_engine = await _boot_kernel(tmp_path)
+    kernel, storage_engine, security_engine, _connector_engine = await _boot_kernel(tmp_path)
     tenant_a = _tenant(tmp_path, "-a")
     tenant_b = _tenant(tmp_path, "-b")
 

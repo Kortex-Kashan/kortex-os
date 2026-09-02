@@ -51,9 +51,7 @@ def test_adapter_id_and_supported_capabilities_properties() -> None:
 async def test_execute_is_deterministic_across_repeated_calls() -> None:
     """Identical operation_type/context/options produce byte-identical output every time."""
     adapter = MacroAdapter()
-    context = BindingContext(
-        context_id="ctx-macro-1", data={"field_a": 1, "field_b": 2}
-    )
+    context = BindingContext(context_id="ctx-macro-1", data={"field_a": 1, "field_b": 2})
 
     first = await adapter.execute(DocumentOperationType.GENERATE, context, {"rule": "normalize"})
     second = await adapter.execute(DocumentOperationType.GENERATE, context, {"rule": "normalize"})

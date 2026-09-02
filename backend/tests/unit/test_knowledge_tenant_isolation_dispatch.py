@@ -298,7 +298,7 @@ async def test_index_source_lands_records_in_the_callers_real_tenant(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_load_pack_registers_under_the_callers_real_tenant(tmp_path: Path) -> None:
-    kernel, storage_engine, security_engine, knowledge_engine = await _boot_kernel(tmp_path)
+    kernel, storage_engine, security_engine, _knowledge_engine = await _boot_kernel(tmp_path)
 
     tenant_a = _tenant(tmp_path, "-a")
     tenant_b = _tenant(tmp_path, "-b")

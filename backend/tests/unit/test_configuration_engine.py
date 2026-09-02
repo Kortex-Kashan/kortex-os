@@ -3,12 +3,13 @@ Unit tests for Configuration Engine.
 """
 
 import json
-import pytest
 from pathlib import Path
+
+import pytest
 from pydantic import BaseModel
 
-from kortex.engines.configuration.engine import ConfigurationEngine, SystemSettings
 from kortex.core.exceptions import ConfigurationLoadError, ConfigurationValidationError
+from kortex.engines.configuration.engine import ConfigurationEngine
 
 
 class CustomAppConfig(BaseModel):

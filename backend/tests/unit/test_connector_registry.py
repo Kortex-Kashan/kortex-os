@@ -53,14 +53,10 @@ class SampleDriver(BaseConnectorDriver):
             supported_capabilities=[ConnectorCapability.SEND, ConnectorCapability.TEST_CONNECTION],
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -80,14 +76,10 @@ class ActionOnlyDriver(BaseConnectorDriver):
             supported_capabilities=[],
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -98,14 +90,10 @@ class FaultyMetadataPropertyDriver(BaseConnectorDriver):
     def metadata(self) -> DriverMetadata:
         raise RuntimeError("Metadata property access error")
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -116,14 +104,10 @@ class NonDriverMetadataDriver(BaseConnectorDriver):
     def metadata(self) -> Any:
         return 12345
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS")
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -176,7 +160,9 @@ def test_metadata_only_registration() -> None:
     import asyncio
 
     with pytest.raises(ConnectorOperationError):
-        asyncio.run(drv.execute_action(ActionRequest(request_id="r1", profile_id="p1", action_type=ConnectorActionType.PUSH)))
+        asyncio.run(
+            drv.execute_action(ActionRequest(request_id="r1", profile_id="p1", action_type=ConnectorActionType.PUSH))
+        )
 
     assert asyncio.run(drv.test_connection(ConnectorProfile(profile_id="p1", name="P", driver_id="meta-only"))) is False
 

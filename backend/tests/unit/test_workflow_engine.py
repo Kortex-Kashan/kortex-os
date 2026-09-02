@@ -15,7 +15,6 @@ from kortex.core.exceptions import ResourceNotFoundError
 from kortex.core.kernel import Kernel
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.exceptions import (
-    WorkflowApprovalError,
     WorkflowStateError,
     WorkflowValidationError,
 )
@@ -88,7 +87,7 @@ async def test_workflow_engine_initialize_and_stop_lifecycle() -> None:
     engine = WorkflowEngine()
 
     # Initialize without Storage Engine in container raises exception
-    with pytest.raises(Exception):
+    with pytest.raises(ResourceNotFoundError):
         await engine.initialize(kernel)
 
     assert engine.state == EngineState.FAILED

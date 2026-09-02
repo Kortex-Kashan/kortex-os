@@ -36,8 +36,8 @@ from kortex.engines.ai.router import ModelRouter
 # Distinctive sentinels used to prove no exception message ever leaks them (I7).
 # Not credentials: `SECRET_HANDLE` is an opaque Security Engine *handle*, and
 # the host is an RFC 2606 `.invalid` name that cannot resolve.
-SECRET_URL = "https://super-secret-host.example.invalid:9999/v1"  # noqa: S105
-SECRET_HANDLE = "secret:kortex/ai/DO-NOT-LEAK-THIS-HANDLE"  # noqa: S105
+SECRET_URL = "https://super-secret-host.example.invalid:9999/v1"
+SECRET_HANDLE = "secret:kortex/ai/DO-NOT-LEAK-THIS-HANDLE"
 
 
 def _metadata(
@@ -197,9 +197,7 @@ class _LyingIdentityProvider(BaseAIProvider):
 
 
 def _request() -> LLMRequest:
-    return LLMRequest(
-        request_id="r1", tenant_id="t1", user_id="u1", conversation_id="c1", prompt="hi"
-    )
+    return LLMRequest(request_id="r1", tenant_id="t1", user_id="u1", conversation_id="c1", prompt="hi")
 
 
 def _router(*providers: BaseAIProvider) -> tuple[ModelRouter, ProviderRegistry]:
@@ -500,9 +498,7 @@ async def test_pin_with_conflicting_endpoint_type_raises() -> None:
     """I6: an unsatisfiable assertion raises rather than silently returning nothing."""
     router, _ = _router(_FakeProvider("local-1", endpoint_type="local_host"))
     with pytest.raises(NoRoutableProviderError):
-        await router.select_model(
-            _request(), {"provider_id": "local-1", "endpoint_type": "cloud"}
-        )
+        await router.select_model(_request(), {"provider_id": "local-1", "endpoint_type": "cloud"})
 
 
 async def test_padded_pin_is_not_normalized() -> None:
@@ -669,14 +665,14 @@ async def test_no_exception_message_leaks_url_or_secret_handle() -> None:
     router = ModelRouter(registry)
 
     raising_calls = [
-        {},                                                     # cloud excluded -> NoRoutable
-        {"provider_id": "meta-secret"},                          # metadata-only -> NotRoutable
+        {},  # cloud excluded -> NoRoutable
+        {"provider_id": "meta-secret"},  # metadata-only -> NotRoutable
         {"provider_id": "cloud-secret", "endpoint_type": "local_host"},  # mismatch -> NoRoutable
-        {"provider_id": "absent"},                               # unknown -> NotFound
-        {"provider_id": "liar"},                                 # identity mismatch -> NotRoutable
-        {"model_id": "x"},                                       # rejected key
-        {"bogus": SECRET_HANDLE},                                # unknown key
-        {"endpoint_type": "not-a-real-endpoint"},                # invalid literal
+        {"provider_id": "absent"},  # unknown -> NotFound
+        {"provider_id": "liar"},  # identity mismatch -> NotRoutable
+        {"model_id": "x"},  # rejected key
+        {"bogus": SECRET_HANDLE},  # unknown key
+        {"endpoint_type": "not-a-real-endpoint"},  # invalid literal
     ]
 
     raised = 0
@@ -787,9 +783,7 @@ def test_ai_package_imports_no_forbidden_dependency() -> None:
                 if any(module_name.startswith(bad) for bad in forbidden_everywhere):
                     offenders.append(f"{source_file.name} -> {module_name} (forbidden everywhere)")
                     continue
-                if not is_adapter and any(
-                    module_name.startswith(bad) for bad in restricted_third_party
-                ):
+                if not is_adapter and any(module_name.startswith(bad) for bad in restricted_third_party):
                     offenders.append(f"{source_file.name} -> {module_name} (adapter-only)")
                     continue
                 if not module_name.startswith("kortex"):
@@ -801,9 +795,7 @@ def test_ai_package_imports_no_forbidden_dependency() -> None:
 
 
 async def test_routing_never_mutates_the_registry() -> None:
-    router, registry = _router(
-        _FakeProvider("a"), _FakeProvider("b", endpoint_type="cloud")
-    )
+    router, registry = _router(_FakeProvider("a"), _FakeProvider("b", endpoint_type="cloud"))
     before = [m.provider_id for m in registry.list_providers()]
     await router.select_candidates(_request(), {})
     await router.select_candidates(_request(), {"allow_cloud": True})

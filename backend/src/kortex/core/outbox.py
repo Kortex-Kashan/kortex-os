@@ -49,9 +49,7 @@ class EventOutboxModel(BaseModel):
         index=True,
     )
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_retry_at: Mapped[datetime.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    next_retry_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class OutboxStore:
@@ -87,6 +85,7 @@ class OutboxStore:
         payload: dict[str, Any],
     ) -> EventOutboxModel:
         """Stage an event outbox record in a standalone transaction."""
+
         async def _action(session: AsyncSession) -> EventOutboxModel:
             record = self.stage_event_in_session(session, tenant_id, topic, payload)
             await session.flush()
@@ -101,6 +100,7 @@ class OutboxStore:
         limit: int = 100,
     ) -> list[EventOutboxModel]:
         """Query pending outbox records, optionally filtered by tenant."""
+
         async def _action(session: AsyncSession) -> list[EventOutboxModel]:
             stmt = (
                 select(EventOutboxModel)
@@ -116,7 +116,7 @@ class OutboxStore:
         result = await self._data_store.execute_in_transaction(_action)
         return cast(list[EventOutboxModel], result)
 
-    async def dispatch_pending(self, event_engine: Any, limit: int = 100) -> int:  # noqa: ANN401
+    async def dispatch_pending(self, event_engine: Any, limit: int = 100) -> int:
         """Sweep PENDING outbox records, publish them to EventEngine, and update status to SENT."""
         pending_records = await self.get_pending_events(limit=limit)
         if not pending_records:

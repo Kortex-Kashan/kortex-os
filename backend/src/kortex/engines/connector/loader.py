@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import pkgutil
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from kortex.engines.connector.base_driver import BaseConnectorDriver
 from kortex.engines.connector.exceptions import DriverLoadError
 from kortex.engines.connector.models import DriverMetadata
 from kortex.engines.connector.registry import ConnectorDriverRegistry
+
+logger = logging.getLogger("kortex.engines.connector.loader")
 
 
 class ConnectorDriverLoader:
@@ -33,14 +36,16 @@ class ConnectorDriverLoader:
         """Dynamically load, instantiate, and validate a BaseConnectorDriver class.
 
         Args:
-            module_path: Python import path for the driver module (e.g. 'kortex.engines.connector.drivers.dummy_driver').
+            module_path: Python import path for the driver module
+                (e.g. 'kortex.engines.connector.drivers.dummy_driver').
             class_name: Target class name within the module (e.g. 'DummyConnectorDriver').
 
         Returns:
             Instantiated BaseConnectorDriver plugin object.
 
         Raises:
-            DriverLoadError: If module cannot be imported, class is invalid, instantiation fails, or metadata is incomplete.
+            DriverLoadError: If module cannot be imported, class is invalid, instantiation fails, or metadata is
+            incomplete.
         """
         module_path = module_path.strip()
         class_name = class_name.strip()
@@ -152,7 +157,7 @@ class ConnectorDriverLoader:
                     modules_to_inspect.append(f"{package_path}.{modname}")
             else:
                 modules_to_inspect.append(package_path)
-        except ImportError:
+        except ImportError as exc:
             # Check if package_path is a filesystem directory
             path_obj = Path(package_path)
             if path_obj.exists() and path_obj.is_dir():
@@ -165,12 +170,13 @@ class ConnectorDriverLoader:
                 raise DriverLoadError(
                     f"Target package path '{package_path}' could not be imported or resolved.",
                     details={"package_path": package_path},
-                )
+                ) from exc
 
         for mod_path in modules_to_inspect:
             try:
                 mod = importlib.import_module(mod_path)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Skipping unimportable module '%s' during driver discovery: %s", mod_path, exc)
                 continue
 
             for attr_name in dir(mod):
@@ -189,7 +195,13 @@ class ConnectorDriverLoader:
                         if isinstance(meta, DriverMetadata):
                             ConnectorDriverRegistry.validate_driver_metadata(meta)
                             discovered_metadata.append(meta)
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug(
+                            "Skipping attribute '%s' in '%s' during driver discovery: %s",
+                            attr_name,
+                            mod_path,
+                            exc,
+                        )
                         continue
 
         return discovered_metadata

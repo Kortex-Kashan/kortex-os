@@ -26,7 +26,7 @@ class ISchedulerProvider(Protocol):
     async def schedule_workflow(
         self,
         definition_name: str,
-        cron_expression_or_delay_seconds: Any,  # noqa: ANN401
+        cron_expression_or_delay_seconds: Any,
         initial_context: dict[str, Any] | None = None,
     ) -> str:
         """Schedule a workflow for execution."""

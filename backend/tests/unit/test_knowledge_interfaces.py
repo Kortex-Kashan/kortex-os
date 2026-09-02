@@ -11,7 +11,6 @@ behavior and are not milestone implementations of any kind.
 from __future__ import annotations
 
 import inspect
-from typing import List
 
 from kortex.engines.knowledge.interfaces import (
     IEngineDiagnostics,
@@ -22,7 +21,6 @@ from kortex.engines.knowledge.interfaces import (
     IKnowledgeSearchEngine,
     IKnowledgeSourceProvider,
 )
-from kortex.engines.knowledge.models import KnowledgeRecord
 
 ALL_M1_PROTOCOLS = (
     IKnowledgeGraph,
@@ -50,7 +48,7 @@ def test_source_provider_ingest_returns_knowledge_record_list_not_node_list() ->
     `SOURCE_EVIDENCE`-trust-state `KnowledgeRecord`s, not raw
     `KnowledgeNode`s, per the Chief Architect's explicit instruction."""
     signature = inspect.signature(IKnowledgeSourceProvider.ingest)
-    assert signature.return_annotation == "List[KnowledgeRecord]"
+    assert signature.return_annotation == "list[KnowledgeRecord]"
 
 
 def test_index_source_return_type_matches_ingest_return_type() -> None:
@@ -58,7 +56,7 @@ def test_index_source_return_type_matches_ingest_return_type() -> None:
     — their return types must not drift apart (M1 fast-follow reconciliation)."""
     ingest_return = inspect.signature(IKnowledgeSourceProvider.ingest).return_annotation
     index_source_return = inspect.signature(IKnowledgeEngine.index_source).return_annotation
-    assert ingest_return == index_source_return == "List[KnowledgeRecord]"
+    assert ingest_return == index_source_return == "list[KnowledgeRecord]"
 
 
 # -- IKnowledgeRecordManager.promote() contract shape ---------------------------

@@ -47,19 +47,21 @@ from kortex.engines.ai.telemetry_ports import ITelemetryExporter
 
 logger = logging.getLogger("kortex.engines.ai.telemetry")
 
-_FORBIDDEN_SECRET_KEYS: frozenset[str] = frozenset({
-    "api_key",
-    "apikey",
-    "token",
-    "bearer",
-    "password",
-    "secret",
-    "credential",
-    "authorization",
-    "auth_header",
-    "private_key",
-    "master_key",
-})
+_FORBIDDEN_SECRET_KEYS: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "token",
+        "bearer",
+        "password",
+        "secret",
+        "credential",
+        "authorization",
+        "auth_header",
+        "private_key",
+        "master_key",
+    }
+)
 
 
 def sanitize_telemetry_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -70,10 +72,7 @@ def sanitize_telemetry_payload(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict):
             sanitized[key] = sanitize_telemetry_payload(value)
         elif isinstance(value, list):
-            sanitized[key] = [
-                sanitize_telemetry_payload(item) if isinstance(item, dict) else item
-                for item in value
-            ]
+            sanitized[key] = [sanitize_telemetry_payload(item) if isinstance(item, dict) else item for item in value]
         elif any(secret_term in lower_key for secret_term in _FORBIDDEN_SECRET_KEYS):
             sanitized[key] = "[REDACTED]"
         else:
@@ -197,9 +196,7 @@ class AITelemetryEmitter:
             )
 
         if self._exporter:
-            self._exporter.record_counter(
-                "ai.generation.failure", 1, {"tenant_id": tenant_id, "error": error_category}
-            )
+            self._exporter.record_counter("ai.generation.failure", 1, {"tenant_id": tenant_id, "error": error_category})
 
         event = AIGenerationFailedEvent(
             request_id=request_id,
@@ -384,9 +381,7 @@ class AITelemetryEmitter:
             )
 
         if self._exporter:
-            self._exporter.record_counter(
-                "ai.agent.failed", 1, {"tenant_id": tenant_id, "error": error_category}
-            )
+            self._exporter.record_counter("ai.agent.failed", 1, {"tenant_id": tenant_id, "error": error_category})
 
         event = AgentTaskFailedEvent(
             task_id=task_id,
@@ -416,9 +411,7 @@ class AITelemetryEmitter:
             )
 
         if self._exporter:
-            self._exporter.record_counter(
-                "ai.agent.loop_detected", 1, {"tenant_id": tenant_id, "tool": tool_name}
-            )
+            self._exporter.record_counter("ai.agent.loop_detected", 1, {"tenant_id": tenant_id, "tool": tool_name})
 
         event = AgentLoopDetectedEvent(
             task_id=task_id,
@@ -443,9 +436,7 @@ class AITelemetryEmitter:
             self._diagnostics.record_security_event("authorization_denied")
 
         if self._exporter:
-            self._exporter.record_counter(
-                "ai.security.denied", 1, {"tenant_id": tenant_id, "action": action}
-            )
+            self._exporter.record_counter("ai.security.denied", 1, {"tenant_id": tenant_id, "action": action})
 
         event = AISecurityDeniedEvent(
             tenant_id=tenant_id,
@@ -557,9 +548,7 @@ class AITelemetryEmitter:
             )
 
         if self._exporter:
-            self._exporter.record_counter(
-                "ai.tool.failed", 1, {"tool_name": tool_name, "error": error_category}
-            )
+            self._exporter.record_counter("ai.tool.failed", 1, {"tool_name": tool_name, "error": error_category})
 
         event = AIToolFailedEvent(
             request_id=request_id,

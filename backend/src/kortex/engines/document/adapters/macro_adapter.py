@@ -94,14 +94,8 @@ class MacroAdapter(BaseDocumentAdapter):
         Returns:
             Deterministic UTF-8 encoded JSON bytes describing the mock macro operation.
         """
-        op_value = (
-            operation_type.value if isinstance(operation_type, DocumentOperationType) else str(operation_type)
-        )
-        semantic_options = {
-            key: value
-            for key, value in options.items()
-            if key not in _SANDBOX_EPHEMERAL_OPTION_KEYS
-        }
+        op_value = operation_type.value if isinstance(operation_type, DocumentOperationType) else str(operation_type)
+        semantic_options = {key: value for key, value in options.items() if key not in _SANDBOX_EPHEMERAL_OPTION_KEYS}
         payload = {
             "adapter_id": self.adapter_id,
             "operation_type": op_value,

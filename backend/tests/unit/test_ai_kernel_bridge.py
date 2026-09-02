@@ -171,7 +171,7 @@ async def test_invoke_capability_translation_to_capability_request() -> None:
     adapter = KernelBridgeAdapter(fake_kernel)
 
     token = TokenPayload(
-        token_id="session-id-123",  # noqa: S106
+        token_id="session-id-123",
         principal_id="user-42",
         principal_type=PrincipalType.USER,
         tenant_id="tenant-alpha",
@@ -403,19 +403,8 @@ FORBIDDEN_NAMESPACES = [
 
 def test_bridge_py_quarantine_forbidden_imports() -> None:
     """Verify bridge.py does not import forbidden namespaces."""
-    target_path = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "kortex"
-        / "engines"
-        / "ai"
-        / "bridge.py"
-    )
+    target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / "bridge.py"
     imports = _collect_imports(target_path)
     for forbidden in FORBIDDEN_NAMESPACES:
-        violations = [
-            imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")
-        ]
-        assert violations == [], (
-            f"bridge.py illegally imports {forbidden!r}: {violations}"
-        )
+        violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
+        assert violations == [], f"bridge.py illegally imports {forbidden!r}: {violations}"

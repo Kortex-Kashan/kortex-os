@@ -122,7 +122,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
@@ -147,20 +147,18 @@ from kortex.engines.knowledge.models import (
 from kortex.engines.knowledge.persistence import KnowledgeRecordRow
 from kortex.engines.storage.interfaces import IDataStore
 
-_CONFIRMED_TRUST_STATES = frozenset(
-    {KnowledgeTrustState.HUMAN_CONFIRMED, KnowledgeTrustState.HUMAN_CORRECTED}
-)
+_CONFIRMED_TRUST_STATES = frozenset({KnowledgeTrustState.HUMAN_CONFIRMED, KnowledgeTrustState.HUMAN_CORRECTED})
 
 
 class KnowledgeLineageManager:
     """Tenant-scoped record lineage and supersession manager (Milestone
     M3), optionally durable via `IDataStore` (Milestone M7)."""
 
-    def __init__(self, data_store: Optional[IDataStore] = None) -> None:
+    def __init__(self, data_store: IDataStore | None = None) -> None:
         # (tenant_id, record_id, version_id) -> KnowledgeRecord — every version ever created.
-        self._versions: Dict[Tuple[str, str, str], KnowledgeRecord] = {}
+        self._versions: dict[tuple[str, str, str], KnowledgeRecord] = {}
         # (tenant_id, record_id) -> version_id of the current version.
-        self._current_version_id: Dict[Tuple[str, str], str] = {}
+        self._current_version_id: dict[tuple[str, str], str] = {}
         self._data_store = data_store
         # Milestone M7 finding: persisting introduces a genuine `await`
         # suspension point inside create_record/supersede/promote where
@@ -188,9 +186,7 @@ class KnowledgeLineageManager:
         except KnowledgeEngineError:
             raise
         except Exception as exc:
-            raise KnowledgePersistenceError(
-                f"Knowledge lineage persistence operation failed: {exc}"
-            ) from exc
+            raise KnowledgePersistenceError(f"Knowledge lineage persistence operation failed: {exc}") from exc
 
     async def load(self) -> None:
         """Hydrate in-memory state from the configured `IDataStore`
@@ -201,7 +197,7 @@ class KnowledgeLineageManager:
         if self._data_store is None:
             return
 
-        async def _action(session: AsyncSession) -> List[KnowledgeRecordRow]:
+        async def _action(session: AsyncSession) -> list[KnowledgeRecordRow]:
             result = await session.execute(select(KnowledgeRecordRow))
             return list(result.scalars().all())
 
@@ -360,7 +356,7 @@ class KnowledgeLineageManager:
             self._current_version_id[record_key] = current_record.version_id
             return current_record
 
-    async def list_current_records(self, tenant_id: str) -> List[KnowledgeRecord]:
+    async def list_current_records(self, tenant_id: str) -> list[KnowledgeRecord]:
         """Return the current version of every record for `tenant_id`.
         Added in Milestone M8 so a search coordinator can enumerate
         candidate records without reaching into `_versions` directly —
@@ -377,7 +373,7 @@ class KnowledgeLineageManager:
                 if t == tenant_id
             ]
 
-    async def get_current(self, record_id: str, tenant_id: str) -> Optional[KnowledgeRecord]:
+    async def get_current(self, record_id: str, tenant_id: str) -> KnowledgeRecord | None:
         """Return the current version of `record_id`, scoped to `tenant_id`,
         or `None` if the record does not exist — a normal outcome per this
         method's own `Optional` contract, not an error."""
@@ -386,7 +382,7 @@ class KnowledgeLineageManager:
             return None
         return self._versions[(tenant_id, record_id, current_version_id)]
 
-    async def get_lineage(self, record_id: str, tenant_id: str) -> List[KnowledgeRecord]:
+    async def get_lineage(self, record_id: str, tenant_id: str) -> list[KnowledgeRecord]:
         """Return the full ordered version history of `record_id`, from the
         earliest ancestor to the current version, scoped to `tenant_id`.
 
@@ -398,8 +394,8 @@ class KnowledgeLineageManager:
         if current_version_id is None:
             raise KnowledgeRecordNotFoundError(f"Record '{record_id}' not found for tenant '{tenant_id}'.")
 
-        chain: List[KnowledgeRecord] = []
-        version_id: Optional[str] = current_version_id
+        chain: list[KnowledgeRecord] = []
+        version_id: str | None = current_version_id
         while version_id is not None:
             version = self._versions[(tenant_id, record_id, version_id)]
             chain.append(version)
@@ -407,9 +403,7 @@ class KnowledgeLineageManager:
         chain.reverse()
         return chain
 
-    async def supersede(
-        self, record_id: str, tenant_id: str, new_version: KnowledgeRecord
-    ) -> KnowledgeRecord:
+    async def supersede(self, record_id: str, tenant_id: str, new_version: KnowledgeRecord) -> KnowledgeRecord:
         """Atomically supersede the current version of `record_id` with
         `new_version`.
 

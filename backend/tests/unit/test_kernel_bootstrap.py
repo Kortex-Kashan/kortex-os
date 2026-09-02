@@ -28,7 +28,6 @@ from kortex.api.kernel_bootstrap import (
 from kortex.core.base_module import ModuleState
 from kortex.core.kernel import KernelState
 from kortex.engines.ai.engine import AIOrchestrationEngine
-from kortex.engines.connector.drivers.dummy_driver import DummyConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.exceptions import ConnectorProfileNotFoundError
 from kortex.engines.connector.models import ActionRequest, ConnectorActionType, ConnectorProfile

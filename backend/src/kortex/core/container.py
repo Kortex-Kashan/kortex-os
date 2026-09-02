@@ -8,7 +8,8 @@ management for the KORTEX Kernel and System Engines.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Type, TypeVar, cast
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 from kortex.core.exceptions import ResourceAlreadyExistsError, ResourceNotFoundError
 
@@ -21,9 +22,9 @@ class Container:
     """Inversion-of-Control (IoC) Dependency Injection Container."""
 
     def __init__(self) -> None:
-        self._instances: Dict[str, Any] = {}
-        self._factories: Dict[str, Callable[['Container'], Any]] = {}
-        self._types: Dict[Type[Any], Any] = {}
+        self._instances: dict[str, Any] = {}
+        self._factories: dict[str, Callable[[Container], Any]] = {}
+        self._types: dict[type[Any], Any] = {}
 
     def register_instance(self, key: str, instance: Any) -> None:
         """Register a singleton instance under a string key.
@@ -37,7 +38,7 @@ class Container:
         self._instances[key] = instance
         logger.debug("Registered DI singleton instance: '%s'", key)
 
-    def register_type(self, interface: Type[T], instance: T) -> None:
+    def register_type(self, interface: type[T], instance: T) -> None:
         """Register a singleton instance under its Type/Interface class.
 
         Args:
@@ -81,7 +82,7 @@ class Container:
 
         raise ResourceNotFoundError(f"Service '{key}' not found in DI container.")
 
-    def resolve_type(self, interface: Type[T]) -> T:
+    def resolve_type(self, interface: type[T]) -> T:
         """Resolve a service instance by type/interface class.
 
         Args:
@@ -101,7 +102,7 @@ class Container:
         """Check if a service key is registered in the container."""
         return key in self._instances or key in self._factories
 
-    def has_type(self, interface: Type[Any]) -> bool:
+    def has_type(self, interface: type[Any]) -> bool:
         """Check if a type binding exists in the container."""
         return interface in self._types
 

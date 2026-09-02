@@ -125,20 +125,20 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": _TENANT, "principal_id": principal_id, "password": password}
     )
 
 
-async def _token(kernel: Kernel, principal) -> dict:  # noqa: ANN001
+async def _token(kernel: Kernel, principal) -> dict:
     security_engine: SecurityEngine = kernel.get_engine("security")
     minted = await security_engine.authentication_manager.issue_token(principal)
     return minted.model_dump() if hasattr(minted, "model_dump") else minted
 
 
-def _build_request(idempotency_key: str, requester, requires_approval: bool = False):  # noqa: ANN001
+def _build_request(idempotency_key: str, requester, requires_approval: bool = False):
     return ExternalExecutionRequest(
         tenant_id=_TENANT,
         operation_type="CAPABILITY",
@@ -174,9 +174,7 @@ async def test_duplicate_immediate_execution_replays_instead_of_redispatching(ke
     first = await executor.execute_operation(_build_request(key, requester), principal=requester, session_token=token)
     assert first.status == ExternalExecutionStatus.COMPLETED
 
-    second = await executor.execute_operation(
-        _build_request(key, requester), principal=requester, session_token=token
-    )
+    second = await executor.execute_operation(_build_request(key, requester), principal=requester, session_token=token)
     assert second.id == first.id
     assert second.status == ExternalExecutionStatus.COMPLETED
     assert second.attempts == first.attempts

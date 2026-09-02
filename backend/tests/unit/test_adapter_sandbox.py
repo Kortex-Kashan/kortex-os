@@ -10,6 +10,7 @@ import os
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from kortex.engines.document.adapter_pipeline import AdapterPipelineExecutor
 from kortex.engines.document.adapter_registry import DocumentAdapterRegistry
@@ -419,7 +420,7 @@ def test_immutability_of_inputs_and_config() -> None:
     config_dump_before = config.model_dump()
 
     # Attempting mutation on frozen model raises Exception
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         config.timeout_seconds = 60  # type: ignore[misc]
 
     assert config.model_dump() == config_dump_before

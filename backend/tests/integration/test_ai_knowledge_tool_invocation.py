@@ -101,9 +101,7 @@ class _ScriptedProvider(BaseAIProvider):
         return True
 
 
-async def _build_kernel(
-    tmp_path: Path, provider: BaseAIProvider
-) -> tuple[Kernel, Any, KnowledgeEngine]:
+async def _build_kernel(tmp_path: Path, provider: BaseAIProvider) -> tuple[Kernel, Any, KnowledgeEngine]:
     db_path = (tmp_path / f"kortex_ai_knowledge_{uuid4().hex[:8]}.db").as_posix()
     db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_path}")
     await db_manager.connect()

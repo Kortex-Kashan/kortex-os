@@ -145,20 +145,20 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, tenant_id: str, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, tenant_id: str, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": principal_id, "password": password}
     )
 
 
-async def _token(kernel: Kernel, principal) -> dict:  # noqa: ANN001
+async def _token(kernel: Kernel, principal) -> dict:
     security_engine: SecurityEngine = kernel.get_engine("security")
     minted = await security_engine.authentication_manager.issue_token(principal)
     return minted.model_dump() if hasattr(minted, "model_dump") else minted
 
 
-def _outer_capability_request(token: dict, profile_suffix: str, extra_params: dict | None = None):  # noqa: ANN001
+def _outer_capability_request(token: dict, profile_suffix: str, extra_params: dict | None = None):
     params = {
         "target": "kortex.connector.action.execute",
         "operation_type": "CAPABILITY",
@@ -213,7 +213,9 @@ async def test_case_b_approval_rejected_cancels_with_no_connector_call(kernel_en
             target="kortex.connector.action.execute",
             parameters={
                 "request": ActionRequest(
-                    request_id=f"ext-slice-b-{uuid4()}", profile_id="prof-ext-slice-a", action_type=ConnectorActionType.FETCH
+                    request_id=f"ext-slice-b-{uuid4()}",
+                    profile_id="prof-ext-slice-a",
+                    action_type=ConnectorActionType.FETCH,
                 )
             },
             timeout_seconds=10.0,
@@ -259,7 +261,9 @@ async def test_case_c_approval_approved_completes_with_full_trace(kernel_env: Ke
             target="kortex.connector.action.execute",
             parameters={
                 "request": ActionRequest(
-                    request_id=f"ext-slice-c-{uuid4()}", profile_id="prof-ext-slice-a", action_type=ConnectorActionType.FETCH
+                    request_id=f"ext-slice-c-{uuid4()}",
+                    profile_id="prof-ext-slice-a",
+                    action_type=ConnectorActionType.FETCH,
                 )
             },
             timeout_seconds=10.0,
@@ -313,7 +317,9 @@ async def test_case_d_cross_tenant_attack_fails_closed(kernel_env: Kernel) -> No
             target="kortex.connector.action.execute",
             parameters={
                 "request": ActionRequest(
-                    request_id=f"ext-slice-d-{uuid4()}", profile_id="prof-ext-slice-a", action_type=ConnectorActionType.FETCH
+                    request_id=f"ext-slice-d-{uuid4()}",
+                    profile_id="prof-ext-slice-a",
+                    action_type=ConnectorActionType.FETCH,
                 )
             },
             timeout_seconds=10.0,

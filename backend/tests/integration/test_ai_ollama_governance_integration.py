@@ -19,7 +19,6 @@ import httpx
 import pytest
 
 from kortex.core.db import DatabaseEngineManager
-from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter

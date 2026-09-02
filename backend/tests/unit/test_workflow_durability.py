@@ -544,9 +544,7 @@ async def test_step_ledger_and_instance_advancement_atomicity(test_store: Workfl
 
     # Now intentionally alter instance version in DB to 99 to force an OCC conflict
     async def corrupt_version(session: AsyncSession) -> None:
-        db_row = await session.scalar(
-            select(WorkflowInstanceModel).where(WorkflowInstanceModel.id == str(inst.id))
-        )
+        db_row = await session.scalar(select(WorkflowInstanceModel).where(WorkflowInstanceModel.id == str(inst.id)))
         assert db_row is not None
         db_row.version = 99
 

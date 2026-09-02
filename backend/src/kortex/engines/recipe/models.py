@@ -7,7 +7,8 @@ compatibility settings, and lifecycle operation result models.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from kortex.engines.workflow.models import WorkflowDefinition
@@ -20,7 +21,7 @@ class RecipeInput(BaseModel):
     type: str = Field("string", description="Parameter data type (string, integer, boolean, object, array)")
     description: str = Field("", description="Human-readable parameter description")
     required: bool = Field(True, description="True if input is mandatory")
-    default: Optional[Any] = Field(None, description="Default value if not provided")
+    default: Any | None = Field(None, description="Default value if not provided")
 
 
 class RecipeStep(BaseModel):
@@ -28,14 +29,18 @@ class RecipeStep(BaseModel):
 
     id: str = Field(..., description="Step unique identifier within recipe")
     name: str = Field(..., description="Human-readable step title")
-    capability: Optional[str] = Field(None, description="Canonical capability name to invoke (kortex.<domain>.<resource>.<action>)")
-    parameters: Dict[str, Any] = Field(default_factory=dict, description="Step parameters and variable bindings")
+    capability: str | None = Field(
+        None, description="Canonical capability name to invoke (kortex.<domain>.<resource>.<action>)"
+    )
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Step parameters and variable bindings")
     is_approval: bool = Field(False, description="True if step requires human approval")
-    approval_role: Optional[str] = Field(None, description="Role authorized to approve")
-    retry_attempts: Optional[int] = Field(None, description="Max retry attempts for step")
-    retry_backoff: Optional[float] = Field(None, description="Backoff multiplier")
-    on_failure_continue: bool = Field(False, description="If True, step failure will not halt recipe compilation/workflow")
-    compensation: Optional[Dict[str, Any]] = Field(None, description="Rollback compensation parameters")
+    approval_role: str | None = Field(None, description="Role authorized to approve")
+    retry_attempts: int | None = Field(None, description="Max retry attempts for step")
+    retry_backoff: float | None = Field(None, description="Backoff multiplier")
+    on_failure_continue: bool = Field(
+        False, description="If True, step failure will not halt recipe compilation/workflow"
+    )
+    compensation: dict[str, Any] | None = Field(None, description="Rollback compensation parameters")
 
 
 class RecipeOutput(BaseModel):
@@ -60,7 +65,7 @@ class RecipePermission(BaseModel):
 
     resource: str = Field(..., description="Target resource or namespace")
     action: str = Field(..., description="Required operation/action")
-    scope: Optional[str] = Field(None, description="Permission scope constraint")
+    scope: str | None = Field(None, description="Permission scope constraint")
 
 
 class RecipeCompatibility(BaseModel):
@@ -69,9 +74,9 @@ class RecipeCompatibility(BaseModel):
     kernel: str = Field(">=0.1.0", description="Kernel SemVer requirement")
     workflow_engine: str = Field(">=0.1.0", description="Workflow Engine SemVer requirement")
     storage_engine: str = Field(">=0.1.0", description="Storage Engine SemVer requirement")
-    document_engine: Optional[str] = Field(None, description="Document Engine SemVer requirement")
-    connector_engine: Optional[str] = Field(None, description="Connector Engine SemVer requirement")
-    module_versions: Dict[str, str] = Field(default_factory=dict, description="Module version dependencies")
+    document_engine: str | None = Field(None, description="Document Engine SemVer requirement")
+    connector_engine: str | None = Field(None, description="Connector Engine SemVer requirement")
+    module_versions: dict[str, str] = Field(default_factory=dict, description="Module version dependencies")
 
 
 class RecipeDependency(BaseModel):
@@ -86,7 +91,7 @@ class RecipeProfile(BaseModel):
     """Execution profile or environment parameter preset."""
 
     name: str = Field(..., description="Profile identifier (e.g. dev, staging, prod)")
-    settings: Dict[str, Any] = Field(default_factory=dict, description="Profile specific parameter overrides")
+    settings: dict[str, Any] = Field(default_factory=dict, description="Profile specific parameter overrides")
 
 
 class RecipeMetadata(BaseModel):
@@ -98,7 +103,7 @@ class RecipeMetadata(BaseModel):
     version: str = Field(..., description="Semantic version string")
     description: str = Field("", description="Detailed recipe description")
     author: str = Field("", description="Author or organization name")
-    organization: Optional[str] = Field(None, description="Vendor organization")
+    organization: str | None = Field(None, description="Vendor organization")
     created_at: str = Field("", description="Recipe creation ISO timestamp")
 
 
@@ -110,27 +115,31 @@ class RecipeManifest(BaseModel):
     namespace: str = Field(..., description="Reverse domain identifier (e.g. kortex.hr.payroll)")
     version: str = Field("1.0.0", description="Semantic Version string")
     description: str = Field("", description="Recipe purpose and scope")
-    author: Dict[str, Any] = Field(default_factory=dict, description="Author contact details")
+    author: dict[str, Any] = Field(default_factory=dict, description="Author contact details")
     license: str = Field("MIT", description="License model")
-    dependencies: Dict[str, str] = Field(default_factory=dict, description="Map of required assets and version constraints")
-    capabilities_required: List[str] = Field(default_factory=list, description="Capabilities invoked by recipe")
-    capabilities_provided: List[str] = Field(default_factory=list, description="Capabilities exposed by recipe")
-    permissions_required: List[str] = Field(default_factory=list, description="Required permissions")
+    dependencies: dict[str, str] = Field(
+        default_factory=dict, description="Map of required assets and version constraints"
+    )
+    capabilities_required: list[str] = Field(default_factory=list, description="Capabilities invoked by recipe")
+    capabilities_provided: list[str] = Field(default_factory=list, description="Capabilities exposed by recipe")
+    permissions_required: list[str] = Field(default_factory=list, description="Required permissions")
     kernel_compatibility: str = Field(">=0.1.0", description="Compatible Kernel SemVer constraint")
     checksum: str = Field("", description="SHA256 checksum hash")
-    signature: Optional[str] = Field(None, description="Optional digital signature")
+    signature: str | None = Field(None, description="Optional digital signature")
 
 
 class RecipeDefinition(BaseModel):
     """Complete declarative Recipe Definition specification object."""
 
     manifest: RecipeManifest = Field(..., description="Associated asset manifest")
-    inputs: List[RecipeInput] = Field(default_factory=list, description="Declared input arguments")
-    steps: List[RecipeStep] = Field(default_factory=list, description="Declared execution steps")
-    outputs: List[RecipeOutput] = Field(default_factory=list, description="Declared output definitions")
+    inputs: list[RecipeInput] = Field(default_factory=list, description="Declared input arguments")
+    steps: list[RecipeStep] = Field(default_factory=list, description="Declared execution steps")
+    outputs: list[RecipeOutput] = Field(default_factory=list, description="Declared output definitions")
     settings: RecipeSettings = Field(default_factory=RecipeSettings, description="Recipe settings")
-    permissions: List[RecipePermission] = Field(default_factory=list, description="Permissions list")
-    compatibility: RecipeCompatibility = Field(default_factory=RecipeCompatibility, description="Compatibility specifications")
+    permissions: list[RecipePermission] = Field(default_factory=list, description="Permissions list")
+    compatibility: RecipeCompatibility = Field(
+        default_factory=RecipeCompatibility, description="Compatibility specifications"
+    )
 
 
 class RecipePackage(BaseModel):
@@ -140,7 +149,7 @@ class RecipePackage(BaseModel):
     file_name: str = Field(..., description="Package archive filename (.kortex-recipe)")
     checksum: str = Field(..., description="SHA256 payload checksum hash")
     payload_bytes: bytes = Field(..., description="Raw ZIP package archive binary content")
-    signature: Optional[str] = Field(None, description="Digital signature placeholder")
+    signature: str | None = Field(None, description="Digital signature placeholder")
 
 
 class RecipeCompilationResult(BaseModel):
@@ -148,8 +157,8 @@ class RecipeCompilationResult(BaseModel):
 
     success: bool = Field(..., description="True if recipe compiled successfully")
     recipe_id: str = Field(..., description="Target recipe ID")
-    workflow_definition: Optional[WorkflowDefinition] = Field(None, description="Compiled executable workflow definition")
-    errors: List[str] = Field(default_factory=list, description="Compilation errors if any")
+    workflow_definition: WorkflowDefinition | None = Field(None, description="Compiled executable workflow definition")
+    errors: list[str] = Field(default_factory=list, description="Compilation errors if any")
 
 
 class RecipeValidationResult(BaseModel):
@@ -157,8 +166,8 @@ class RecipeValidationResult(BaseModel):
 
     is_valid: bool = Field(..., description="True if recipe is structurally and securely valid")
     recipe_id: str = Field(..., description="Target recipe ID")
-    errors: List[str] = Field(default_factory=list, description="Validation failure error messages")
-    warnings: List[str] = Field(default_factory=list, description="Non-fatal validation warnings")
+    errors: list[str] = Field(default_factory=list, description="Validation failure error messages")
+    warnings: list[str] = Field(default_factory=list, description="Non-fatal validation warnings")
 
 
 class RecipeInstallationResult(BaseModel):
@@ -168,7 +177,7 @@ class RecipeInstallationResult(BaseModel):
     recipe_id: str = Field(..., description="Installed recipe ID")
     version: str = Field(..., description="Installed version string")
     installed_at: str = Field("", description="Installation ISO timestamp")
-    errors: List[str] = Field(default_factory=list, description="Installation errors if any")
+    errors: list[str] = Field(default_factory=list, description="Installation errors if any")
 
 
 class RecipeUpgradeResult(BaseModel):
@@ -178,7 +187,7 @@ class RecipeUpgradeResult(BaseModel):
     recipe_id: str = Field(..., description="Upgraded recipe ID")
     previous_version: str = Field(..., description="Version prior to upgrade")
     new_version: str = Field(..., description="Upgraded version string")
-    errors: List[str] = Field(default_factory=list, description="Upgrade errors if any")
+    errors: list[str] = Field(default_factory=list, description="Upgrade errors if any")
 
 
 class RecipeRemovalResult(BaseModel):
@@ -188,4 +197,4 @@ class RecipeRemovalResult(BaseModel):
     recipe_id: str = Field(..., description="Removed recipe ID")
     version: str = Field(..., description="Removed version string")
     removed_at: str = Field("", description="Removal ISO timestamp")
-    errors: List[str] = Field(default_factory=list, description="Removal errors if any")
+    errors: list[str] = Field(default_factory=list, description="Removal errors if any")

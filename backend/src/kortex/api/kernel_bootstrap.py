@@ -30,18 +30,18 @@ from kortex.engines.ai.identity import AI_SYSTEM_PRINCIPAL_ID, AI_SYSTEM_ROLE, A
 from kortex.engines.ai.ollama_provider import OllamaProvider
 from kortex.engines.ai.tools import ToolDefinition, ToolRegistry
 from kortex.engines.configuration.engine import SystemSettings
-from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
+from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
-from kortex.modules.finance.module import FinanceModule
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
 from kortex.engines.security.models import PrincipalType
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.engine import WorkflowEngine
+from kortex.modules.finance.module import FinanceModule
 
 logger = logging.getLogger("kortex.api.kernel_bootstrap")
 
@@ -49,7 +49,8 @@ _MASTER_KEY_ENV = "KORTEX_MASTER_KEY"
 _SIGNING_KEY_ENV = "KORTEX_AUTH_SIGNING_PRIVATE_KEY"
 _STORAGE_DIR_ENV = "KORTEX_STORAGE_DIR"
 _DEFAULT_STORAGE_DIR = "kortex_api_storage"
-_AI_SYSTEM_CREDENTIAL_SECRET_HANDLE = "kortex/ai-system-credential"
+# S105 false positive: a SecretStore *handle* (lookup key), not a credential.
+_AI_SYSTEM_CREDENTIAL_SECRET_HANDLE = "kortex/ai-system-credential"  # noqa: S105
 
 
 def _build_ai_system_identity(security_engine: SecurityEngine) -> AISystemIdentity:

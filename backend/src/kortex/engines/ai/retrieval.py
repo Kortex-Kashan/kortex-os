@@ -129,9 +129,7 @@ class IKnowledgeQueryPort(Protocol):
     module docstring.
     """
 
-    async def search(
-        self, tenant_id: str, query_text: str, max_results: int
-    ) -> list[RetrievedDocument]:
+    async def search(self, tenant_id: str, query_text: str, max_results: int) -> list[RetrievedDocument]:
         """Return at most `max_results` documents for `tenant_id`.
 
         `max_results` is required and has no default: Knowledge Engine
@@ -158,9 +156,7 @@ class InMemoryKnowledgeQueryPort(IKnowledgeQueryPort):
         """Add one document to the canned corpus."""
         self._documents.append(document)
 
-    async def search(
-        self, tenant_id: str, query_text: str, max_results: int
-    ) -> list[RetrievedDocument]:
+    async def search(self, tenant_id: str, query_text: str, max_results: int) -> list[RetrievedDocument]:
         needle = query_text.lower()
         matches = [doc for doc in self._documents if needle in doc.content.lower()]
         return matches[:max_results]

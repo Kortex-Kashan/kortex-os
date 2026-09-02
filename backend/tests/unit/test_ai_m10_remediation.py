@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from typing import Any
 
 import pytest
 
 from kortex.engines.ai.agent import (
-    AgentStatus,
     AgentTask,
     ResumeToken,
     _hash_tool_calls,

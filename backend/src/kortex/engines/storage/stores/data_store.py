@@ -8,7 +8,9 @@ sessions and isolated transaction block execution (SQLite / PostgreSQL).
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.core.db import DatabaseEngineManager

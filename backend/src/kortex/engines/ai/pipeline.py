@@ -114,8 +114,7 @@ class PromptPipeline:
         """
         caller_entries = [sanitize_context_content(entry) for entry in request.context_documents]
         knowledge_entries = [
-            f"{KNOWLEDGE_MARKER}\n{sanitize_context_content(document.content)}"
-            for document in documents
+            f"{KNOWLEDGE_MARKER}\n{sanitize_context_content(document.content)}" for document in documents
         ]
         history = list(history_entries)
 
@@ -124,9 +123,7 @@ class PromptPipeline:
             assembled = [*caller_entries, *knowledge_entries, *history]
             return request.model_copy(update={"context_documents": assembled})
 
-        base_tokens = self._token_estimator(request.prompt) + self._token_estimator(
-            request.system_instruction or ""
-        )
+        base_tokens = self._token_estimator(request.prompt) + self._token_estimator(request.system_instruction or "")
         remaining_budget = max(0, budget - base_tokens)
 
         # 1. Caller entries (application explicit framing)
@@ -210,9 +207,7 @@ class ContextComposer:
         """Configured maximum context token limit."""
         return self._max_context_tokens
 
-    async def compose(
-        self, request: LLMRequest, *, knowledge_query: str | None = None
-    ) -> LLMRequest:
+    async def compose(self, request: LLMRequest, *, knowledge_query: str | None = None) -> LLMRequest:
         """Compose a context-enriched request with token budget enforcement."""
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
@@ -221,9 +216,7 @@ class ContextComposer:
         if knowledge_query is not None and knowledge_query.strip():
             documents = await self._retrieve(request.tenant_id, knowledge_query)
 
-        history_entries = await self._memory.get_context(
-            request.tenant_id, request.conversation_id
-        )
+        history_entries = await self._memory.get_context(request.tenant_id, request.conversation_id)
         return self._pipeline.assemble(
             request=request,
             history_entries=history_entries,
@@ -234,9 +227,7 @@ class ContextComposer:
     async def _retrieve(self, tenant_id: str, query_text: str) -> list[RetrievedDocument]:
         """Retrieve, verify the port honoured its bound, then filter."""
         if self._knowledge is None:
-            raise ContextCompositionError(
-                "Knowledge retrieval was requested but no IKnowledgeQueryPort is configured."
-            )
+            raise ContextCompositionError("Knowledge retrieval was requested but no IKnowledgeQueryPort is configured.")
 
         try:
             documents = await self._knowledge.search(
@@ -249,23 +240,18 @@ class ContextComposer:
         except Exception as exc:
             # Message names the failure type only — retrieved content and
             # query text are tenant-sensitive.
-            raise KnowledgeRetrievalError(
-                f"Knowledge retrieval failed: {type(exc).__name__}"
-            ) from exc
+            raise KnowledgeRetrievalError(f"Knowledge retrieval failed: {type(exc).__name__}") from exc
 
         if len(documents) > self._max_documents:
             # Truncating here would be exactly the silent truncation this
             # design forbids; an over-returning adapter is a bug worth surfacing.
             raise KnowledgeRetrievalError(
-                f"Knowledge port returned {len(documents)} documents when at most "
-                f"{self._max_documents} were requested."
+                f"Knowledge port returned {len(documents)} documents when at most {self._max_documents} were requested."
             )
 
         return self._deduplicate(self._filter_by_classification(documents))
 
-    def _filter_by_classification(
-        self, documents: list[RetrievedDocument]
-    ) -> list[RetrievedDocument]:
+    def _filter_by_classification(self, documents: list[RetrievedDocument]) -> list[RetrievedDocument]:
         """Drop documents whose classification is not explicitly allowed.
 
         Knowledge Engine applies no classification filtering of its own, so

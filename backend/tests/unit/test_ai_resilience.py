@@ -421,19 +421,8 @@ FORBIDDEN_NAMESPACES = [
 
 def test_resilience_py_quarantine_forbidden_imports() -> None:
     """Verify resilience.py does not import forbidden namespaces."""
-    target_path = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "kortex"
-        / "engines"
-        / "ai"
-        / "resilience.py"
-    )
+    target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / "resilience.py"
     imports = _collect_imports(target_path)
     for forbidden in FORBIDDEN_NAMESPACES:
-        violations = [
-            imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")
-        ]
-        assert violations == [], (
-            f"resilience.py illegally imports {forbidden!r}: {violations}"
-        )
+        violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
+        assert violations == [], f"resilience.py illegally imports {forbidden!r}: {violations}"

@@ -234,9 +234,7 @@ async def test_concurrent_racing_resumption_claims(
 
     async def _worker_claim() -> tuple[str, PersistedAgentTaskRecord | None, Exception | None]:
         try:
-            res = await storage_task_store.claim_task_for_resumption(
-                task.task_id, task.tenant_id, expected_version=1
-            )
+            res = await storage_task_store.claim_task_for_resumption(task.task_id, task.tenant_id, expected_version=1)
             return ("WON", res, None)
         except Exception as exc:
             return ("LOST", None, exc)
@@ -254,13 +252,16 @@ async def test_concurrent_racing_resumption_claims(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_status", [
-    AgentStatus.RUNNING,
-    AgentStatus.COMPLETED,
-    AgentStatus.FAILED,
-    AgentStatus.CANCELLED,
-    AgentStatus.TIMED_OUT,
-])
+@pytest.mark.parametrize(
+    "invalid_status",
+    [
+        AgentStatus.RUNNING,
+        AgentStatus.COMPLETED,
+        AgentStatus.FAILED,
+        AgentStatus.CANCELLED,
+        AgentStatus.TIMED_OUT,
+    ],
+)
 async def test_claim_rejects_non_paused_states(
     storage_task_store: StorageAgentTaskStore,
     invalid_status: AgentStatus,

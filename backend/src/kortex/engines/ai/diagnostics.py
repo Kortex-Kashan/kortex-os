@@ -52,7 +52,6 @@ CANONICAL_CAPABILITIES: list[str] = [
 ]
 
 
-
 class AIDiagnostics(IEngineDiagnostics):
     """Standardized in-memory thread-safe diagnostics provider for the AI Orchestration Engine."""
 
@@ -129,15 +128,9 @@ class AIDiagnostics(IEngineDiagnostics):
                 self._generation_requests_total += 1
                 self._total_generation_latency_ms += latency_ms
 
-                if (
-                    self._min_generation_latency_ms is None
-                    or latency_ms < self._min_generation_latency_ms
-                ):
+                if self._min_generation_latency_ms is None or latency_ms < self._min_generation_latency_ms:
                     self._min_generation_latency_ms = latency_ms
-                if (
-                    self._max_generation_latency_ms is None
-                    or latency_ms > self._max_generation_latency_ms
-                ):
+                if self._max_generation_latency_ms is None or latency_ms > self._max_generation_latency_ms:
                     self._max_generation_latency_ms = latency_ms
 
                 if is_success:
@@ -145,9 +138,7 @@ class AIDiagnostics(IEngineDiagnostics):
                 else:
                     self._generation_failure_total += 1
                     if error_category:
-                        self._error_counts[error_category] = (
-                            self._error_counts.get(error_category, 0) + 1
-                        )
+                        self._error_counts[error_category] = self._error_counts.get(error_category, 0) + 1
         except Exception as exc:
             logger.debug("Error recording generation metric: %s", exc)
 
@@ -201,9 +192,7 @@ class AIDiagnostics(IEngineDiagnostics):
                 else:
                     pm["failures"] += 1
                     if error_category:
-                        self._error_counts[error_category] = (
-                            self._error_counts.get(error_category, 0) + 1
-                        )
+                        self._error_counts[error_category] = self._error_counts.get(error_category, 0) + 1
 
                 if is_timeout:
                     pm["timeouts"] += 1
@@ -226,15 +215,9 @@ class AIDiagnostics(IEngineDiagnostics):
                 self._total_agent_steps += total_steps
                 self._total_agent_latency_ms += latency_ms
 
-                if (
-                    self._min_agent_latency_ms is None
-                    or latency_ms < self._min_agent_latency_ms
-                ):
+                if self._min_agent_latency_ms is None or latency_ms < self._min_agent_latency_ms:
                     self._min_agent_latency_ms = latency_ms
-                if (
-                    self._max_agent_latency_ms is None
-                    or latency_ms > self._max_agent_latency_ms
-                ):
+                if self._max_agent_latency_ms is None or latency_ms > self._max_agent_latency_ms:
                     self._max_agent_latency_ms = latency_ms
 
                 if status == "COMPLETED":
@@ -251,9 +234,7 @@ class AIDiagnostics(IEngineDiagnostics):
                     self._agent_failed_total += 1
 
                 if error_category:
-                    self._error_counts[error_category] = (
-                        self._error_counts.get(error_category, 0) + 1
-                    )
+                    self._error_counts[error_category] = self._error_counts.get(error_category, 0) + 1
         except Exception as exc:
             logger.debug("Error recording agent task metric: %s", exc)
 
@@ -281,9 +262,7 @@ class AIDiagnostics(IEngineDiagnostics):
                     self._tool_timeout += 1
 
                 if error_category:
-                    self._error_counts[error_category] = (
-                        self._error_counts.get(error_category, 0) + 1
-                    )
+                    self._error_counts[error_category] = self._error_counts.get(error_category, 0) + 1
         except Exception as exc:
             logger.debug("Error recording tool invocation metric: %s", exc)
 
@@ -345,9 +324,7 @@ class AIDiagnostics(IEngineDiagnostics):
                 else 0.0
             )
             avg_agent_latency = (
-                (self._total_agent_latency_ms / self._agent_tasks_total)
-                if self._agent_tasks_total > 0
-                else 0.0
+                (self._total_agent_latency_ms / self._agent_tasks_total) if self._agent_tasks_total > 0 else 0.0
             )
 
             return {
@@ -399,13 +376,15 @@ class AIDiagnostics(IEngineDiagnostics):
             if self._provider_registry is not None:
                 try:
                     for p in self._provider_registry.list_providers():
-                        providers_meta.append({
-                            "provider_id": p.provider_id,
-                            "display_name": p.display_name,
-                            "vendor": p.vendor,
-                            "endpoint_type": p.endpoint_type,
-                            "supported_models": list(p.supported_models),
-                        })
+                        providers_meta.append(
+                            {
+                                "provider_id": p.provider_id,
+                                "display_name": p.display_name,
+                                "vendor": p.vendor,
+                                "endpoint_type": p.endpoint_type,
+                                "supported_models": list(p.supported_models),
+                            }
+                        )
                 except Exception as exc:
                     logger.debug("Error assembling provider diagnostics: %s", exc)
 
@@ -413,12 +392,14 @@ class AIDiagnostics(IEngineDiagnostics):
             if self._tool_registry is not None:
                 try:
                     for t in self._tool_registry.list_tools():
-                        tools_meta.append({
-                            "name": t.name,
-                            "canonical_capability": t.canonical_capability,
-                            "is_mutation": t.is_mutation,
-                            "timeout_seconds": t.timeout_seconds,
-                        })
+                        tools_meta.append(
+                            {
+                                "name": t.name,
+                                "canonical_capability": t.canonical_capability,
+                                "is_mutation": t.is_mutation,
+                                "timeout_seconds": t.timeout_seconds,
+                            }
+                        )
                 except Exception as exc:
                     logger.debug("Error assembling tool diagnostics: %s", exc)
 

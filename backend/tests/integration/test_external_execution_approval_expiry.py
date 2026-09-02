@@ -106,14 +106,14 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": _TENANT, "principal_id": principal_id, "password": password}
     )
 
 
-async def _submit_paused_execution(kernel: Kernel, requester_principal, approval_timeout_seconds=None):  # noqa: ANN001
+async def _submit_paused_execution(kernel: Kernel, requester_principal, approval_timeout_seconds=None):
     workflow_engine: WorkflowEngine = kernel.get_engine("workflow")
     executor = workflow_engine.external_executor
     assert executor is not None
@@ -187,7 +187,11 @@ async def test_expired_event_never_resumes_execution(kernel_env: Kernel) -> None
             "request_id": str(record.approval_request_id),
             "tenant_id": _TENANT,
             "decision": "EXPIRED",
-            "context_snapshot": {"action": "external_execution", "execution_id": str(record.id), "target": record.target},
+            "context_snapshot": {
+                "action": "external_execution",
+                "execution_id": str(record.id),
+                "target": record.target,
+            },
         },
     )
     await executor.on_approval_decided(forged_event)
@@ -212,7 +216,11 @@ async def test_duplicate_expired_event_delivered_twice_cancels_exactly_once(kern
             "request_id": str(record.approval_request_id),
             "tenant_id": _TENANT,
             "decision": "EXPIRED",
-            "context_snapshot": {"action": "external_execution", "execution_id": str(record.id), "target": record.target},
+            "context_snapshot": {
+                "action": "external_execution",
+                "execution_id": str(record.id),
+                "target": record.target,
+            },
         },
     )
     await executor.on_approval_decided(event)
@@ -241,7 +249,11 @@ async def test_expired_event_with_wrong_tenant_fails_closed(kernel_env: Kernel) 
             "request_id": str(record.approval_request_id),
             "tenant_id": _OTHER_TENANT,
             "decision": "EXPIRED",
-            "context_snapshot": {"action": "external_execution", "execution_id": str(record.id), "target": record.target},
+            "context_snapshot": {
+                "action": "external_execution",
+                "execution_id": str(record.id),
+                "target": record.target,
+            },
         },
     )
     await executor.on_approval_decided(forged_event)

@@ -15,11 +15,11 @@ from pydantic import ValidationError
 from kortex.core.exceptions import KortexError
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.events import (
+    AgentTaskCompletedEvent,
     AIBaseEvent,
     AIGenerationCompletedEvent,
     AIGenerationStartedEvent,
     AIToolInvokedEvent,
-    AgentTaskCompletedEvent,
 )
 from kortex.engines.ai.exceptions import AIOrchestrationError, AIProviderError
 from kortex.engines.ai.interfaces import (
@@ -184,9 +184,7 @@ def test_provider_metadata_invalid_endpoint_type_rejected() -> None:
 
 
 def test_provider_metadata_is_frozen() -> None:
-    provider = AIProviderMetadata(
-        provider_id="p", display_name="p", vendor="p", endpoint_type="local_host"
-    )
+    provider = AIProviderMetadata(provider_id="p", display_name="p", vendor="p", endpoint_type="local_host")
     with pytest.raises(ValidationError):
         provider.provider_id = "changed"  # type: ignore[misc]
 
@@ -227,17 +225,31 @@ def test_secret_handle_is_optional_string_not_object() -> None:
 @pytest.mark.parametrize(
     ("event_cls", "expected_type", "extra_kwargs"),
     [
-        (AIGenerationStartedEvent, "ai.generation.started", {"request_id": "r1", "tenant_id": "t1", "conversation_id": "c1"}),
+        (
+            AIGenerationStartedEvent,
+            "ai.generation.started",
+            {"request_id": "r1", "tenant_id": "t1", "conversation_id": "c1"},
+        ),
         (
             AIGenerationCompletedEvent,
             "ai.generation.completed",
             {"request_id": "r1", "tenant_id": "t1", "conversation_id": "c1", "execution_time_ms": 12.5},
         ),
-        (AIToolInvokedEvent, "ai.tool.invoked", {"request_id": "r1", "tenant_id": "t1", "tool_name": "kortex.workflow.instance.approve"}),
-        (AgentTaskCompletedEvent, "ai.agent.completed", {"task_id": "task-1", "tenant_id": "t1", "status": "completed"}),
+        (
+            AIToolInvokedEvent,
+            "ai.tool.invoked",
+            {"request_id": "r1", "tenant_id": "t1", "tool_name": "kortex.workflow.instance.approve"},
+        ),
+        (
+            AgentTaskCompletedEvent,
+            "ai.agent.completed",
+            {"task_id": "task-1", "tenant_id": "t1", "status": "completed"},
+        ),
     ],
 )
-def test_event_type_matches_spec_naming(event_cls: type[AIBaseEvent], expected_type: str, extra_kwargs: dict[str, Any]) -> None:
+def test_event_type_matches_spec_naming(
+    event_cls: type[AIBaseEvent], expected_type: str, extra_kwargs: dict[str, Any]
+) -> None:
     """Event type strings match ai_orchestration_engine_implementation_spec.md section 16 verbatim."""
     event = event_cls(**extra_kwargs)
     assert event.event_type == expected_type

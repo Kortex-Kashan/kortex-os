@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import io
-from typing import Dict, Optional
 import zipfile
 
 from kortex.engines.recipe.exceptions import RecipePackageError
-from kortex.engines.recipe.manifest import RecipeManifestManager
 from kortex.engines.recipe.models import RecipeManifest, RecipePackage
 
 
@@ -22,9 +20,9 @@ class RecipePackager:
 
     def create_package(
         self,
-        recipe_files: Dict[str, bytes],
+        recipe_files: dict[str, bytes],
         manifest: RecipeManifest,
-        signature: Optional[str] = None,
+        signature: str | None = None,
     ) -> RecipePackage:
         """Compress recipe folder assets into a .kortex-recipe archive package.
 

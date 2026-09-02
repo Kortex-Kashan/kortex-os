@@ -9,7 +9,7 @@ from __future__ import annotations
 import abc
 import enum
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.exceptions import EngineStateError
 
@@ -46,7 +46,7 @@ class BaseEngine(abc.ABC):
         """Unique identifier name for this engine."""
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Names of other engines this engine depends on for startup ordering."""
         return []
 
@@ -78,7 +78,7 @@ class BaseEngine(abc.ABC):
         """Start active background services, listeners, or loops."""
 
     @abc.abstractmethod
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Return diagnostic health information about the engine status.
 
         Returns:

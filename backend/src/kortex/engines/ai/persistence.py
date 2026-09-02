@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     )
 
 
-
 logger = logging.getLogger("kortex.engines.ai.persistence")
 
 _T = TypeVar("_T")
@@ -86,9 +85,7 @@ class AIConversationTurnRow(BaseModel):
 
     __tablename__ = "ai_conversation_turns"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "conversation_id", "sequence", name="uq_ai_conversation_turn_sequence"
-        ),
+        UniqueConstraint("tenant_id", "conversation_id", "sequence", name="uq_ai_conversation_turn_sequence"),
         Index("ix_ai_conversation_turn_lookup", "tenant_id", "conversation_id", "sequence"),
     )
 
@@ -239,18 +236,14 @@ class StorageConversationStore:
             for row in reversed(rows)
         ]
 
-    async def _run(
-        self, action: Callable[[AsyncSession], Awaitable[_T]], description: str
-    ) -> _T:
+    async def _run(self, action: Callable[[AsyncSession], Awaitable[_T]], description: str) -> _T:
         """Execute `action` transactionally, normalizing failures."""
         try:
             result = await self._data_store.execute_in_transaction(action)
         except ConversationStoreError:
             raise
         except (IntegrityError, Exception) as exc:
-            raise ConversationStoreError(
-                f"Conversation store failed to {description}: {type(exc).__name__}"
-            ) from exc
+            raise ConversationStoreError(f"Conversation store failed to {description}: {type(exc).__name__}") from exc
         return cast("_T", result)
 
 
@@ -296,12 +289,8 @@ class StorageAgentTaskStore(IAgentTaskStore):
         async def _action(session: AsyncSession) -> None:
             task_json = record.task.model_dump_json()
             steps_json = json.dumps([s.model_dump(mode="json") for s in record.steps])
-            pending_calls_json = json.dumps(
-                [c.model_dump(mode="json") for c in record.pending_tool_calls]
-            )
-            resume_token_json = (
-                record.resume_token.model_dump_json() if record.resume_token else None
-            )
+            pending_calls_json = json.dumps([c.model_dump(mode="json") for c in record.pending_tool_calls])
+            resume_token_json = record.resume_token.model_dump_json() if record.resume_token else None
             token_usage_json = record.total_token_usage.model_dump_json()
 
             row = AIAgentTaskRow(
@@ -356,12 +345,8 @@ class StorageAgentTaskStore(IAgentTaskStore):
         async def _action(session: AsyncSession) -> None:
             task_json = record.task.model_dump_json()
             steps_json = json.dumps([s.model_dump(mode="json") for s in record.steps])
-            pending_calls_json = json.dumps(
-                [c.model_dump(mode="json") for c in record.pending_tool_calls]
-            )
-            resume_token_json = (
-                record.resume_token.model_dump_json() if record.resume_token else None
-            )
+            pending_calls_json = json.dumps([c.model_dump(mode="json") for c in record.pending_tool_calls])
+            resume_token_json = record.resume_token.model_dump_json() if record.resume_token else None
 
             token_usage_json = record.total_token_usage.model_dump_json()
 
@@ -415,11 +400,13 @@ class StorageAgentTaskStore(IAgentTaskStore):
                 .where(
                     AIAgentTaskRow.tenant_id == tenant_id,
                     AIAgentTaskRow.task_id == task_id,
-                    AIAgentTaskRow.status.in_([
-                        AgentStatus.RUNNING.value,
-                        AgentStatus.PAUSED_FOR_APPROVAL.value,
-                        AgentStatus.RESUMING.value,
-                    ]),
+                    AIAgentTaskRow.status.in_(
+                        [
+                            AgentStatus.RUNNING.value,
+                            AgentStatus.PAUSED_FOR_APPROVAL.value,
+                            AgentStatus.RESUMING.value,
+                        ]
+                    ),
                 )
                 .values(
                     status=AgentStatus.CANCELLED.value,
@@ -516,11 +503,7 @@ class StorageAgentTaskStore(IAgentTaskStore):
         steps = [AgentStep.model_validate(s) for s in steps_data]
         calls_data = json.loads(row.pending_calls_json)
         pending_calls = [ToolCall.model_validate(c) for c in calls_data]
-        resume_token = (
-            ResumeToken.model_validate_json(row.resume_token_json)
-            if row.resume_token_json
-            else None
-        )
+        resume_token = ResumeToken.model_validate_json(row.resume_token_json) if row.resume_token_json else None
         token_usage = (
             TokenUsage.model_validate_json(row.token_usage_json)
             if getattr(row, "token_usage_json", None)
@@ -584,9 +567,7 @@ class AIDecisionAuditRow(BaseModel):
     """Relational store model for immutable AI reasoning decision records."""
 
     __tablename__ = "ai_decision_records"
-    __table_args__ = (
-        Index("ix_ai_decision_tenant_created", "tenant_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_ai_decision_tenant_created", "tenant_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -822,14 +803,10 @@ class AIGovernanceStore:
         require_identifier(tenant_id, "tenant_id")
 
         async def _ensure_row(session: AsyncSession) -> None:
-            existing = await session.scalar(
-                select(AITenantQuotaRow).where(AITenantQuotaRow.tenant_id == tenant_id)
-            )
+            existing = await session.scalar(select(AITenantQuotaRow).where(AITenantQuotaRow.tenant_id == tenant_id))
             if existing is None:
                 try:
-                    session.add(
-                        AITenantQuotaRow(id=str(uuid.uuid4()), tenant_id=tenant_id, last_reset_date=today)
-                    )
+                    session.add(AITenantQuotaRow(id=str(uuid.uuid4()), tenant_id=tenant_id, last_reset_date=today))
                     await session.flush()
                 except IntegrityError:
                     # Lost a concurrent first-ever-request race for this
@@ -879,7 +856,6 @@ class AIGovernanceStore:
         record: AIDecisionAuditRecord,
         outbox_store: object | None = None,
     ) -> None:
-
         """Save immutable decision audit record and optionally stage outbox event."""
         require_identifier(record.tenant_id, "tenant_id")
 
@@ -943,7 +919,6 @@ class AIGovernanceStore:
         user_id: str | None = None,
         task_id: str | None = None,
     ) -> list[AIDecisionAuditRecord]:
-
         """Query decision audit records partitioned by tenant."""
         from kortex.engines.ai.governance import AIDecisionAuditRecord
 

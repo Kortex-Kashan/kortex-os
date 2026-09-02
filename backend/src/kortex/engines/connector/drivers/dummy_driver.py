@@ -39,9 +39,7 @@ class DummyConnectorDriver(BaseConnectorDriver):
             vendor="KORTEX",
             author="KORTEX Core Team",
             version="1.0.0",
-            description=(
-                "Reference dummy connector driver plugin for testing and mock action dispatches."
-            ),
+            description=("Reference dummy connector driver plugin for testing and mock action dispatches."),
             license="MIT",
             is_sandboxed=True,
             supported_actions=[
@@ -64,9 +62,7 @@ class DummyConnectorDriver(BaseConnectorDriver):
             ],
         )
 
-    async def execute_action(
-        self, request: ActionRequest, secret_token: str | None = None
-    ) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         """Execute a mock connector action and return deterministic result payload.
 
         Args:
@@ -129,9 +125,7 @@ class DummyConnectorDriver(BaseConnectorDriver):
             correlation_id=request.correlation_id,
         )
 
-    async def test_connection(
-        self, profile: ConnectorProfile, secret_token: str | None = None
-    ) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         """Test connectivity and configuration validity for a target profile.
 
         Args:
@@ -145,10 +139,7 @@ class DummyConnectorDriver(BaseConnectorDriver):
             return False
 
         options = profile.options or {}
-        if options.get("simulate_connection_failure", False):
-            return False
-
-        return True
+        return not options.get("simulate_connection_failure", False)
 
 
 __all__ = ["DummyConnectorDriver"]

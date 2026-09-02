@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import pytest
 from argon2 import PasswordHasher
@@ -51,17 +51,13 @@ from kortex.engines.connector.models import (
     DriverMetadata,
 )
 from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITIES
-
-_A_BOOTSTRAP_EXEMPT_CAPABILITY = next(iter(sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)))
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import (
-    AuthenticationError,
     AuthorizationDeniedError,
     InvalidTokenError,
     TokenExpiredError,
 )
 from kortex.engines.security.models import (
-    ClassificationLevel,
     PrincipalRecord,
     RolePermissionRecord,
     SecurityPrincipal,
@@ -70,6 +66,8 @@ from kortex.engines.security.models import (
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.engines.workflow.models import CompensationAction, WorkflowDefinition, WorkflowState, WorkflowStep
+
+_A_BOOTSTRAP_EXEMPT_CAPABILITY = next(iter(sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)))
 
 _TEST_MASTER_KEY = b"\xaa" * 32
 _TEST_SIGNING_KEY = b"\xbb" * 32
@@ -100,7 +98,7 @@ async def _seed_principal(
     data_store: Any,
     tenant_id: str,
     principal_id: str,
-    roles: Optional[list[str]] = None,
+    roles: list[str] | None = None,
     clearance_level: str = "INTERNAL",
     enabled: bool = True,
 ) -> None:
@@ -178,12 +176,16 @@ async def _issue_backdated_token(
     """
     manager = security_engine.authentication_manager
     token_id = uuid.uuid4().hex
-    issued_at_utc = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago + 1)
+    issued_at_utc = datetime.now(UTC) - timedelta(seconds=seconds_ago + 1)
     expires_at_utc = issued_at_utc + timedelta(seconds=1)
 
     payload_bytes = manager._build_signing_payload(
-        token_id, principal.principal_id, principal.principal_type.value, principal.tenant_id,
-        issued_at_utc, expires_at_utc,
+        token_id,
+        principal.principal_id,
+        principal.principal_type.value,
+        principal.tenant_id,
+        issued_at_utc,
+        expires_at_utc,
     )
     signature = manager._verification_service.sign(
         payload_bytes, manager._signing_private_key, manager._signing_public_key
@@ -277,7 +279,7 @@ async def test_direct_handler_bypass_closed_for_bootstrap_protected_capability(t
     """Same closure proof, but against a REAL production capability
     (`kortex.security.access.authorize`) rather than a synthetic one —
     proves the fix is not an artifact of test-only capability registration."""
-    kernel, storage_engine, security_engine = await _boot_kernel(tmp_path)
+    kernel, _storage_engine, _security_engine = await _boot_kernel(tmp_path)
     descriptor = kernel.get_capability("kortex.security.access.authorize")
 
     # The descriptor for a real production capability carries no handler either.
@@ -565,7 +567,10 @@ async def test_insufficient_rbac_permission_denied_full_dispatch(tmp_path: Path)
     kernel, storage_engine, security_engine = _build_kernel(tmp_path)
     spy = _Spy()
     kernel.register_capability(
-        name="adv.test.insufficient_rbac", description="test", provider="test", handler=spy,
+        name="adv.test.insufficient_rbac",
+        description="test",
+        provider="test",
+        handler=spy,
         required_permissions=["adv.needed"],
     )
     await kernel.boot()
@@ -604,7 +609,10 @@ def test_bootstrap_exemption_rejects_every_near_miss_name(tmp_path: Path, near_m
     kernel = Kernel()
     with pytest.raises(ValueError):
         kernel.register_capability(
-            name=near_miss_name, description="test", provider="test", handler=lambda: None,
+            name=near_miss_name,
+            description="test",
+            provider="test",
+            handler=lambda: None,
             requires_authentication=False,
         )
 
@@ -617,12 +625,18 @@ def test_bootstrap_exemption_rejects_every_near_miss_name(tmp_path: Path, near_m
 def test_duplicate_bootstrap_capability_registration_rejected() -> None:
     kernel = Kernel()
     kernel.register_capability(
-        name=_A_BOOTSTRAP_EXEMPT_CAPABILITY, description="test", provider="test", handler=lambda: None,
+        name=_A_BOOTSTRAP_EXEMPT_CAPABILITY,
+        description="test",
+        provider="test",
+        handler=lambda: None,
         requires_authentication=False,
     )
     with pytest.raises(ResourceAlreadyExistsError):
         kernel.register_capability(
-            name=_A_BOOTSTRAP_EXEMPT_CAPABILITY, description="test", provider="test", handler=lambda: None,
+            name=_A_BOOTSTRAP_EXEMPT_CAPABILITY,
+            description="test",
+            provider="test",
+            handler=lambda: None,
             requires_authentication=False,
         )
 
@@ -636,9 +650,7 @@ def test_duplicate_bootstrap_capability_registration_rejected() -> None:
 async def test_post_boot_registration_rejected(tmp_path: Path) -> None:
     kernel, _storage_engine, _security_engine = await _boot_kernel(tmp_path)
     with pytest.raises(KernelStateError):
-        kernel.register_capability(
-            name="adv.test.too_late", description="test", provider="test", handler=lambda: None
-        )
+        kernel.register_capability(name="adv.test.too_late", description="test", provider="test", handler=lambda: None)
 
 
 # =============================================================================
@@ -651,7 +663,10 @@ async def test_concurrent_dispatch_calls_do_not_leak_identity_between_requests(t
     kernel, storage_engine, security_engine = _build_kernel(tmp_path)
     spy = _Spy()
     kernel.register_capability(
-        name="adv.test.concurrent", description="test", provider="test", handler=spy,
+        name="adv.test.concurrent",
+        description="test",
+        provider="test",
+        handler=spy,
         required_permissions=["adv.concurrent.read"],
     )
     await kernel.boot()
@@ -680,9 +695,7 @@ async def test_concurrent_dispatch_calls_do_not_leak_identity_between_requests(t
         except AuthorizationDeniedError:
             return "DENIED"
 
-    results = await asyncio.gather(
-        *[_dispatch(t) for t in authorized_tokens], *[_dispatch(t) for t in denied_tokens]
-    )
+    results = await asyncio.gather(*[_dispatch(t) for t in authorized_tokens], *[_dispatch(t) for t in denied_tokens])
     authorized_results = results[: len(authorized_tokens)]
     denied_results = results[len(authorized_tokens) :]
 
@@ -713,7 +726,10 @@ async def test_workflow_compensation_with_expired_token_fails_closed(tmp_path: P
 
     spy = _Spy()
     kernel.register_capability(
-        name="adv.test.compensation_target", description="test", provider="test", handler=spy,
+        name="adv.test.compensation_target",
+        description="test",
+        provider="test",
+        handler=spy,
     )
     await kernel.boot()
 
@@ -725,7 +741,8 @@ async def test_workflow_compensation_with_expired_token_fails_closed(tmp_path: P
     token_dict["signature"] = token_dict["signature"].hex()
 
     comp_action = CompensationAction(
-        name="rollback", capability_name="adv.test.compensation_target",
+        name="rollback",
+        capability_name="adv.test.compensation_target",
         parameters={"_authz_context": {"resource_tenant_id": tenant_id}},
     )
     step_succ = WorkflowStep(id="step_succ", name="Succeeds, registers compensation", compensation_action=comp_action)
@@ -753,14 +770,19 @@ class _AlwaysSucceedsDriver(BaseConnectorDriver):
     @property
     def metadata(self) -> DriverMetadata:
         return DriverMetadata(
-            driver_id="adv-dummy-driver", display_name="Adv Dummy", vendor="test", author="test", version="1.0.0",
-            description="test", supported_actions=[ConnectorActionType.FETCH],
+            driver_id="adv-dummy-driver",
+            display_name="Adv Dummy",
+            vendor="test",
+            author="test",
+            version="1.0.0",
+            description="test",
+            supported_actions=[ConnectorActionType.FETCH],
         )
 
-    async def execute_action(self, request: ActionRequest, secret_token: Optional[str] = None) -> ActionResult:
+    async def execute_action(self, request: ActionRequest, secret_token: str | None = None) -> ActionResult:
         return ActionResult(request_id=request.request_id, status="SUCCESS", response_payload={"ok": True})
 
-    async def test_connection(self, profile: ConnectorProfile, secret_token: Optional[str] = None) -> bool:
+    async def test_connection(self, profile: ConnectorProfile, secret_token: str | None = None) -> bool:
         return True
 
 
@@ -793,7 +815,7 @@ async def _build_connector_kernel(
 async def _dispatch_connector_action(
     kernel: Kernel, tenant_id: str, token: TokenPayload, granted_permissions: Any
 ) -> Any:
-    options: Dict[str, Any] = {}
+    options: dict[str, Any] = {}
     if granted_permissions is not _UNSET:
         options["granted_permissions"] = granted_permissions
     request = CapabilityRequest(
@@ -801,7 +823,9 @@ async def _dispatch_connector_action(
         session_token=token,
         parameters={
             "request": ActionRequest(
-                request_id=str(uuid.uuid4()), profile_id="adv-profile", action_type=ConnectorActionType.FETCH,
+                request_id=str(uuid.uuid4()),
+                profile_id="adv-profile",
+                action_type=ConnectorActionType.FETCH,
                 options=options,
             )
         },
@@ -855,7 +879,9 @@ async def test_mismatched_permission_set_denied_by_connector(tmp_path: Path) -> 
     token = await _issue_token(security_engine, tenant_id, "principal-1")
 
     with pytest.raises(ConnectorSecurityError):
-        await _dispatch_connector_action(kernel, tenant_id, token, granted_permissions=["kortex.connector.other.action"])
+        await _dispatch_connector_action(
+            kernel, tenant_id, token, granted_permissions=["kortex.connector.other.action"]
+        )
 
 
 @pytest.mark.asyncio
@@ -1027,15 +1053,13 @@ async def test_handler_receives_only_exploded_parameters_never_request_or_contex
     replace the security identity/context that authorized its own
     invocation (Core Invariant #12)."""
     kernel, storage_engine, security_engine = _build_kernel(tmp_path)
-    received: Dict[str, Any] = {}
+    received: dict[str, Any] = {}
 
     async def handler(**kwargs: Any) -> str:
         received.update(kwargs)
         return "ok"
 
-    kernel.register_capability(
-        name="adv.test.no_context_leak", description="test", provider="test", handler=handler
-    )
+    kernel.register_capability(name="adv.test.no_context_leak", description="test", provider="test", handler=handler)
     await kernel.boot()
 
     tenant_id = _tenant(tmp_path, "-ncl")

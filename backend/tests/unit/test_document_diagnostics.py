@@ -6,6 +6,7 @@ Target: 100% pass rate, 100% line coverage for diagnostics.py, events.py, and en
 from __future__ import annotations
 
 from typing import Any
+
 import pytest
 
 from kortex.core.base_engine import BaseEngine, EngineState
@@ -24,7 +25,7 @@ from kortex.engines.document.events import (
     DocumentPublishedEvent,
     DocumentSupersededEvent,
 )
-from kortex.engines.document.exceptions import DocumentOperationError
+from kortex.engines.document.exceptions import DocumentLifecycleError, DocumentOperationError
 from kortex.engines.document.intelligence import DocumentIntelligenceModel
 from kortex.engines.document.models import (
     AdapterCapability,
@@ -187,7 +188,9 @@ async def test_document_engine_events_emission() -> None:
 
     # Lifecycle transition event emission
     doc_ver = await engine.lifecycle_manager.create_version(title="Doc 100", author_id="user1")
-    meta = await engine.transition_lifecycle(doc_ver.metadata.document_id, doc_ver.version_id, DocumentLifecycleState.REVIEW)
+    meta = await engine.transition_lifecycle(
+        doc_ver.metadata.document_id, doc_ver.version_id, DocumentLifecycleState.REVIEW
+    )
     assert meta.lifecycle_state == DocumentLifecycleState.REVIEW
 
     events2 = engine.emitted_events
@@ -200,9 +203,7 @@ async def test_document_engine_events_emission() -> None:
 @pytest.mark.asyncio
 async def test_system_events_instantiation() -> None:
     """Test all system event classes instantiations and model validation."""
-    e1 = DocumentCreatedEvent(
-        document_id="d1", version_id="v1", title="Title", author_id="user1"
-    )
+    e1 = DocumentCreatedEvent(document_id="d1", version_id="v1", title="Title", author_id="user1")
     assert e1.event_type == "document.created"
 
     e2 = DocumentPublishedEvent(document_id="d1", version_id="v1", published_at="2026-08-11T12:00:00Z")
@@ -246,6 +247,7 @@ async def test_document_engine_facade_additional_methods() -> None:
 
     # generate_preview when no preview adapter registered
     from kortex.engines.document.models import PreviewOptions
+
     prev_res = await engine.generate_preview("req-prev-1", PreviewOptions(page_number=1))
     assert prev_res.request_id == "req-prev-1"
     assert prev_res.image_bytes is None
@@ -266,17 +268,18 @@ async def test_document_engine_facade_additional_methods() -> None:
     assert len(engine.capabilities()) == 10  # M7.4-W2: +kortex.document.profile.list
 
     # transition_lifecycle invalid document_id
-    with pytest.raises(Exception):
+    with pytest.raises(DocumentLifecycleError):
         await engine.transition_lifecycle("non_existent_doc", "v1", DocumentLifecycleState.REVIEW)
 
     # execute_profile with invalid request
-    with pytest.raises(Exception):
+    with pytest.raises(DocumentOperationError):
         await engine.execute_profile("prof-1", None)  # type: ignore[arg-type]
 
 
 # =============================================================================
 # Milestone 8 Remediation: Capability Handlers, Kernel Event Publication
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_all_capabilities_have_working_handlers_via_real_kernel() -> None:
@@ -345,9 +348,7 @@ async def test_intelligence_analyze_capability_real_invocation_via_kernel() -> N
     assert result.document_id == "doc-intel-1"
     assert result.version_id == "ver-intel-1"
 
-    updated_events = [
-        e for e in engine.emitted_events if isinstance(e, DocumentIntelligenceUpdatedEvent)
-    ]
+    updated_events = [e for e in engine.emitted_events if isinstance(e, DocumentIntelligenceUpdatedEvent)]
     assert len(updated_events) == 1
     assert updated_events[0].document_id == "doc-intel-1"
 
@@ -365,9 +366,7 @@ async def test_recommendation_get_capability_real_invocation_via_kernel() -> Non
     templates = await cap_handler("template", user_intent="generate payslip", data_schema={})
     assert "payslip.declarative.v1" in templates
 
-    profile_id = await cap_handler(
-        "operation_profile", business_operation="GENERATE_PAYROLL_SLIP", user_context={}
-    )
+    profile_id = await cap_handler("operation_profile", business_operation="GENERATE_PAYROLL_SLIP", user_context={})
     assert profile_id == "profile.payslip.v1"
 
     pipeline = await cap_handler("adapter_pipeline", profile_id="profile.payslip.v1")
@@ -383,14 +382,10 @@ async def test_transition_lifecycle_emits_published_superseded_archived_events()
     and DocumentArchivedEvent at the correct points in the real lifecycle transition flow."""
     engine = DocumentEngine()
 
-    v1 = await engine.lifecycle_manager.create_version(
-        title="M8 Event Test Doc", author_id="user1"
-    )
+    v1 = await engine.lifecycle_manager.create_version(title="M8 Event Test Doc", author_id="user1")
 
     # Genesis publish: DocumentPublishedEvent only, no DocumentSupersededEvent (no parent).
-    pub_meta = await engine.transition_lifecycle(
-        v1.document_id, v1.version_id, DocumentLifecycleState.PUBLISHED
-    )
+    pub_meta = await engine.transition_lifecycle(v1.document_id, v1.version_id, DocumentLifecycleState.PUBLISHED)
     assert pub_meta.lifecycle_state == DocumentLifecycleState.PUBLISHED
 
     published_events = [e for e in engine.emitted_events if isinstance(e, DocumentPublishedEvent)]
@@ -398,9 +393,7 @@ async def test_transition_lifecycle_emits_published_superseded_archived_events()
     assert published_events[0].document_id == v1.document_id
     assert published_events[0].version_id == v1.version_id
 
-    superseded_events = [
-        e for e in engine.emitted_events if isinstance(e, DocumentSupersededEvent)
-    ]
+    superseded_events = [e for e in engine.emitted_events if isinstance(e, DocumentSupersededEvent)]
     assert len(superseded_events) == 0
 
     # Child publish supersedes the parent: both DocumentPublishedEvent and
@@ -410,9 +403,7 @@ async def test_transition_lifecycle_emits_published_superseded_archived_events()
     )
     await engine.transition_lifecycle(v1.document_id, v2.version_id, DocumentLifecycleState.PUBLISHED)
 
-    superseded_events2 = [
-        e for e in engine.emitted_events if isinstance(e, DocumentSupersededEvent)
-    ]
+    superseded_events2 = [e for e in engine.emitted_events if isinstance(e, DocumentSupersededEvent)]
     assert len(superseded_events2) == 1
     assert superseded_events2[0].superseded_version_id == v1.version_id
     assert superseded_events2[0].new_version_id == v2.version_id
@@ -507,13 +498,8 @@ async def test_event_publication_failure_does_not_break_engine_when_kernel_lacks
     await engine.start()
 
     doc_ver = await engine.lifecycle_manager.create_version(title="Broken Kernel Doc", author_id="u1")
-    meta = await engine.transition_lifecycle(
-        doc_ver.document_id, doc_ver.version_id, DocumentLifecycleState.REVIEW
-    )
+    meta = await engine.transition_lifecycle(doc_ver.document_id, doc_ver.version_id, DocumentLifecycleState.REVIEW)
     assert meta.lifecycle_state == DocumentLifecycleState.REVIEW
 
-    transition_events = [
-        e for e in engine.emitted_events if isinstance(e, DocumentLifecycleTransitionedEvent)
-    ]
+    transition_events = [e for e in engine.emitted_events if isinstance(e, DocumentLifecycleTransitionedEvent)]
     assert len(transition_events) == 1
-

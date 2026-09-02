@@ -27,8 +27,9 @@ defaults to a single shared, non-test-scoped SQLite file).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, NoReturn, Optional
+from typing import Any, NoReturn
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -130,13 +131,13 @@ class _RecordingCacheStore:
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
         self.get_calls: list[str] = []
-        self.set_calls: list[tuple[str, Any, Optional[int]]] = []
+        self.set_calls: list[tuple[str, Any, int | None]] = []
 
     async def get(self, key: str) -> Any:
         self.get_calls.append(key)
         return self._data.get(key)
 
-    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
         self.set_calls.append((key, value, ttl_seconds))
         self._data[key] = value
         return True
@@ -160,7 +161,7 @@ class _RaisingGetCacheStore(_RecordingCacheStore):
 class _RaisingSetCacheStore(_RecordingCacheStore):
     """A cache whose `set()` always raises — proves a write failure never changes the result."""
 
-    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
         self.set_calls.append((key, value, ttl_seconds))
         raise RuntimeError("simulated cache write failure")
 

@@ -8,11 +8,12 @@ delay calculations and async retry handling in accordance with the Connector Eng
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
-from kortex.engines.connector.exceptions import RateLimitExceededError
 from kortex.engines.connector.interfaces import IRateLimiter
 from kortex.engines.storage.interfaces import ICacheStore
 
@@ -41,7 +42,8 @@ def calculate_backoff_delay(
     capped_delay = min(max_delay, calculated)
 
     if jitter:
-        return random.uniform(0.0, capped_delay)
+        # S311: retry backoff jitter is explicitly non-cryptographic.
+        return random.uniform(0.0, capped_delay)  # noqa: S311
 
     return capped_delay
 
@@ -84,13 +86,11 @@ class TokenBucketRateLimiter(IRateLimiter):
         """Format canonical cache key string."""
         return f"connector:ratelimit:{key.strip()}"
 
-    async def _read_bucket_state(
-        self, key: str, capacity: float, refill_rate: float
-    ) -> dict[str, float]:
+    async def _read_bucket_state(self, key: str, capacity: float, refill_rate: float) -> dict[str, float]:
         """Read bucket state from cache_store or local memory, initializing if missing."""
         now = time.monotonic()
         if self._cache_store is not None:
-            try:
+            with contextlib.suppress(Exception):  # Fall through to local buckets on cache errors
                 cached = await self._cache_store.get(self._get_cache_key(key))
                 if isinstance(cached, dict):
                     return {
@@ -99,8 +99,6 @@ class TokenBucketRateLimiter(IRateLimiter):
                         "capacity": float(cached.get("capacity", capacity)),
                         "refill_rate": float(cached.get("refill_rate", refill_rate)),
                     }
-            except Exception:
-                pass  # Fall through to local buckets on cache errors
 
         if key in self._local_buckets:
             return dict(self._local_buckets[key])
@@ -116,11 +114,9 @@ class TokenBucketRateLimiter(IRateLimiter):
         """Write bucket state to cache_store or local memory."""
         self._local_buckets[key] = dict(state)
         if self._cache_store is not None:
-            try:
+            with contextlib.suppress(Exception):  # Ignore cache write exceptions to ensure reliability
                 # Set TTL to 1 hour (3600s) to keep cache clean
                 await self._cache_store.set(self._get_cache_key(key), state, ttl_seconds=3600)
-            except Exception:
-                pass  # Ignore cache write exceptions to ensure reliability
 
     async def acquire_token(
         self,
@@ -176,9 +172,7 @@ class TokenBucketRateLimiter(IRateLimiter):
         tokens_released = float(tokens)
         lock = await self._get_lock_for_key(key)
         async with lock:
-            state = await self._read_bucket_state(
-                key, self._default_capacity, self._default_refill_rate
-            )
+            state = await self._read_bucket_state(key, self._default_capacity, self._default_refill_rate)
             now = time.monotonic()
             elapsed = max(0.0, now - state["last_refill"])
 

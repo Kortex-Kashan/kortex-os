@@ -39,11 +39,13 @@ class FakeKernelBridge:
     ) -> None:
         if self.should_fail:
             raise RuntimeError("Event engine connection dropped!")
-        self.published_events.append({
-            "topic": topic,
-            "payload": payload,
-            "sender": sender,
-        })
+        self.published_events.append(
+            {
+                "topic": topic,
+                "payload": payload,
+                "sender": sender,
+            }
+        )
 
     async def invoke_capability(
         self,
@@ -74,9 +76,7 @@ async def test_generation_events_emission() -> None:
     bridge = FakeKernelBridge()
     diag = AIDiagnostics()
     exporter = InMemoryTelemetryExporter()
-    telemetry = AITelemetryEmitter(
-        kernel_bridge=bridge, diagnostics=diag, exporter=exporter
-    )
+    telemetry = AITelemetryEmitter(kernel_bridge=bridge, diagnostics=diag, exporter=exporter)
 
     # 1. Started
     await telemetry.emit_generation_started(
@@ -126,9 +126,7 @@ async def test_provider_resilience_events_emission() -> None:
     bridge = FakeKernelBridge()
     diag = AIDiagnostics()
     exporter = InMemoryTelemetryExporter()
-    telemetry = AITelemetryEmitter(
-        kernel_bridge=bridge, diagnostics=diag, exporter=exporter
-    )
+    telemetry = AITelemetryEmitter(kernel_bridge=bridge, diagnostics=diag, exporter=exporter)
 
     await telemetry.emit_provider_timeout(
         provider_id="ollama-local",
@@ -366,10 +364,10 @@ def test_secret_sanitization_removes_credentials() -> None:
 
     sanitized = sanitize_telemetry_payload(raw_payload)
     assert sanitized["api_key"] == "[REDACTED]"
-    assert sanitized["nested"]["token"] == "[REDACTED]"  # noqa: S105
-    assert sanitized["nested"]["password"] == "[REDACTED]"  # noqa: S105
+    assert sanitized["nested"]["token"] == "[REDACTED]"
+    assert sanitized["nested"]["password"] == "[REDACTED]"
     assert sanitized["nested"]["safe_metric"] == 42.0
-    assert sanitized["credentials_list"][0]["secret_key"] == "[REDACTED]"  # noqa: S105
+    assert sanitized["credentials_list"][0]["secret_key"] == "[REDACTED]"
     assert sanitized["credentials_list"][0]["status"] == "active"
     assert sanitized["tenant_id"] == "tenant-1"
 
@@ -411,19 +409,8 @@ FORBIDDEN_NAMESPACES = [
 )
 def test_telemetry_files_quarantine_forbidden_imports(filename: str) -> None:
     """Verify telemetry and diagnostics modules do not import forbidden SDKs or DB engines."""
-    target_path = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "kortex"
-        / "engines"
-        / "ai"
-        / filename
-    )
+    target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / filename
     imports = _collect_imports(target_path)
     for forbidden in FORBIDDEN_NAMESPACES:
-        violations = [
-            imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")
-        ]
-        assert violations == [], (
-            f"{filename} illegally imports {forbidden!r}: {violations}"
-        )
+        violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
+        assert violations == [], f"{filename} illegally imports {forbidden!r}: {violations}"

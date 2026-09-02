@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from argon2 import PasswordHasher
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -282,7 +283,7 @@ async def test_invalid_invoice_input_fails_through_existing_validation(tmp_path:
         parameters={"request": _create_request(amount="-5.00")},
         context={"resource_tenant_id": tenant_id},
     )
-    with pytest.raises(Exception):  # Pydantic ValidationError, surfaced generically -- no new error path
+    with pytest.raises(ValidationError):  # Pydantic ValidationError, surfaced generically -- no new error path
         await kernel.invoke_capability(request)
 
 

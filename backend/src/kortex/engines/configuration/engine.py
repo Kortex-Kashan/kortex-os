@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Type, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import yaml
 from pydantic import BaseModel, Field
@@ -31,7 +31,9 @@ class SystemSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KORTEX_", env_file=".env", extra="ignore")
 
     app_name: str = Field(default="KORTEX OS", description="Platform application title")
-    environment: str = Field(default="development", description="Execution environment (development, staging, production)")
+    environment: str = Field(
+        default="development", description="Execution environment (development, staging, production)"
+    )
     version: str = Field(default="0.1.0", description="KORTEX release version")
     debug: bool = Field(default=False, description="Enable debug logging and diagnostics")
 
@@ -54,10 +56,10 @@ class ConfigurationEngine(BaseEngine):
     (.env, JSON, YAML).
     """
 
-    def __init__(self, initial_settings: Optional[SystemSettings] = None) -> None:
+    def __init__(self, initial_settings: SystemSettings | None = None) -> None:
         super().__init__()
         self._settings = initial_settings or SystemSettings()
-        self._custom_config: Dict[str, Any] = {}
+        self._custom_config: dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -85,7 +87,7 @@ class ConfigurationEngine(BaseEngine):
         self._set_state(EngineState.RUNNING)
         self.logger.info("Configuration Engine running.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Diagnostic health check."""
         return {
             "engine": self.name,
@@ -120,13 +122,13 @@ class ConfigurationEngine(BaseEngine):
             self._custom_config[key] = value
         self.logger.debug("Configuration value set for key '%s'", key)
 
-    def load_from_json(self, file_path: Path | str) -> Dict[str, Any]:
+    def load_from_json(self, file_path: Path | str) -> dict[str, Any]:
         """Load and merge configuration from a JSON file."""
         path = Path(file_path)
         if not path.exists():
             raise ConfigurationLoadError(f"JSON configuration file not found: {path}")
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             self._custom_config.update(data)
             self.logger.info("Loaded configuration from JSON file: %s", path)
@@ -134,13 +136,13 @@ class ConfigurationEngine(BaseEngine):
         except Exception as e:
             raise ConfigurationLoadError(f"Failed to parse JSON file '{path}': {e}") from e
 
-    def load_from_yaml(self, file_path: Path | str) -> Dict[str, Any]:
+    def load_from_yaml(self, file_path: Path | str) -> dict[str, Any]:
         """Load and merge configuration from a YAML file."""
         path = Path(file_path)
         if not path.exists():
             raise ConfigurationLoadError(f"YAML configuration file not found: {path}")
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             self._custom_config.update(data)
             self.logger.info("Loaded configuration from YAML file: %s", path)
@@ -148,7 +150,7 @@ class ConfigurationEngine(BaseEngine):
         except Exception as e:
             raise ConfigurationLoadError(f"Failed to parse YAML file '{path}': {e}") from e
 
-    def get_validated_schema(self, schema_cls: Type[T], prefix: str = "") -> T:
+    def get_validated_schema(self, schema_cls: type[T], prefix: str = "") -> T:
         """Instantiate and validate a typed Pydantic configuration schema from loaded data.
 
         Args:

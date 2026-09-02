@@ -115,7 +115,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": _TENANT, "principal_id": principal_id, "password": password}

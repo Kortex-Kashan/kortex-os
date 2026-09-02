@@ -150,20 +150,20 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[Kernel]:
         await db_manager.disconnect()
 
 
-async def _principal(kernel: Kernel, tenant_id: str, principal_id: str, password: str = "pass"):  # noqa: ANN001
+async def _principal(kernel: Kernel, tenant_id: str, principal_id: str, password: str = "pass"):
     security_engine: SecurityEngine = kernel.get_engine("security")
     return await security_engine.authentication_manager.authenticate(
         {"principal_type": "USER", "tenant_id": tenant_id, "principal_id": principal_id, "password": password}
     )
 
 
-async def _token(kernel: Kernel, principal) -> dict:  # noqa: ANN001
+async def _token(kernel: Kernel, principal) -> dict:
     security_engine: SecurityEngine = kernel.get_engine("security")
     minted = await security_engine.authentication_manager.issue_token(principal)
     return minted.model_dump() if hasattr(minted, "model_dump") else minted
 
 
-def _outer_capability_request(token: dict, profile_suffix: str):  # noqa: ANN001
+def _outer_capability_request(token: dict, profile_suffix: str):
     return CapabilityRequest(
         capability_name="kortex.workflow.external.execute",
         session_token=token,
@@ -184,7 +184,7 @@ def _outer_capability_request(token: dict, profile_suffix: str):  # noqa: ANN001
     )
 
 
-async def _submit_paused_execution(kernel: Kernel, tenant: str, suffix: str, requester, approval_timeout_seconds=None):  # noqa: ANN001
+async def _submit_paused_execution(kernel: Kernel, tenant: str, suffix: str, requester, approval_timeout_seconds=None):
     workflow_engine: WorkflowEngine = kernel.get_engine("workflow")
     executor = workflow_engine.external_executor
     assert executor is not None
@@ -254,9 +254,7 @@ async def test_case_c_approval_expiry_via_real_production_daemon(kernel_env: Ker
     requester = await _principal(kernel, _TENANT_A, "user_requester_a")
     workflow_engine: WorkflowEngine = kernel.get_engine("workflow")
 
-    executor, record = await _submit_paused_execution(
-        kernel, _TENANT_A, "a", requester, approval_timeout_seconds=1
-    )
+    executor, record = await _submit_paused_execution(kernel, _TENANT_A, "a", requester, approval_timeout_seconds=1)
     assert record.status == ExternalExecutionStatus.WAITING_APPROVAL
 
     await asyncio.sleep(3.0)
@@ -297,7 +295,9 @@ async def test_case_d_approval_approved_completes_with_full_trace(kernel_env: Ke
             target="kortex.connector.action.execute",
             parameters={
                 "request": ActionRequest(
-                    request_id=f"ext-m64-d-{uuid4()}", profile_id="prof-m64-slice-a", action_type=ConnectorActionType.FETCH
+                    request_id=f"ext-m64-d-{uuid4()}",
+                    profile_id="prof-m64-slice-a",
+                    action_type=ConnectorActionType.FETCH,
                 )
             },
             timeout_seconds=10.0,

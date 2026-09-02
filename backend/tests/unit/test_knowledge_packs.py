@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -60,12 +60,12 @@ def _pack(
     asset_id: str,
     data: bytes,
     tenant_id: str = "tenant-a",
-    manifest: Optional[Dict[str, Any]] = None,
+    manifest: dict[str, Any] | None = None,
     bucket_name: str = "knowledge",
-    storage_key: Optional[str] = None,
-    digital_signature: Optional[str] = None,
-    size_bytes: Optional[int] = None,
-    checksum_sha256: Optional[str] = None,
+    storage_key: str | None = None,
+    digital_signature: str | None = None,
+    size_bytes: int | None = None,
+    checksum_sha256: str | None = None,
 ) -> KnowledgePack:
     return KnowledgePack(
         asset_id=asset_id,
@@ -234,7 +234,10 @@ async def test_load_pack_does_not_cryptographically_verify_digital_signature(tmp
     data = b"signed-looking-payload"
     pack_no_sig = _pack("pack-no-sig", data, digital_signature=None, storage_key="packs/no-sig.kortex-knowledge")
     pack_garbage_sig = _pack(
-        "pack-garbage-sig", data, digital_signature="not-a-real-signature", storage_key="packs/garbage-sig.kortex-knowledge"
+        "pack-garbage-sig",
+        data,
+        digital_signature="not-a-real-signature",
+        storage_key="packs/garbage-sig.kortex-knowledge",
     )
     await object_store.put_object(pack_no_sig.bucket_name, pack_no_sig.storage_key, data)
     await object_store.put_object(pack_garbage_sig.bucket_name, pack_garbage_sig.storage_key, data)
@@ -334,7 +337,7 @@ async def test_concurrent_load_pack_for_same_identity_does_not_duplicate(tmp_pat
     assert len(failures) == 1
     assert isinstance(failures[0], KnowledgeDuplicatePackError)
 
-    async def _action(session: Any) -> List[Any]:
+    async def _action(session: Any) -> list[Any]:
         result = await session.execute(select(KnowledgePackRow))
         return list(result.scalars().all())
 

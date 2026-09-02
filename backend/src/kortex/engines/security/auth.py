@@ -55,8 +55,9 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, NamedTuple, Optional, cast
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any, NamedTuple, cast
 
 from argon2 import PasswordHasher
 from sqlalchemy import func, select
@@ -124,9 +125,9 @@ class _PrincipalSnapshot(NamedTuple):
     principal_type: str
     tenant_id: str
     enabled: bool
-    credential_hash: Optional[str]
+    credential_hash: str | None
     roles: list[str]
-    attributes: Dict[str, Any]
+    attributes: dict[str, Any]
 
 
 class AuthenticationManager(IAuthenticationManager):
@@ -263,7 +264,7 @@ class AuthenticationManager(IAuthenticationManager):
 
     async def _load_principal(
         self, tenant_id: str, principal_id: str, principal_type: str
-    ) -> Optional[_PrincipalSnapshot]:
+    ) -> _PrincipalSnapshot | None:
         """Look up a `PrincipalRecord` by `(tenant_id, principal_id, principal_type)`.
 
         Returns `None` if no matching record exists — callers must treat this
@@ -271,7 +272,7 @@ class AuthenticationManager(IAuthenticationManager):
         enumeration-resistance purposes.
         """
 
-        async def _action(session: AsyncSession) -> Optional[_PrincipalSnapshot]:
+        async def _action(session: AsyncSession) -> _PrincipalSnapshot | None:
             stmt = select(PrincipalRecord).where(
                 PrincipalRecord.tenant_id == tenant_id,
                 PrincipalRecord.principal_id == principal_id,
@@ -291,7 +292,7 @@ class AuthenticationManager(IAuthenticationManager):
                 attributes=dict(record.attributes),
             )
 
-        return cast(Optional[_PrincipalSnapshot], await self._run_in_transaction(_action))
+        return cast(_PrincipalSnapshot | None, await self._run_in_transaction(_action))
 
     def _verify_credential(self, presented: str, stored_hash: str) -> bool:
         """Verify `presented` against `stored_hash` via Argon2id.
@@ -308,7 +309,7 @@ class AuthenticationManager(IAuthenticationManager):
 
     # -- IAuthenticationManager ---------------------------------------------------
 
-    async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
+    async def authenticate(self, credentials: dict[str, Any]) -> SecurityPrincipal:
         """Verify credentials and return the resulting `SecurityPrincipal`.
 
         Uniform across `USER`/`SERVICE_PRINCIPAL`/`AGENT` — all three verify
@@ -363,7 +364,7 @@ class AuthenticationManager(IAuthenticationManager):
         principal_type: PrincipalType,
         credential: str,
         roles: list[str] | None = None,
-        attributes: Dict[str, Any] | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> bool:
         """Idempotently ensure a `PrincipalRecord` exists for a system/service identity (M6.2-1).
 
@@ -481,9 +482,7 @@ class AuthenticationManager(IAuthenticationManager):
         if not (isinstance(principal_id, str) and principal_id.strip()):
             raise BootstrapValidationError("A username is required.")
         if not isinstance(password, str) or len(password) < _BOOTSTRAP_MIN_PASSWORD_LENGTH:
-            raise BootstrapValidationError(
-                f"Password must be at least {_BOOTSTRAP_MIN_PASSWORD_LENGTH} characters."
-            )
+            raise BootstrapValidationError(f"Password must be at least {_BOOTSTRAP_MIN_PASSWORD_LENGTH} characters.")
         if not roles:
             raise BootstrapValidationError("At least one role is required for the bootstrap administrator.")
 
@@ -494,9 +493,7 @@ class AuthenticationManager(IAuthenticationManager):
             count_stmt = select(func.count()).select_from(PrincipalRecord)
             existing = (await session.execute(count_stmt)).scalar_one()
             if existing > 0:
-                raise BootstrapClosedError(
-                    "Bootstrap is no longer available: an administrator already exists."
-                )
+                raise BootstrapClosedError("Bootstrap is no longer available: an administrator already exists.")
 
             session.add(
                 PrincipalRecord(
@@ -523,9 +520,7 @@ class AuthenticationManager(IAuthenticationManager):
                 )
             )
             for permission in sorted(set(permissions)):
-                session.add(
-                    RolePermissionRecord(id=str(uuid.uuid4()), role=primary_role, permission=permission)
-                )
+                session.add(RolePermissionRecord(id=str(uuid.uuid4()), role=primary_role, permission=permission))
 
         await self._run_in_transaction(_action)
 
@@ -536,16 +531,18 @@ class AuthenticationManager(IAuthenticationManager):
         token is fully self-contained and self-validating.
         """
         token_id = os.urandom(16).hex()
-        issued_at_utc = datetime.now(timezone.utc)
+        issued_at_utc = datetime.now(UTC)
         expires_at_utc = issued_at_utc + _TOKEN_TTL
 
         payload_bytes = self._build_signing_payload(
-            token_id, principal.principal_id, principal.principal_type.value, principal.tenant_id,
-            issued_at_utc, expires_at_utc,
+            token_id,
+            principal.principal_id,
+            principal.principal_type.value,
+            principal.tenant_id,
+            issued_at_utc,
+            expires_at_utc,
         )
-        signature = self._verification_service.sign(
-            payload_bytes, self._signing_private_key, self._signing_public_key
-        )
+        signature = self._verification_service.sign(payload_bytes, self._signing_private_key, self._signing_public_key)
 
         return TokenPayload(
             token_id=token_id,
@@ -581,8 +578,12 @@ class AuthenticationManager(IAuthenticationManager):
             raise InvalidTokenError("Token has no signature.")
 
         payload_bytes = self._build_signing_payload(
-            token.token_id, token.principal_id, token.principal_type.value, token.tenant_id,
-            token.issued_at_utc, token.expires_at_utc,
+            token.token_id,
+            token.principal_id,
+            token.principal_type.value,
+            token.tenant_id,
+            token.issued_at_utc,
+            token.expires_at_utc,
         )
         signature_model = CryptographicSignature(
             algorithm="ed25519", signature=token.signature, public_key=self._signing_public_key
@@ -595,7 +596,7 @@ class AuthenticationManager(IAuthenticationManager):
         if snapshot is None or not snapshot.enabled:
             raise InvalidTokenError("Token principal is no longer valid.")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             is_temporally_invalid = now > token.expires_at_utc or now < token.issued_at_utc
         except TypeError:

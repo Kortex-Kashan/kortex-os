@@ -26,7 +26,8 @@ implementation of the `ISecurityEngine` protocol.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.engines.security.audit import AuditManager
@@ -70,8 +71,10 @@ logger = logging.getLogger("kortex.engines.security")
 
 _MASTER_KEY_CONFIG_KEY = "KORTEX_MASTER_KEY"
 _AUTH_SIGNING_KEY_CONFIG_KEY = "KORTEX_AUTH_SIGNING_PRIVATE_KEY"
-_SECRET_GET_CAPABILITY = "kortex.security.secret.get"
-_SECRET_PUT_CAPABILITY = "kortex.security.secret.put"
+# S105 false positives: capability name strings, flagged only because the
+# constant names contain "SECRET".
+_SECRET_GET_CAPABILITY = "kortex.security.secret.get"  # noqa: S105
+_SECRET_PUT_CAPABILITY = "kortex.security.secret.put"  # noqa: S105
 _AUTH_AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate"
 _ACCESS_AUTHORIZE_CAPABILITY = "kortex.security.access.authorize"
 _SIGNATURE_VERIFY_CAPABILITY = "kortex.security.signature.verify"
@@ -86,7 +89,7 @@ _BOOTSTRAP_ADMIN_ROLE = "admin"
 # during M7.3 planning: `SecretStore.put_secret` existed and was already
 # used internally for the AI system credential, but no tenant-facing,
 # RBAC-gated, audited capability ever exposed it).
-_CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
+_CANONICAL_CAPABILITIES: list[tuple[str, str]] = [
     (_AUTH_AUTHENTICATE_CAPABILITY, "Authenticate a caller identity."),
     (_ACCESS_AUTHORIZE_CAPABILITY, "Authorize a caller's requested capability."),
     (_SECRET_GET_CAPABILITY, "Resolve a secret handle to its plaintext value."),
@@ -114,7 +117,7 @@ _CANONICAL_CAPABILITIES: List[tuple[str, str]] = [
 # already required for any RBAC permission on this platform, since no
 # permission-provisioning API exists yet (a pre-existing gap, not introduced
 # here).
-_CANONICAL_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
+_CANONICAL_CAPABILITY_PERMISSIONS: dict[str, list[str]] = {
     _ACCESS_AUTHORIZE_CAPABILITY: ["security:read"],
     _SECRET_GET_CAPABILITY: ["security:read"],
     _SECRET_PUT_CAPABILITY: ["security:secret:write"],
@@ -127,7 +130,7 @@ _CANONICAL_CAPABILITY_PERMISSIONS: Dict[str, List[str]] = {
 # SERVICE_PRINCIPAL -> CONNECTOR is an implementation decision (closest
 # available category for an external service credential), not a frozen
 # mandate — flagged as such rather than silently assumed.
-_PRINCIPAL_TYPE_TO_ACTOR_TYPE: Dict[str, str] = {
+_PRINCIPAL_TYPE_TO_ACTOR_TYPE: dict[str, str] = {
     "USER": "HUMAN",
     "AGENT": "AI_AGENT",
     "SERVICE_PRINCIPAL": "CONNECTOR",
@@ -147,11 +150,11 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
 
     def __init__(
         self,
-        crypto_provider: Optional[ICryptoProvider] = None,
-        data_store: Optional[IDataStore] = None,
-        master_key: Optional[bytes] = None,
-        signing_private_key: Optional[bytes] = None,
-        event_engine: Optional[EventEngine] = None,
+        crypto_provider: ICryptoProvider | None = None,
+        data_store: IDataStore | None = None,
+        master_key: bytes | None = None,
+        signing_private_key: bytes | None = None,
+        event_engine: EventEngine | None = None,
     ) -> None:
         """Initialize SecurityEngine instance.
 
@@ -173,14 +176,14 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         """
         super().__init__()
         self._crypto_provider: ICryptoProvider = crypto_provider if crypto_provider is not None else LocalCrypto()
-        self._data_store_override: Optional[IDataStore] = data_store
-        self._master_key_override: Optional[bytes] = master_key
-        self._signing_private_key_override: Optional[bytes] = signing_private_key
-        self._event_engine_override: Optional[EventEngine] = event_engine
-        self._secret_store: Optional[SecretStore] = None
-        self._authentication_manager: Optional[AuthenticationManager] = None
-        self._authorization_engine: Optional[AuthorizationEngine] = None
-        self._audit_manager: Optional[AuditManager] = None
+        self._data_store_override: IDataStore | None = data_store
+        self._master_key_override: bytes | None = master_key
+        self._signing_private_key_override: bytes | None = signing_private_key
+        self._event_engine_override: EventEngine | None = event_engine
+        self._secret_store: SecretStore | None = None
+        self._authentication_manager: AuthenticationManager | None = None
+        self._authorization_engine: AuthorizationEngine | None = None
+        self._audit_manager: AuditManager | None = None
         # M7.1: bound `Kernel.list_capabilities` method only (never the full
         # `Kernel` instance) — the narrowest capture that lets
         # `bootstrap_create_admin` discover the union of every currently
@@ -189,10 +192,10 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         # permission set without hand-maintaining a duplicate list here that
         # would silently drift out of sync with every other engine's own
         # capability registrations.
-        self._list_capabilities: Optional[Callable[[], List[Any]]] = None
+        self._list_capabilities: Callable[[], list[Any]] | None = None
         self._verification_service: VerificationService = VerificationService(crypto_provider=self._crypto_provider)
-        self._registered_capabilities: List[str] = []
-        self._metrics: Dict[str, Any] = {
+        self._registered_capabilities: list[str] = []
+        self._metrics: dict[str, Any] = {
             "capabilities_registered": 0,
             "signature_verifications": 0,
         }
@@ -203,7 +206,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         return "security"
 
     @property
-    def dependencies(self) -> List[str]:
+    def dependencies(self) -> list[str]:
         """Names of prerequisite foundation engines."""
         return ["storage", "registry"]
 
@@ -292,7 +295,9 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                     # `self.authorize` (not the raw engine method) so this
                     # capability's real dispatch path is also audited (M6).
                     handler = self.authorize
-                    capability_description = f"{description} Fail-closed, hybrid RBAC+ABAC, audited (Milestones M4 + M6)."
+                    capability_description = (
+                        f"{description} Fail-closed, hybrid RBAC+ABAC, audited (Milestones M4 + M6)."
+                    )
                 elif capability_name == _SIGNATURE_VERIFY_CAPABILITY:
                     handler = self._verify_signature_capability_handler
                     capability_description = f"{description} Cryptographic verification (Milestone M6)."
@@ -373,7 +378,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
     def _build_authorization_engine(self, kernel: Kernel) -> AuthorizationEngine:
         """Resolve `IDataStore` and shared `ICacheStore`, then construct `AuthorizationEngine`."""
         data_store = self._resolve_data_store(kernel)
-        cache_store: Optional[ICacheStore] = None
+        cache_store: ICacheStore | None = None
         if self._data_store_override is None:
             storage_engine = kernel.get_engine("storage")
             cache_store = getattr(storage_engine, "cache", None)
@@ -391,7 +396,6 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                     event_engine = cast("EventEngine", resolved_event)
             except Exception:
                 event_engine = None
-
 
         return AuditManager(
             data_store=data_store,
@@ -415,7 +419,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         self._set_state(EngineState.STOPPED)
         self.logger.info("Security Engine stopped cleanly.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Perform diagnostic health check."""
         return self.health()
 
@@ -424,8 +428,8 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
     async def _verify_signature_capability_handler(
         self,
         data: bytes | str,
-        signature: bytes | str | Dict[str, Any] | CryptographicSignature,
-        public_key: Optional[bytes | str] = None,
+        signature: bytes | str | dict[str, Any] | CryptographicSignature,
+        public_key: bytes | str | None = None,
         algorithm: str = "ed25519",
         **_extra: Any,
     ) -> bool:
@@ -480,7 +484,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         tenant_id: str,
         principal_id: str,
         password: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Capability handler for `kortex.security.bootstrap.create_admin` (M7.1).
 
         Creates the very first tenant/administrator on a fresh install (see
@@ -499,7 +503,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         Records an audit entry mirroring `authenticate()`'s own pattern on
         both outcomes. Never audits, logs, or returns the submitted password.
         """
-        permissions: List[str] = []
+        permissions: list[str] = []
         if self._list_capabilities is not None:
             granted: set[str] = set()
             for descriptor in self._list_capabilities():
@@ -562,7 +566,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
 
     # -- ISecurityEngine Protocol Implementation ------------------------------
 
-    async def authenticate(self, credentials: Dict[str, Any]) -> SecurityPrincipal:
+    async def authenticate(self, credentials: dict[str, Any]) -> SecurityPrincipal:
         """Authenticate a caller identity.
 
         Records an audit entry and publishes a typed success/failure event
@@ -575,7 +579,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         # is required to fail closed with `AuthenticationError` even for non-dict shapes (`None`,
         # a bare string, etc.), so this audit-context extraction must never itself raise for those
         # shapes ahead of the real authentication check.
-        safe_credentials: Dict[str, Any] = credentials if isinstance(credentials, dict) else {}
+        safe_credentials: dict[str, Any] = credentials if isinstance(credentials, dict) else {}
         raw_tenant_id = safe_credentials.get("tenant_id")
         raw_principal_id = safe_credentials.get("principal_id")
         attempted_tenant_id = str(raw_tenant_id) if raw_tenant_id else "unknown"
@@ -623,7 +627,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         self,
         principal: SecurityPrincipal,
         requirement: PermissionRequirement,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> AccessDecision:
         """Authorize a caller's requested capability.
 
@@ -668,8 +672,8 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         actor_id: str,
         actor_type: str,
         tenant_id: str,
-        resource_id: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None,
+        resource_id: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Best-effort audit recording (Milestone M6).
 
@@ -712,9 +716,9 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         self,
         secret_handle: str,
         plaintext: str,
-        tenant_id: Optional[str] = None,
-        principal: Optional[SecurityPrincipal] = None,
-    ) -> Dict[str, Any]:
+        tenant_id: str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> dict[str, Any]:
         """Capability handler for `kortex.security.secret.put` (M7.3).
 
         Unlike the pre-existing `kortex.security.secret.get` capability
@@ -743,9 +747,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
 
         actor_id = principal.principal_id if principal is not None else "system"
         actor_type = (
-            _actor_type_for_principal_type(principal.principal_type.value)
-            if principal is not None
-            else "SYSTEM_ENGINE"
+            _actor_type_for_principal_type(principal.principal_type.value) if principal is not None else "SYSTEM_ENGINE"
         )
         await self._record_security_audit(
             action=_SECRET_PUT_CAPABILITY,
@@ -776,7 +778,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
 
     # -- Common Diagnostics Interface (IEngineDiagnostics) -------------------
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Return diagnostic health checks."""
         return {
             "engine": self.name,
@@ -789,11 +791,11 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
             "audit_implemented": self._audit_manager is not None,
         }
 
-    def metrics(self) -> Dict[str, Any]:
+    def metrics(self) -> dict[str, Any]:
         """Return operational runtime metrics."""
         return dict(self._metrics)
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return detailed technical diagnostics."""
         return {
             "engine": self.name,
@@ -812,6 +814,6 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         """Return semantic version string."""
         return "0.6.0-m6"
 
-    def capabilities(self) -> List[str]:
+    def capabilities(self) -> list[str]:
         """Return list of capability strings registered by this engine."""
         return list(self._registered_capabilities)

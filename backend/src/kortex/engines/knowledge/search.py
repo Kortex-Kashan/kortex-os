@@ -92,7 +92,6 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import List, Optional
 
 from kortex.engines.knowledge.graph import KnowledgeGraph
 from kortex.engines.knowledge.lineage import KnowledgeLineageManager
@@ -106,7 +105,7 @@ from kortex.engines.knowledge.models import (
 _DEFAULT_TRAVERSAL_MAX_HOPS = 3
 
 
-def _clamp_max_results(count: Optional[int]) -> Optional[int]:
+def _clamp_max_results(count: int | None) -> int | None:
     """`None` means unlimited (the model's own default/contract). Any
     concrete value <= 0 means "return nothing" — see module docstring."""
     if count is None:
@@ -137,7 +136,7 @@ class KnowledgeSearchEngine:
         self._graph = graph
         self._lineage_manager = lineage_manager
 
-    async def _resolve_as_of(self, current_record: KnowledgeRecord, as_of: datetime) -> Optional[KnowledgeRecord]:
+    async def _resolve_as_of(self, current_record: KnowledgeRecord, as_of: datetime) -> KnowledgeRecord | None:
         """Resolve the version of `current_record` that was current as of
         `as_of`, by walking `get_lineage()`'s existing chain — never a
         second lineage implementation. Returns `None` if the record did
@@ -154,7 +153,7 @@ class KnowledgeSearchEngine:
         this does not assume it.
         """
         lineage = await self._lineage_manager.get_lineage(current_record.record_id, current_record.tenant_id)
-        applicable: Optional[KnowledgeRecord] = None
+        applicable: KnowledgeRecord | None = None
         for version in lineage:
             if version.created_at <= as_of and (applicable is None or version.created_at > applicable.created_at):
                 applicable = version
@@ -170,7 +169,7 @@ class KnowledgeSearchEngine:
 
         current_records = await self._lineage_manager.list_current_records(query.tenant_id)
 
-        resolved: List[KnowledgeRecord] = []
+        resolved: list[KnowledgeRecord] = []
         for record in current_records:
             if query.as_of is not None:
                 version = await self._resolve_as_of(record, query.as_of)
@@ -216,7 +215,7 @@ class KnowledgeSearchEngine:
         ]
 
         seen_ids: set = set()
-        matched_nodes: List[KnowledgeNode] = []
+        matched_nodes: list[KnowledgeNode] = []
         for seed in seeds:
             if seed.node_id not in seen_ids:
                 seen_ids.add(seed.node_id)

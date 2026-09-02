@@ -298,7 +298,6 @@ async def test_kernel_capability_registration() -> None:
 
     assert len(kernel.capabilities) == len(CANONICAL_CAPABILITIES)
     for cap_name in CANONICAL_CAPABILITIES:
-
         assert cap_name in kernel.capabilities
         assert kernel.capabilities[cap_name]["provider"] == "ai"
         assert kernel.capabilities[cap_name]["handler"] is not None
@@ -744,9 +743,7 @@ async def test_orchestrate_agent_pause_and_resume() -> None:
         approval_policy=AlwaysApprovePolicy(),
         task_store=shared_task_store,
     )
-    resuming_engine = AIOrchestrationEngine(
-        agent_orchestrator=resuming_orchestrator, tool_registry=tools
-    )
+    resuming_engine = AIOrchestrationEngine(agent_orchestrator=resuming_orchestrator, tool_registry=tools)
     await resuming_engine.initialize(kernel)
 
     resumed_result = await resuming_engine.resume_agent(
@@ -836,9 +833,7 @@ async def test_orchestrate_agent_paused_turn_recorded_only_after_resume() -> Non
         approval_policy=AlwaysDenyPolicy(),
         task_store=shared_task_store,
     )
-    engine = AIOrchestrationEngine(
-        agent_orchestrator=orchestrator, tool_registry=tools, memory_manager=shared_memory
-    )
+    engine = AIOrchestrationEngine(agent_orchestrator=orchestrator, tool_registry=tools, memory_manager=shared_memory)
     await engine.initialize(kernel)
 
     task = AgentTask(
@@ -887,8 +882,7 @@ def _fingerprint(tool_calls: list[ToolCall]) -> str:
     """Mirrors `governance.py`'s `DurableAIApprovalPolicy.requires_approval`
     fingerprint formula exactly -- see `AIOrchestrationEngine._action_fingerprint`."""
     calls_summary = [
-        {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))}
-        for c in tool_calls
+        {"tool": c.tool_name, "args": scrub_secrets_from_text(json.dumps(c.arguments))} for c in tool_calls
     ]
     return hashlib.sha256(json.dumps(calls_summary, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -971,9 +965,7 @@ async def test_approval_decided_approved_resumes_paused_task() -> None:
     engine, task, paused = await _paused_engine_and_result()
     fp = _fingerprint(paused.pending_tool_calls)
 
-    event = _decided_event(
-        tenant_id=task.tenant_id, decision="APPROVED", task_id=task.task_id, action_fingerprint=fp
-    )
+    event = _decided_event(tenant_id=task.tenant_id, decision="APPROVED", task_id=task.task_id, action_fingerprint=fp)
     await engine._on_approval_decided(event)
 
     record = await engine.agent_orchestrator.get_task(task.task_id, task.tenant_id)
@@ -983,7 +975,7 @@ async def test_approval_decided_approved_resumes_paused_task() -> None:
 
 @pytest.mark.asyncio
 async def test_approval_decided_rejected_cancels_paused_task() -> None:
-    engine, task, paused = await _paused_engine_and_result()
+    engine, task, _paused = await _paused_engine_and_result()
 
     event = _decided_event(tenant_id=task.tenant_id, decision="REJECTED", task_id=task.task_id)
     await engine._on_approval_decided(event)
@@ -1000,7 +992,7 @@ async def test_approval_decided_expired_cancels_paused_task() -> None:
     REJECTED -- no special-cased `if decision == "EXPIRED"` handling exists
     or is needed, since the existing `decision != "APPROVED"` check already
     covers it correctly."""
-    engine, task, paused = await _paused_engine_and_result()
+    engine, task, _paused = await _paused_engine_and_result()
 
     event = _decided_event(tenant_id=task.tenant_id, decision="EXPIRED", task_id=task.task_id)
     await engine._on_approval_decided(event)
@@ -1014,7 +1006,7 @@ async def test_approval_decided_expired_cancels_paused_task() -> None:
 async def test_approval_decided_expired_never_resumes_task() -> None:
     """Adversarial: an EXPIRED decision must never take the resume path --
     the paused task's proposed tool calls must never actually execute."""
-    engine, task, paused = await _paused_engine_and_result()
+    engine, task, _paused = await _paused_engine_and_result()
 
     event = _decided_event(tenant_id=task.tenant_id, decision="EXPIRED", task_id=task.task_id)
     await engine._on_approval_decided(event)
@@ -1031,7 +1023,7 @@ async def test_duplicate_expired_event_is_harmless() -> None:
     """Delivering the same EXPIRED decision event twice must cancel the
     task exactly once -- the second delivery is an idempotent no-op because
     the task has already left PAUSED_FOR_APPROVAL."""
-    engine, task, paused = await _paused_engine_and_result()
+    engine, task, _paused = await _paused_engine_and_result()
 
     event = _decided_event(tenant_id=task.tenant_id, decision="EXPIRED", task_id=task.task_id)
     await engine._on_approval_decided(event)
@@ -1047,7 +1039,7 @@ async def test_expired_event_with_wrong_tenant_id_does_not_cancel_task() -> None
     """Adversarial: a forged/wrong tenant_id in the event payload must not
     reach across tenant boundaries to cancel a task belonging to a
     different tenant -- the tenant-scoped task lookup simply finds nothing."""
-    engine, task, paused = await _paused_engine_and_result()
+    engine, task, _paused = await _paused_engine_and_result()
 
     event = _decided_event(tenant_id="a-completely-different-tenant", decision="EXPIRED", task_id=task.task_id)
     await engine._on_approval_decided(event)
@@ -1251,18 +1243,14 @@ async def test_get_conversation_history_forces_principal_tenant_not_spoofed_call
     await engine.generate_response(request)
 
     # Caller claims tenant_a, but the verified principal is actually tenant_b.
-    history = await engine.get_conversation_history(
-        "tenant_a", "conv-shared-id", principal=_FakePrincipal("tenant_b")
-    )
+    history = await engine.get_conversation_history("tenant_a", "conv-shared-id", principal=_FakePrincipal("tenant_b"))
 
     assert len(history) == 1
     assert history[0].user_content == "secret to tenant B"
 
     # And the reverse: a real tenant_a principal must not see tenant_b's data
     # even when passing tenant_b's id as the (untrusted) argument.
-    isolated = await engine.get_conversation_history(
-        "tenant_b", "conv-shared-id", principal=_FakePrincipal("tenant_a")
-    )
+    isolated = await engine.get_conversation_history("tenant_b", "conv-shared-id", principal=_FakePrincipal("tenant_a"))
     assert isolated == []
 
 
@@ -1293,9 +1281,7 @@ async def test_conversation_history_capability_is_registered_and_reachable() -> 
 # ---------------------------------------------------------------------------
 
 
-def _make_task_record(
-    task_id: str, tenant_id: str, status: AgentStatus
-) -> PersistedAgentTaskRecord:
+def _make_task_record(task_id: str, tenant_id: str, status: AgentStatus) -> PersistedAgentTaskRecord:
     task = AgentTask(
         task_id=task_id,
         tenant_id=tenant_id,
@@ -1544,9 +1530,7 @@ def test_m8_files_quarantine_forbidden_imports(file_name: str) -> None:
     imports = _collect_imports(target_path)
     for forbidden in FORBIDDEN_NAMESPACES:
         violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
-        assert violations == [], (
-            f"{file_name} illegally imports {forbidden!r}: {violations}"
-        )
+        assert violations == [], f"{file_name} illegally imports {forbidden!r}: {violations}"
 
 
 def test_engine_py_contains_no_raw_sql() -> None:

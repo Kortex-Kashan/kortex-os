@@ -7,7 +7,6 @@ constraints declared within business recipes.
 
 from __future__ import annotations
 
-from typing import List, Set
 from kortex.engines.recipe.exceptions import RecipePermissionError
 from kortex.engines.recipe.models import RecipeDefinition, RecipePermission
 
@@ -18,8 +17,8 @@ class PermissionValidator:
     @staticmethod
     def validate_permissions(
         recipe: RecipeDefinition,
-        granted_capabilities: List[str],
-        granted_permissions: Optional[List[str]] = None,
+        granted_capabilities: list[str],
+        granted_permissions: list[str] | None = None,
     ) -> bool:
         """Verify that all capabilities and permissions requested by recipe are authorized.
 
@@ -34,20 +33,22 @@ class PermissionValidator:
         Raises:
             RecipePermissionError: If unauthorized capability or permission is requested.
         """
-        granted_cap_set: Set[str] = set(granted_capabilities)
+        granted_cap_set: set[str] = set(granted_capabilities)
 
         # Check required capabilities in manifest
         for required_cap in recipe.manifest.capabilities_required:
             if required_cap not in granted_cap_set:
                 raise RecipePermissionError(
-                    f"Recipe '{recipe.manifest.id}' requires capability '{required_cap}' which is not registered or granted."
+                    f"Recipe '{recipe.manifest.id}' requires capability '{required_cap}' which is not registered or "
+                    f"granted."
                 )
 
         # Check capabilities invoked in steps
         for step in recipe.steps:
             if step.capability and step.capability not in granted_cap_set:
                 raise RecipePermissionError(
-                    f"Step '{step.id}' in recipe '{recipe.manifest.id}' invokes unauthorized capability '{step.capability}'."
+                    f"Step '{step.id}' in recipe '{recipe.manifest.id}' invokes unauthorized capability "
+                    f"'{step.capability}'."
                 )
 
         # Check permission rules
@@ -56,13 +57,14 @@ class PermissionValidator:
             for perm in recipe.manifest.permissions_required:
                 if perm not in granted_perm_set:
                     raise RecipePermissionError(
-                        f"Recipe '{recipe.manifest.id}' requires permission '{perm}' which is not granted in security context."
+                        f"Recipe '{recipe.manifest.id}' requires permission '{perm}' which is not granted in security "
+                        f"context."
                     )
 
         return True
 
     @staticmethod
-    def parse_permissions_yaml_dict(data: dict) -> List[RecipePermission]:
+    def parse_permissions_yaml_dict(data: dict) -> list[RecipePermission]:
         """Convert parsed permissions.yaml dictionary into RecipePermission models."""
         perms = data.get("permissions", [])
         return [RecipePermission(**p) for p in perms]

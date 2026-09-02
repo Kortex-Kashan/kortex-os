@@ -13,13 +13,13 @@ Knowledge Engine test file already uses).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any
 
 import pytest
 
 from kortex.core.base_engine import EngineState
 from kortex.core.db import DatabaseEngineManager
-from kortex.core.exceptions import EngineStateError
+from kortex.core.exceptions import EngineStateError, ResourceNotFoundError
 from kortex.core.kernel import Kernel
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.knowledge.exceptions import KnowledgeSourceNotFoundError
@@ -36,7 +36,7 @@ from kortex.engines.storage.engine import StorageEngine
 _REFERENCE_SOURCE_ID = "kortex.knowledge.source.reference"
 
 
-async def _build_ready_engine(tmp_path: Path) -> Tuple[Kernel, StorageEngine, KnowledgeEngine]:
+async def _build_ready_engine(tmp_path: Path) -> tuple[Kernel, StorageEngine, KnowledgeEngine]:
     """`Kernel.boot()` (not a manual `initialize()`/`start()` call) is
     required here: it is the only thing that connects the database and
     calls `create_all_tables()` before any engine's `initialize()` runs
@@ -125,7 +125,7 @@ async def test_initialize_without_storage_engine_fails_closed() -> None:
     an ambiguous READY/RUNNING-looking state."""
     kernel = Kernel()
     engine = KnowledgeEngine()
-    with pytest.raises(Exception):
+    with pytest.raises(ResourceNotFoundError):
         await engine.initialize(kernel)
     assert engine.state == EngineState.FAILED
 
@@ -193,15 +193,14 @@ async def test_index_source_never_produces_confirmed_trust_state(tmp_path: Path)
     _kernel, _storage, knowledge_engine = await _build_ready_engine(tmp_path)
     created = await knowledge_engine.index_source(_REFERENCE_SOURCE_ID, "tenant-a")
     assert all(
-        r.trust_state not in (KnowledgeTrustState.HUMAN_CONFIRMED, KnowledgeTrustState.HUMAN_CORRECTED)
-        for r in created
+        r.trust_state not in (KnowledgeTrustState.HUMAN_CONFIRMED, KnowledgeTrustState.HUMAN_CORRECTED) for r in created
     )
 
 
 @pytest.mark.asyncio
 async def test_index_source_emits_knowledge_node_indexed_event(tmp_path: Path) -> None:
     kernel, _storage, knowledge_engine = await _build_ready_engine(tmp_path)
-    received: List[Any] = []
+    received: list[Any] = []
     kernel.subscribe_event("knowledge.node.indexed", lambda event: received.append(event))
 
     await knowledge_engine.index_source(_REFERENCE_SOURCE_ID, "tenant-a")
@@ -217,7 +216,7 @@ async def test_index_source_emits_knowledge_node_indexed_event(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_load_pack_delegates_to_pack_manager(tmp_path: Path) -> None:
-    kernel, storage_engine, knowledge_engine = await _build_ready_engine(tmp_path)
+    _kernel, storage_engine, knowledge_engine = await _build_ready_engine(tmp_path)
     data = b"pack-payload"
     pack = _pack(data)
     await storage_engine.object.put_object(pack.bucket_name, pack.storage_key, data)
@@ -230,7 +229,7 @@ async def test_load_pack_delegates_to_pack_manager(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_load_pack_emits_knowledge_pack_loaded_event(tmp_path: Path) -> None:
     kernel, storage_engine, knowledge_engine = await _build_ready_engine(tmp_path)
-    received: List[Any] = []
+    received: list[Any] = []
     kernel.subscribe_event("knowledge.pack.loaded", lambda event: received.append(event))
 
     data = b"pack-event-payload"

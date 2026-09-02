@@ -21,13 +21,13 @@ from kortex.engines.ai.models import LLMRequest
 from kortex.engines.ai.ollama_provider import DEFAULT_OLLAMA_TIMEOUT_SECONDS, OllamaProvider
 
 
-def _make_provider(handler) -> OllamaProvider:  # noqa: ANN001
+def _make_provider(handler) -> OllamaProvider:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
     return OllamaProvider(base_url="http://localhost:11434", model_name="llama3", client=client)
 
 
-def _request(prompt: str = "hello", **overrides) -> LLMRequest:  # noqa: ANN003
+def _request(prompt: str = "hello", **overrides) -> LLMRequest:
     fields = {
         "request_id": "req-1",
         "tenant_id": "tenant-1",

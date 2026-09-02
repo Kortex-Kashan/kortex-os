@@ -4,7 +4,9 @@ Unit tests for RecipeEngine facade and IEngineDiagnostics.
 
 import io
 import zipfile
+
 import pytest
+
 from kortex.core.base_engine import EngineState
 from kortex.engines.recipe.engine import RecipeEngine
 from kortex.engines.recipe.exceptions import RecipeError
@@ -93,7 +95,9 @@ async def test_recipe_engine_lifecycle_and_capabilities() -> None:
     # Load package
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
-        zf.writestr("manifest.yaml", "id: r_pkg\nname: Pkg Recipe\nnamespace: kortex.pkg\nversion: 1.0.0\nchecksum: '123'")
+        zf.writestr(
+            "manifest.yaml", "id: r_pkg\nname: Pkg Recipe\nnamespace: kortex.pkg\nversion: 1.0.0\nchecksum: '123'"
+        )
         zf.writestr("recipe.yaml", "steps:\n  - id: s_pkg\n    name: Pkg Step")
     pkg_bytes = buffer.getvalue()
 
@@ -117,7 +121,9 @@ async def test_recipe_engine_lifecycle_and_capabilities() -> None:
     # Upgrade via bytes
     buffer_v2 = io.BytesIO()
     with zipfile.ZipFile(buffer_v2, "w") as zf:
-        zf.writestr("manifest.yaml", "id: r_pkg\nname: Pkg Recipe\nnamespace: kortex.pkg\nversion: 2.0.0\nchecksum: '123'")
+        zf.writestr(
+            "manifest.yaml", "id: r_pkg\nname: Pkg Recipe\nnamespace: kortex.pkg\nversion: 2.0.0\nchecksum: '123'"
+        )
         zf.writestr("recipe.yaml", "steps:\n  - id: s_pkg\n    name: Pkg Step")
     pkg_v2_bytes = buffer_v2.getvalue()
 

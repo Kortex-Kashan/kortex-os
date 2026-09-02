@@ -14,7 +14,6 @@ from kortex.engines.document.models import (
     AdapterMetadata,
     BindingContext,
     Document,
-    DocumentContent,
     DocumentExtractionResult,
     DocumentLifecycleState,
     DocumentMetadata,
@@ -24,6 +23,7 @@ from kortex.engines.document.models import (
     OperationResult,
     PreviewOptions,
     PreviewResult,
+    SecurityMetadata,
     TemplateSchema,
     ValidationReport,
 )
@@ -36,9 +36,7 @@ if TYPE_CHECKING:
 class IDocumentEngine(Protocol):
     """Primary facade interface exposed by the Document Engine."""
 
-    async def execute_profile(
-        self, profile_id: str, request: OperationRequest
-    ) -> OperationResult:
+    async def execute_profile(self, profile_id: str, request: OperationRequest) -> OperationResult:
         """Execute a Document Operation Profile via configured Adapter Pipeline."""
         ...
 
@@ -52,15 +50,11 @@ class IDocumentEngine(Protocol):
         """Transition document version to a new lifecycle state."""
         ...
 
-    async def bind_template(
-        self, template_id: str, context: BindingContext
-    ) -> ValidationReport:
+    async def bind_template(self, template_id: str, context: BindingContext) -> ValidationReport:
         """Validate and bind context data against a declarative Template Schema."""
         ...
 
-    async def generate_preview(
-        self, request_id: str, options: PreviewOptions
-    ) -> PreviewResult:
+    async def generate_preview(self, request_id: str, options: PreviewOptions) -> PreviewResult:
         """Generate a preview thumbnail for a document operation page."""
         ...
 
@@ -68,9 +62,7 @@ class IDocumentEngine(Protocol):
         """Return list of metadata objects for all registered document adapters."""
         ...
 
-    async def register_adapter(
-        self, adapter: BaseDocumentAdapter | AdapterMetadata
-    ) -> BaseDocumentAdapter:
+    async def register_adapter(self, adapter: BaseDocumentAdapter | AdapterMetadata) -> BaseDocumentAdapter:
         """Register a new document adapter into the Document Adapter Registry."""
         ...
 
@@ -79,7 +71,7 @@ class IDocumentEngine(Protocol):
         document_id: str,
         version_id: str,
         ontology: dict[str, Any] | None = None,
-    ) -> "DocumentIntelligenceModel":
+    ) -> DocumentIntelligenceModel:
         """Trigger intelligence analysis via IDocumentIntelligenceProvider."""
         ...
 
@@ -92,9 +84,7 @@ class IDocumentEngine(Protocol):
 class IDocumentLifecycleManager(Protocol):
     """Interface for managing document lifecycle state machine, version lineage, and immutability."""
 
-    def validate_transition(
-        self, current_state: DocumentLifecycleState, target_state: DocumentLifecycleState
-    ) -> bool:
+    def validate_transition(self, current_state: DocumentLifecycleState, target_state: DocumentLifecycleState) -> bool:
         """Validate whether a lifecycle transition from current_state to target_state is permitted."""
         ...
 
@@ -110,27 +100,19 @@ class IDocumentLifecycleManager(Protocol):
         """Transition document state adhering to state machine transition rules."""
         ...
 
-    async def get_version(
-        self, document_id: str, version_id: str, tenant_id: str = "default"
-    ) -> DocumentMetadata:
+    async def get_version(self, document_id: str, version_id: str, tenant_id: str = "default") -> DocumentMetadata:
         """Retrieve metadata for a specific document version."""
         ...
 
-    async def get_latest_version(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> DocumentMetadata:
+    async def get_latest_version(self, document_id: str, tenant_id: str = "default") -> DocumentMetadata:
         """Retrieve newest active version metadata for a document entity."""
         ...
 
-    async def get_lineage(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> list[DocumentMetadata]:
+    async def get_lineage(self, document_id: str, tenant_id: str = "default") -> list[DocumentMetadata]:
         """Retrieve complete version lineage chain for a document entity."""
         ...
 
-    async def is_immutable(
-        self, document_id: str, version_id: str, tenant_id: str = "default"
-    ) -> bool:
+    async def is_immutable(self, document_id: str, version_id: str, tenant_id: str = "default") -> bool:
         """Check whether a document version is locked against edits."""
         ...
 
@@ -168,9 +150,7 @@ class IDocumentLifecycleManager(Protocol):
 class ITemplateLibrary(Protocol):
     """Interface for indexing, searching, loading, and managing declarative templates."""
 
-    async def get_template(
-        self, template_id: str, tenant_id: str | None = None
-    ) -> TemplateSchema:
+    async def get_template(self, template_id: str, tenant_id: str | None = None) -> TemplateSchema:
         """Retrieve declarative TemplateSchema by template ID."""
         ...
 
@@ -183,9 +163,7 @@ class ITemplateLibrary(Protocol):
         """Search template library by keyword query and filtering tags."""
         ...
 
-    async def install_template(
-        self, schema: TemplateSchema, tenant_id: str | None = None
-    ) -> bool:
+    async def install_template(self, schema: TemplateSchema, tenant_id: str | None = None) -> bool:
         """Install a new declarative template into the local Template Library."""
         ...
 
@@ -194,9 +172,7 @@ class ITemplateLibrary(Protocol):
 class ITemplateBinder(Protocol):
     """Interface for binding context data against declarative Template Schemas."""
 
-    async def bind(
-        self, schema: TemplateSchema, context: BindingContext
-    ) -> ValidationReport:
+    async def bind(self, schema: TemplateSchema, context: BindingContext) -> ValidationReport:
         """Validate context data against template placeholders and compute fields."""
         ...
 
@@ -205,9 +181,7 @@ class ITemplateBinder(Protocol):
 class IDocumentAdapterRegistry(Protocol):
     """Thread-safe registry protocol for registering and looking up document adapters."""
 
-    def register_adapter(
-        self, adapter: BaseDocumentAdapter | AdapterMetadata
-    ) -> BaseDocumentAdapter:
+    def register_adapter(self, adapter: BaseDocumentAdapter | AdapterMetadata) -> BaseDocumentAdapter:
         """Register a document adapter instance, or bare adapter metadata, in the registry."""
         ...
 
@@ -258,9 +232,7 @@ class IDocumentOperationProfileManager(Protocol):
 class IAdapterPipelineExecutor(Protocol):
     """Interface for executing multi-stage Adapter Pipelines."""
 
-    async def execute_pipeline(
-        self, profile_id: str, request: OperationRequest
-    ) -> OperationResult:
+    async def execute_pipeline(self, profile_id: str, request: OperationRequest) -> OperationResult:
         """Coordinate and execute adapter pipeline stages for an operation profile."""
         ...
 
@@ -269,9 +241,7 @@ class IAdapterPipelineExecutor(Protocol):
 class IDocumentIntelligenceProvider(Protocol):
     """Interface for declarative document intelligence analysis and concept extraction."""
 
-    async def extract_concepts(
-        self, document_id: str, version_id: str
-    ) -> dict[str, Any]:
+    async def extract_concepts(self, document_id: str, version_id: str) -> dict[str, Any]:
         """Extract semantic concepts and structural relationships from document."""
         ...
 
@@ -299,21 +269,15 @@ class IDocumentIntelligenceProvider(Protocol):
 class IDocumentRecommendationProvider(Protocol):
     """Interface for AI-driven template, profile, and pipeline recommendations."""
 
-    async def recommend_template(
-        self, user_intent: str, data_schema: dict[str, Any]
-    ) -> list[str]:
+    async def recommend_template(self, user_intent: str, data_schema: dict[str, Any]) -> list[str]:
         """Recommend template schema IDs based on user intent and available data."""
         ...
 
-    async def recommend_operation_profile(
-        self, business_operation: str, user_context: dict[str, Any]
-    ) -> str:
+    async def recommend_operation_profile(self, business_operation: str, user_context: dict[str, Any]) -> str:
         """Recommend optimal DocumentOperationProfile ID."""
         ...
 
-    async def recommend_adapter_pipeline(
-        self, profile_id: str, installed_adapters: list[AdapterMetadata]
-    ) -> list[str]:
+    async def recommend_adapter_pipeline(self, profile_id: str, installed_adapters: list[AdapterMetadata]) -> list[str]:
         """Recommend optimal adapter pipeline stage configuration."""
         ...
 
@@ -419,9 +383,7 @@ class IDocumentRepository(Protocol):
         """List root documents matching tenant and optional type filter."""
         ...
 
-    async def create_version(
-        self, version: DocumentVersion, tenant_id: str = "default"
-    ) -> DocumentVersion:
+    async def create_version(self, version: DocumentVersion, tenant_id: str = "default") -> DocumentVersion:
         """Persist an immutable DocumentVersion snapshot."""
         ...
 
@@ -431,15 +393,11 @@ class IDocumentRepository(Protocol):
         """Retrieve specific DocumentVersion snapshot."""
         ...
 
-    async def get_latest_version(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> DocumentVersion | None:
+    async def get_latest_version(self, document_id: str, tenant_id: str = "default") -> DocumentVersion | None:
         """Retrieve most recently created version snapshot for a document."""
         ...
 
-    async def list_versions(
-        self, document_id: str, tenant_id: str = "default"
-    ) -> list[DocumentVersion]:
+    async def list_versions(self, document_id: str, tenant_id: str = "default") -> list[DocumentVersion]:
         """List all version snapshots for a document in creation order."""
         ...
 
@@ -464,7 +422,8 @@ class IDocumentRepository(Protocol):
         tenant_id: str = "default",
         sha256_hash: str | None = None,
     ) -> tuple[DocumentVersion, DocumentVersion | None]:
-        """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document pointer.
+        """Atomically transition a document version to PUBLISHED, supersede its predecessor, and update the document
+        pointer.
 
         Uses an atomic compare-and-swap (CAS) update on DocumentRecord.current_version_id to guarantee that exactly
         one transaction succeeds in concurrent publication races.
@@ -488,9 +447,7 @@ class IDocumentRepository(Protocol):
         """Record sanitized document operation execution history."""
         ...
 
-    async def get_operation_history(
-        self, request_id: str, tenant_id: str = "default"
-    ) -> dict[str, Any] | None:
+    async def get_operation_history(self, request_id: str, tenant_id: str = "default") -> dict[str, Any] | None:
         """Retrieve operation execution history entry by request ID."""
         ...
 
@@ -526,9 +483,7 @@ class IDocumentRepository(Protocol):
         """List registered operation profiles matching criteria."""
         ...
 
-    async def delete_operation_profile(
-        self, profile_id: str, version: str, tenant_id: str = "default"
-    ) -> bool:
+    async def delete_operation_profile(self, profile_id: str, version: str, tenant_id: str = "default") -> bool:
         """Delete an operation profile version record."""
         ...
 
@@ -537,9 +492,7 @@ class IDocumentRepository(Protocol):
 class ITemplateRepository(Protocol):
     """Protocol defining relational persistence operations for Template Schemas via IDataStore."""
 
-    async def save_template(
-        self, schema: TemplateSchema, tenant_id: str = "default"
-    ) -> TemplateSchema:
+    async def save_template(self, schema: TemplateSchema, tenant_id: str = "default") -> TemplateSchema:
         """Persist a new declarative TemplateSchema version."""
         ...
 
@@ -549,15 +502,11 @@ class ITemplateRepository(Protocol):
         """Retrieve a TemplateSchema by template_id and optional version (latest if omitted)."""
         ...
 
-    async def list_templates(
-        self, tenant_id: str = "default", namespace: str | None = None
-    ) -> list[TemplateSchema]:
+    async def list_templates(self, tenant_id: str = "default", namespace: str | None = None) -> list[TemplateSchema]:
         """List persisted template versions matching tenant and optional namespace filter."""
         ...
 
-    async def delete_template(
-        self, template_id: str, version: str, tenant_id: str = "default"
-    ) -> bool:
+    async def delete_template(self, template_id: str, version: str, tenant_id: str = "default") -> bool:
         """Delete a specific persisted template version."""
         ...
 

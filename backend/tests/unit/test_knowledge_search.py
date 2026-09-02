@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -35,7 +35,7 @@ from kortex.engines.knowledge.models import (
 )
 from kortex.engines.knowledge.search import KnowledgeSearchEngine
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _query(
@@ -499,7 +499,9 @@ async def test_search_hybrid_preserves_tenant_isolation() -> None:
 @pytest.mark.asyncio
 async def test_search_hybrid_preserves_trust_state_filtering() -> None:
     engine, _graph, lineage = await _build_engine()
-    await lineage.create_record(_record("rec-1", trust_state=KnowledgeTrustState.AI_CANDIDATE, content={"summary": "alpha"}))
+    await lineage.create_record(
+        _record("rec-1", trust_state=KnowledgeTrustState.AI_CANDIDATE, content={"summary": "alpha"})
+    )
 
     result = await engine.search_hybrid(_query("alpha"))
     assert result.matching_records == []  # default trust_states excludes AI_CANDIDATE
@@ -514,8 +516,8 @@ async def test_search_hybrid_does_not_duplicate_within_its_own_fields() -> None:
     graph.add_relationship(_rel("r1", "seed", "shared"))
 
     result = await engine.search_hybrid(_query("alpha"))
-    assert len(result.matching_records) == len(set(r.record_id for r in result.matching_records))
-    assert len(result.matching_nodes) == len(set(n.node_id for n in result.matching_nodes))
+    assert len(result.matching_records) == len({r.record_id for r in result.matching_records})
+    assert len(result.matching_nodes) == len({n.node_id for n in result.matching_nodes})
 
 
 # -- New enumeration methods: KnowledgeGraph.list_nodes / lineage.list_current_records --

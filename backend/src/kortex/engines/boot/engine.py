@@ -8,16 +8,16 @@ orderly engine initialization, system-wide health checks, and graceful shutdown 
 from __future__ import annotations
 
 import collections
-from typing import TYPE_CHECKING, Any, Dict, List, Set
+from typing import TYPE_CHECKING, Any
 
 from kortex.core.base_engine import BaseEngine, EngineState
-from kortex.core.exceptions import EngineNotFoundError, KernelBootError
+from kortex.core.exceptions import KernelBootError
 
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
 
 
-def _report_is_healthy(report: Dict[str, Any]) -> bool:
+def _report_is_healthy(report: dict[str, Any]) -> bool:
     """Interpret one engine's `health_check()` report leniently.
 
     Engines report health two different ways across the codebase: some set
@@ -44,7 +44,7 @@ class BootEngine(BaseEngine):
 
     def __init__(self) -> None:
         super().__init__()
-        self._boot_order: List[str] = []
+        self._boot_order: list[str] = []
         self._kernel_ref: Kernel | None = None
 
     @property
@@ -64,7 +64,7 @@ class BootEngine(BaseEngine):
         self._set_state(EngineState.RUNNING)
         self.logger.info("Boot Engine running.")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Diagnostic health check."""
         return {
             "engine": self.name,
@@ -80,7 +80,7 @@ class BootEngine(BaseEngine):
 
     # -- Dependency Resolution & Boot Operations ---------------------------
 
-    def resolve_dependency_order(self, engines: Dict[str, BaseEngine]) -> List[str]:
+    def resolve_dependency_order(self, engines: dict[str, BaseEngine]) -> list[str]:
         """Topologically sort registered system engines by declared dependencies.
 
         Args:
@@ -92,8 +92,8 @@ class BootEngine(BaseEngine):
         Raises:
             KernelBootError: If a dependency is missing or a cyclic dependency is detected.
         """
-        in_degree: Dict[str, int] = {name: 0 for name in engines}
-        adj_list: Dict[str, List[str]] = collections.defaultdict(list)
+        in_degree: dict[str, int] = dict.fromkeys(engines, 0)
+        adj_list: dict[str, list[str]] = collections.defaultdict(list)
 
         for name, engine in engines.items():
             for dep in engine.dependencies:
@@ -104,7 +104,7 @@ class BootEngine(BaseEngine):
 
         # Queue of engines with zero incoming dependencies
         queue = collections.deque([name for name, deg in in_degree.items() if deg == 0])
-        sorted_order: List[str] = []
+        sorted_order: list[str] = []
 
         while queue:
             node = queue.popleft()
@@ -174,10 +174,10 @@ class BootEngine(BaseEngine):
 
         self.logger.info("KORTEX OS System Shutdown Sequence completed.")
 
-    async def run_system_health_checks(self, kernel: Kernel) -> Dict[str, Any]:
+    async def run_system_health_checks(self, kernel: Kernel) -> dict[str, Any]:
         """Gather aggregated health check reports across all active system engines."""
         registered_engines = kernel.get_all_engines()
-        reports: Dict[str, Any] = {}
+        reports: dict[str, Any] = {}
         all_healthy = True
 
         for name, engine in registered_engines.items():

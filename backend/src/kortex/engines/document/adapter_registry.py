@@ -136,9 +136,7 @@ class DocumentAdapterRegistry:
         except Exception as err:
             raise DocumentAdapterError(f"Invalid adapter version: {err}") from err
 
-    def register_adapter(
-        self, adapter: BaseDocumentAdapter | AdapterMetadata
-    ) -> BaseDocumentAdapter:
+    def register_adapter(self, adapter: BaseDocumentAdapter | AdapterMetadata) -> BaseDocumentAdapter:
         """Register a BaseDocumentAdapter or AdapterMetadata instance.
 
         Args:
@@ -184,9 +182,7 @@ class DocumentAdapterRegistry:
         self._mark_discovery_cache_dirty()
         return adapter_obj
 
-    def unregister_adapter(
-        self, adapter_id: str, version: str | None = None
-    ) -> bool:
+    def unregister_adapter(self, adapter_id: str, version: str | None = None) -> bool:
         """Unregister an adapter or specific adapter version from the registry.
 
         Args:
@@ -258,9 +254,7 @@ class DocumentAdapterRegistry:
 
         raise AdapterNotFoundError(f"Invalid lookup target: {identifier_or_capability}")
 
-    def get_adapter_by_id(
-        self, adapter_id: str, version: str | None = None
-    ) -> BaseDocumentAdapter:
+    def get_adapter_by_id(self, adapter_id: str, version: str | None = None) -> BaseDocumentAdapter:
         """Retrieve a registered adapter by adapter_id and optional version.
 
         Args:
@@ -280,16 +274,12 @@ class DocumentAdapterRegistry:
         if version is not None:
             version = version.strip()
             if version not in self._adapters[adapter_id]:
-                raise AdapterNotFoundError(
-                    f"Adapter '{adapter_id}' version '{version}' not found in registry."
-                )
+                raise AdapterNotFoundError(f"Adapter '{adapter_id}' version '{version}' not found in registry.")
             return self._adapters[adapter_id][version]
 
         return self.get_latest_version(adapter_id)
 
-    def get_adapter_by_capability(
-        self, capability: AdapterCapability | str
-    ) -> BaseDocumentAdapter:
+    def get_adapter_by_capability(self, capability: AdapterCapability | str) -> BaseDocumentAdapter:
         """Retrieve the latest registered adapter supporting a specific capability.
 
         Args:
@@ -343,9 +333,7 @@ class DocumentAdapterRegistry:
         """
         return self.get_adapter_by_id(adapter_id, version=version)
 
-    def get_adapter_metadata(
-        self, adapter_id: str, version: str | None = None
-    ) -> AdapterMetadata:
+    def get_adapter_metadata(self, adapter_id: str, version: str | None = None) -> AdapterMetadata:
         """Retrieve AdapterMetadata for a registered adapter.
 
         Args:
@@ -361,9 +349,7 @@ class DocumentAdapterRegistry:
         adapter_obj = self.get_adapter_by_id(adapter_id, version=version)
         return adapter_obj.metadata
 
-    def find_by_capability(
-        self, capability: AdapterCapability | str
-    ) -> list[BaseDocumentAdapter]:
+    def find_by_capability(self, capability: AdapterCapability | str) -> list[BaseDocumentAdapter]:
         """Find all registered adapters advertising support for a specific capability.
 
         Returns latest version for each matching adapter ID.
@@ -394,9 +380,7 @@ class DocumentAdapterRegistry:
 
         return result
 
-    def find_by_operation(
-        self, operation: DocumentOperationType | str
-    ) -> list[BaseDocumentAdapter]:
+    def find_by_operation(self, operation: DocumentOperationType | str) -> list[BaseDocumentAdapter]:
         """Find all registered adapters advertising support for a specific operation type.
 
         Args:
@@ -466,9 +450,7 @@ class DocumentAdapterRegistry:
             return cast(list[AdapterMetadata], cached)
 
         result = self.list_adapters()
-        await self._cache_store.set(
-            self.DISCOVERY_CACHE_KEY, result, ttl_seconds=self.ADAPTER_CACHE_TTL_SECONDS
-        )
+        await self._cache_store.set(self.DISCOVERY_CACHE_KEY, result, ttl_seconds=self.ADAPTER_CACHE_TTL_SECONDS)
         return result
 
     def list_all_adapter_versions(self) -> list[AdapterMetadata]:
@@ -478,8 +460,8 @@ class DocumentAdapterRegistry:
             List of AdapterMetadata objects.
         """
         result: list[AdapterMetadata] = []
-        for adapter_id, versions_map in self._adapters.items():
-            for ver_str, adapter_obj in versions_map.items():
+        for _adapter_id, versions_map in self._adapters.items():
+            for _ver_str, adapter_obj in versions_map.items():
                 result.append(adapter_obj.metadata)
         return result
 

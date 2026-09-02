@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Dict, List, Optional
 
 from kortex.core.exceptions import ResourceNotFoundError
 from kortex.engines.storage.interfaces import IFileStore, IObjectStore
@@ -31,7 +30,7 @@ class BlobObjectStore(IObjectStore):
         """
         self._file_store = file_store
         self._enable_deduplication = enable_deduplication
-        self._metadata_index: Dict[str, ObjectMetadata] = {}
+        self._metadata_index: dict[str, ObjectMetadata] = {}
         logger.debug("Initialized BlobObjectStore (Deduplication=%s)", self._enable_deduplication)
 
     @property
@@ -99,8 +98,8 @@ class BlobObjectStore(IObjectStore):
         rel_path = self._build_storage_path(bucket_name, object_key)
         try:
             return await self._file_store.read_file(rel_path)
-        except ResourceNotFoundError:
-            raise ResourceNotFoundError(f"Object '{object_key}' not found in bucket '{bucket_name}'")
+        except ResourceNotFoundError as exc:
+            raise ResourceNotFoundError(f"Object '{object_key}' not found in bucket '{bucket_name}'") from exc
 
     async def delete_object(self, bucket_name: str, object_key: str) -> bool:
         """Delete an object blob from a bucket.
@@ -123,7 +122,7 @@ class BlobObjectStore(IObjectStore):
         rel_path = self._build_storage_path(bucket_name, object_key)
         return await self._file_store.file_exists(rel_path)
 
-    async def list_objects(self, bucket_name: str, prefix: Optional[str] = None) -> List[ObjectMetadata]:
+    async def list_objects(self, bucket_name: str, prefix: str | None = None) -> list[ObjectMetadata]:
         """List metadata descriptors for objects matching a prefix filter in a bucket.
 
         Args:
@@ -136,12 +135,12 @@ class BlobObjectStore(IObjectStore):
         bucket_rel_path = f"buckets/{bucket_name.strip('/')}"
         files = await self._file_store.list_files(bucket_rel_path)
 
-        results: List[ObjectMetadata] = []
+        results: list[ObjectMetadata] = []
         for file_meta in files:
             # Extract object_key from relative path (remove buckets/bucket_name/)
             prefix_to_strip = f"{bucket_rel_path}/"
             if file_meta.relative_path.startswith(prefix_to_strip):
-                obj_key = file_meta.relative_path[len(prefix_to_strip):]
+                obj_key = file_meta.relative_path[len(prefix_to_strip) :]
             else:
                 obj_key = file_meta.file_name
 
