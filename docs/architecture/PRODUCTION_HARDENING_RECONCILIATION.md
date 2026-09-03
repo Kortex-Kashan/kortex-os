@@ -53,8 +53,8 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Work Package | Status | Dependencies | Evidence | Acceptance |
 |---|---|---|---|---|
 | Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
-| Phase 7 — Production Hardening — Sentinel Engine | **IMPLEMENTED — AWAITING REVIEW** | None | §5.2 | Pending review (§5.2) |
-| Monitoring Engine | PENDING | None hard | §5.3 | Not planned yet |
+| Phase 7 — Production Hardening — Sentinel Engine | **DONE** | None | §5.2 | Formally accepted (§5.2) |
+| Monitoring Engine | **PLANNED** | None hard | §5.3 | Implementation plan complete (§5.3) |
 | Backup Engine | PENDING | Migrations (now available) | §5.4 | Not planned yet |
 | Recovery Engine | BLOCKED — PENDING OWNER DECISION | Owner Decision #1 (§3) | §5.5 | Not planned yet |
 | Update Engine | PENDING | Migrations (now available) | §5.6 | Not planned yet |
@@ -63,7 +63,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | CI/CD | **IMPLEMENTED — AWAITING REVIEW** | None | §5.9 | Pending review |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-**Database Migration Wiring is DONE** (formally accepted, §5.1). **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). **Phase 7 — Production Hardening — Sentinel Engine is now IMPLEMENTED — AWAITING REVIEW** (§5.2) — the Sentinel Engine infrastructure is fully implemented, registered into Kernel bootstrap, verified against 41 unit/integration/failure-injection tests, and integrated into system health rollup, but this status is **not** `DONE`: formal architectural/owner acceptance is a separate, subsequent review pass. Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` as authorization to implement.
+**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is PLANNED** (§5.3) — full implementation plan prepared. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
 
 ## 5. Work Package Detail
 
@@ -105,10 +105,11 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
 
 **Acceptance criteria status**: baseline schema byte-for-byte equivalent to `create_all()`'s output — met (Test C). `alembic upgrade head` succeeds from empty — met (Test A). Full test suite green modulo pre-existing/unrelated failures — met. Downgrade path defined for baseline — met, with documented inherent limitation. **Formally accepted as `DONE` this pass** (see acceptance record above). This does not reopen or authorize modification of the migration implementation — future passes touching this area must treat it as accepted, frozen architecture unless direct evidence of a defect emerges.
 
-### 5.2 Phase 7 — Production Hardening — Sentinel Engine — IMPLEMENTED — AWAITING REVIEW
+### 5.2 Phase 7 — Production Hardening — Sentinel Engine — DONE
 
-**Implementation record** (this pass):
-- **Components Implemented**:
+**Formal acceptance record**:
+- **Accepted commit**: `65676a4c8296e762ee580bf522a8aff6fa918db3` (`feat(sentinel): refine STOPPED lifecycle mapping and add unauthenticated/unauthorized capability tests`).
+- **Components Accepted**:
   - `engine.py`: `SentinelEngine(BaseEngine, IEngineDiagnostics)` with 7-state `SentinelStatus` model (`STARTING`, `HEALTHY`, `DEGRADED`, `FAILED`, `UNKNOWN`, `STOPPING`, `DISABLED`), self-exclusion during engine polling, non-blocking background monitoring loop, and capability handlers.
   - `heartbeats.py`: `HeartbeatManager` implementing explicit `IHeartbeatSource` protocol with monotonic clock, deterministic duplicate handling/replacement, $2\times$ warning and $3\times$ failure thresholds, and startup/shutdown immunity.
   - `deadlock.py`: `DeadlockDetector` and `OperationTracker` measuring event-loop scheduling latency via cooperative yielding (`await asyncio.sleep(0)`), tracking tracked operations, and distinguishing `EVENT_LOOP_STARVATION` from `DEADLOCK_SUSPECTED`.
@@ -120,13 +121,24 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
 - **Database Boundary**: Zero database tables, zero Alembic migrations. All state is strictly ephemeral and in-memory.
 - **Verification Evidence**:
   - 41 passed unit, integration, and failure-injection tests across 6 dedicated test suites.
-  - Integration verified with `BootEngine.run_system_health_checks()`, Kernel `invoke_capability()`, and clean Kernel shutdown.
-  - `ruff` passed with 0 errors; `mypy` passed with 0 issues in 11 source files.
-- **Status**: **IMPLEMENTED — AWAITING REVIEW** (not `DONE`). Formal architectural/owner review is pending.
+  - 50 passed cross-engine tests (`test_boot_engine.py`, `test_capability_dispatch.py`, `test_production_capability_permissions.py`, `test_alembic_migrations.py`).
+  - Full backend test suite executed: 2,948 collected, 2,927 passed, 19 failed (all 19 pre-existing and unchanged; 16 document intelligence OCR/PDF unit tests and 3 integration tests), 0 new regressions. Exact node-ID comparison: `NEW FAILURE NODE IDs CAUSED BY SENTINEL = 0`.
+  - Migration integrity: 7/7 passed in `test_alembic_migrations.py`; zero new migrations or tables.
+  - `ruff` passed with 0 errors across 18 files; `mypy` passed with 0 issues in 11 source files.
+  - Graphify verified fresh at HEAD (`built_at_commit == 65676a4c`, 15,442 nodes, 36,158 edges, 487 communities).
+- **Status**: **DONE** (formally accepted).
 
-### 5.3 Monitoring Engine — PENDING
+### 5.3 Monitoring Engine — PLANNED
 
-`backend/src/kortex/engines/monitoring/__init__.py` is a 2-line docstring only; no other files; not registered. Classified **STUB**. No metrics/dashboard aggregation point exists anywhere — M7.6's AI telemetry (`AIToolCompletedEvent`, exporter counters) is scoped only to the AI engine, not cross-engine. No dedicated tests exist.
+- **Status**: **PLANNED** (full implementation plan prepared in `docs/architecture/monitoring_engine_implementation_plan.md` and `implementation_plan.md`).
+- **Role in Phase 7**: Directly complements Sentinel Engine as the operational metrics, counter/gauge/histogram aggregation, rolling time-series buffer, and dashboard visualization provider for KORTEX.
+- **Why it is next**:
+  1. Sentinel Engine is formally accepted as DONE; its health status and failure events provide the health foundation that Monitoring dashboards display.
+  2. All KORTEX engines and business modules already implement `IEngineDiagnostics` (`health()`, `metrics()`, `diagnostics()`, etc.), but no central metrics aggregator or dashboard query capability currently exists.
+  3. Zero unsatisfied prerequisites: unlike Backup and Update engines (which depend on release pipelines/storage policies), Recovery Engine (which is blocked on Owner Decision #1), and Docker/Installers (which depend on deployment decisions), Monitoring Engine has no hard dependencies and operates entirely within the running local-first runtime.
+  4. Proposed Critical Path (§6) pairs Sentinel and Monitoring as the core runtime observability layer.
+- **Scope**: MetricsCollector polling `IEngineDiagnostics` with self-exclusion, MetricRegistry (Counters, Gauges, Histograms, Timers), bounded rolling TimeSeriesBuffer (max 360 points per metric, ~1 hr at 10s intervals), 4 read-only authenticated capabilities (`kortex.monitoring.metrics.get`, `kortex.monitoring.timeseries.get`, `kortex.monitoring.dashboard.get`, `kortex.monitoring.diagnostics.get`), 3 informational alert/summary events (`kortex.monitoring.threshold.exceeded`, `kortex.monitoring.threshold.recovered`, `kortex.monitoring.snapshot.emitted`), zero database migrations (pure bounded in-memory state).
+- **Explicit Non-Goals**: No process supervision, no engine restarts, no external SaaS telemetry export, no duplication of Sentinel's health assessment or circuit breaker. Not authorized for implementation in this planning pass.
 
 ### 5.4 Backup Engine — PENDING
 
