@@ -261,3 +261,37 @@ def test_expected_alembic_head_is_correctly_recognized(tmp_path: Path, monkeypat
     with engine.connect() as conn:
         result = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
     assert result == heads[0]
+
+
+def test_operations_migration_downgrade_to_parent_and_reupgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TEST G: Operations migration 4c99c2ff7376 upgrades cleanly, downgrades
+    to explicit parent revision c7d8e9f1a2b3 dropping Operations tables, and
+    re-upgrades cleanly to head."""
+    db_path = tmp_path / "downgrade_test.db"
+    db_url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("KORTEX_DATABASE_URL", db_url)
+
+    cfg = _alembic_config(db_url)
+    command.upgrade(cfg, "4c99c2ff7376")
+
+    inspector = sa.inspect(sa.create_engine(_sync_url_for_inspection(db_path)))
+    tables_after_upgrade = set(inspector.get_table_names())
+    assert {"ops_vehicles", "ops_vehicle_tracking_records", "ops_incidents"}.issubset(tables_after_upgrade)
+
+    # Downgrade to explicit parent revision c7d8e9f1a2b3 (never relative -1)
+    command.downgrade(cfg, "c7d8e9f1a2b3")
+    inspector_down = sa.inspect(sa.create_engine(_sync_url_for_inspection(db_path)))
+    tables_after_downgrade = set(inspector_down.get_table_names())
+    assert "ops_vehicles" not in tables_after_downgrade
+    assert "ops_vehicle_tracking_records" not in tables_after_downgrade
+    assert "ops_incidents" not in tables_after_downgrade
+    # Parent tables (HR & Payroll) must remain
+    assert "hr_employees" in tables_after_downgrade
+
+    # Re-upgrade to head
+    command.upgrade(cfg, "4c99c2ff7376")
+    inspector_reup = sa.inspect(sa.create_engine(_sync_url_for_inspection(db_path)))
+    tables_after_reup = set(inspector_reup.get_table_names())
+    assert {"ops_vehicles", "ops_vehicle_tracking_records", "ops_incidents"}.issubset(tables_after_reup)

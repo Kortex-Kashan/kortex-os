@@ -26,6 +26,7 @@ from kortex.modules.operations.models import (
     ReportIncidentRequest,
     ResolveIncidentRequest,
     UnassignDriverRequest,
+    UpdateIncidentStatusRequest,
     UpdateVehicleStatusRequest,
     VehicleStatus,
     VehicleType,
@@ -285,6 +286,17 @@ class TestIncidentRequestValidation:
         assert req.incident_id == "inc-123"
         assert req.closing_notes == "Insurance claim paid."
 
+    def test_update_incident_status_request_validation(self) -> None:
+        req = UpdateIncidentStatusRequest(
+            incident_id="inc-123",
+            status=IncidentStatus.UNDER_INVESTIGATION,
+        )
+        assert req.incident_id == "inc-123"
+        assert req.status == IncidentStatus.UNDER_INVESTIGATION
+
+        with pytest.raises(ValidationError):
+            UpdateIncidentStatusRequest(incident_id="  ", status=IncidentStatus.UNDER_INVESTIGATION)
+
 
 _REQUEST_CLASSES = [
     CreateVehicleRequest,
@@ -298,6 +310,7 @@ _REQUEST_CLASSES = [
     ResolveIncidentRequest,
     CloseIncidentRequest,
     ListIncidentsRequest,
+    UpdateIncidentStatusRequest,
 ]
 
 

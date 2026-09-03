@@ -36,6 +36,7 @@ from kortex.engines.storage.interfaces import IDataStore
 from kortex.modules.operations.exceptions import (
     OpsIncidentAlreadyClosedError,
     OpsIncidentNotFoundError,
+    OpsIncidentValidationError,
     OpsTrackingRecordValidationError,
     OpsVehicleConflictError,
     OpsVehicleNotFoundError,
@@ -425,7 +426,8 @@ class TestIncidentManagementCapabilities:
                 resource_tenant_id=tenant_a,
             )
             inc: IncidentResponse = await kernel.invoke_capability(report_req)
-            assert inc.incident_number == f"INC-{occurred.year}-0001"
+            now_year = datetime.now(UTC).year
+            assert inc.incident_number == f"INC-{now_year}-0001"
             assert inc.status == IncidentStatus.REPORTED
             assert inc.severity == IncidentSeverity.HIGH
             assert inc.reported_by_id == "officer-dave"
@@ -462,7 +464,68 @@ class TestIncidentManagementCapabilities:
             assert len(incidents_a) == 1
             assert incidents_a[0].id == inc.id
 
-            # 4. Resolve Incident
+            # 4. Status Update (Intermediate Lifecycle)
+            # Direct resolve of HIGH severity incident from REPORTED must fail
+            resolve_premature = _req(
+                "kortex.operations.incident.resolve",
+                token_a,
+                {
+                    "request": {
+                        "incident_id": inc.id,
+                        "resolution_notes": "Premature resolve",
+                    }
+                },
+                resource_tenant_id=tenant_a,
+            )
+            with pytest.raises(OpsIncidentValidationError):
+                await kernel.invoke_capability(resolve_premature)
+
+            # Cross-tenant status update fails
+            status_cross = _req(
+                "kortex.operations.incident.status_update",
+                token_b,
+                {
+                    "request": {
+                        "incident_id": inc.id,
+                        "status": "UNDER_INVESTIGATION",
+                    }
+                },
+                resource_tenant_id=tenant_b,
+            )
+            with pytest.raises(OpsIncidentNotFoundError):
+                await kernel.invoke_capability(status_cross)
+
+            # Advance REPORTED -> UNDER_INVESTIGATION
+            status_req_1 = _req(
+                "kortex.operations.incident.status_update",
+                token_a,
+                {
+                    "request": {
+                        "incident_id": inc.id,
+                        "status": "UNDER_INVESTIGATION",
+                    }
+                },
+                resource_tenant_id=tenant_a,
+            )
+            inc_inv: IncidentResponse = await kernel.invoke_capability(status_req_1)
+            assert inc_inv.status == IncidentStatus.UNDER_INVESTIGATION
+
+            # Advance UNDER_INVESTIGATION -> ACTION_REQUIRED
+            status_req_2 = _req(
+                "kortex.operations.incident.status_update",
+                token_a,
+                {
+                    "request": {
+                        "incident_id": inc.id,
+                        "status": "ACTION_REQUIRED",
+                    }
+                },
+                resource_tenant_id=tenant_a,
+            )
+            inc_act: IncidentResponse = await kernel.invoke_capability(status_req_2)
+            assert inc_act.status == IncidentStatus.ACTION_REQUIRED
+
+            # 5. Resolve Incident
             # Cross-tenant resolve fails
             resolve_cross = _req(
                 "kortex.operations.incident.resolve",
@@ -494,7 +557,7 @@ class TestIncidentManagementCapabilities:
             assert inc_resolved.resolved_by == "officer-dave"
             assert inc_resolved.resolved_at is not None
 
-            # 5. Close Incident
+            # 6. Close Incident
             # Cross-tenant close fails
             close_cross = _req(
                 "kortex.operations.incident.close",
@@ -575,6 +638,15 @@ class TestSecurityAndAdversarialRejection:
             )
             with pytest.raises(AuthorizationDeniedError):
                 await kernel.invoke_capability(denied_write_req)
+
+            denied_status_req = _req(
+                "kortex.operations.incident.status_update",
+                read_only_token,
+                {"request": {"incident_id": "inc-id", "status": "UNDER_INVESTIGATION"}},
+                resource_tenant_id=tenant_id,
+            )
+            with pytest.raises(AuthorizationDeniedError):
+                await kernel.invoke_capability(denied_status_req)
 
             # 3. Permission denied for user lacking operations:incident:manage
             worker_token = await _authorized_token(

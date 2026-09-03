@@ -43,6 +43,7 @@ from kortex.modules.operations.models import (
     ReportIncidentRequest,
     ResolveIncidentRequest,
     UnassignDriverRequest,
+    UpdateIncidentStatusRequest,
     UpdateVehicleStatusRequest,
     VehicleResponse,
     VehicleStatus,
@@ -174,8 +175,15 @@ class OperationsManager:
             if row is None:
                 raise OpsVehicleNotFoundError(f"Vehicle '{request.vehicle_id}' not found.")
 
-            if row.status == VehicleStatus.DECOMMISSIONED.value:
-                raise OpsVehicleValidationError("Cannot assign driver to a decommissioned vehicle.")
+            if row.status != VehicleStatus.ACTIVE.value:
+                raise OpsVehicleValidationError(
+                    f"Driver assignment is permitted only for ACTIVE vehicles (current status: '{row.status}')."
+                )
+
+            if row.assigned_driver_id is not None:
+                raise OpsVehicleConflictError(
+                    f"Vehicle '{request.vehicle_id}' is already assigned to driver '{row.assigned_driver_id}'."
+                )
 
             row.assigned_driver_id = request.driver_id
             row.assigned_at = now
@@ -196,6 +204,9 @@ class OperationsManager:
             row = (await session.execute(stmt)).scalar_one_or_none()
             if row is None:
                 raise OpsVehicleNotFoundError(f"Vehicle '{request.vehicle_id}' not found.")
+
+            if row.status == VehicleStatus.DECOMMISSIONED.value:
+                raise OpsVehicleValidationError("Cannot unassign driver from a decommissioned vehicle.")
 
             row.assigned_driver_id = None
             row.assigned_at = None
@@ -247,10 +258,12 @@ class OperationsManager:
                     f"Invalid vehicle status transition from '{old_status}' to '{new_status_val}'."
                 )
 
-            # If decommissioning, automatically unassign driver
-            if new_status_val == VehicleStatus.DECOMMISSIONED.value:
-                row.assigned_driver_id = None
-                row.assigned_at = None
+            # Invariant: a vehicle with an assigned driver cannot be transitioned to DECOMMISSIONED
+            if new_status_val == VehicleStatus.DECOMMISSIONED.value and row.assigned_driver_id is not None:
+                raise OpsVehicleValidationError(
+                    f"Cannot decommission vehicle '{request.vehicle_id}' while driver "
+                    f"'{row.assigned_driver_id}' is assigned; unassign driver first."
+                )
 
             row.status = new_status_val
             await session.flush()
@@ -377,7 +390,7 @@ class OperationsManager:
         """File a new operational incident report and publish domain event."""
         incident_id = str(uuid.uuid4())
         now = datetime.now(UTC)
-        year = request.occurred_at.year
+        year = now.year
         event_payload: dict[str, object] | None = None
 
         # Bounded collision retry for concurrency safety
@@ -495,6 +508,51 @@ class OperationsManager:
         rows = await self._data_store.execute_in_transaction(_action)
         return [self._to_incident_response(r) for r in rows]
 
+    async def update_incident_status(
+        self, request: UpdateIncidentStatusRequest, tenant_id: str
+    ) -> IncidentResponse:
+        """Transition incident operational status through intermediate lifecycle states."""
+
+        async def _action(session: AsyncSession) -> OpsIncidentRow:
+            stmt = select(OpsIncidentRow).where(
+                OpsIncidentRow.tenant_id == tenant_id,
+                OpsIncidentRow.id == request.incident_id,
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                raise OpsIncidentNotFoundError(f"Incident '{request.incident_id}' not found.")
+
+            if row.status == IncidentStatus.CLOSED.value:
+                raise OpsIncidentAlreadyClosedError(
+                    f"Incident '{row.incident_number}' is CLOSED and cannot be modified."
+                )
+
+            current_status = row.status
+            requested_status = request.status.value
+
+            # Generic status_update is strictly for intermediate lifecycle transitions:
+            # REPORTED -> UNDER_INVESTIGATION
+            # UNDER_INVESTIGATION -> ACTION_REQUIRED
+            # Formally resolving requires `resolve_incident`, and closing requires `close_incident`.
+            permitted = {
+                IncidentStatus.REPORTED.value: {IncidentStatus.UNDER_INVESTIGATION.value},
+                IncidentStatus.UNDER_INVESTIGATION.value: {IncidentStatus.ACTION_REQUIRED.value},
+            }
+
+            if requested_status not in permitted.get(current_status, set()):
+                raise OpsIncidentValidationError(
+                    f"Invalid incident status transition from '{current_status}' to '{requested_status}'. "
+                    f"status_update permits only REPORTED -> UNDER_INVESTIGATION and "
+                    f"UNDER_INVESTIGATION -> ACTION_REQUIRED."
+                )
+
+            row.status = requested_status
+            await session.flush()
+            return row
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return self._to_incident_response(row)
+
     async def resolve_incident(
         self, request: ResolveIncidentRequest, tenant_id: str, resolved_by: str
     ) -> IncidentResponse:
@@ -515,18 +573,24 @@ class OperationsManager:
                     f"Incident '{row.incident_number}' is CLOSED and cannot be modified."
                 )
 
-            # Permitted transitions to RESOLVED:
-            # REPORTED -> RESOLVED, UNDER_INVESTIGATION -> RESOLVED, ACTION_REQUIRED -> RESOLVED
-            permitted_prior = {
-                IncidentStatus.REPORTED.value,
-                IncidentStatus.UNDER_INVESTIGATION.value,
-                IncidentStatus.ACTION_REQUIRED.value,
-                IncidentStatus.RESOLVED.value,
-            }
-
-            if row.status not in permitted_prior:
+            if row.status == IncidentStatus.RESOLVED.value:
                 raise OpsIncidentValidationError(
-                    f"Invalid transition to RESOLVED from current status '{row.status}'."
+                    f"Incident '{row.incident_number}' is already RESOLVED."
+                )
+
+            # Permitted transitions to RESOLVED:
+            # 1. ACTION_REQUIRED -> RESOLVED
+            # 2. LOW severity REPORTED -> RESOLVED (fast path)
+            can_resolve = (
+                row.status == IncidentStatus.ACTION_REQUIRED.value
+                or (row.status == IncidentStatus.REPORTED.value and row.severity == IncidentSeverity.LOW.value)
+            )
+
+            if not can_resolve:
+                raise OpsIncidentValidationError(
+                    f"Invalid transition to RESOLVED from current status '{row.status}' "
+                    f"with severity '{row.severity}'. Resolution is permitted from "
+                    f"ACTION_REQUIRED, or from REPORTED for LOW severity incidents only."
                 )
 
             row.status = IncidentStatus.RESOLVED.value

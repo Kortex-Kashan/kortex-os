@@ -34,6 +34,7 @@ from kortex.modules.operations.models import (
     ReportIncidentRequest,
     ResolveIncidentRequest,
     UnassignDriverRequest,
+    UpdateIncidentStatusRequest,
     UpdateVehicleStatusRequest,
     VehicleResponse,
     VehicleTrackingRecordResponse,
@@ -54,6 +55,7 @@ _REGISTERED_CAPABILITIES: list[str] = [
     "kortex.operations.incident.report",
     "kortex.operations.incident.get",
     "kortex.operations.incident.list",
+    "kortex.operations.incident.status_update",
     "kortex.operations.incident.resolve",
     "kortex.operations.incident.close",
 ]
@@ -202,6 +204,15 @@ class OperationsModule(BaseModule):
                 handler=self.list_incidents,
                 requires_authentication=True,
                 required_permissions=["operations:incident:read"],
+                requires_execution_context=True,
+            )
+            kernel.register_capability(
+                name="kortex.operations.incident.status_update",
+                description="Transition incident operational status through intermediate lifecycle states.",
+                provider=self.name,
+                handler=self.update_incident_status,
+                requires_authentication=True,
+                required_permissions=["operations:incident:write"],
                 requires_execution_context=True,
             )
             kernel.register_capability(
@@ -381,6 +392,16 @@ class OperationsModule(BaseModule):
         self._require_principal(execution_context, "kortex.operations.incident.list")
         assert self._manager is not None
         return await self._manager.list_incidents(request, tenant_id=execution_context.tenant_id)
+
+    async def update_incident_status(
+        self,
+        request: UpdateIncidentStatusRequest,
+        execution_context: CapabilityExecutionContext,
+    ) -> IncidentResponse:
+        self.ensure_state(ModuleState.ACTIVE)
+        self._require_principal(execution_context, "kortex.operations.incident.status_update")
+        assert self._manager is not None
+        return await self._manager.update_incident_status(request, tenant_id=execution_context.tenant_id)
 
     async def resolve_incident(
         self,

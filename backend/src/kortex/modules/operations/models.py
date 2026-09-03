@@ -324,6 +324,21 @@ class CloseIncidentRequest(BaseModel):
         return cleaned
 
 
+class UpdateIncidentStatusRequest(BaseModel):
+    """Request payload to transition an incident to an intermediate status."""
+
+    incident_id: str = Field(min_length=1, description="Target incident unique ID.")
+    status: IncidentStatus = Field(description="Requested intermediate target status.")
+
+    @field_validator("incident_id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("incident_id cannot be blank.")
+        return cleaned
+
+
 class ListIncidentsRequest(BaseModel):
     """Request to query and paginate incident reports."""
 
@@ -378,6 +393,7 @@ __all__ = [
     "ReportIncidentRequest",
     "ResolveIncidentRequest",
     "UnassignDriverRequest",
+    "UpdateIncidentStatusRequest",
     "UpdateVehicleStatusRequest",
     "VehicleResponse",
     "VehicleStatus",

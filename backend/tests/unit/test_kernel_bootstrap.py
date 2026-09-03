@@ -133,7 +133,7 @@ async def test_hr_payroll_module_registers_on_production_boot_path() -> None:
 @pytest.mark.asyncio
 async def test_operations_module_registers_on_production_boot_path() -> None:
     """Phase 6: `OperationsModule` (inheriting `BaseModule`) reaches `ModuleState.ACTIVE`
-    and registers all 13 Operations capabilities via the real production boot path."""
+    and registers all 14 Operations capabilities via the real production boot path."""
     kernel = await build_and_boot_kernel()
     try:
         assert kernel.state == KernelState.RUNNING
@@ -152,6 +152,7 @@ async def test_operations_module_registers_on_production_boot_path() -> None:
             "kortex.operations.incident.report",
             "kortex.operations.incident.get",
             "kortex.operations.incident.list",
+            "kortex.operations.incident.status_update",
             "kortex.operations.incident.resolve",
             "kortex.operations.incident.close",
         }
@@ -162,6 +163,12 @@ async def test_operations_module_registers_on_production_boot_path() -> None:
         assert create_desc.required_permissions == ["operations:vehicle:write"]
         assert create_desc.requires_execution_context is True
         assert create_desc.requires_authentication is True
+
+        status_update_desc = kernel.get_capability("kortex.operations.incident.status_update")
+        assert status_update_desc.provider == "operations"
+        assert status_update_desc.required_permissions == ["operations:incident:write"]
+        assert status_update_desc.requires_execution_context is True
+        assert status_update_desc.requires_authentication is True
 
         close_desc = kernel.get_capability("kortex.operations.incident.close")
         assert close_desc.provider == "operations"

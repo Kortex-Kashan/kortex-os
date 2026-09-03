@@ -40,6 +40,7 @@ class OpsVehicleRow(BaseModel):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "license_plate", name="uq_ops_vehicle_tenant_plate"),
+        UniqueConstraint("tenant_id", "vin", name="uq_ops_vehicle_tenant_vin"),
         Index("ix_ops_vehicles_tenant_status", "tenant_id", "status"),
     )
 

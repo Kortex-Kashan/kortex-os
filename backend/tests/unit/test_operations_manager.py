@@ -21,6 +21,7 @@ from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.storage.engine import StorageEngine
 from kortex.modules.operations.exceptions import (
     OpsIncidentAlreadyClosedError,
+    OpsIncidentConflictError,
     OpsIncidentValidationError,
     OpsTrackingRecordValidationError,
     OpsVehicleConflictError,
@@ -40,6 +41,7 @@ from kortex.modules.operations.models import (
     ReportIncidentRequest,
     ResolveIncidentRequest,
     UnassignDriverRequest,
+    UpdateIncidentStatusRequest,
     UpdateVehicleStatusRequest,
     VehicleStatus,
     VehicleType,
@@ -52,7 +54,8 @@ _TEST_SIGNING_KEY = b"\x66" * 32
 async def _create_test_manager(tmp_path: Path) -> tuple[OperationsManager, Kernel, EventEngine]:
     """Provide an OperationsManager wired to an isolated SQLite data store and event engine via Kernel."""
     kernel = Kernel()
-    kernel._db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
+    db_file = tmp_path / "ops_test.db"
+    kernel._db_manager = DatabaseEngineManager(f"sqlite+aiosqlite:///{db_file}")
     storage_engine = StorageEngine(base_directory=str(tmp_path / "ops_test_storage"))
     security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
     event_engine: EventEngine = kernel.get_engine("event")  # type: ignore[assignment]
@@ -204,13 +207,26 @@ class TestVehicleManagerOperations:
                 tenant_id=tenant_id,
             )
 
-            # ACTIVE -> DECOMMISSIONED (terminal)
+            # Invariant: attempting to decommission while driver is assigned must be rejected
+            with pytest.raises(OpsVehicleValidationError, match=r"while driver .* is assigned"):
+                await mgr.update_vehicle_status(
+                    UpdateVehicleStatusRequest(vehicle_id=v.id, new_status=VehicleStatus.DECOMMISSIONED),
+                    tenant_id=tenant_id,
+                )
+
+            # Explicit unassignment required before decommissioning
+            await mgr.unassign_driver(
+                UnassignDriverRequest(vehicle_id=v.id),
+                tenant_id=tenant_id,
+            )
+
+            # ACTIVE -> DECOMMISSIONED (terminal) succeeds after unassignment
             v_decom = await mgr.update_vehicle_status(
                 UpdateVehicleStatusRequest(vehicle_id=v.id, new_status=VehicleStatus.DECOMMISSIONED),
                 tenant_id=tenant_id,
             )
             assert v_decom.status == VehicleStatus.DECOMMISSIONED
-            assert v_decom.assigned_driver_id is None  # Driver automatically unassigned
+            assert v_decom.assigned_driver_id is None
 
             # Attempt transition out of DECOMMISSIONED must fail
             with pytest.raises(OpsVehicleValidationError):
@@ -225,6 +241,99 @@ class TestVehicleManagerOperations:
                     AssignDriverRequest(vehicle_id=v.id, driver_id="driver-new"),
                     tenant_id=tenant_id,
                 )
+
+            # Attempt driver unassignment from decommissioned vehicle must fail
+            with pytest.raises(OpsVehicleValidationError, match="Cannot unassign driver from a decommissioned vehicle"):
+                await mgr.unassign_driver(
+                    UnassignDriverRequest(vehicle_id=v.id),
+                    tenant_id=tenant_id,
+                )
+        finally:
+            await kernel.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_driver_assignment_restrictions(self, tmp_path: Path) -> None:
+        """Driver assignment is permitted only to ACTIVE vehicles and rejects already-assigned vehicles."""
+        mgr, kernel, _ = await _create_test_manager(tmp_path)
+        try:
+            tenant_id = "tenant-alpha"
+            v = await mgr.create_vehicle(
+                CreateVehicleRequest(license_plate="RESTR-01", make="Toyota", model="Yaris"),
+                tenant_id=tenant_id,
+            )
+
+            # Assign to ACTIVE vehicle succeeds
+            await mgr.assign_driver(
+                AssignDriverRequest(vehicle_id=v.id, driver_id="driver-a"),
+                tenant_id=tenant_id,
+            )
+
+            # Assigning an already-assigned vehicle must fail with OpsVehicleConflictError
+            with pytest.raises(OpsVehicleConflictError):
+                await mgr.assign_driver(
+                    AssignDriverRequest(vehicle_id=v.id, driver_id="driver-b"),
+                    tenant_id=tenant_id,
+                )
+
+            # Unassign
+            await mgr.unassign_driver(UnassignDriverRequest(vehicle_id=v.id), tenant_id=tenant_id)
+
+            # Transition to MAINTENANCE
+            await mgr.update_vehicle_status(
+                UpdateVehicleStatusRequest(vehicle_id=v.id, new_status=VehicleStatus.MAINTENANCE),
+                tenant_id=tenant_id,
+            )
+
+            # Assignment to MAINTENANCE vehicle must fail
+            with pytest.raises(OpsVehicleValidationError, match="permitted only for ACTIVE vehicles"):
+                await mgr.assign_driver(
+                    AssignDriverRequest(vehicle_id=v.id, driver_id="driver-c"),
+                    tenant_id=tenant_id,
+                )
+        finally:
+            await kernel.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_vehicle_vin_uniqueness_and_null_semantics(self, tmp_path: Path) -> None:
+        """VIN uniqueness is enforced per tenant, while empty/null VINs do not conflict."""
+        mgr, kernel, _ = await _create_test_manager(tmp_path)
+        try:
+            tenant_1 = "tenant-alpha"
+            tenant_2 = "tenant-beta"
+            shared_vin = "1HGCR2F83HA999999"
+
+            # Create vehicle with VIN in tenant 1
+            v1 = await mgr.create_vehicle(
+                CreateVehicleRequest(license_plate="VIN-001", make="Honda", model="Civic", vin=shared_vin),
+                tenant_id=tenant_1,
+            )
+            assert v1.vin == shared_vin
+
+            # Duplicate VIN in SAME tenant must be rejected
+            with pytest.raises(OpsVehicleConflictError):
+                await mgr.create_vehicle(
+                    CreateVehicleRequest(license_plate="VIN-002", make="Honda", model="Accord", vin=shared_vin),
+                    tenant_id=tenant_1,
+                )
+
+            # Same VIN in DIFFERENT tenant is permitted
+            v2 = await mgr.create_vehicle(
+                CreateVehicleRequest(license_plate="VIN-001", make="Honda", model="Civic", vin=shared_vin),
+                tenant_id=tenant_2,
+            )
+            assert v2.vin == shared_vin
+
+            # Multiple vehicles with empty/None VIN in the same tenant do not collide
+            v_null1 = await mgr.create_vehicle(
+                CreateVehicleRequest(license_plate="NVIN-001", make="Ford", model="Transit", vin=None),
+                tenant_id=tenant_1,
+            )
+            v_null2 = await mgr.create_vehicle(
+                CreateVehicleRequest(license_plate="NVIN-002", make="Ford", model="Transit", vin=None),
+                tenant_id=tenant_1,
+            )
+            assert v_null1.vin is None
+            assert v_null2.vin is None
         finally:
             await kernel.shutdown()
 
@@ -434,7 +543,38 @@ class TestIncidentManagerOperations:
                     closed_by="manager-1",
                 )
 
-            # RESOLVE the incident
+            # Cannot directly RESOLVE a MEDIUM severity incident from REPORTED (must go through investigation)
+            with pytest.raises(OpsIncidentValidationError, match="Resolution is permitted from ACTION_REQUIRED"):
+                await mgr.resolve_incident(
+                    ResolveIncidentRequest(
+                        incident_id=inc.id,
+                        resolution_notes="Direct resolve attempt",
+                    ),
+                    tenant_id=tenant_id,
+                    resolved_by="investigator-1",
+                )
+
+            # Advance REPORTED -> UNDER_INVESTIGATION
+            under_inv = await mgr.update_incident_status(
+                UpdateIncidentStatusRequest(
+                    incident_id=inc.id,
+                    status=IncidentStatus.UNDER_INVESTIGATION,
+                ),
+                tenant_id=tenant_id,
+            )
+            assert under_inv.status == IncidentStatus.UNDER_INVESTIGATION
+
+            # Advance UNDER_INVESTIGATION -> ACTION_REQUIRED
+            act_req = await mgr.update_incident_status(
+                UpdateIncidentStatusRequest(
+                    incident_id=inc.id,
+                    status=IncidentStatus.ACTION_REQUIRED,
+                ),
+                tenant_id=tenant_id,
+            )
+            assert act_req.status == IncidentStatus.ACTION_REQUIRED
+
+            # RESOLVE the incident from ACTION_REQUIRED
             resolved = await mgr.resolve_incident(
                 ResolveIncidentRequest(
                     incident_id=inc.id,
@@ -447,6 +587,14 @@ class TestIncidentManagerOperations:
             assert resolved.resolution_notes == "Windshield replaced by Safelite autoglass."
             assert resolved.resolved_by == "investigator-1"
             assert resolved.resolved_at is not None
+
+            # Attempting to re-resolve an already RESOLVED incident must fail
+            with pytest.raises(OpsIncidentValidationError, match="already RESOLVED"):
+                await mgr.resolve_incident(
+                    ResolveIncidentRequest(incident_id=inc.id, resolution_notes="Duplicate resolution"),
+                    tenant_id=tenant_id,
+                    resolved_by="investigator-1",
+                )
 
             # CLOSE the incident (terminal state)
             closed = await mgr.close_incident(
@@ -474,6 +622,167 @@ class TestIncidentManagerOperations:
                     CloseIncidentRequest(incident_id=inc.id),
                     tenant_id=tenant_id,
                     closed_by="manager-1",
+                )
+
+            with pytest.raises(OpsIncidentAlreadyClosedError):
+                await mgr.update_incident_status(
+                    UpdateIncidentStatusRequest(incident_id=inc.id, status=IncidentStatus.UNDER_INVESTIGATION),
+                    tenant_id=tenant_id,
+                )
+        finally:
+            await kernel.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_incident_low_severity_fast_path(self, tmp_path: Path) -> None:
+        """LOW severity incidents may transition directly from REPORTED to RESOLVED."""
+        mgr, kernel, _ = await _create_test_manager(tmp_path)
+        try:
+            tenant_id = "tenant-alpha"
+            inc = await mgr.report_incident(
+                ReportIncidentRequest(
+                    incident_type=IncidentType.OTHER,
+                    severity=IncidentSeverity.LOW,
+                    title="Lost fuel cap",
+                    description="Driver misplaced fuel cap during refueling.",
+                    occurred_at=datetime.now(UTC),
+                ),
+                tenant_id=tenant_id,
+                reported_by_id="p1",
+            )
+            assert inc.status == IncidentStatus.REPORTED
+
+            # Direct resolution permitted for LOW severity
+            resolved = await mgr.resolve_incident(
+                ResolveIncidentRequest(incident_id=inc.id, resolution_notes="Replacement cap purchased for $15."),
+                tenant_id=tenant_id,
+                resolved_by="fleet-lead",
+            )
+            assert resolved.status == IncidentStatus.RESOLVED
+            assert resolved.resolved_by == "fleet-lead"
+        finally:
+            await kernel.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_incident_status_update_invalid_transitions(self, tmp_path: Path) -> None:
+        """Assert fail-closed validation for forbidden intermediate status transitions."""
+        mgr, kernel, _ = await _create_test_manager(tmp_path)
+        try:
+            tenant_id = "tenant-alpha"
+            inc = await mgr.report_incident(
+                ReportIncidentRequest(
+                    incident_type=IncidentType.ACCIDENT,
+                    severity=IncidentSeverity.HIGH,
+                    title="Fender bender",
+                    description="Hit parking post.",
+                    occurred_at=datetime.now(UTC),
+                ),
+                tenant_id=tenant_id,
+                reported_by_id="p1",
+            )
+
+            # Forbidden: Skipping directly from REPORTED to ACTION_REQUIRED via status_update
+            with pytest.raises(OpsIncidentValidationError):
+                await mgr.update_incident_status(
+                    UpdateIncidentStatusRequest(incident_id=inc.id, status=IncidentStatus.ACTION_REQUIRED),
+                    tenant_id=tenant_id,
+                )
+
+            # Forbidden: Setting to RESOLVED via status_update (must use resolve_incident)
+            with pytest.raises(OpsIncidentValidationError):
+                await mgr.update_incident_status(
+                    UpdateIncidentStatusRequest(incident_id=inc.id, status=IncidentStatus.RESOLVED),
+                    tenant_id=tenant_id,
+                )
+
+            # Advance to UNDER_INVESTIGATION
+            await mgr.update_incident_status(
+                UpdateIncidentStatusRequest(incident_id=inc.id, status=IncidentStatus.UNDER_INVESTIGATION),
+                tenant_id=tenant_id,
+            )
+
+            # Forbidden: Backward transition from UNDER_INVESTIGATION to REPORTED
+            with pytest.raises(OpsIncidentValidationError):
+                await mgr.update_incident_status(
+                    UpdateIncidentStatusRequest(incident_id=inc.id, status=IncidentStatus.REPORTED),
+                    tenant_id=tenant_id,
+                )
+        finally:
+            await kernel.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_incident_numbering_concurrency_and_retry(self, tmp_path: Path) -> None:
+        """Simulate collision during incident creation to verify retry logic succeeds."""
+        import asyncio
+
+        mgr, kernel, _ = await _create_test_manager(tmp_path)
+        try:
+            tenant_id = "tenant-alpha"
+            year = datetime.now(UTC).year
+
+            # Concurrent incident creation
+            async def _create_one(title: str) -> str:
+                res = await mgr.report_incident(
+                    ReportIncidentRequest(
+                        incident_type=IncidentType.BREAKDOWN,
+                        severity=IncidentSeverity.LOW,
+                        title=title,
+                        description="Test breakdown description",
+                        occurred_at=datetime.now(UTC),
+                    ),
+                    tenant_id=tenant_id,
+                    reported_by_id="p1",
+                )
+                return res.incident_number
+
+            results = await asyncio.gather(
+                _create_one("Concurrent Incident 1"),
+                _create_one("Concurrent Incident 2"),
+                _create_one("Concurrent Incident 3"),
+            )
+
+            # Distinct sequence numbers must be assigned
+            assert len(set(results)) == 3
+            assert all(r.startswith(f"INC-{year}-") for r in results)
+        finally:
+            await kernel.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_incident_numbering_exhaustion_raises_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When retries are exhausted due to continuous collisions, OpsIncidentConflictError is raised."""
+        mgr, kernel, _ = await _create_test_manager(tmp_path)
+        try:
+            tenant_id = "tenant-alpha"
+            # Seed an existing incident
+            await mgr.report_incident(
+                ReportIncidentRequest(
+                    incident_type=IncidentType.BREAKDOWN,
+                    severity=IncidentSeverity.LOW,
+                    title="Seed",
+                    description="Seed incident",
+                    occurred_at=datetime.now(UTC),
+                ),
+                tenant_id=tenant_id,
+                reported_by_id="p1",
+            )
+            # Force _generate_incident_number to return colliding number
+            async def _mock_gen(*args: object, **kwargs: object) -> str:
+                return f"INC-{datetime.now(UTC).year}-0001"
+
+            monkeypatch.setattr(mgr, "_generate_incident_number", _mock_gen)
+
+            with pytest.raises(OpsIncidentConflictError):
+                await mgr.report_incident(
+                    ReportIncidentRequest(
+                        incident_type=IncidentType.BREAKDOWN,
+                        severity=IncidentSeverity.LOW,
+                        title="Colliding",
+                        description="Collision description",
+                        occurred_at=datetime.now(UTC),
+                    ),
+                    tenant_id=tenant_id,
+                    reported_by_id="p1",
                 )
         finally:
             await kernel.shutdown()

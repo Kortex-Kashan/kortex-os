@@ -48,6 +48,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("tenant_id", "license_plate", name="uq_ops_vehicle_tenant_plate"),
+        sa.UniqueConstraint("tenant_id", "vin", name="uq_ops_vehicle_tenant_vin"),
     )
     op.create_index(op.f("ix_ops_vehicles_tenant_id"), "ops_vehicles", ["tenant_id"], unique=False)
     op.create_index(op.f("ix_ops_vehicles_vin"), "ops_vehicles", ["vin"], unique=False)

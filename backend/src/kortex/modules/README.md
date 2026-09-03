@@ -28,7 +28,7 @@ Every KORTEX module exposes a standard set of facets:
 
 - **Finance** (`kortex.modules.finance`): Invoices, Purchase Orders, Salary Sheets
 - **HR & Payroll** (`kortex.modules.hr_payroll`): Employee Master, Attendance & Overtime, Leave Quotas & Balances, Monthly Payroll Runs, Payslips
-- **Operations** (`kortex.modules.operations`): Fleet Vehicle Master, Driver Assignment, Odometer & Location Tracking History, Incident Management & Terminal Closure
+- **Operations** (`kortex.modules.operations`): Fleet Vehicle Master, (tenant_id, plate) and (tenant_id, vin) uniqueness, Driver Assignment & Decommissioning Invariants, Monotonic Odometer & Location Tracking History, Incident Management (14 capabilities, concurrency-safe sequential numbering `INC-YYYY-####`, intermediate status transitions, investigation resolution, and terminal closure immutability)
 
 ## Future Modules
 
