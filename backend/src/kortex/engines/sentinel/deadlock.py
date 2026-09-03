@@ -88,11 +88,7 @@ class OperationTracker:
 
         for op_id, op_data in items:
             elapsed = max(0.0, now - op_data["start_monotonic"])
-            threshold = (
-                override_threshold_seconds
-                if override_threshold_seconds is not None
-                else op_data["threshold"]
-            )
+            threshold = override_threshold_seconds if override_threshold_seconds is not None else op_data["threshold"]
             if elapsed > threshold:
                 stalled.append(
                     StalledOperation(

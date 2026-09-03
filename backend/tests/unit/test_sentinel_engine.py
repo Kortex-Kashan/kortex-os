@@ -185,9 +185,7 @@ def test_sentinel_status_mapping() -> None:
     assert status == SentinelStatus.STARTING
 
     # Running with all healthy probes -> HEALTHY
-    probes_ok = {
-        "check1": ProbeResult(probe_name="check1", status=CheckStatus.PASS, message="OK", is_required=True)
-    }
+    probes_ok = {"check1": ProbeResult(probe_name="check1", status=CheckStatus.PASS, message="OK", is_required=True)}
     status = engine._determine_engine_sentinel_status(
         "subsystem",
         EngineState.RUNNING,
@@ -225,13 +223,34 @@ def test_sentinel_status_mapping() -> None:
 
 
 def test_sentinel_stopped_mapping() -> None:
-    """Verify EngineState.STOPPED mapping: FAILED if unexpected, DISABLED if intentional."""
+    """Verify EngineState.STOPPED mapping: FAILED if unexpected, DISABLED if intentional, UNKNOWN if unknown."""
     engine = SentinelEngine()
-    mock_k = MagicMock(spec=Kernel)
-    mock_k.state = KernelState.RUNNING
-    engine._kernel = mock_k
 
-    # Unexpected STOPPED while Kernel is RUNNING -> FAILED
+    # 1. Lifecycle not determinable (kernel is None or BOOTING) -> UNKNOWN
+    engine._kernel = None
+    status = engine._determine_engine_sentinel_status(
+        "subsystem",
+        EngineState.STOPPED,
+        {},
+        is_startup_grace=False,
+        is_stopping=False,
+    )
+    assert status == SentinelStatus.UNKNOWN
+
+    mock_k = MagicMock(spec=Kernel)
+    mock_k.state = KernelState.BOOTING
+    engine._kernel = mock_k
+    status = engine._determine_engine_sentinel_status(
+        "subsystem",
+        EngineState.STOPPED,
+        {},
+        is_startup_grace=False,
+        is_stopping=False,
+    )
+    assert status == SentinelStatus.UNKNOWN
+
+    # 2. Unexpected STOPPED while Kernel is RUNNING -> FAILED
+    mock_k.state = KernelState.RUNNING
     status = engine._determine_engine_sentinel_status(
         "subsystem",
         EngineState.STOPPED,
@@ -241,7 +260,7 @@ def test_sentinel_stopped_mapping() -> None:
     )
     assert status == SentinelStatus.FAILED
 
-    # Intentional STOPPED when Kernel is not RUNNING -> DISABLED
+    # 3. Intentional STOPPED when Kernel is not RUNNING -> DISABLED
     mock_k.state = KernelState.STOPPED
     status = engine._determine_engine_sentinel_status(
         "subsystem",
@@ -251,6 +270,16 @@ def test_sentinel_stopped_mapping() -> None:
         is_stopping=False,
     )
     assert status == SentinelStatus.DISABLED
+
+    # 4. Engine marked DISABLED by config/registration -> DISABLED
+    status_disabled = engine._determine_engine_sentinel_status(
+        "subsystem",
+        SentinelStatus.DISABLED,
+        {},
+        is_startup_grace=False,
+        is_stopping=False,
+    )
+    assert status_disabled == SentinelStatus.DISABLED
 
 
 # -- 4. Diagnostics Protocol (IEngineDiagnostics) ----------------------------

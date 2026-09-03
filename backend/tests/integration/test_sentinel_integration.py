@@ -19,6 +19,7 @@ from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.security.engine import SecurityEngine
+from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError
 from kortex.engines.security.models import (
     PrincipalType,
     RolePermissionRecord,
@@ -118,7 +119,31 @@ async def test_sentinel_kernel_boot_and_dispatch_integration(tmp_path: Path) -> 
     assert diag_res["version"] == "1.0.0"
     assert "metrics" in diag_res
 
-    # 7. Clean Shutdown
+    # 7. Unauthenticated request is rejected
+    unauth_req = CapabilityRequest(
+        capability_name=CAPABILITY_HEALTH_GET,
+        session_token=None,
+    )
+    with pytest.raises(AuthenticationError):
+        await kernel.invoke_capability(unauth_req)
+
+    # 8. Unauthorized principal (lacking system:sentinel:read) is rejected by RBAC
+    unauth_principal_id = f"viewer-{uuid.uuid4().hex[:6]}"
+    unauth_token = await _provision_unauthorized_principal(
+        security_engine=security_engine,
+        tenant_id=tenant_id,
+        principal_id=unauth_principal_id,
+    )
+    rbac_req = CapabilityRequest(
+        capability_name=CAPABILITY_HEALTH_GET,
+        session_token=unauth_token,
+        parameters={},
+        context={"resource_tenant_id": tenant_id},
+    )
+    with pytest.raises(AuthorizationDeniedError):
+        await kernel.invoke_capability(rbac_req)
+
+    # 9. Clean Shutdown
     await kernel.shutdown()
     assert kernel.state == KernelState.STOPPED
     assert sentinel_engine.state.value == "STOPPED"
@@ -157,6 +182,32 @@ async def _provision_sentinel_principal(
     await storage.data.execute_in_transaction(_action)
 
     # Authenticate and obtain session token
+    principal = await security_engine.authenticate(
+        {
+            "tenant_id": tenant_id,
+            "principal_id": principal_id,
+            "password": password,
+            "principal_type": PrincipalType.USER.value,
+        }
+    )
+    return await security_engine.authentication_manager.issue_token(principal)
+
+
+async def _provision_unauthorized_principal(
+    security_engine: SecurityEngine,
+    tenant_id: str,
+    principal_id: str,
+) -> TokenPayload:
+    """Helper to provision a test principal without any roles or permissions."""
+    password = "SafePassword123!"
+    await security_engine.authentication_manager.provision_principal(
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        principal_type=PrincipalType.USER,
+        credential=password,
+        roles=[],
+        attributes={"clearance_level": "INTERNAL"},
+    )
     principal = await security_engine.authenticate(
         {
             "tenant_id": tenant_id,

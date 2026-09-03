@@ -73,9 +73,7 @@ class IntegrityVerifier:
         }
 
         active_checks = (
-            {k: v for k, v in all_checks.items() if k in selected_checks}
-            if selected_checks is not None
-            else all_checks
+            {k: v for k, v in all_checks.items() if k in selected_checks} if selected_checks is not None else all_checks
         )
 
         results: list[ProbeResult] = []

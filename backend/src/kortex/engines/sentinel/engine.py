@@ -327,16 +327,27 @@ class SentinelEngine(BaseEngine, IEngineDiagnostics):
         if engine_state == EngineState.STOPPING:
             return SentinelStatus.STOPPING
 
-        if engine_state == EngineState.INITIALIZING or is_startup_grace:
+        if engine_state is None:
+            return SentinelStatus.UNKNOWN
+
+        if engine_state in ("DISABLED", SentinelStatus.DISABLED):
+            return SentinelStatus.DISABLED
+
+        if engine_state in (EngineState.INITIALIZING, "STARTING") or is_startup_grace:
             return SentinelStatus.STARTING
 
         if engine_state == EngineState.UNINITIALIZED:
             return SentinelStatus.STARTING if is_startup_grace else SentinelStatus.UNKNOWN
 
         if engine_state == EngineState.STOPPED:
-            # STOPPED mapping: if kernel is running and engine was expected to run -> FAILED
-            if self._kernel is not None and self._kernel.state == KernelState.RUNNING:
+            # STOPPED mapping per specification:
+            # 1. if startup/shutdown lifecycle is not yet determinable -> UNKNOWN
+            if self._kernel is None or self._kernel.state in (KernelState.CREATED, KernelState.BOOTING):
+                return SentinelStatus.UNKNOWN
+            # 2. if unexpectedly stopped while expected to be running -> FAILED
+            if self._kernel.state == KernelState.RUNNING:
                 return SentinelStatus.FAILED
+            # 3. if intentionally stopped/disabled -> DISABLED
             return SentinelStatus.DISABLED
 
         if engine_state == EngineState.FAILED:
@@ -532,9 +543,7 @@ class SentinelEngine(BaseEngine, IEngineDiagnostics):
             overall_status = SentinelStatus.HEALTHY
 
         # 7. Check Aggregate Health Transition
-        previous_overall = (
-            self._last_health_report.status if self._last_health_report else SentinelStatus.UNKNOWN
-        )
+        previous_overall = self._last_health_report.status if self._last_health_report else SentinelStatus.UNKNOWN
         if overall_status != previous_overall:
             await self._event_publisher.emit_health_changed(
                 previous_status=previous_overall.value,
@@ -610,8 +619,7 @@ class SentinelEngine(BaseEngine, IEngineDiagnostics):
                     failure_class=FailureClass.CRASH_LOOP,
                     health_status=SentinelStatus.FAILED,
                     message=(
-                        f"Subsystem '{name}' crash-loop detected ({count} failures in window). "
-                        "Circuit breaker tripped."
+                        f"Subsystem '{name}' crash-loop detected ({count} failures in window). Circuit breaker tripped."
                     ),
                 )
 
