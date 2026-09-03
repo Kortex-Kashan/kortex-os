@@ -39,14 +39,18 @@
 - [x] AI Engine (Ollama integration, streaming, structured output — `kortex.engines.ai`, M1–M13 closed; real `OllamaProvider` wired into the production boot path as part of the Phase 5 hardening below)
 - [x] Tool Engine (Capability → LLM tool schema — AI Engine M6, Tool Invocation Engine)
 - [x] Knowledge Engine (directed graph, versioned lineage & trust promotion, annotations, source ingestion, multi-modal search, knowledge pack loader — `KnowledgeEngine`, `kortex.engines.knowledge`; no vector store/RAG — see `docs/architecture/ARCHITECTURE_VERSION_1.0.md` §17)
-- [ ] Document Intelligence Engine (PDF parsing, OCR — adapter interfaces and OCR/PDF type definitions exist in `kortex.engines.document`; no concrete processor implementation confirmed)
+- [ ] Document Intelligence Engine — **IMPLEMENTED — AWAITING REVIEW** (local PDF parsing via `pdfplumber`, local OCR via `rapidocr-onnxruntime`/ONNXRuntime — `DocumentIntelligenceEngine`, `kortex.engines.document_intelligence`; the previously-confirmed platform-level tenant-identity-confusion gap is now closed — see "Platform Security: Capability Identity Propagation" below — and proven closed by a real (no longer `xfail`) adversarial regression test; not checked off `[x]` until Chief Architect review and explicit commit/push authorization)
+
+### Platform Security: Capability Identity Propagation — **IMPLEMENTED — AWAITING REVIEW**
+
+Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatcher` now constructs an immutable `CapabilityExecutionContext` (dispatcher-authenticated principal + authoritative tenant) and injects it into any capability handler that declares `requires_execution_context=True`, via unconditional, registration-time-validated binding — never a caller-suppliable value. Closes a confirmed, externally-reachable identity-confusion vulnerability found in 6 handler sites (Workflow: `decide_approval_request`, `delegate_approval_role`, `create_schedule`, `execute_external_operation`; Document Intelligence: `handle_pdf_parse`, `handle_ocr_extract`), plus an adjacent Workflow approval-impersonation defect (`approval.py::submit_decision`). See `backend/tests/unit/test_capability_identity_propagation_architecture.py` for the repo-wide static guard against recurrence.
 
 ## Phase 5: Advanced Business Engines & Approvals
 
 **Status**: In Progress
 
 - [x] Human-in-the-loop approval queues & notification schedules (`DurableApprovalManager` — durable ticket lifecycle, expiry sweep daemon, cross-engine resume/cancel for both human and AI-originated requests; delivered as the M5.1–M6.4 workflow-governance hardening track, distinct from this roadmap's own "Phase 6" numbering below — see `git log --grep="M6\."` for that track's own milestone sequence)
-- [ ] Process Intelligence Engine (telemetry & process mining)
+- [ ] Process Intelligence Engine — **IMPLEMENTED — AWAITING REVIEW** (DFG process mining, trace variant extraction, bottleneck diagnostics, throughput KPIs — `kortex.engines.process_intelligence`; bounded $\le 100$ nodes, $\le 500$ edges; structural tenant isolation via `TenantScopedProcessAnalyticsRepository`; not checked off `[x]` until Chief Architect review and explicit acceptance)
 - [x] Security Engine (RBAC, encryption, audit — `kortex.engines.security`, milestones 1–6 and 8 complete; tenant-isolation hardening extended further by the M5.1–M6.4 track above)
 - [ ] License Engine
 

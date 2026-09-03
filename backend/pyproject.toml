@@ -21,6 +21,13 @@ dependencies = [
     "cryptography>=42.0.0",
     "argon2-cffi>=23.1.0",
     "tzdata>=2024.1; sys_platform == 'win32'",
+    # Phase 4 Document Intelligence Engine: deterministic local PDF text/
+    # metadata/table extraction (pure Python, no subprocess, no system
+    # package — verified during the M2/M3 dependency spike).
+    "pdfplumber>=0.11.0",
+    # Local OCR (ONNXRuntime CPU backend, models bundled in the wheel — no
+    # runtime network access, no subprocess, no system package).
+    "rapidocr-onnxruntime>=1.4.0",
 ]
 
 [project.optional-dependencies]
@@ -64,6 +71,13 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 mypy_path = ["src"]
 plugins = ["pydantic.mypy"]
+
+# `rapidocr-onnxruntime` ships no type stubs / py.typed marker (verified
+# during the Document Intelligence Engine OCR dependency spike). Narrowly
+# scoped to this one third-party package, not a project-wide relaxation.
+[[tool.mypy.overrides]]
+module = ["rapidocr_onnxruntime.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py312"

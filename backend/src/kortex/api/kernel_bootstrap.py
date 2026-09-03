@@ -33,6 +33,7 @@ from kortex.engines.configuration.engine import SystemSettings
 from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
+from kortex.engines.document_intelligence.engine import DocumentIntelligenceEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
@@ -241,6 +242,9 @@ async def build_and_boot_kernel() -> Kernel:
     # `BaseModule` is deliberately not a `BaseEngine`; registration relies on the
     # Kernel's duck-typed boot dispatch. See `kortex.core.base_module`.
     kernel.register_engine(FinanceModule())  # type: ignore[arg-type]
+
+    # Phase 4: Document Intelligence Engine — local PDF parsing and local OCR.
+    kernel.register_engine(DocumentIntelligenceEngine())
 
     await kernel.boot()
 
