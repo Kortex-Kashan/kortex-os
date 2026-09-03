@@ -37,13 +37,14 @@ import kortex.engines.knowledge.persistence
 import kortex.engines.license.tables
 import kortex.engines.security.models
 import kortex.engines.workflow.persistence
-import kortex.modules.finance.persistence  # noqa: F401
+import kortex.modules.finance.persistence
+import kortex.modules.hr_payroll.persistence  # noqa: F401
 from kortex.core.db import DatabaseEngineManager
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_DIR / "alembic.ini"
 
-# The 30 real production tables the baseline revision creates (mirrors
+# The real production tables Alembic upgrade head creates (mirrors
 # `alembic/env.py`'s own explicit model-import list exactly). Deliberately
 # NOT derived from the live `Base.metadata.tables.keys()` at test-run time:
 # `Base` is a single, process-wide, mutable SQLAlchemy declarative base, and
@@ -53,7 +54,7 @@ _ALEMBIC_INI = _BACKEND_DIR / "alembic.ini"
 # happen to already be imported into the same pytest process by the time
 # this test runs is collection-order-dependent, not a stable "real schema"
 # oracle. The baseline migration is a frozen, non-dynamic revision script
-# that only ever creates these 30 tables regardless of what else has been
+# that only ever creates these tables regardless of what else has been
 # imported into the process, so this fixed list is the correct comparison
 # target, not a live read of a registry that other tests also mutate.
 _PRODUCTION_TABLE_NAMES = frozenset(
@@ -76,6 +77,12 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "event_outbox",
         "external_executions",
         "finance_invoices",
+        "hr_attendance_records",
+        "hr_employees",
+        "hr_leave_balances",
+        "hr_leave_requests",
+        "hr_payroll_entries",
+        "hr_payroll_runs",
         "idempotency_records",
         "knowledge_annotations",
         "knowledge_packs",

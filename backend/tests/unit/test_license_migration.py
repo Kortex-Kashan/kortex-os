@@ -69,7 +69,7 @@ def _upgrade_to_head(db_path: str) -> None:
 
 
 def _downgrade_to_baseline(db_path: str) -> None:
-    command.downgrade(_alembic_cfg(db_path), "-1")
+    command.downgrade(_alembic_cfg(db_path), "81d6d64c51ba")
 
 
 def _issue_test_token(crypto_engine: LicenseCryptoEngine, tenant_id: str) -> str:

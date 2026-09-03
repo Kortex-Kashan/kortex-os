@@ -37,6 +37,7 @@ from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.modules.finance.module import FinanceModule
+from kortex.modules.hr_payroll.module import HRPayrollModule
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +83,48 @@ async def test_finance_module_registers_on_production_boot_path() -> None:
         get_descriptor = kernel.get_capability("kortex.finance.invoice.get")
         assert get_descriptor.provider == "finance"
         assert get_descriptor.required_permissions == ["finance:invoice:read"]
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hr_payroll_module_registers_on_production_boot_path() -> None:
+    """Phase 6: `HRPayrollModule` (inheriting `BaseModule`) reaches `ModuleState.ACTIVE`
+    and registers all 12 HR & Payroll capabilities via the real production boot
+    path, through `kernel.register_engine()` with `requires_execution_context=True`."""
+    kernel = await build_and_boot_kernel()
+    try:
+        assert kernel.state == KernelState.RUNNING
+        hr_module = kernel.get_engine("hr_payroll")
+        assert isinstance(hr_module, HRPayrollModule)
+        assert hr_module.state == ModuleState.ACTIVE
+        assert set(hr_module.capabilities()) == {
+            "kortex.hr_payroll.employee.create",
+            "kortex.hr_payroll.employee.get",
+            "kortex.hr_payroll.employee.list",
+            "kortex.hr_payroll.attendance.check_in",
+            "kortex.hr_payroll.attendance.check_out",
+            "kortex.hr_payroll.attendance.list",
+            "kortex.hr_payroll.leave.balance_get",
+            "kortex.hr_payroll.leave.request",
+            "kortex.hr_payroll.leave.decide",
+            "kortex.hr_payroll.payroll.calculate",
+            "kortex.hr_payroll.payroll.run_get",
+            "kortex.hr_payroll.payslip.get",
+        }
+
+        # Verify capability registration attributes
+        create_desc = kernel.get_capability("kortex.hr_payroll.employee.create")
+        assert create_desc.provider == "hr_payroll"
+        assert create_desc.required_permissions == ["hr:employee:write"]
+        assert create_desc.requires_execution_context is True
+        assert create_desc.requires_authentication is True
+
+        calc_desc = kernel.get_capability("kortex.hr_payroll.payroll.calculate")
+        assert calc_desc.provider == "hr_payroll"
+        assert calc_desc.required_permissions == ["payroll:run:write"]
+        assert calc_desc.requires_execution_context is True
+        assert calc_desc.requires_authentication is True
     finally:
         await kernel.shutdown()
 

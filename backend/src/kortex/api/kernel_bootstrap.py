@@ -44,6 +44,7 @@ from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.modules.finance.module import FinanceModule
+from kortex.modules.hr_payroll.module import HRPayrollModule
 
 logger = logging.getLogger("kortex.api.kernel_bootstrap")
 
@@ -243,6 +244,9 @@ async def build_and_boot_kernel() -> Kernel:
     # `BaseModule` is deliberately not a `BaseEngine`; registration relies on the
     # Kernel's duck-typed boot dispatch. See `kortex.core.base_module`.
     kernel.register_engine(FinanceModule())  # type: ignore[arg-type]
+
+    # Phase 6 / HR & Payroll Business Module (second pilot module under BaseModule)
+    kernel.register_engine(HRPayrollModule())  # type: ignore[arg-type]
 
     # Phase 4: Document Intelligence Engine — local PDF parsing and local OCR.
     kernel.register_engine(DocumentIntelligenceEngine())
