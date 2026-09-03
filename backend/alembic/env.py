@@ -53,7 +53,8 @@ import kortex.engines.license.tables  # noqa: E402
 import kortex.engines.security.models  # noqa: E402
 import kortex.engines.workflow.persistence  # noqa: E402
 import kortex.modules.finance.persistence  # noqa: E402
-import kortex.modules.hr_payroll.persistence  # noqa: E402,F401
+import kortex.modules.hr_payroll.persistence  # noqa: E402
+import kortex.modules.operations.persistence  # noqa: E402,F401
 from kortex.core.db import Base, _default_sqlite_url  # noqa: E402
 
 # this is the Alembic Config object, which provides access to the

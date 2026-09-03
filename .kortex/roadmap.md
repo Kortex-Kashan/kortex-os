@@ -55,12 +55,12 @@ Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatch
 
 ## Phase 6: Pilot Business Modules
 
-**Status**: In Progress
+**Status**: Complete
 
 - [x] Module base contract (`kortex.core.base_module.BaseModule` — minimal lifecycle contract, a sibling to `BaseEngine`, proven in production by `FinanceModule` below; the full platform-scale contract in `docs/architecture/business_module_architecture.md` — packaging, DAG dependency resolution, IoC container, dynamic discovery, upgrade/rollback — remains deferred, not required for a pilot module to function)
 - [x] Finance Module — first pilot business module complete (`kortex.finance.invoice.create`/`.get`: real Kernel capability dispatch, `IDataStore` persistence, principal-derived tenant isolation, RBAC, production boot registration — see `docs/architecture/finance_module_pilot_implementation_report.md`). Purchase Orders and Salary Sheets are future Finance-domain expansion, not required for this pilot's completion, and remain unauthorized pending separate planning.
 - [x] HR & Payroll Module — second pilot business module complete (Employee Management, Attendance & Overtime, Leave Balances & Requests, Monthly Payroll Runs, Payslip retrieval, 6 relational tables, Alembic migration, CapabilityExecutionContext tenant isolation, event kortex.event.payroll.run_finalized — see docs/architecture/hr_payroll_module_pilot_implementation_report.md)
-- [ ] Operations Module (Vehicle Tracking, Incidents)
+- [x] Operations Module (Vehicle Tracking, Incidents) — third pilot business module complete (Fleet Vehicle Master, Plate Uniqueness, Driver Assignment, Monotonic Odometer Tracking Logs & History, Incident Reporting & Resolution, Terminal Sealing/Closure, 3 relational tables, Alembic migration, CapabilityExecutionContext tenant isolation, events vehicle.status_changed, incident.reported, incident.closed — see docs/architecture/operations_module_pilot_implementation_report.md)
 
 ## Phase 7: Production Hardening
 

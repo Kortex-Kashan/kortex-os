@@ -38,6 +38,7 @@ from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from kortex.modules.finance.module import FinanceModule
 from kortex.modules.hr_payroll.module import HRPayrollModule
+from kortex.modules.operations.module import OperationsModule
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +126,48 @@ async def test_hr_payroll_module_registers_on_production_boot_path() -> None:
         assert calc_desc.required_permissions == ["payroll:run:write"]
         assert calc_desc.requires_execution_context is True
         assert calc_desc.requires_authentication is True
+    finally:
+        await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_operations_module_registers_on_production_boot_path() -> None:
+    """Phase 6: `OperationsModule` (inheriting `BaseModule`) reaches `ModuleState.ACTIVE`
+    and registers all 13 Operations capabilities via the real production boot path."""
+    kernel = await build_and_boot_kernel()
+    try:
+        assert kernel.state == KernelState.RUNNING
+        ops_module = kernel.get_engine("operations")
+        assert isinstance(ops_module, OperationsModule)
+        assert ops_module.state == ModuleState.ACTIVE
+        assert set(ops_module.capabilities()) == {
+            "kortex.operations.vehicle.create",
+            "kortex.operations.vehicle.get",
+            "kortex.operations.vehicle.list",
+            "kortex.operations.vehicle.assign",
+            "kortex.operations.vehicle.unassign",
+            "kortex.operations.vehicle.status_update",
+            "kortex.operations.vehicle.tracking_record",
+            "kortex.operations.vehicle.tracking_history",
+            "kortex.operations.incident.report",
+            "kortex.operations.incident.get",
+            "kortex.operations.incident.list",
+            "kortex.operations.incident.resolve",
+            "kortex.operations.incident.close",
+        }
+
+        # Verify capability registration attributes
+        create_desc = kernel.get_capability("kortex.operations.vehicle.create")
+        assert create_desc.provider == "operations"
+        assert create_desc.required_permissions == ["operations:vehicle:write"]
+        assert create_desc.requires_execution_context is True
+        assert create_desc.requires_authentication is True
+
+        close_desc = kernel.get_capability("kortex.operations.incident.close")
+        assert close_desc.provider == "operations"
+        assert close_desc.required_permissions == ["operations:incident:manage"]
+        assert close_desc.requires_execution_context is True
+        assert close_desc.requires_authentication is True
     finally:
         await kernel.shutdown()
 

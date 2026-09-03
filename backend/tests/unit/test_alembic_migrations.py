@@ -38,7 +38,8 @@ import kortex.engines.license.tables
 import kortex.engines.security.models
 import kortex.engines.workflow.persistence
 import kortex.modules.finance.persistence
-import kortex.modules.hr_payroll.persistence  # noqa: F401
+import kortex.modules.hr_payroll.persistence
+import kortex.modules.operations.persistence  # noqa: F401
 from kortex.core.db import DatabaseEngineManager
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -88,6 +89,9 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "knowledge_packs",
         "knowledge_records",
         "kortex_licenses",
+        "ops_incidents",
+        "ops_vehicle_tracking_records",
+        "ops_vehicles",
         "security_audit_records",
         "security_principals",
         "security_role_permissions",
