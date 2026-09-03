@@ -39,6 +39,7 @@ An ADR documents a significant technical or architectural decision, including th
 | `ADR-0002` | Approval of the Phase 3 Desktop Architecture Specification | 2026-08-25 | `ACCEPTED` | Desktop Shell, React UI, IPC Bridge, Design System |
 | `ADR-0003` | Phase 3 Stabilization — Panel-State Persistence Consolidation, Implementation-Tracking Slices, and State Ownership Clarification | 2026-08-26 | `ACCEPTED` | Desktop Shell (`apps/desktop/src/session`, `panels`, `workspace`) |
 | `ADR-0004` | Canonical Location for Architecture Decision Records | 2026-08-26 | `ACCEPTED` | Governance / ADR Process |
+| `ADR-0014` | Phase 7 — Production Hardening — Sentinel Engine | 2026-09-03 | `ACCEPTED` | Sentinel Engine (`kortex.engines.sentinel`) |
 
 **Legacy record**: `.kortex/decisions.md` contains one entry ("ADR #001: Local-First Architecture Foundation," 2026-08-06) predating this directory's ADR process. It is preserved there as historical record per ADR-0004 and is not renumbered into this sequence — see ADR-0004 for the full rationale. It does not appear in the table above because it is not part of this directory's numbering sequence.
 

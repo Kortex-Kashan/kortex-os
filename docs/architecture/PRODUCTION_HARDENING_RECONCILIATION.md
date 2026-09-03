@@ -53,7 +53,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Work Package | Status | Dependencies | Evidence | Acceptance |
 |---|---|---|---|---|
 | Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
-| Sentinel | PENDING | Benefits from Monitoring; no hard dependency | §5.2 | Not planned yet |
+| Phase 7 — Production Hardening — Sentinel Engine | **IMPLEMENTED — AWAITING REVIEW** | None | §5.2 | Pending review (§5.2) |
 | Monitoring Engine | PENDING | None hard | §5.3 | Not planned yet |
 | Backup Engine | PENDING | Migrations (now available) | §5.4 | Not planned yet |
 | Recovery Engine | BLOCKED — PENDING OWNER DECISION | Owner Decision #1 (§3) | §5.5 | Not planned yet |
@@ -63,7 +63,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | CI/CD | **IMPLEMENTED — AWAITING REVIEW** | None | §5.9 | Pending review |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-**Database Migration Wiring is DONE** (formally accepted, §5.1). **CI/CD is now IMPLEMENTED — AWAITING REVIEW** (this pass, §5.9) — two GitHub Actions workflows exist and validate the repository on every push/PR to `main`, but this status is **not** `DONE`: formal architectural/owner acceptance is a separate, subsequent review pass, exactly as Database Migration Wiring itself went through. Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` as authorization to implement, and do not treat this pass as authorization for any Production Hardening package other than CI/CD.
+**Database Migration Wiring is DONE** (formally accepted, §5.1). **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). **Phase 7 — Production Hardening — Sentinel Engine is now IMPLEMENTED — AWAITING REVIEW** (§5.2) — the Sentinel Engine infrastructure is fully implemented, registered into Kernel bootstrap, verified against 41 unit/integration/failure-injection tests, and integrated into system health rollup, but this status is **not** `DONE`: formal architectural/owner acceptance is a separate, subsequent review pass. Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` as authorization to implement.
 
 ## 5. Work Package Detail
 
@@ -105,9 +105,24 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
 
 **Acceptance criteria status**: baseline schema byte-for-byte equivalent to `create_all()`'s output — met (Test C). `alembic upgrade head` succeeds from empty — met (Test A). Full test suite green modulo pre-existing/unrelated failures — met. Downgrade path defined for baseline — met, with documented inherent limitation. **Formally accepted as `DONE` this pass** (see acceptance record above). This does not reopen or authorize modification of the migration implementation — future passes touching this area must treat it as accepted, frozen architecture unless direct evidence of a defect emerges.
 
-### 5.2 Sentinel — PENDING
+### 5.2 Phase 7 — Production Hardening — Sentinel Engine — IMPLEMENTED — AWAITING REVIEW
 
-Repository state (established by the read-only reconciliation pass, not re-audited by this implementation pass): `backend/src/kortex/engines/sentinel/__init__.py` is a 2-line docstring only (`"""KORTEX Sentinel — System health monitoring, deadlock detection, and integrity."""`); no other files; not imported or registered in `kernel_bootstrap.py`. Classified **STUB**. A genuine health-rollup aggregation point already exists independently: `BootEngine.run_system_health_checks()` (`engines/boot/engine.py:177-196`) → `Kernel.health_check()` (`core/kernel.py:197-227`) → `GET /health` (`api/main.py:291-296`), consumed by a desktop `useSystemHealth` hook — this is health-only, not integrity/deadlock detection. No dedicated tests exist.
+**Implementation record** (this pass):
+- **Components Implemented**:
+  - `engine.py`: `SentinelEngine(BaseEngine, IEngineDiagnostics)` with 7-state `SentinelStatus` model (`STARTING`, `HEALTHY`, `DEGRADED`, `FAILED`, `UNKNOWN`, `STOPPING`, `DISABLED`), self-exclusion during engine polling, non-blocking background monitoring loop, and capability handlers.
+  - `heartbeats.py`: `HeartbeatManager` implementing explicit `IHeartbeatSource` protocol with monotonic clock, deterministic duplicate handling/replacement, $2\times$ warning and $3\times$ failure thresholds, and startup/shutdown immunity.
+  - `deadlock.py`: `DeadlockDetector` and `OperationTracker` measuring event-loop scheduling latency via cooperative yielding (`await asyncio.sleep(0)`), tracking tracked operations, and distinguishing `EVENT_LOOP_STARVATION` from `DEADLOCK_SUSPECTED`.
+  - `integrity.py`: `IntegrityVerifier` executing non-invasive architectural invariant checks across Kernel state, engine lifecycle states, engine dependencies, database connectivity session ping (`SELECT 1`), capability descriptors, and Event Engine availability.
+  - `incident.py`: `IncidentStore` with bounded in-memory ring buffer (100 entries max, deterministic FIFO eviction), crash-loop detection ($\ge 3$ failures in $600\text{s}$), and Recovery Request Emission Circuit Breaker with ephemeral cooldown ($60\text{s}$).
+  - `events.py`: `SentinelEventPublisher` publishing all 6 canonical Sentinel events (`kortex.sentinel.health.changed`, `kortex.sentinel.subsystem.failed`, `kortex.sentinel.subsystem.recovered`, `kortex.sentinel.deadlock.detected`, `kortex.sentinel.crash_loop.detected`, `kortex.sentinel.recovery.requested`).
+  - `diagnostics.py`: `SentinelDiagnostics` conforming to `IEngineDiagnostics` (`health()`, `metrics()`, `diagnostics()`).
+- **Kernel Bootstrap Integration**: Registered in `backend/src/kortex/api/kernel_bootstrap.py` following `LicenseEngine` and before `kernel.boot()`.
+- **Database Boundary**: Zero database tables, zero Alembic migrations. All state is strictly ephemeral and in-memory.
+- **Verification Evidence**:
+  - 41 passed unit, integration, and failure-injection tests across 6 dedicated test suites.
+  - Integration verified with `BootEngine.run_system_health_checks()`, Kernel `invoke_capability()`, and clean Kernel shutdown.
+  - `ruff` passed with 0 errors; `mypy` passed with 0 issues in 11 source files.
+- **Status**: **IMPLEMENTED — AWAITING REVIEW** (not `DONE`). Formal architectural/owner review is pending.
 
 ### 5.3 Monitoring Engine — PENDING
 

@@ -28,3 +28,24 @@ KORTEX OS adopts a **Local-First Architecture** as a fundamental platform princi
 ### Consequences
 - **Positive**: Zero latency dependence on SaaS APIs, complete data privacy compliance, uninterrupted business operation during network outages, predictable operational costs.
 - **Negative / Trade-offs**: Higher hardware requirements on host machine (RAM/GPU for local LLMs), need for local sync/replication mechanisms, client-side database management complexity.
+
+---
+
+## ADR-014: Phase 7 — Production Hardening — Sentinel Engine
+
+- **Status**: Approved
+- **Date**: 2026-09-03
+- **Context**: KORTEX OS requires production hardening through an unyielding, non-invasive health observation and invariant verification sentinel. Sentinel observes, classifies, and hands off failure episodes without performing destructive actions or process recovery.
+
+### Decision
+Implement `Phase 7 — Production Hardening — Sentinel Engine` under Clean Architecture and BaseEngine lifecycle:
+1. **Separation of Health from Lifecycle**: Layer `SentinelStatus` (7 states: `STARTING`, `HEALTHY`, `DEGRADED`, `FAILED`, `UNKNOWN`, `STOPPING`, `DISABLED`) over existing `EngineState`.
+2. **Explicit Observation Only**: Sentinel evaluates core probes (engine lifecycle, health checks, DB ping, registry descriptors, dependency graph, EventEngine availability, event-loop lag) and optional probes (tracked operations, heartbeats). Sentinel NEVER executes restarts, terminates processes, or performs recovery.
+3. **Explicit Heartbeat Contract**: Define `IHeartbeatSource` protocol with monotonic clock, deterministic replacement, $2\times$ warning and $3\times$ failure multipliers, and startup/shutdown immunity.
+4. **Deterministic Failure Classification & Circuit Breaker**: Classify failures into `TRANSIENT`, `REPEATED`, `PERSISTENT`, `CRASH_LOOP`, `EVENT_LOOP_STARVATION`, `STALLED_OPERATION`, and `DEADLOCK_SUSPECTED`. Implement Recovery Request Emission Circuit Breaker with ephemeral cooldown to prevent recovery-request event storms.
+5. **Canonical Capabilities & Events**: Register 3 read-only, authenticated capabilities (`kortex.sentinel.health.get`, `kortex.sentinel.status.get`, `kortex.sentinel.diagnostics.get`) requiring `system:sentinel:read`. Standardize 6 canonical events with UUIDv4 IDs, UTC timestamps, and deterministic idempotency keys.
+6. **Ephemeral Bounded Storage**: No database migrations. Diagnostic retention uses an in-memory bounded ring buffer (`maxlen=100`) with deterministic FIFO eviction.
+
+### Consequences
+- **Positive**: Complete observability across runtime components, deterministic fault isolation, non-blocking asynchronous monitoring, zero persistent schema overhead.
+- **Negative / Trade-offs**: Diagnostic incident history is ephemeral and does not survive runtime process restarts.

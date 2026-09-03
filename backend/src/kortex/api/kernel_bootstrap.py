@@ -38,6 +38,7 @@ from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.license.engine import LicenseEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
+from kortex.engines.sentinel.engine import SentinelEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
 from kortex.engines.security.models import PrincipalType
 from kortex.engines.storage.engine import StorageEngine
@@ -257,6 +258,9 @@ async def build_and_boot_kernel() -> Kernel:
 
     # Phase 5: License Engine (M5.7) — Commercial license validation and feature gating.
     kernel.register_engine(LicenseEngine())
+
+    # Phase 7 — Production Hardening — Sentinel Engine: System health, integrity, and liveness observation.
+    kernel.register_engine(SentinelEngine())
 
     await kernel.boot()
 
