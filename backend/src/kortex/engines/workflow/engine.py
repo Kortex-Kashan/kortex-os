@@ -1326,7 +1326,8 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         decision_data: dict[str, Any] | None = None,
         tenant_id: str | None = None,
         execution_context: CapabilityExecutionContext | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Submit a decision for an approval ticket (kortex.workflow.approval.decide capability).
 
@@ -1341,9 +1342,16 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         overridden — a caller cannot make their own tenant claim authoritative
         by matching it to nothing.
         """
-        principal = execution_context.principal if execution_context is not None else None
+        if principal is None and execution_context is not None:
+            principal = execution_context.principal
         if execution_context is not None:
             tid = execution_context.tenant_id
+            if tenant_id is not None and tenant_id != tid:
+                raise AuthorizationDeniedError(
+                    f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
+                )
+        elif principal is not None:
+            tid = principal.tenant_id
             if tenant_id is not None and tenant_id != tid:
                 raise AuthorizationDeniedError(
                     f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
@@ -1446,7 +1454,8 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         valid_until: str | datetime.datetime,
         tenant_id: str | None = None,
         execution_context: CapabilityExecutionContext | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        principal: SecurityPrincipal | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Delegate an approval role to another principal (kortex.workflow.approval.delegate capability).
 
@@ -1454,9 +1463,16 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         `decide_approval_request`'s docstring for the invariant this
         handler follows identically.
         """
-        principal = execution_context.principal if execution_context is not None else None
+        if principal is None and execution_context is not None:
+            principal = execution_context.principal
         if execution_context is not None:
             tid = execution_context.tenant_id
+            if tenant_id is not None and tenant_id != tid:
+                raise AuthorizationDeniedError(
+                    f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
+                )
+        elif principal is not None:
+            tid = principal.tenant_id
             if tenant_id is not None and tenant_id != tid:
                 raise AuthorizationDeniedError(
                     f"Supplied tenant_id '{tenant_id}' does not match the authenticated tenant '{tid}'."
@@ -1689,7 +1705,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         timezone: str = "UTC",
         tenant_id: str | None = None,
         execution_context: CapabilityExecutionContext | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Create a workflow execution schedule (kortex.workflow.schedule.create capability).
 
@@ -1892,7 +1908,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         correlation_id: str | None = None,
         tenant_id: str | None = None,
         execution_context: CapabilityExecutionContext | None = None,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Execute a governed external operation with safety guards (kortex.workflow.external.execute capability).
 

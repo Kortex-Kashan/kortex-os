@@ -88,6 +88,7 @@ from kortex.engines.security.models import (
     SecurityPrincipal,
     TokenPayload,
 )
+
 # Reserved `CapabilityRequest.parameters` keys: only `CapabilityDispatcher` may
 # populate these, via `CapabilityExecutionContext` injection (see
 # `_invoke_handler` below). A caller supplying either key is rejected outright
@@ -578,7 +579,7 @@ class CapabilityDispatcher:
         request: CapabilityRequest,
         descriptor: CapabilityDescriptor,
         execution_context: CapabilityExecutionContext,
-    ) -> Any:  # noqa: ANN401
+    ) -> Any:
         """Resolve and invoke the real handler, awaiting the result only if
         it is actually awaitable.
 
@@ -624,8 +625,8 @@ class CapabilityDispatcher:
         kwargs = dict(request.parameters)
         if descriptor.requires_execution_context:
             kwargs["execution_context"] = execution_context
-            if descriptor.legacy_principal_bridge:
-                kwargs["principal"] = execution_context.principal
+        if descriptor.legacy_principal_bridge:
+            kwargs["principal"] = execution_context.principal
 
         # M7.2: coerce plain-dict parameters into the real Pydantic model
         # instances the handler's own signature declares — see

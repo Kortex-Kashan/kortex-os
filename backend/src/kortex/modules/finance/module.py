@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from kortex.core.base_module import BaseModule, ModuleState
+from kortex.core.dispatch import CapabilityExecutionContext
 from kortex.core.exceptions import KortexError
 from kortex.engines.security.models import SecurityPrincipal
 from kortex.engines.storage.interfaces import IDataStore
@@ -100,7 +101,10 @@ class FinanceModule(BaseModule):
                 description="Create a commercial billing invoice in DRAFT state.",
                 provider=self.name,
                 handler=self.create_invoice,
+                requires_authentication=True,
                 required_permissions=["finance:invoice:write"],
+                requires_execution_context=True,
+                legacy_principal_bridge=True,
             )
 
             kernel.register_capability(
@@ -108,7 +112,10 @@ class FinanceModule(BaseModule):
                 description="Retrieve one of the caller's own invoices by ID.",
                 provider=self.name,
                 handler=self.get_invoice,
+                requires_authentication=True,
                 required_permissions=["finance:invoice:read"],
+                requires_execution_context=True,
+                legacy_principal_bridge=True,
             )
 
             self._set_state(ModuleState.ACTIVE)
@@ -147,6 +154,7 @@ class FinanceModule(BaseModule):
         self,
         request: CreateInvoiceRequest,
         principal: SecurityPrincipal | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
     ) -> FinanceInvoice:
         """Backs the `kortex.finance.invoice.create` capability.
 
@@ -163,6 +171,8 @@ class FinanceModule(BaseModule):
         default tenant.
         """
         self.ensure_state(ModuleState.ACTIVE)
+        if principal is None and execution_context is not None:
+            principal = execution_context.principal
         if principal is None:
             raise KortexError("kortex.finance.invoice.create requires a verified principal; none was provided.")
 
@@ -173,6 +183,7 @@ class FinanceModule(BaseModule):
         self,
         invoice_id: str,
         principal: SecurityPrincipal | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
     ) -> FinanceInvoice:
         """Backs the `kortex.finance.invoice.get` capability.
 
@@ -185,6 +196,8 @@ class FinanceModule(BaseModule):
         that exception's own docstring.
         """
         self.ensure_state(ModuleState.ACTIVE)
+        if principal is None and execution_context is not None:
+            principal = execution_context.principal
         if principal is None:
             raise KortexError("kortex.finance.invoice.get requires a verified principal; none was provided.")
 

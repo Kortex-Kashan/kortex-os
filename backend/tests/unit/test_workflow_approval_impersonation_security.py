@@ -25,11 +25,11 @@ from pathlib import Path
 
 import pytest
 
+from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import AuthorizationDeniedError
-from kortex.core.db import DatabaseEngineManager
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.workflow.engine import WorkflowEngine
 from tests.unit.test_workflow_capability_dispatch import (

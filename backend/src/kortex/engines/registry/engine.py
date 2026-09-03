@@ -323,11 +323,16 @@ class RegistryEngine(BaseEngine):
                 f"only {sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may bypass authentication."
             )
 
-        if legacy_principal_bridge and not requires_execution_context:
-            raise ValueError(
-                f"Capability '{name}' set legacy_principal_bridge=True without "
-                f"requires_execution_context=True; the bridge is only meaningful alongside it."
-            )
+        if handler is not None:
+            try:
+                sig = inspect.signature(handler)
+                handler_params = sig.parameters
+                if not requires_execution_context and "execution_context" in handler_params:
+                    requires_execution_context = True
+                if not legacy_principal_bridge and "principal" in handler_params:
+                    legacy_principal_bridge = True
+            except (TypeError, ValueError):
+                pass
 
         if handler is not None and (requires_execution_context or legacy_principal_bridge):
             self._validate_execution_context_binding(
