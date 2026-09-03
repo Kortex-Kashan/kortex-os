@@ -49,6 +49,7 @@ import kortex.engines.ai.persistence  # noqa: E402
 import kortex.engines.connector.models  # noqa: E402
 import kortex.engines.document.models  # noqa: E402
 import kortex.engines.knowledge.persistence  # noqa: E402
+import kortex.engines.license.tables  # noqa: E402
 import kortex.engines.security.models  # noqa: E402
 import kortex.engines.workflow.persistence  # noqa: E402
 import kortex.modules.finance.persistence  # noqa: E402,F401

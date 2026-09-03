@@ -51,8 +51,7 @@ Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatch
 
 - [x] Human-in-the-loop approval queues & notification schedules (`DurableApprovalManager` — durable ticket lifecycle, expiry sweep daemon, cross-engine resume/cancel for both human and AI-originated requests; delivered as the M5.1–M6.4 workflow-governance hardening track, distinct from this roadmap's own "Phase 6" numbering below — see `git log --grep="M6\."` for that track's own milestone sequence)
 - [ ] Process Intelligence Engine — **IMPLEMENTED — AWAITING REVIEW** (DFG process mining, trace variant extraction, bottleneck diagnostics, throughput KPIs — `kortex.engines.process_intelligence`; bounded $\le 100$ nodes, $\le 500$ edges; structural tenant isolation via `TenantScopedProcessAnalyticsRepository`; not checked off `[x]` until Chief Architect review and explicit acceptance)
-- [x] Security Engine (RBAC, encryption, audit — `kortex.engines.security`, milestones 1–6 and 8 complete; tenant-isolation hardening extended further by the M5.1–M6.4 track above)
-- [ ] License Engine
+- [ ] License Engine (M5.7) — **IMPLEMENTED — AWAITING REVIEW** (offline-first cryptographic licensing, Ed25519 token verification via `LocalCrypto`, KORTEX constrained canonicalization profile, `TenantScopedLicenseRepository` with concurrency-safe `active_tenant_id` unique constraint, `ILicenseProvider` protocol implementation, clock-tamper/rollback detection with Canonical Community fallback, Alembic migration `b4e89f123c5a`; not checked off `[x]` until Chief Architect review and explicit acceptance)
 
 ## Phase 6: Pilot Business Modules
 

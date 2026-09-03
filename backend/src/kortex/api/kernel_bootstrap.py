@@ -35,6 +35,7 @@ from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document_intelligence.engine import DocumentIntelligenceEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
+from kortex.engines.license.engine import LicenseEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
@@ -245,6 +246,9 @@ async def build_and_boot_kernel() -> Kernel:
 
     # Phase 4: Document Intelligence Engine — local PDF parsing and local OCR.
     kernel.register_engine(DocumentIntelligenceEngine())
+
+    # Phase 5: License Engine (M5.7) — Commercial license validation and feature gating.
+    kernel.register_engine(LicenseEngine())
 
     await kernel.boot()
 

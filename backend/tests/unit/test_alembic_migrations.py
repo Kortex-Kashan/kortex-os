@@ -34,6 +34,7 @@ import kortex.engines.ai.persistence
 import kortex.engines.connector.models
 import kortex.engines.document.models
 import kortex.engines.knowledge.persistence
+import kortex.engines.license.tables
 import kortex.engines.security.models
 import kortex.engines.workflow.persistence
 import kortex.modules.finance.persistence  # noqa: F401
@@ -79,6 +80,7 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "knowledge_annotations",
         "knowledge_packs",
         "knowledge_records",
+        "kortex_licenses",
         "security_audit_records",
         "security_principals",
         "security_role_permissions",
