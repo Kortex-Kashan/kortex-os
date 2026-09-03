@@ -150,7 +150,10 @@ async def booted_system(tmp_path: Path) -> tuple[Kernel, SecurityEngine, License
     kernel.register_engine(license_engine)
     await kernel.boot()
 
-    return kernel, security_engine, license_engine
+    try:
+        yield kernel, security_engine, license_engine
+    finally:
+        await db_manager.disconnect()
 
 
 @pytest.mark.asyncio
@@ -291,3 +294,48 @@ async def test_authorized_activation_and_status_flow(
     rev_res = await kernel.invoke_capability(rev_req)
     assert rev_res.status == "UNLICENSED"
     assert rev_res.tier == "COMMUNITY"
+
+
+@pytest.mark.asyncio
+async def test_token_verify_capability_dispatch(
+    booted_system: tuple[Kernel, SecurityEngine, LicenseEngine],
+) -> None:
+    kernel, sec_engine, lic_engine = booted_system
+    tenant_id = str(uuid.uuid4())
+    data_store = kernel.get_engine("storage").data  # type: ignore[union-attr]
+
+    await _seed_principal(data_store, tenant_id, "auditor-user", roles=["AUDITOR"])
+    await _grant_role_permission(data_store, "AUDITOR", "license:read")
+    session_token = await _issue_session_token(sec_engine, "auditor-user", tenant_id, roles=["AUDITOR"])
+
+    token = _issue_license_token(lic_engine.crypto_engine, tenant_id)
+
+    # 1. Successful verification through dispatcher
+    verify_req = CapabilityRequest(
+        capability_name="kortex.license.token.verify",
+        session_token=session_token,
+        context={"resource_tenant_id": tenant_id},
+        parameters={"token": token},
+    )
+    verify_res = await kernel.invoke_capability(verify_req)
+    assert verify_res.is_valid is True
+    assert verify_res.claims.subject_tenant_id == tenant_id
+    assert verify_res.claims.tier == LicenseTier.ENTERPRISE
+
+    # 2. Unauthenticated invocation rejected
+    unauth_req = CapabilityRequest(
+        capability_name="kortex.license.token.verify",
+        session_token=None,
+        context={"resource_tenant_id": tenant_id},
+        parameters={"token": token},
+    )
+    with pytest.raises(AuthenticationError):
+        await kernel.invoke_capability(unauth_req)
+
+
+def test_production_mode_rejects_arbitrary_root_keys() -> None:
+    from kortex.engines.license.exceptions import SecurityConfigurationError
+
+    arbitrary_keys = {_OFFICIAL_ROOT_KID: b"k" * 32}
+    with pytest.raises(SecurityConfigurationError, match="Custom root keys are strictly forbidden"):
+        LicenseEngine(trusted_root_keys=arbitrary_keys, is_production=True)

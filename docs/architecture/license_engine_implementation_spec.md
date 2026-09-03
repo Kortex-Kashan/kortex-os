@@ -55,10 +55,10 @@ In adherence to the **KORTEX Constitution (`AGENTS.md`)**:
   - Registered in `backend/src/kortex/api/kernel_bootstrap.py` during Phase 5 boot.
   - IoC registration provides `ILicenseProvider` to the kernel container.
   - Registered capabilities:
-    1. `kortex.license.activation.apply` (Permission: `license:manage`)
-    2. `kortex.license.activation.revoke` (Permission: `license:manage`)
-    3. `kortex.license.status.get` (Permission: `license:read`)
-    4. `kortex.license.status.refresh` (Permission: `license:manage`)
+    1. `kortex.license.token.verify` (Permission: `license:read`, stateless token inspection)
+    2. `kortex.license.activation.apply` (Permission: `license:manage`, stateful tenant activation)
+    3. `kortex.license.activation.revoke` (Permission: `license:manage`, tenant license revocation)
+    4. `kortex.license.status.get` (Permission: `license:read`, active entitlement inspection)
 
 ### 2.2 Domain Models & Entitlements
 - **`LicenseTier`**: `COMMUNITY`, `STARTER`, `PROFESSIONAL`, `ENTERPRISE`.
@@ -99,9 +99,10 @@ The implementation adheres to a precisely defined KORTEX canonicalization profil
 5. ISO 8601 UTC datetimes formatted strictly as `YYYY-MM-DDTHH:MM:SSZ`.
 6. JSON parser (`parse_json_safe`) enforces duplicate key rejection (`object_pairs_hook`).
 
-### 3.3 Cryptographic Verification
+### 3.3 Cryptographic Verification & Root Key Provenance
 - Backed by `LocalCrypto.verify_ed25519(data, signature, public_key)`.
-- Root keys: Compiled vendor dictionary containing official vendor keys (`_OFFICIAL_ROOT_KID = "kortex-root-2026"`). Custom keys are rejected in production mode.
+- **Production Trust Anchor**: Official vendor trust anchor `_OFFICIAL_ROOT_KID = "kortex-root-2026"` compiled into `COMPILED_VENDOR_ROOT_KEYS`. Custom or externally supplied root keys are strictly rejected in production mode (`SecurityConfigurationError`).
+- **Test/Dev Fixtures**: Test fixtures generate isolated, temporary in-memory keypairs with deterministic seeds for test runs. No private vendor signing keys exist in the repository, configuration, or environment.
 
 ---
 
@@ -144,6 +145,11 @@ The partial uniqueness invariant is enforced via `active_tenant_id`:
 - Under SQLite and PostgreSQL, `UNIQUE(active_tenant_id)` permits multiple `NULL` values while guaranteeing that at most **one** license is active per tenant at any given moment.
 - License replacement executes atomically within a single transaction: existing active license transitions to `SUPERSEDED` (`active_tenant_id = NULL`) before the new license is inserted with `active_tenant_id = tenant_id`.
 
+### 4.3 Event Delivery Semantics
+- **Ordering Guarantee**: Strictly **no event is emitted before the corresponding database transaction commits**.
+- **Delivery Guarantee**: Durable state transition with best-effort / at-most-once event notification over the in-memory `EventEngine`.
+- **Process Failure Boundary**: If a process terminates between the relational commit (`grace_event_emitted = True`) and in-memory event dispatch, the event is not re-published on subsequent queries. Exactly-once delivery across process crashes is not claimed without an active transactional outbox worker.
+
 ---
 
 ## 5. Security & Tenant Isolation
@@ -158,7 +164,7 @@ The partial uniqueness invariant is enforced via `active_tenant_id`:
 
 ### 5.2 Tamper Resistance & Clock Rollback
 - The engine maintains an in-memory and database monotonic high-water mark `highest_observed_at`.
-- If the current wall clock `now` is observed to be more than 300 seconds behind `highest_observed_at`, clock tampering is flagged:
+- If the current wall clock `now` is observed to be more than **3,600 seconds (1 hour)** behind `highest_observed_at`, clock tampering is flagged:
   - `clock_tamper_detected = True`
   - `is_degraded = True`
   - Immediate fail-closed fallback to Canonical Community entitlements.

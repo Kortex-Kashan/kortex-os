@@ -55,6 +55,7 @@ def test_no_caller_supplied_tenant_id_in_handler_signatures() -> None:
     tree = ast.parse((_LICENSE_PKG_PATH / "engine.py").read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in (
+            "verify_token",
             "apply_activation",
             "revoke_activation",
             "get_status",

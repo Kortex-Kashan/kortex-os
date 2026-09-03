@@ -171,6 +171,27 @@ def test_clock_rollback_triggers_tamper_defense() -> None:
     assert snapshot.features == CANONICAL_COMMUNITY_FEATURES
 
 
+def test_clock_rollback_boundary_one_hour() -> None:
+    tenant_id = "tenant-boundary"
+    rec = _build_test_record(tenant_id, expires_at=datetime.now(UTC) + timedelta(days=100))
+
+    engine = LicenseEngine()
+    engine._cached_records[tenant_id] = rec
+
+    # 1. Rollback of 30 minutes (< 1 hour tolerance) -> not flagged
+    engine._highest_observed_at[tenant_id] = datetime.now(UTC) + timedelta(minutes=30)
+    snap_within = engine.get_entitlements(tenant_id)
+    assert snap_within.clock_tamper_detected is False
+    assert snap_within.tier == LicenseTier.ENTERPRISE
+
+    # 2. Rollback of 65 minutes (> 1 hour tolerance) -> flagged as tamper
+    engine._highest_observed_at[tenant_id] = datetime.now(UTC) + timedelta(minutes=65)
+    snap_exceeded = engine.get_entitlements(tenant_id)
+    assert snap_exceeded.clock_tamper_detected is True
+    assert snap_exceeded.tier == LicenseTier.COMMUNITY
+    assert snap_exceeded.is_degraded is True
+
+
 def test_clock_restoration_clears_tamper_defense() -> None:
     tenant_id = "tenant-restored"
     rec = _build_test_record(tenant_id, expires_at=datetime.now(UTC) + timedelta(days=100))
