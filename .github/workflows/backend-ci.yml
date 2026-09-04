@@ -36,6 +36,9 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/requirements-dev.txt
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
@@ -54,4 +57,4 @@ jobs:
         run: python -m mypy src
 
       - name: pytest
-        run: python -m pytest -q
+        run: python -m pytest -ra --tb=short
