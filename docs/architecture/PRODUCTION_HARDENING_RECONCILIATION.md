@@ -54,7 +54,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 |---|---|---|---|---|
 | Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
 | Phase 7 — Production Hardening — Sentinel Engine | **DONE** | None | §5.2 | Formally accepted (§5.2) |
-| Monitoring Engine | **IMPLEMENTED — AWAITING REVIEW** | Sentinel (public interface) | §5.3 | Implemented, awaiting review (§5.3) |
+| Monitoring Engine | **DONE** | Sentinel (public interface) | §5.3 | Formally accepted (§5.3) |
 | Backup Engine | PENDING | Migrations (now available) | §5.4 | Not planned yet |
 | Recovery Engine | BLOCKED — PENDING OWNER DECISION | Owner Decision #1 (§3) | §5.5 | Not planned yet |
 | Update Engine | PENDING | Migrations (now available) | §5.6 | Not planned yet |
@@ -63,7 +63,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | CI/CD | **IMPLEMENTED — AWAITING REVIEW** | None | §5.9 | Pending review |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is PLANNED** (§5.3) — full implementation plan prepared. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
+**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
 
 ## 5. Work Package Detail
 
@@ -128,9 +128,20 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
   - Graphify verified fresh at HEAD (`built_at_commit == 65676a4c`, 15,442 nodes, 36,158 edges, 487 communities).
 - **Status**: **DONE** (formally accepted).
 
-### 5.3 Monitoring Engine — IMPLEMENTED — AWAITING REVIEW
+### 5.3 Monitoring Engine — DONE
 
-- **Status**: **IMPLEMENTED — AWAITING REVIEW** (ADR-0015, implementation complete across all modules and tests).
+- **Status**: **DONE** (formally accepted).
+- **Formal acceptance record**:
+  - **Owner approval**: Received explicit owner authorization and approval for closure.
+  - **Accepted implementation commit**: `e9ebccac268ea48a13e16ab5148f587a82752b91` (`feat(monitoring): implement Phase 7 Monitoring Engine`).
+  - **ADR**: [ADR-0015-phase7-monitoring-engine.md](../adr/ADR-0015-phase7-monitoring-engine.md).
+  - **Technical verification**: Fully completed and verified against baseline `a8860c6` (2,962 passed, 2 skipped, 0 failed). Full backend suite achieved 3,016 passed, 2 skipped, 0 failed (+54 net new test cases, 0 new failures, 0 unexpected skips).
+  - **Targeted test suite**: 42 unique unit and integration tests across 8 dedicated monitoring test files; 12 new parameterized test cases dynamically verified by `test_capability_identity_propagation_architecture.py`.
+  - **Quality gates**: Ruff check (0 errors), Ruff format check (0 errors), Mypy (0 issues across 247 source files).
+  - **GitHub Actions CI**: Backend CI (`33863580710`) and Desktop CI (`33863580801`) passed with `conclusion: success`.
+  - **Database boundary**: Zero Alembic migrations, zero database tables, 100% ephemeral in-memory state. Migration integrity verified (7/7 passed in `test_alembic_migrations.py`).
+  - **Sentinel & Architecture boundaries**: Sentinel untouched and remains DONE; integration occurs strictly through public event `kortex.sentinel.health.changed` and canonical `IEngineDiagnostics.health()`. Zero private Sentinel imports. No process supervision, recovery, or restarts.
+  - **Graphify**: Synchronized with `built_at_commit == e9ebccac268ea48a13e16ab5148f587a82752b91`.
 - **Role in Phase 7**: Directly complements Sentinel Engine as the operational metrics, counter/gauge/histogram aggregation, rolling time-series buffer, and dashboard visualization provider for KORTEX.
 - **Implemented Architecture**:
   1. `MetricRegistry`: Thread-safe metric primitives (`Counter`, `Gauge`, `Histogram`, `Timer`), strict cardinality limits (200 names, 500 active series, 5 labels, 64-character length limit), whitelisted label keys (`subsystem`, `driver`, `status`, `error_type`, `action_type`, `severity`, `entity_type`), and deterministic collision-safe series keys.
@@ -142,7 +153,6 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
   7. Capabilities: Exactly 4 registered capabilities (`kortex.monitoring.metrics.get`, `kortex.monitoring.timeseries.get`, `kortex.monitoring.dashboard.get`, `kortex.monitoring.diagnostics.get`), all requiring authentication, `system:monitoring:read`, `INTERNAL` clearance, and execution context.
   8. Dashboard: Direct internal composition of operational state without nested capability dispatcher invocation.
   9. Storage: 100% ephemeral in-memory state; zero database tables, zero Alembic migrations.
-- **Verification**: 56 monitoring tests passing (unit + integration), 0 full backend regressions, clean Ruff lint/format, clean mypy.
 - **Explicit Non-Goals Honored**: No process supervision, no engine restarts, no permanent storage, no duplication of Sentinel's health assessment.
 
 ### 5.4 Backup Engine — PENDING
