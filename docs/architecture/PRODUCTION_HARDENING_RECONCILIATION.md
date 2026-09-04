@@ -158,11 +158,11 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
 ### 5.4 Backup Engine — DONE
 
 - **Status**: **DONE** (surgically verified and ready for formal owner acceptance).
-- **Accepted Implementation Commit**: `a78f6814c6adbe34e672872fc5d63a8897bc3479` (`feat(backup): implement Phase 7 production backup engine`).
+- **Accepted Implementation Commit**: `a78f6814c6adbe34e672872fc5d63a8897bc3479` (`feat(backup): implement Phase 7 production backup engine`), verified and hardened at `46d63686c35d0ecaebfbef8be96bdc4f4a47e369` (`fix(backup): enforce last-valid retention invariant and idempotency handling`).
 - **ADR**: [ADR-0016-phase7-backup-engine.md](../adr/ADR-0016-phase7-backup-engine.md).
 - **Technical Verification**:
-  - Full backend suite: 3,078 tests collected (+60 test nodes from 3,018 baseline). 3,075 passed, 2 skipped, 0 real regressions.
-  - Targeted Backup suite: 47 passed unit and integration tests across 6 dedicated test modules.
+  - Full backend suite: 3,078 tests collected (+60 test nodes from 3,018 baseline: 3,076 passed, 2 skipped, 0 failed, 0 errors).
+  - Targeted Backup suite: 47 passed unit and integration tests across 11 dedicated test files (1 integration, 10 unit).
   - Capability identity propagation: 243 passed tests in `test_capability_identity_propagation_architecture.py` (including all 13 Backup capability combinations).
   - Quality gates: `ruff check` (0 errors), `ruff format --check` (0 errors), `mypy` (0 issues across 14 backup source files).
   - Migration boundary: 0 new database tables, 0 new Alembic migrations; completely filesystem-artifact-based persistence with migration sanity fully preserved (7/7 passed).
