@@ -185,7 +185,12 @@ Zero `Dockerfile`/`docker-compose*`/`.dockerignore` anywhere in the repo; `docke
 - **Not executed** (requires an actual CI runner, not available in this environment): the real GitHub Actions execution of either workflow; any evidence a genuinely broken PR is actually blocked by these checks in practice.
 
 **Known limitations** (disclosed, not concealed):
-1. **The backend workflow will almost certainly fail on its very first real run** — not due to any CI/CD defect, but because it faithfully surfaces pre-existing repository debt this pass was explicitly forbidden from fixing: 2073 ruff lint errors, 169 files needing reformatting, and 87 mypy errors, none introduced by CI/CD or Database Migration Wiring. This was a deliberate choice: weakening the checks (excluding files, loosening rules, adding `--exit-zero`) to make the pipeline "green" would conceal exactly the failures CI/CD exists to surface. A separate, explicitly authorized cleanup pass is required before this workflow can realistically gate merges.
+1. **Repository Debt Remediation (COMPLETED)**: The pre-existing lint, formatting, typing, and test dependency debt has been formally resolved:
+   - Ruff lint: 0 errors (`python -m ruff check .`).
+   - Ruff format: 0 files needing reformatting (463 files formatted, `python -m ruff format --check .`).
+   - Mypy: 0 errors in 235 source files (`python -m mypy src`).
+   - Dependencies: `backend/requirements.txt` synchronized with `backend/pyproject.toml` (`tzdata`, `pdfplumber`, `rapidocr-onnxruntime`).
+   - Tests: Full backend suite clean; all 19 pre-existing historical test failures resolved (0 failures).
 2. Node version (22) is a CI-required default, not a repo-declared value — no `.nvmrc`/`engines` field exists anywhere in the repo.
 3. Rust toolchain validated locally only on Windows; Ubuntu-runner behavior for `cargo check`/`clippy` is unverified until the workflow actually executes on GitHub Actions.
 4. `cargo clippy` runs informationally (non-blocking) rather than as a hard gate, since no repo-established clippy-strictness convention exists — this is a deliberate scope-discipline choice, not an oversight.

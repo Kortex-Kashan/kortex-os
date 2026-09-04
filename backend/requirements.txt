@@ -14,3 +14,6 @@ argon2-cffi>=23.1.0
 aiosqlite>=0.22.0
 pyyaml>=6.0.0
 python-dotenv>=1.0.0
+tzdata>=2024.1; sys_platform == 'win32'
+pdfplumber>=0.11.0
+rapidocr-onnxruntime>=1.4.0
