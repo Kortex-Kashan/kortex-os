@@ -38,9 +38,9 @@ from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.license.engine import LicenseEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.security.engine import SecurityEngine
-from kortex.engines.sentinel.engine import SentinelEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
 from kortex.engines.security.models import PrincipalType
+from kortex.engines.sentinel.engine import SentinelEngine
 from kortex.engines.storage.engine import StorageEngine
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.engine import WorkflowEngine
