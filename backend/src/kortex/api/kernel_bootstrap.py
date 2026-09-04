@@ -29,6 +29,7 @@ from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.ai.identity import AI_SYSTEM_PRINCIPAL_ID, AI_SYSTEM_ROLE, AISystemIdentity
 from kortex.engines.ai.ollama_provider import OllamaProvider
 from kortex.engines.ai.tools import ToolDefinition, ToolRegistry
+from kortex.engines.backup.engine import BackupEngine
 from kortex.engines.configuration.engine import SystemSettings
 from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
@@ -265,6 +266,9 @@ async def build_and_boot_kernel() -> Kernel:
 
     # Phase 7 — Production Hardening — Monitoring Engine: Operational telemetry, metrics, and alerting.
     kernel.register_engine(MonitoringEngine())
+
+    # Phase 7 — Production Hardening — Backup Engine: Snapshot capture, packaging, encryption, validation, retention.
+    kernel.register_engine(BackupEngine())
 
     await kernel.boot()
 
