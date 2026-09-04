@@ -57,4 +57,22 @@ jobs:
         run: python -m mypy src
 
       - name: pytest
-        run: python -m pytest -ra --tb=short
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -ra --tb=short 2>&1 | tee pytest_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "## Pytest Failure Summary" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 120 pytest_output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit $EXIT_CODE
+          fi
+
+      - name: Upload pytest failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-failure-log
+          path: backend/pytest_output.txt
