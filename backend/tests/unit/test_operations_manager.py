@@ -766,6 +766,7 @@ class TestIncidentManagerOperations:
                 tenant_id=tenant_id,
                 reported_by_id="p1",
             )
+
             # Force _generate_incident_number to return colliding number
             async def _mock_gen(*args: object, **kwargs: object) -> str:
                 return f"INC-{datetime.now(UTC).year}-0001"

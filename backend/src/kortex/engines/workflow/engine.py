@@ -1367,7 +1367,6 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         else:
             raise WorkflowValidationError(f"Invalid approval decision state: '{decision}'.")
 
-
         decision_obj = ApprovalDecision(
             request_id=UUID(str(request_id)),
             tenant_id=tid,

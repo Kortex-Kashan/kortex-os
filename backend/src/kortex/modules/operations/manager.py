@@ -216,9 +216,7 @@ class OperationsManager:
         row = await self._data_store.execute_in_transaction(_action)
         return self._to_vehicle_response(row)
 
-    async def update_vehicle_status(
-        self, request: UpdateVehicleStatusRequest, tenant_id: str
-    ) -> VehicleResponse:
+    async def update_vehicle_status(self, request: UpdateVehicleStatusRequest, tenant_id: str) -> VehicleResponse:
         """Transition vehicle operational status and publish domain event."""
         old_status: str | None = None
         event_payload: dict[str, object] | None = None
@@ -508,9 +506,7 @@ class OperationsManager:
         rows = await self._data_store.execute_in_transaction(_action)
         return [self._to_incident_response(r) for r in rows]
 
-    async def update_incident_status(
-        self, request: UpdateIncidentStatusRequest, tenant_id: str
-    ) -> IncidentResponse:
+    async def update_incident_status(self, request: UpdateIncidentStatusRequest, tenant_id: str) -> IncidentResponse:
         """Transition incident operational status through intermediate lifecycle states."""
 
         async def _action(session: AsyncSession) -> OpsIncidentRow:
@@ -574,16 +570,13 @@ class OperationsManager:
                 )
 
             if row.status == IncidentStatus.RESOLVED.value:
-                raise OpsIncidentValidationError(
-                    f"Incident '{row.incident_number}' is already RESOLVED."
-                )
+                raise OpsIncidentValidationError(f"Incident '{row.incident_number}' is already RESOLVED.")
 
             # Permitted transitions to RESOLVED:
             # 1. ACTION_REQUIRED -> RESOLVED
             # 2. LOW severity REPORTED -> RESOLVED (fast path)
-            can_resolve = (
-                row.status == IncidentStatus.ACTION_REQUIRED.value
-                or (row.status == IncidentStatus.REPORTED.value and row.severity == IncidentSeverity.LOW.value)
+            can_resolve = row.status == IncidentStatus.ACTION_REQUIRED.value or (
+                row.status == IncidentStatus.REPORTED.value and row.severity == IncidentSeverity.LOW.value
             )
 
             if not can_resolve:
@@ -603,9 +596,7 @@ class OperationsManager:
         row = await self._data_store.execute_in_transaction(_action)
         return self._to_incident_response(row)
 
-    async def close_incident(
-        self, request: CloseIncidentRequest, tenant_id: str, closed_by: str
-    ) -> IncidentResponse:
+    async def close_incident(self, request: CloseIncidentRequest, tenant_id: str, closed_by: str) -> IncidentResponse:
         """Formally close and seal an incident record (terminal state)."""
         now = datetime.now(UTC)
         event_payload: dict[str, object] | None = None
@@ -621,9 +612,7 @@ class OperationsManager:
                 raise OpsIncidentNotFoundError(f"Incident '{request.incident_id}' not found.")
 
             if row.status == IncidentStatus.CLOSED.value:
-                raise OpsIncidentAlreadyClosedError(
-                    f"Incident '{row.incident_number}' is already CLOSED."
-                )
+                raise OpsIncidentAlreadyClosedError(f"Incident '{row.incident_number}' is already CLOSED.")
 
             # Strict state machine: Only RESOLVED -> CLOSED is allowed
             if row.status != IncidentStatus.RESOLVED.value:
