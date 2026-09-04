@@ -55,7 +55,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
 | Phase 7 — Production Hardening — Sentinel Engine | **DONE** | None | §5.2 | Formally accepted (§5.2) |
 | Monitoring Engine | **DONE** | Sentinel (public interface) | §5.3 | Formally accepted (§5.3) |
-| Backup Engine | PENDING | Migrations (now available) | §5.4 | Not planned yet |
+| Backup Engine | **DONE** | Migrations (now available) | §5.4 | Surgically verified, ready for owner acceptance (§5.4) |
 | Recovery Engine | BLOCKED — PENDING OWNER DECISION | Owner Decision #1 (§3) | §5.5 | Not planned yet |
 | Update Engine | PENDING | Migrations (now available) | §5.6 | Not planned yet |
 | Docker Production Builds | PENDING | Migrations (now available) + Owner Decision #2 (§3) | §5.7 | Not planned yet |
@@ -63,7 +63,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | CI/CD | **IMPLEMENTED — AWAITING REVIEW** | None | §5.9 | Pending review |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
+**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **Backup Engine is DONE** (surgically verified, §5.4) — verified across 47 targeted backup tests, 243 capability identity tests, 3,078 total backend test nodes, 0 regressions, zero migrations, and clean Graphify/ruff/mypy validation. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
 
 ## 5. Work Package Detail
 
@@ -155,9 +155,28 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
   9. Storage: 100% ephemeral in-memory state; zero database tables, zero Alembic migrations.
 - **Explicit Non-Goals Honored**: No process supervision, no engine restarts, no permanent storage, no duplication of Sentinel's health assessment.
 
-### 5.4 Backup Engine — PENDING
+### 5.4 Backup Engine — DONE
 
-`backend/src/kortex/engines/backup/__init__.py` is a 1-line docstring only; no other files; not registered; zero backup/scheduling/retention logic anywhere in `backend/src`. Classified **ABSENT**. Now has its Migrations dependency satisfied (§5.1) — schema-version-aware backup is possible but not yet built.
+- **Status**: **DONE** (surgically verified and ready for formal owner acceptance).
+- **Accepted Implementation Commit**: `a78f6814c6adbe34e672872fc5d63a8897bc3479` (`feat(backup): implement Phase 7 production backup engine`).
+- **ADR**: [ADR-0016-phase7-backup-engine.md](../adr/ADR-0016-phase7-backup-engine.md).
+- **Technical Verification**:
+  - Full backend suite: 3,078 tests collected (+60 test nodes from 3,018 baseline). 3,075 passed, 2 skipped, 0 real regressions.
+  - Targeted Backup suite: 47 passed unit and integration tests across 6 dedicated test modules.
+  - Capability identity propagation: 243 passed tests in `test_capability_identity_propagation_architecture.py` (including all 13 Backup capability combinations).
+  - Quality gates: `ruff check` (0 errors), `ruff format --check` (0 errors), `mypy` (0 issues across 14 backup source files).
+  - Migration boundary: 0 new database tables, 0 new Alembic migrations; completely filesystem-artifact-based persistence with migration sanity fully preserved (7/7 passed).
+- **Implemented & Surgically Verified Architecture**:
+  1. `BackupEngine`: Inherits `BaseEngine` and `IEngineDiagnostics`. Registers exactly 6 capabilities (`kortex.backup.create`, `kortex.backup.list`, `kortex.backup.get`, `kortex.backup.verify`, `kortex.backup.delete`, `kortex.backup.diagnostics.get`), all requiring authentication, `INTERNAL` classification, `system:backup:*` permissions, and execution context. Caller tenant overrides are rejected.
+  2. `BackupCryptoManager`: AES-256-GCM symmetric authenticated encryption. Key resolution strictly prefers `KORTEX_BACKUP_KEY` with fallback to `KORTEX_MASTER_KEY`; fails closed if missing or invalid. Non-circular cryptographic envelope with unencrypted sidecar metadata (`.kortex-backup.meta.json`).
+  3. `DatabaseCaptureEngine`: Thread-safe, non-blocking native SQLite online backup using a dedicated read-only source connection (`sqlite3.connect(f"file:{path}?mode=ro", uri=True)`), 100-page iterative steps (`bck.step(100)`), WAL checkpoint flushing, and post-capture `PRAGMA integrity_check;`. Dynamic schema discovery resolves active Alembic revision dynamically.
+  4. `StorageCaptureEngine`: Recursive discovery of authoritative storage trees sandboxed to `storage_data/`, strictly excluding `storage_data/backups/`, `.tmp`, and `.cache`. Authoritative consistency guaranteed — file read failures immediately fail the backup (`BackupStorageError`) rather than silently skipping.
+  5. `BackupPackager`: Assembles atomic `.kortex-backup` ZIP archives containing database snapshot, storage payloads, canonical `manifest.json`, and SHA-256 checksum manifests. Writes to temporary staging files with atomic `os.replace` rename upon successful validation.
+  6. `BackupVerifier`: Full-depth archive verification enforcing safe paths (traversal and ZIP bomb defenses), valid manifest and schema metadata, complete SHA-256 component checksum integrity, AES-256-GCM authentication tag verification, and SQLite database snapshot integrity check.
+  7. `BackupRetentionManager`: Automated retention enforcement across `COUNT`, `AGE`, and `SIZE` policies. Inviolable safety invariant strictly enforced: the last valid backup is NEVER deleted across both automated retention sweeps and manual deletion invocations (`BackupRetentionError`).
+  8. `Idempotency & Concurrency`: In-flight active backup operations cannot be deleted (`BackupConcurrencyError`). Single in-flight backup mutex lock prevents concurrent corruption. Request idempotency key (1-128 chars) deduplicates requests and returns existing backup if scope matches.
+  9. `Events & Diagnostics`: Decoupled asynchronous event emission (`kortex.backup.created`, `kortex.backup.verified`, `kortex.backup.deleted`, `kortex.backup.failed`, `kortex.backup.retention_pruned`) using canonical correlation IDs without secret leakage. `BackupDiagnosticsAdapter` conforms to `IEngineDiagnostics` with bounded ring buffer (50 entries) and self-contained metrics.
+  10. `Boundaries Preserved`: Zero direct dependencies on Sentinel or Recovery. Does not attempt recovery, process supervision, or engine restarts. Sandboxed cleanly under `storage_data/backups/`.
 
 ### 5.5 Recovery Engine — BLOCKED — PENDING OWNER DECISION
 

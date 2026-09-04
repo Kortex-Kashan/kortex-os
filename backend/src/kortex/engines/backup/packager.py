@@ -116,7 +116,9 @@ class BackupPackager:
                         with abs_path.open("rb") as sf:
                             zf.writestr(zinfo_f, sf.read())
                     except OSError as exc:
-                        logger.warning("Could not bundle file '%s': %s", abs_path, exc)
+                        raise BackupStorageError(
+                            f"Failed to read storage file during archive packaging '{abs_path}': {exc}"
+                        ) from exc
 
                 # Write checksums.json
                 checksum_manifest = ChecksumManifest(
@@ -213,6 +215,7 @@ class BackupPackager:
                 "database_pages": db_manifest_entry.size_bytes // 4096 if db_manifest_entry.size_bytes else 0,
                 "storage_files": len(storage_files),
             },
+            extra_metadata=extra_metadata or {},
             error_message=None,
         )
 

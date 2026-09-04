@@ -122,6 +122,7 @@ class BackupMetadata(BaseModel):
     key_id: str | None = Field(default=None, description="Key identifier if encrypted")
     database_schema_revision: str | None = Field(default=None, description="Schema revision")
     component_counts: dict[str, int] = Field(default_factory=dict, description="Counts of components")
+    extra_metadata: dict[str, Any] = Field(default_factory=dict, description="Custom or contextual metadata")
     error_message: str | None = Field(default=None, description="Error detail if failed")
 
 

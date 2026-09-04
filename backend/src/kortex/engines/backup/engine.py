@@ -42,6 +42,7 @@ from kortex.engines.backup.events import BackupEventPublisher
 from kortex.engines.backup.exceptions import (
     BackupConcurrencyError,
     BackupEncryptionError,
+    BackupRetentionError,
     BackupScopeError,
     BackupStorageError,
     BackupValidationError,
@@ -407,6 +408,34 @@ class BackupEngine(BaseEngine, IBackupEngine, IEngineDiagnostics):
         if request.scope != BackupScope.FULL_INSTANCE:
             raise BackupScopeError(f"Unsupported backup scope: '{request.scope}'. Only FULL_INSTANCE is supported.")
 
+        # Validate idempotency key if provided
+        clean_idemp_key: str | None = None
+        if request.idempotency_key is not None:
+            clean_idemp_key = request.idempotency_key.strip()
+            if not clean_idemp_key or len(clean_idemp_key) > 128:
+                raise BackupValidationError("Idempotency key must be non-empty and at most 128 characters.")
+
+            # Check existing backups for this idempotency key
+            existing = self._repository.list_backups(ListBackupsRequest(limit=500)).backups
+            for b in existing:
+                if b.extra_metadata.get("idempotency_key") == clean_idemp_key:
+                    if b.scope != request.scope:
+                        raise BackupConcurrencyError(
+                            f"Idempotency key '{clean_idemp_key}' was previously used with scope '{b.scope}'."
+                        )
+                    logger.info("Idempotent request matched backup '%s' for key '%s'.", b.backup_id, clean_idemp_key)
+                    return CreateBackupResponse(
+                        backup_id=b.backup_id,
+                        state=b.state,
+                        created_at=b.created_at,
+                        finalized_at=b.finalized_at,
+                        filename=b.filename,
+                        file_size_bytes=b.file_size_bytes,
+                        sha256=b.sha256,
+                        is_encrypted=b.is_encrypted,
+                        key_id=b.key_id,
+                    )
+
         # Stage 1: BACKUP (Request & Concurrency Guard)
         if self._backup_lock.locked():
             raise BackupConcurrencyError("Another backup operation is currently in progress.")
@@ -429,13 +458,14 @@ class BackupEngine(BaseEngine, IBackupEngine, IEngineDiagnostics):
 
             try:
                 # Stage 2: PREFLIGHT DISK CHECK
-                self._preflight_disk_check()
+                live_db = self._resolve_live_db_path()
+                est_bytes = live_db.stat().st_size if live_db.is_file() else 0
+                self._preflight_disk_check(estimated_bytes=est_bytes)
 
                 # Stage 3: CAPTURE
                 await self._event_publisher.emit_started(backup_id, request.scope)
 
                 # 3.a Capture Database
-                live_db = self._resolve_live_db_path()
                 db_entry, schema_rev = await self._db_capture.capture_database(
                     source_db_path=live_db,
                     destination_db_path=db_snap_path,
@@ -459,6 +489,10 @@ class BackupEngine(BaseEngine, IBackupEngine, IEngineDiagnostics):
                 if self._kernel is not None and hasattr(self._kernel, "instance_id"):
                     instance_id = str(self._kernel.instance_id)
 
+                combined_metadata = dict(request.metadata)
+                if clean_idemp_key is not None:
+                    combined_metadata["idempotency_key"] = clean_idemp_key
+
                 _manifest, sidecar_meta = await asyncio.to_thread(
                     packager.assemble_backup,
                     backup_id=backup_id,
@@ -474,7 +508,7 @@ class BackupEngine(BaseEngine, IBackupEngine, IEngineDiagnostics):
                     tmp_unencrypted_zip=tmp_unencrypted_zip,
                     tmp_final_path=tmp_final_path,
                     final_target_path=final_target_path,
-                    extra_metadata=request.metadata,
+                    extra_metadata=combined_metadata,
                 )
 
                 # Save sidecar metadata
@@ -568,7 +602,28 @@ class BackupEngine(BaseEngine, IBackupEngine, IEngineDiagnostics):
         return res
 
     async def delete_backup(self, request: DeleteBackupRequest) -> DeleteBackupResponse:
-        """Atomically delete an artifact and its sidecar metadata."""
+        """Atomically delete an artifact and its sidecar metadata.
+
+        Enforces:
+        1. Cannot delete active in-progress backup.
+        2. Inviolable safety invariant: Cannot delete the last valid backup.
+        """
+        if self._active_operation is not None and self._active_operation.endswith(request.backup_id):
+            raise BackupConcurrencyError(f"Cannot delete active, in-progress backup '{request.backup_id}'.")
+
+        meta = self._repository.get_metadata(request.backup_id)
+        if meta is not None and meta.state == BackupState.VALID:
+            valid_backups = [
+                b
+                for b in self._repository.list_backups(ListBackupsRequest(limit=500)).backups
+                if b.state == BackupState.VALID
+            ]
+            if len(valid_backups) <= 1 and any(b.backup_id == request.backup_id for b in valid_backups):
+                raise BackupRetentionError(
+                    f"Cannot delete backup '{request.backup_id}': "
+                    "Inviolable safety invariant forbids deleting the last valid backup."
+                )
+
         res = self._repository.delete_backup(request)
         await self._event_publisher.emit_deleted(request.backup_id)
         return res

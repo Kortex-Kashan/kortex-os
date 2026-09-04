@@ -39,6 +39,7 @@ from kortex.engines.backup.constants import (
 )
 from kortex.engines.backup.crypto import BackupCryptoManager
 from kortex.engines.backup.engine import BackupEngine
+from kortex.engines.backup.exceptions import BackupRetentionError
 from kortex.engines.backup.models import BackupConfig
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import AuthenticationError, AuthorizationDeniedError
@@ -191,16 +192,35 @@ async def test_backup_kernel_boot_and_dispatch_integration(tmp_path: Path) -> No
     with pytest.raises(AuthorizationDeniedError):
         await kernel.invoke_capability(unauthorized_req)
 
-    # 12. Invoke kortex.backup.delete
+    # 12. Invoke kortex.backup.delete on the sole valid backup: MUST fail per invariant
     del_req = CapabilityRequest(
         capability_name=CAPABILITY_BACKUP_DELETE,
         session_token=session_token,
         parameters={"backup_id": backup_id},
         context={"resource_tenant_id": tenant_id},
     )
+    with pytest.raises(BackupRetentionError, match="Inviolable safety invariant"):
+        await kernel.invoke_capability(del_req)
+
+    # 13. Create a second backup so deleting one is permitted
+    create_req_2 = CapabilityRequest(
+        capability_name=CAPABILITY_BACKUP_CREATE,
+        session_token=session_token,
+        parameters={"scope": "FULL_INSTANCE", "metadata": {"origin": "integration_test_second"}},
+        context={"resource_tenant_id": tenant_id},
+    )
+    create_res_2 = await kernel.invoke_capability(create_req_2)
+    backup_id_2 = create_res_2["backup_id"]
+
+    # 14. Deleting the first backup now succeeds because backup_id_2 remains
     del_res = await kernel.invoke_capability(del_req)
     assert isinstance(del_res, dict)
     assert del_res["deleted"] is True
+
+    # 15. Verify list has 1 remaining valid backup (backup_id_2)
+    list_after = await kernel.invoke_capability(list_req)
+    assert list_after["total_count"] == 1
+    assert list_after["backups"][0]["backup_id"] == backup_id_2
 
     # 13. Clean shutdown
     await kernel.shutdown()

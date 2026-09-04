@@ -11,7 +11,11 @@ from kortex.core.base_engine import EngineState
 from kortex.engines.backup.constants import BackupScope, BackupState
 from kortex.engines.backup.crypto import BackupCryptoManager
 from kortex.engines.backup.engine import BackupEngine
-from kortex.engines.backup.exceptions import BackupConcurrencyError
+from kortex.engines.backup.exceptions import (
+    BackupConcurrencyError,
+    BackupRetentionError,
+    BackupValidationError,
+)
 from kortex.engines.backup.models import BackupConfig, CreateBackupRequest
 
 
@@ -47,7 +51,7 @@ async def test_engine_lifecycle(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_engine_create_and_handlers(tmp_path: Path) -> None:
-    """Verify all 6 capability handlers execute cleanly."""
+    """Verify all 6 capability handlers execute cleanly and adhere to invariants."""
     key = b"\x44" * 32
     crypto = BackupCryptoManager(key=key)
     config = BackupConfig(backup_directory=str(tmp_path / "backups"))
@@ -80,13 +84,27 @@ async def test_engine_create_and_handlers(tmp_path: Path) -> None:
     assert diag_res["engine_name"] == "backup"
     assert diag_res["total_backups"] == 1
 
-    # 6. Delete backup via handler
+    # 6. INVIOLABLE SAFETY INVARIANT: Attempting to delete the ONLY valid backup MUST fail
+    with pytest.raises(BackupRetentionError, match="Inviolable safety invariant"):
+        await engine.handle_backup_delete(backup_id=backup_id)
+
+    # 7. Create a second backup so pruning/deleting one is permitted
+    create_res_2 = await engine.handle_backup_create(scope="FULL_INSTANCE")
+    backup_id_2 = create_res_2["backup_id"]
+    assert (await engine.handle_backup_list())["total_count"] == 2
+
+    # 8. Deleting the first backup now succeeds because backup_id_2 remains
     del_res = await engine.handle_backup_delete(backup_id=backup_id)
     assert del_res["deleted"] is True
 
-    # Post-delete list is empty
+    # 9. Post-delete list has 1 remaining valid backup
     list_after = await engine.handle_backup_list()
-    assert list_after["total_count"] == 0
+    assert list_after["total_count"] == 1
+    assert list_after["backups"][0]["backup_id"] == backup_id_2
+
+    # 10. Attempting to delete backup_id_2 now fails because it is now the last valid backup
+    with pytest.raises(BackupRetentionError, match="Inviolable safety invariant"):
+        await engine.handle_backup_delete(backup_id=backup_id_2)
 
 
 @pytest.mark.asyncio
@@ -106,3 +124,38 @@ async def test_engine_concurrency_lock_collision(tmp_path: Path) -> None:
             await engine.create_backup(CreateBackupRequest(scope=BackupScope.FULL_INSTANCE))
     finally:
         engine._backup_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_engine_idempotency_and_active_deletion_protection(tmp_path: Path) -> None:
+    """Verify idempotency deduplication and active operation deletion rejection."""
+    key = b"\x44" * 32
+    crypto = BackupCryptoManager(key=key)
+    config = BackupConfig(backup_directory=str(tmp_path / "backups"))
+    engine = BackupEngine(config=config, crypto_manager=crypto)
+    await engine.initialize()
+
+    # 1. Create with idempotency key
+    res1 = await engine.create_backup(
+        CreateBackupRequest(scope=BackupScope.FULL_INSTANCE, idempotency_key="idemp-key-001")
+    )
+    assert res1.state == BackupState.VALID
+
+    # 2. Re-issuing with same idempotency key returns identical backup
+    res2 = await engine.create_backup(
+        CreateBackupRequest(scope=BackupScope.FULL_INSTANCE, idempotency_key="  idemp-key-001  ")
+    )
+    assert res2.backup_id == res1.backup_id
+    assert res2.sha256 == res1.sha256
+
+    # 3. Invalid idempotency key length (> 128) rejected
+    with pytest.raises(BackupValidationError, match="Idempotency key must be non-empty and at most 128 characters"):
+        await engine.create_backup(CreateBackupRequest(scope=BackupScope.FULL_INSTANCE, idempotency_key="x" * 129))
+
+    # 4. Attempting to delete an active in-progress backup operation fails with BackupConcurrencyError
+    engine._active_operation = f"create_backup:{res1.backup_id}"
+    try:
+        with pytest.raises(BackupConcurrencyError, match="Cannot delete active, in-progress backup"):
+            await engine.handle_backup_delete(backup_id=res1.backup_id)
+    finally:
+        engine._active_operation = None
