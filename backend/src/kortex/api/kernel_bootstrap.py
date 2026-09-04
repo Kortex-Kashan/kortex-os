@@ -37,6 +37,7 @@ from kortex.engines.document_intelligence.engine import DocumentIntelligenceEngi
 from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.license.engine import LicenseEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
+from kortex.engines.monitoring.engine import MonitoringEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
 from kortex.engines.security.models import PrincipalType
@@ -261,6 +262,9 @@ async def build_and_boot_kernel() -> Kernel:
 
     # Phase 7 — Production Hardening — Sentinel Engine: System health, integrity, and liveness observation.
     kernel.register_engine(SentinelEngine())
+
+    # Phase 7 — Production Hardening — Monitoring Engine: Operational telemetry, metrics, and alerting.
+    kernel.register_engine(MonitoringEngine())
 
     await kernel.boot()
 

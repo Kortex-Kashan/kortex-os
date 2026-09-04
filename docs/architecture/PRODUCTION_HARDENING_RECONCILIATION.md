@@ -54,7 +54,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 |---|---|---|---|---|
 | Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
 | Phase 7 — Production Hardening — Sentinel Engine | **DONE** | None | §5.2 | Formally accepted (§5.2) |
-| Monitoring Engine | **PLANNED** | None hard | §5.3 | Implementation plan complete (§5.3) |
+| Monitoring Engine | **IMPLEMENTED — AWAITING REVIEW** | Sentinel (public interface) | §5.3 | Implemented, awaiting review (§5.3) |
 | Backup Engine | PENDING | Migrations (now available) | §5.4 | Not planned yet |
 | Recovery Engine | BLOCKED — PENDING OWNER DECISION | Owner Decision #1 (§3) | §5.5 | Not planned yet |
 | Update Engine | PENDING | Migrations (now available) | §5.6 | Not planned yet |
@@ -128,17 +128,22 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
   - Graphify verified fresh at HEAD (`built_at_commit == 65676a4c`, 15,442 nodes, 36,158 edges, 487 communities).
 - **Status**: **DONE** (formally accepted).
 
-### 5.3 Monitoring Engine — PLANNED
+### 5.3 Monitoring Engine — IMPLEMENTED — AWAITING REVIEW
 
-- **Status**: **PLANNED** (full implementation plan prepared in `docs/architecture/monitoring_engine_implementation_plan.md` and `implementation_plan.md`).
+- **Status**: **IMPLEMENTED — AWAITING REVIEW** (ADR-0015, implementation complete across all modules and tests).
 - **Role in Phase 7**: Directly complements Sentinel Engine as the operational metrics, counter/gauge/histogram aggregation, rolling time-series buffer, and dashboard visualization provider for KORTEX.
-- **Why it is next**:
-  1. Sentinel Engine is formally accepted as DONE; its health status and failure events provide the health foundation that Monitoring dashboards display.
-  2. All KORTEX engines and business modules already implement `IEngineDiagnostics` (`health()`, `metrics()`, `diagnostics()`, etc.), but no central metrics aggregator or dashboard query capability currently exists.
-  3. Zero unsatisfied prerequisites: unlike Backup and Update engines (which depend on release pipelines/storage policies), Recovery Engine (which is blocked on Owner Decision #1), and Docker/Installers (which depend on deployment decisions), Monitoring Engine has no hard dependencies and operates entirely within the running local-first runtime.
-  4. Proposed Critical Path (§6) pairs Sentinel and Monitoring as the core runtime observability layer.
-- **Scope**: MetricsCollector polling `IEngineDiagnostics` with self-exclusion, MetricRegistry (Counters, Gauges, Histograms, Timers), bounded rolling TimeSeriesBuffer (max 360 points per metric, ~1 hr at 10s intervals), 4 read-only authenticated capabilities (`kortex.monitoring.metrics.get`, `kortex.monitoring.timeseries.get`, `kortex.monitoring.dashboard.get`, `kortex.monitoring.diagnostics.get`), 3 informational alert/summary events (`kortex.monitoring.threshold.exceeded`, `kortex.monitoring.threshold.recovered`, `kortex.monitoring.snapshot.emitted`), zero database migrations (pure bounded in-memory state).
-- **Explicit Non-Goals**: No process supervision, no engine restarts, no external SaaS telemetry export, no duplication of Sentinel's health assessment or circuit breaker. Not authorized for implementation in this planning pass.
+- **Implemented Architecture**:
+  1. `MetricRegistry`: Thread-safe metric primitives (`Counter`, `Gauge`, `Histogram`, `Timer`), strict cardinality limits (200 names, 500 active series, 5 labels, 64-character length limit), whitelisted label keys (`subsystem`, `driver`, `status`, `error_type`, `action_type`, `severity`, `entity_type`), and deterministic collision-safe series keys.
+  2. `TimeSeriesBuffer`: Thread-safe rolling ring buffers retaining up to 360 points per series (~60 minutes at 10-second intervals).
+  3. `DiagnosticsNormalizer`: Strict 3-tier normalization of `IEngineDiagnostics` output (finite numbers only with NaN/Inf rejection, metadata preserved semantically, booleans normalized to 1.0/0.0, None skipped, duplicate keys first-occurrence-wins).
+  4. `MetricsCollector`: Sweeps host/process resources using standard library only (`ctypes` for Windows working set, POSIX `resource`, `os.times()` deltas with sample 0 returning 0.0%, `len(asyncio.all_tasks())`, `threading.active_count()`, independent sleep lag probe). Polls registered engines with 1.0s timeout and self-exclusion (`"monitoring"`).
+  5. `ThresholdEvaluator`: Operational threshold evaluation with 2-consecutive-cycle confirmation, 10% hysteresis on recovery, and 60-second cooldown on alert emission. Emits `kortex.monitoring.threshold.exceeded` and `kortex.monitoring.threshold.recovered`.
+  6. `MonitoringEngine`: Full `BaseEngine` and `IEngineDiagnostics` lifecycle management, clean background task ownership and cancellation. Decoupled Sentinel integration consuming public `kortex.sentinel.health.changed` events with on-demand `sentinel.health()` fallback.
+  7. Capabilities: Exactly 4 registered capabilities (`kortex.monitoring.metrics.get`, `kortex.monitoring.timeseries.get`, `kortex.monitoring.dashboard.get`, `kortex.monitoring.diagnostics.get`), all requiring authentication, `system:monitoring:read`, `INTERNAL` clearance, and execution context.
+  8. Dashboard: Direct internal composition of operational state without nested capability dispatcher invocation.
+  9. Storage: 100% ephemeral in-memory state; zero database tables, zero Alembic migrations.
+- **Verification**: 56 monitoring tests passing (unit + integration), 0 full backend regressions, clean Ruff lint/format, clean mypy.
+- **Explicit Non-Goals Honored**: No process supervision, no engine restarts, no permanent storage, no duplication of Sentinel's health assessment.
 
 ### 5.4 Backup Engine — PENDING
 
