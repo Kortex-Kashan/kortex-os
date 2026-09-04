@@ -20,7 +20,7 @@ dependencies = [
     "httpx>=0.28.0",
     "cryptography>=42.0.0",
     "argon2-cffi>=23.1.0",
-    "tzdata>=2024.1; sys_platform == 'win32'",
+    "tzdata>=2024.1",
     # Phase 4 Document Intelligence Engine: deterministic local PDF text/
     # metadata/table extraction (pure Python, no subprocess, no system
     # package — verified during the M2/M3 dependency spike).
@@ -28,6 +28,7 @@ dependencies = [
     # Local OCR (ONNXRuntime CPU backend, models bundled in the wheel — no
     # runtime network access, no subprocess, no system package).
     "rapidocr-onnxruntime>=1.4.0",
+    "opencv-python-headless>=4.5.1.48",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,10 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = [
+    "default",
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
 markers = [
     "unit: Unit tests",
     "integration: Integration tests requiring database",
