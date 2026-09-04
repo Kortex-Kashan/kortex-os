@@ -53,6 +53,7 @@ class HeartbeatManager:
         expected_interval_seconds: float | None = None,
         owner: str = "system",
         replace: bool = False,
+        timestamp_monotonic: float | None = None,
     ) -> None:
         """Register a heartbeat source.
 
@@ -61,6 +62,7 @@ class HeartbeatManager:
             expected_interval_seconds: Expected interval in seconds (required if source is str).
             owner: Owning subsystem or module name.
             replace: If True, overwrite an existing registration deterministically.
+            timestamp_monotonic: Optional monotonic timestamp for testing / deterministic clock injection.
 
         Raises:
             ValueError: If source_id is empty, interval is non-positive, or duplicate without replace=True.
@@ -82,7 +84,7 @@ class HeartbeatManager:
         if interval <= 0.0:
             raise ValueError(f"expected_interval_seconds must be strictly positive, got {interval}")
 
-        now = time.monotonic()
+        now = timestamp_monotonic if timestamp_monotonic is not None else time.monotonic()
         with self._lock:
             if source_id in self._sources and not replace:
                 raise ValueError(

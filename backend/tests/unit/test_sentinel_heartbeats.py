@@ -120,7 +120,7 @@ def test_heartbeat_threshold_evaluations() -> None:
     """Verify warning (2x) and failure (3x) threshold calculations using injected monotonic time."""
     hm = HeartbeatManager(warning_multiplier=2.0, failure_multiplier=3.0)
     t_base = 1000.0
-    hm.register_source("worker.tick", expected_interval_seconds=10.0)
+    hm.register_source("worker.tick", expected_interval_seconds=10.0, timestamp_monotonic=t_base)
     hm.record_heartbeat("worker.tick", timestamp_monotonic=t_base)
 
     # 1. Nominal: age = 5s (< 20s warning) -> PASS
@@ -143,7 +143,7 @@ def test_heartbeat_startup_grace_immunity() -> None:
     """Verify newly registered source without initial pings is immune during startup grace."""
     hm = HeartbeatManager()
     t_start = 1000.0
-    hm.register_source("worker.new", expected_interval_seconds=10.0)
+    hm.register_source("worker.new", expected_interval_seconds=10.0, timestamp_monotonic=t_start)
 
     # Before fail threshold during is_starting -> PASS (startup grace)
     probes_starting = hm.evaluate_all(now_monotonic=t_start + 15.0, is_starting=True)
@@ -155,7 +155,7 @@ def test_heartbeat_shutdown_immunity() -> None:
     """Verify heartbeat lapses are suppressed when system is stopping."""
     hm = HeartbeatManager()
     t_base = 1000.0
-    hm.register_source("worker.stopping", expected_interval_seconds=5.0)
+    hm.register_source("worker.stopping", expected_interval_seconds=5.0, timestamp_monotonic=t_base)
     hm.record_heartbeat("worker.stopping", timestamp_monotonic=t_base)
 
     # Huge elapsed time (100s), but is_stopping is True -> PASS (suppressed)
@@ -169,7 +169,7 @@ def test_heartbeat_restart_reset() -> None:
     hm = HeartbeatManager()
     t0 = 1000.0
     t_later = 2000.0
-    hm.register_source("worker.restartable", expected_interval_seconds=10.0)
+    hm.register_source("worker.restartable", expected_interval_seconds=10.0, timestamp_monotonic=t0)
     hm.record_heartbeat("worker.restartable", timestamp_monotonic=t0)
 
     # Subsystem restarts at t_later
