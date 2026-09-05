@@ -21,6 +21,9 @@ wheels/
 *.egg
 *.manifest
 *.spec
+# Hand-authored PyInstaller build input, not a generated spec — required by
+# .github/workflows/desktop-ci.yml's windows-installer job.
+!installer/pyinstaller/kortex_backend.spec
 pip-log.txt
 pip-delete-this-directory.txt
 .venv/

@@ -110,3 +110,116 @@ jobs:
       - name: cargo clippy (informational)
         continue-on-error: true
         run: cargo clippy
+
+  # Desktop Installers milestone (implementation_plan.md Part 2). Windows is
+  # the fully-validated target (OD-DI-3): no macOS runner is used here, and
+  # none is faked -- see implementation_plan.md Part 2 §D18/§D26. Build-only,
+  # unsigned (OD-DI-2 -- signing credentials are a separate, non-blocking
+  # release gate, not required to prove the packaging pipeline itself works).
+  windows-installer:
+    name: Windows installer build and smoke test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies and PyInstaller
+        run: |
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      # --onedir, not --onefile -- avoids re-extracting the ~150MB+ native
+      # dependency set (onnxruntime/opencv/numpy) on every launch. See
+      # installer/pyinstaller/kortex_backend.spec's own header comment and
+      # implementation_plan.md Part 2 §D6.
+      - name: Freeze the backend (PyInstaller --onedir)
+        run: pyinstaller installer/pyinstaller/kortex_backend.spec --distpath dist --workpath build/pyinstaller --noconfirm
+
+      - name: OCR self-test (proves bundled ONNXRuntime/RapidOCR models actually run inference)
+        run: .\dist\kortex-backend\kortex-backend.exe --selftest-ocr
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Windows runners already ship WebView2 -- unlike the Linux `rust` job
+      # above, no system-library install step is needed here; `tauri-cli`
+      # auto-provisions WiX/NSIS themselves on first use.
+      - name: tauri build (produces MSI + NSIS per tauri.conf.json's bundle.targets)
+        working-directory: apps/desktop
+        run: pnpm tauri build
+
+      - name: Verify installer artifacts exist
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/msi/*.msi"
+          $nsis = Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe"
+          if (-not $msi) { throw "No MSI artifact produced" }
+          if (-not $nsis) { throw "No NSIS artifact produced" }
+          Write-Output "MSI: $($msi.FullName) ($([math]::Round($msi.Length / 1MB, 1)) MB)"
+          Write-Output "NSIS: $($nsis.FullName) ($([math]::Round($nsis.Length / 1MB, 1)) MB)"
+
+      # Silent install -> launch -> poll /health -> uninstall, using
+      # freshly-generated, throwaway keys (never committed, never reused) --
+      # mirrors the Docker CI job's own throwaway-secret pattern (Part 1 §18).
+      - name: Installer smoke test (install, launch, health, uninstall)
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+
+          $exe = "$env:LOCALAPPDATA\KORTEX Desktop\kortex-desktop.exe"
+          if (-not (Test-Path $exe)) { throw "Installed executable not found at $exe" }
+
+          $masterBytes = New-Object byte[] 32
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($masterBytes)
+          $env:KORTEX_MASTER_KEY = "0x" + (($masterBytes | ForEach-Object { $_.ToString("x2") }) -join '')
+          $signingBytes = New-Object byte[] 32
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($signingBytes)
+          $env:KORTEX_AUTH_SIGNING_PRIVATE_KEY = "0x" + (($signingBytes | ForEach-Object { $_.ToString("x2") }) -join '')
+
+          Start-Process -FilePath $exe
+          $healthy = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 2 -UseBasicParsing
+              if ($resp.StatusCode -lt 400) { $healthy = $true; break }
+            } catch {}
+          }
+          if (-not $healthy) { throw "Installed application did not become healthy within 30s" }
+          Write-Output "Installed application healthy after $($i + 1)s"
+
+          Get-Process kortex-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process kortex-backend -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+
+          $uninstaller = "$env:LOCALAPPDATA\KORTEX Desktop\uninstall.exe"
+          if (Test-Path $uninstaller) {
+            Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait
+          }
+          Start-Sleep -Seconds 1
+          if (Test-Path $exe) { throw "Uninstall did not remove the installed executable" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kortex-desktop-windows-installers
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/msi/*.msi
+            apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7

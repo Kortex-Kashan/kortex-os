@@ -24,13 +24,30 @@ const KEY_LENGTH_BYTES: usize = 32;
 pub const MASTER_KEY_ENV_VAR: &str = "KORTEX_MASTER_KEY";
 pub const SIGNING_KEY_ENV_VAR: &str = "KORTEX_AUTH_SIGNING_PRIVATE_KEY";
 
+/// Outcome of attempting to read a stored key. Distinguishes "the store
+/// was queried and confirmed no entry exists" (`ConfirmedAbsent` — a
+/// genuine first run, safe to generate a fresh key) from "the store could
+/// not be queried at all" (`Unreadable` — keyring daemon absent, access
+/// denied, ...). These are deliberately NOT the same case
+/// (implementation_plan.md Part 2, Control 4): collapsing them, as this
+/// module previously did, means a machine with a temporarily-unavailable
+/// keyring silently generates a *replacement* cryptographic identity with
+/// no way to tell that a prior one may have existed — every session and
+/// every previously-encrypted secret invalidated with zero diagnostic
+/// trace. `Unreadable` must fail closed instead.
+pub enum KeyLoadResult {
+    Found(String),
+    ConfirmedAbsent,
+    Unreadable(String),
+}
+
 /// Storage abstraction for a single named key value, mirroring `ipc.rs`'s
 /// `TokenStore` trait exactly (same shape, same reason: production code and
 /// tests share one code path). `store`/`load` operate on an opaque string
 /// value — this module, not the trait, decides that value is `0x`-prefixed
 /// hex.
 pub trait KeyStore: Send + Sync {
-    fn load(&self, user: &str) -> Option<String>;
+    fn load(&self, user: &str) -> KeyLoadResult;
     fn store(&self, user: &str, value: &str);
 }
 
@@ -41,8 +58,21 @@ pub trait KeyStore: Send + Sync {
 pub struct KeyringKeyStore;
 
 impl KeyStore for KeyringKeyStore {
-    fn load(&self, user: &str) -> Option<String> {
-        keyring::Entry::new(KEYRING_SERVICE, user).ok()?.get_password().ok()
+    fn load(&self, user: &str) -> KeyLoadResult {
+        let entry = match keyring::Entry::new(KEYRING_SERVICE, user) {
+            Ok(entry) => entry,
+            Err(e) => return KeyLoadResult::Unreadable(e.to_string()),
+        };
+        match entry.get_password() {
+            Ok(value) => KeyLoadResult::Found(value),
+            // `NoEntry` is the one keyring::Error variant that unambiguously
+            // means "the credential store was reached and confirmed empty" —
+            // every other variant (PlatformFailure, NoStorageAccess, ...)
+            // means the store itself could not be queried, which is the
+            // ambiguous case Control 4 requires failing closed on.
+            Err(keyring::Error::NoEntry) => KeyLoadResult::ConfirmedAbsent,
+            Err(e) => KeyLoadResult::Unreadable(e.to_string()),
+        }
     }
 
     fn store(&self, user: &str, value: &str) {
@@ -50,7 +80,12 @@ impl KeyStore for KeyringKeyStore {
             // A failed write here means the key is regenerated next launch
             // instead of reused — degraded (sessions won't survive that
             // restart either), never a reason to fail spawning the backend
-            // with the freshly generated key we already have in hand.
+            // with the freshly generated key we already have in hand. This
+            // path is only reached after `load` has already confirmed no
+            // prior identity exists (or was unreadably ambiguous, in which
+            // case we never get here at all — see `load_or_generate_hex_key`),
+            // so a failed write here can never silently discard a real prior
+            // key: there wasn't one to discard.
             let _ = entry.set_password(value);
         }
     }
@@ -82,16 +117,38 @@ fn is_valid_hex_key(value: &str) -> bool {
 }
 
 /// Loads a 32-byte key from `store` under `user`, generating and persisting
-/// a fresh cryptographically random one if none is present *or* the stored
-/// value is corrupt/malformed. Corrupt is treated identically to missing —
-/// silently truncating/padding an unexpected value would produce a
-/// *different* key than whatever the store physically holds, which
-/// defeats the entire point of persistence (the backend would still see a
-/// key that changed since the last restart).
+/// a fresh cryptographically random one only when it is safe to do so:
+/// the value is corrupt/malformed (still confirmed *present*, so there is
+/// no ambiguity — silently truncating/padding it would produce a
+/// *different* key than whatever the store physically holds, defeating
+/// the point of persistence, so a malformed value is treated as needing
+/// regeneration exactly as before), or the store confirms no entry has
+/// ever existed (`ConfirmedAbsent` — a genuine first run).
+///
+/// **Fails closed (Control 4)** when the store itself could not be queried
+/// (`Unreadable` — keyring daemon absent, access denied, ...): whether this
+/// is a first install or a machine with an existing identity we simply
+/// cannot read is genuinely undetermined in that case, and silently
+/// generating a new key risks discarding a real prior one with no trace.
+/// The caller (`resolve_backend_sidecar_config`) already surfaces any `Err`
+/// here as a backend-spawn failure, routing to the existing
+/// backend-unavailable recovery UX (`BackendUnavailableScreen.tsx`) —
+/// no new UI is introduced by this behavior.
 fn load_or_generate_hex_key(store: &dyn KeyStore, user: &str) -> Result<String, String> {
-    if let Some(existing) = store.load(user) {
-        if is_valid_hex_key(&existing) {
-            return Ok(existing);
+    match store.load(user) {
+        KeyLoadResult::Found(existing) if is_valid_hex_key(&existing) => return Ok(existing),
+        KeyLoadResult::Found(_) => {
+            // Present but malformed: not ambiguous, safe to regenerate.
+        }
+        KeyLoadResult::ConfirmedAbsent => {
+            // Genuine first run: no prior identity exists to protect.
+        }
+        KeyLoadResult::Unreadable(reason) => {
+            return Err(format!(
+                "cannot confirm whether a persistent key already exists for '{user}' ({reason}); \
+                 refusing to generate a replacement key, which could silently discard an \
+                 existing cryptographic identity. Restore OS keyring access and restart."
+            ));
         }
     }
 
@@ -130,12 +187,30 @@ mod tests {
     }
 
     impl KeyStore for MemoryKeyStore {
-        fn load(&self, user: &str) -> Option<String> {
-            self.values.lock().unwrap().get(user).cloned()
+        fn load(&self, user: &str) -> KeyLoadResult {
+            match self.values.lock().unwrap().get(user).cloned() {
+                Some(value) => KeyLoadResult::Found(value),
+                None => KeyLoadResult::ConfirmedAbsent,
+            }
         }
 
         fn store(&self, user: &str, value: &str) {
             self.values.lock().unwrap().insert(user.to_string(), value.to_string());
+        }
+    }
+
+    /// A store that always reports "unreadable" — simulates a keyring
+    /// daemon that is absent/access-denied, as opposed to one that has been
+    /// queried and confirmed empty.
+    struct UnreadableKeyStore;
+
+    impl KeyStore for UnreadableKeyStore {
+        fn load(&self, _user: &str) -> KeyLoadResult {
+            KeyLoadResult::Unreadable("simulated keyring access failure".to_string())
+        }
+
+        fn store(&self, _user: &str, _value: &str) {
+            panic!("store() must never be called when load() could not confirm absence");
         }
     }
 
@@ -159,12 +234,12 @@ mod tests {
     #[test]
     fn first_call_generates_a_valid_key_and_persists_it() {
         let store = MemoryKeyStore::default();
-        assert!(store.load(MASTER_KEY_USER).is_none());
+        assert!(matches!(store.load(MASTER_KEY_USER), KeyLoadResult::ConfirmedAbsent));
 
         let key = load_or_generate_hex_key(&store, MASTER_KEY_USER).unwrap();
 
         assert!(is_valid_hex_key(&key));
-        assert_eq!(store.load(MASTER_KEY_USER).as_deref(), Some(key.as_str()));
+        assert!(matches!(store.load(MASTER_KEY_USER), KeyLoadResult::Found(v) if v == key));
     }
 
     #[test]
@@ -185,7 +260,29 @@ mod tests {
         let key = load_or_generate_hex_key(&store, MASTER_KEY_USER).unwrap();
 
         assert!(is_valid_hex_key(&key));
-        assert_eq!(store.load(MASTER_KEY_USER).as_deref(), Some(key.as_str()));
+        assert!(matches!(store.load(MASTER_KEY_USER), KeyLoadResult::Found(v) if v == key));
+    }
+
+    #[test]
+    fn first_install_with_confirmed_absent_entry_generates_a_key() {
+        // Genuine first run: the store is queried and confirms no entry
+        // exists (not merely "unreadable") -- safe to generate.
+        let store = MemoryKeyStore::default();
+        let key = load_or_generate_hex_key(&store, MASTER_KEY_USER).unwrap();
+        assert!(is_valid_hex_key(&key));
+    }
+
+    #[test]
+    fn unreadable_keyring_fails_closed_instead_of_silently_replacing_identity() {
+        // Control 4: an unreadable store (keyring daemon absent, access
+        // denied, ...) must never be treated the same as "confirmed no
+        // entry" -- a prior identity might exist and be unreadable, and
+        // silently generating a replacement would discard it with no
+        // trace. `UnreadableKeyStore::store` panics if ever called, so this
+        // test also proves no write is attempted on this path.
+        let store = UnreadableKeyStore;
+        let result = load_or_generate_hex_key(&store, MASTER_KEY_USER);
+        assert!(result.is_err(), "an unreadable keyring must fail closed, not generate a key");
     }
 
     #[test]
