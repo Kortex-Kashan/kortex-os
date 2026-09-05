@@ -186,6 +186,36 @@ class TestPartialLegacyDatabase:
         )
 
 
+class TestFreshInstallWithMissingStorageDirectory:
+    """Case F: the database's parent directory does not exist yet.
+
+    This is what a genuinely fresh install looks like -- a newly created
+    app-data root with no `storage_data/` inside it yet -- and it is the exact
+    production defect that made the Windows installer smoke test fail in
+    Desktop CI #41 and #42: SQLite creates the database file but never its
+    parent directory, so `alembic upgrade head` died with
+    `sqlite3.OperationalError: unable to open database file`, the frozen
+    backend exited immediately, and Tauri's supervisor exhausted its restart
+    attempts without /health ever coming up.
+
+    Every other test in this file receives a database path directly under
+    pytest's `tmp_path`, which always exists -- which is precisely why this
+    case went uncovered.
+    """
+
+    def test_missing_database_parent_directory_is_created_rather_than_failing(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "app_data_root" / "storage_data" / "kortex_local.db"
+        assert not db_path.parent.exists(), "precondition: the storage directory must not exist yet"
+        monkeypatch.setenv("KORTEX_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+
+        run_migrations()
+
+        assert db_path.is_file(), "the database file must have been created"
+        assert _current_alembic_revision(db_path) == HEAD_REVISION
+        all_expected_tables = {t for _, tables in _REVISION_CHAIN for t in tables}
+        assert all_expected_tables.issubset(_all_tables(db_path))
+
+
 class TestPartiallyMigratedAlembicDatabase:
     """Case E: a database already legitimately tracked by Alembic at an
     intermediate revision -- the compatibility/stamp logic must never

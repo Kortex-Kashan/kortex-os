@@ -288,6 +288,25 @@ def run_migrations() -> None:
     """
     db_path = resolve_database_path()
     if db_path is not None:
+        # SQLite creates the database *file* but never its parent directories,
+        # so that directory must already exist before Alembic/aiosqlite can
+        # open it. On a genuinely fresh install nothing has created it yet:
+        # StorageEngine/BackupEngine/RecoveryEngine/UpdateEngine each create
+        # their own subdirectories lazily, but only once `Kernel.boot()`
+        # constructs them -- which happens when uvicorn starts, AFTER this
+        # migration step. Docker's entrypoint already performs exactly this
+        # one-time preparation, for exactly this reason (docker/entrypoint.sh
+        # "Canonical storage root, prepared once, up front"); this is the
+        # desktop path's missing equivalent, not a duplicate of any engine's
+        # own directory-creation logic.
+        #
+        # Without it the frozen backend dies at startup with
+        # `sqlite3.OperationalError: unable to open database file` on every
+        # fresh install, Tauri's supervisor exhausts its restart attempts, and
+        # /health never becomes reachable -- observed directly against a real
+        # installed build, and the cause of the Windows installer smoke test
+        # failing in Desktop CI #41 and #42.
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         stamp_revision_for_preexisting_database(db_path)
 
     cfg = resolve_alembic_config()
