@@ -34,24 +34,24 @@
 
 ## Phase 4: AI Native Engine & Knowledge Layer
 
-**Status**: In Progress
+**Status**: Completed
 
 - [x] AI Engine (Ollama integration, streaming, structured output — `kortex.engines.ai`, M1–M13 closed; real `OllamaProvider` wired into the production boot path as part of the Phase 5 hardening below)
 - [x] Tool Engine (Capability → LLM tool schema — AI Engine M6, Tool Invocation Engine)
 - [x] Knowledge Engine (directed graph, versioned lineage & trust promotion, annotations, source ingestion, multi-modal search, knowledge pack loader — `KnowledgeEngine`, `kortex.engines.knowledge`; no vector store/RAG — see `docs/architecture/ARCHITECTURE_VERSION_1.0.md` §17)
-- [ ] Document Intelligence Engine — **IMPLEMENTED — AWAITING REVIEW** (local PDF parsing via `pdfplumber`, local OCR via `rapidocr-onnxruntime`/ONNXRuntime — `DocumentIntelligenceEngine`, `kortex.engines.document_intelligence`; the previously-confirmed platform-level tenant-identity-confusion gap is now closed — see "Platform Security: Capability Identity Propagation" below — and proven closed by a real (no longer `xfail`) adversarial regression test; not checked off `[x]` until Chief Architect review and explicit commit/push authorization)
+- [x] Document Intelligence Engine — **ACCEPTED** (local PDF parsing via `pdfplumber`, local OCR via `rapidocr-onnxruntime`/ONNXRuntime — `DocumentIntelligenceEngine`, `kortex.engines.document_intelligence`; the previously-confirmed platform-level tenant-identity-confusion gap is now closed — see "Platform Security: Capability Identity Propagation" below — and proven closed by a real (no longer `xfail`) adversarial regression test). Formally accepted in the Final RC Ambiguity Resolution & Baseline Freeze pass; see the Phase 7 status-synchronization note below for the governance basis of this check-off.
 
-### Platform Security: Capability Identity Propagation — **IMPLEMENTED — AWAITING REVIEW**
+### Platform Security: Capability Identity Propagation — **ACCEPTED**
 
 Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatcher` now constructs an immutable `CapabilityExecutionContext` (dispatcher-authenticated principal + authoritative tenant) and injects it into any capability handler that declares `requires_execution_context=True`, via unconditional, registration-time-validated binding — never a caller-suppliable value. Closes a confirmed, externally-reachable identity-confusion vulnerability found in 6 handler sites (Workflow: `decide_approval_request`, `delegate_approval_role`, `create_schedule`, `execute_external_operation`; Document Intelligence: `handle_pdf_parse`, `handle_ocr_extract`), plus an adjacent Workflow approval-impersonation defect (`approval.py::submit_decision`). See `backend/tests/unit/test_capability_identity_propagation_architecture.py` for the repo-wide static guard against recurrence.
 
 ## Phase 5: Advanced Business Engines & Approvals
 
-**Status**: In Progress
+**Status**: Completed
 
 - [x] Human-in-the-loop approval queues & notification schedules (`DurableApprovalManager` — durable ticket lifecycle, expiry sweep daemon, cross-engine resume/cancel for both human and AI-originated requests; delivered as the M5.1–M6.4 workflow-governance hardening track, distinct from this roadmap's own "Phase 6" numbering below — see `git log --grep="M6\."` for that track's own milestone sequence)
-- [ ] Process Intelligence Engine — **IMPLEMENTED — AWAITING REVIEW** (DFG process mining, trace variant extraction, bottleneck diagnostics, throughput KPIs — `kortex.engines.process_intelligence`; bounded $\le 100$ nodes, $\le 500$ edges; structural tenant isolation via `TenantScopedProcessAnalyticsRepository`; not checked off `[x]` until Chief Architect review and explicit acceptance)
-- [ ] License Engine (M5.7) — **IMPLEMENTED — AWAITING REVIEW** (offline-first cryptographic licensing, Ed25519 token verification via `LocalCrypto`, KORTEX constrained canonicalization profile, `TenantScopedLicenseRepository` with concurrency-safe `active_tenant_id` unique constraint, `ILicenseProvider` protocol implementation, clock-tamper/rollback detection with Canonical Community fallback, Alembic migration `b4e89f123c5a`; not checked off `[x]` until Chief Architect review and explicit acceptance)
+- [x] Process Intelligence Engine — **ACCEPTED** (DFG process mining, trace variant extraction, bottleneck diagnostics, throughput KPIs — `kortex.engines.process_intelligence`; bounded $\le 100$ nodes, $\le 500$ edges; structural tenant isolation via `TenantScopedProcessAnalyticsRepository`)
+- [x] License Engine (M5.7) — **ACCEPTED** (offline-first cryptographic licensing, Ed25519 token verification via `LocalCrypto`, KORTEX constrained canonicalization profile, `TenantScopedLicenseRepository` with concurrency-safe `active_tenant_id` unique constraint, `ILicenseProvider` protocol implementation, clock-tamper/rollback detection with Canonical Community fallback, Alembic migration `b4e89f123c5a`)
 
 ## Phase 6: Pilot Business Modules
 
@@ -64,15 +64,21 @@ Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatch
 
 ## Phase 7: Production Hardening
 
-**Status**: Planned
+**Status**: Completed
 
-- [ ] Sentinel (Health monitoring, integrity)
-- [ ] Monitoring Engine (Metrics, dashboards)
-- [ ] Backup Engine
-- [ ] Recovery Engine
-- [ ] Update Engine
-- [ ] Docker production builds
-- [ ] Desktop installers (Tauri .msi / .exe / .dmg)
+- [x] Sentinel (Health monitoring, integrity) — **ACCEPTED** (`kortex.engines.sentinel`; 7-state health model, heartbeat manager, deadlock/event-loop-starvation detection, integrity verifier, bounded incident store with crash-loop detection; zero database tables. Reconciliation §5.2)
+- [x] Monitoring Engine (Metrics, dashboards) — **ACCEPTED** (`kortex.engines.monitoring`; metric registry with cardinality limits, rolling time-series buffers, diagnostics normalizer, threshold evaluator with hysteresis/cooldown, 4 capabilities; zero database tables. Reconciliation §5.3)
+- [x] Backup Engine — **ACCEPTED** (`kortex.engines.backup`; AES-256-GCM authenticated encryption failing closed on missing/invalid key, native SQLite online backup, archive verification with traversal/ZIP-bomb defenses, retention with an inviolable last-valid-backup invariant. Reconciliation §5.4)
+- [x] Recovery Engine — **ACCEPTED** (`kortex.engines.recovery`; durable filesystem journal, mandatory pre-recovery checkpoint, staged-only forward migration, 4-tier verification with automated rollback and fail-closed operator halt. Reconciliation §5.5)
+- [x] Update Engine — **ACCEPTED** (`kortex.engines.update`; Ed25519-signed manifest verification, staged archive extraction with full path/ZIP-bomb/symlink defenses, mandatory backup checkpoint, 3-layer rollback authority, journal-driven crash recovery, explicit filesystem-swap-≠-runtime-activation semantics. Reconciliation §5.6)
+- [x] Docker production builds — **ACCEPTED** (`docker/Dockerfile.backend` + `entrypoint.sh` + compose files; multi-stage build, non-root runtime, fail-closed secret preflight, Alembic migration ahead of serving traffic, `/health` smoke test, image-layer secret/VCS scan — all exercised by the Backend CI `docker` job on every push. Reconciliation §5.7)
+- [x] Desktop installers (Tauri .msi / .exe / .dmg) — **ACCEPTED FOR THE WINDOWS RC SCOPE**: `.msi` (WiX) and `.exe` (NSIS) are both built, installed, and lifecycle-verified in CI and locally, bundling the frozen Python backend. **`.dmg` (macOS) is NOT delivered** and is explicitly deferred as future platform expansion (OD-DI-3) — this bullet is checked off against the accepted Windows RC distribution scope only, not against macOS. Artifacts are **unsigned**; signing is a public-distribution requirement, not a technical-RC one. Reconciliation §5.8.
+
+**Phase 7 status-synchronization note (governance basis for the check-offs above)**: this file's own established convention — stated verbatim on its previously-unchecked Phase 4/5 items — is that a work item is "not checked off `[x]` until Chief Architect review and explicit acceptance." That acceptance has now been given for every Phase 7 work package, and for the previously-pending Phase 4 (Document Intelligence, Capability Identity Propagation) and Phase 5 (Process Intelligence, License Engine) items, in the Final RC Ambiguity Resolution & Baseline Freeze pass. These check-offs therefore follow this file's own rule rather than overriding it; they were not applied unilaterally by any implementation pass. Full per-package evidence lives in `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`; the consolidated release view lives in `docs/release/RELEASE_CANDIDATE_READINESS.md`.
+
+**Supporting work accepted alongside Phase 7, deliberately NOT added as roadmap checklist items** (they are **REPOSITORY-DERIVED**, not roadmap line items, and inventing roadmap requirements is forbidden by the reconciliation document §1): Database Migration Wiring (Alembic foundation), CI/CD (`backend-ci.yml`/`desktop-ci.yml`), and Production Secret Storage / Native Windows Keyring (activating the real Windows Credential Manager backend). All three are accepted and evidenced in the reconciliation document (§5.1, §5.9, §5.11).
+
+**Not part of the Phase 7 RC scope, explicitly deferred**: bare/server (non-Docker, non-desktop) fresh-machine validation; macOS/Linux desktop distribution; installer footprint optimization; Docker OS-credential-store parity (OD-2). See the reconciliation document and RC readiness document for each item's definitive status.
 
 ## Application Completion track — M7.1: Local Runtime Completion
 

@@ -1,113 +1,274 @@
 # KORTEX OS — Release Candidate Readiness
 
-**Status of this document**: RC evidence matrix produced by the Final Production Reconciliation & Release Candidate Preparation pass. It consolidates evidence already recorded in `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md` (the authoritative living control document — read that first for full detail on any row below) into one RC-facing acceptance matrix, per that reconciliation pass's own governance.
+**Authoritative RC readiness document.** Produced by the Final Production Reconciliation pass and finalized by the Final RC Ambiguity Resolution & Baseline Freeze pass. For per-work-package implementation detail and acceptance records, see `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`; for roadmap completion status, see `.kortex/roadmap.md`.
 
-**Produced against**: HEAD `98d94b4c4da9cbec0b3c50af6894af88f8796aae`, branch `main`.
-
-**Statuses used**: `PASS`, `FAIL`, `BLOCKED`, `DEFERRED`, `OWNER REVIEW REQUIRED`. No vague statuses are used.
+**Status terminology used here, and nowhere blurred**: `DONE`, `PASS`, `TECHNICAL RC READY`, `OWNER DECISION REQUIRED`, `DEFERRED / POST-RC`, `PUBLIC RELEASE BLOCKER`.
 
 ---
 
-## 1. RC Acceptance Matrix
+## 1. RC Definition
 
-| # | Area | Requirement | Evidence | Status | Blocker? | Owner Decision Needed? |
-|---|---|---|---|---|---|---|
-| 1 | Architecture baseline | Six architectural phases + Phase 7 production hardening complete | Reconciliation §4 status table — all Phase 7 work packages `DONE` | PASS | No | No |
-| 2 | Phase 1–6 acceptance | Core kernel, business foundation, desktop/UI, document intelligence, process intelligence/license, module base/Finance/HR/Operations | Frozen per this task's own Rule 2; not reopened, no reproducible defect found or sought | PASS | No | No |
-| 3 | Phase 7 acceptance | Sentinel, Monitoring, Backup, Recovery, Update, Docker, Desktop Installers | Reconciliation §5.2–§5.9 — all `DONE` | PASS | No | No |
-| 4 | Sentinel | Health monitoring, integrity, deadlock/crash-loop detection | Reconciliation §5.2 — 41 targeted + 50 cross-engine tests, 0 regressions, DONE | PASS | No | No |
-| 5 | Monitoring | Metrics, dashboards, threshold alerting | Reconciliation §5.3 — 42 targeted tests, 3,016 full-suite passed at acceptance, DONE | PASS | No | No |
-| 6 | Backup | AES-256-GCM encrypted, fail-closed, retention-safe | Reconciliation §5.4 — 47 targeted tests, fail-closed-on-missing-key test reconfirmed passing this pass, DONE | PASS | No | No |
-| 7 | Recovery | Staged restore, 4-tier verification, rollback, journal | Reconciliation §5.5 — 74 net-new tests, adversarial security suite reconfirmed passing this pass; **formally accepted this pass** (was "IMPLEMENTED — AWAITING REVIEW") | PASS | No | No — resolved this pass |
-| 8 | Update | Ed25519-signed manifests, staged migration, 3-layer rollback | Reconciliation §5.6 — 85 targeted tests, adversarial security suite reconfirmed passing this pass; **formally accepted this pass** | PASS | No | No — resolved this pass |
-| 9 | Docker | Production image, non-root, fail-closed secrets, health smoke test | Reconciliation §5.7 — accepted commit `b4b5ffd`; **reconfirmed green at this pass's HEAD** via Backend CI run `33992464212` ("Docker build and smoke test": success) | PASS | No | No |
-| 10 | Windows installer | Real MSI + NSIS, bundled frozen backend, full lifecycle | Reconciliation §5.8 — three commits (`9d6b8fe`/`899aee3`/`f55b6bb`), Desktop CI #41→#44, full 16-stage lifecycle verified twice consecutively; **formally accepted this pass** (was `PENDING`/STUB) | PASS | No | No — resolved this pass |
-| 11 | Native keyring | Real Windows Credential Manager persistence, fail-closed | Reconciliation §5.11 — commit `98d94b4`, real cross-process CI-executed integration test passed (196s); **formally accepted this pass** (new work package) | PASS | No | No — resolved this pass |
-| 12 | Database/migrations | Fresh install, existing DB, legacy compatibility, partial-migration safety | §2 below — full backend suite re-run this pass (3,260 passed), `test_alembic_migrations.py` and `test_desktop_entrypoint_migration.py` (8 tests, including the fresh-install-missing-directory regression added in `f55b6bb`) both green | PASS | No | No |
-| 13 | Storage topology | One persistent app-data root; install directory read-mostly | §2 below — verified via the Desktop Installer lifecycle test: database/`storage_data`/backups all under Tauri's `app_data_dir()`, confirmed absent from the install directory, reinstall/uninstall preserve it byte-identically | PASS | No | No |
-| 14 | Security | Execution identity, tenant isolation, fail-closed secret handling | §3 below — representative adversarial/capability-identity test suites re-run this pass, all passing; no redesign performed (frozen per Rule 2) | PASS | No | No |
-| 15 | Tenant isolation | Capability dispatch enforces authoritative principal tenant, rejects caller override | Part of the full backend suite (`test_capability_identity_propagation_architecture.py` and engine-specific capability tests) — included in the 3,260 passed this pass | PASS | No | No |
-| 16 | Execution identity | Authenticated identity remains the execution identity through nested/background paths | Same suite as above; frozen, not re-audited beyond confirming continued green | PASS | No | No |
-| 17 | CI/CD | Real, repeatedly-executed GitHub Actions coverage | Reconciliation §5.9 — dozens of real runs across Docker/Desktop Installer/Keyring work, including two genuine CI-only failures found and fixed (Desktop CI #41/#42); **formally accepted this pass** (was "AWAITING REVIEW", "no actual run has occurred") | PASS | No | No — resolved this pass |
-| 18 | Backend tests | Full suite, exact counts, no hidden failures | §4 below — 3,260 passed / 2 skipped / 1 failed (full-suite run); the 1 failure reproduced 3/3 in isolation plus 20/20 in its own file, confirmed pre-existing/non-deterministic-under-load, not a regression | PASS (with one documented, pre-existing, non-blocking flake) | No | No |
-| 19 | Desktop tests | TypeScript/vitest suite | §4 below — 575 passed (design-system 50 + apps/desktop 525), 0 failed | PASS | No | No |
-| 20 | Windows installer smoke | CI-executed install/launch/health/uninstall | Desktop CI #43 (`33989632849`) and #44 (`33992464220`) — both green, smoke test 30s in #44 | PASS | No | No |
-| 21 | Docker smoke | CI-executed build/startup/migration/health | Backend CI #44 (`33992464212`) — "Docker build and smoke test": success | PASS | No | No |
-| 22 | Versioning | Formal RC version/tag convention | §5 below — none exists; all package manifests at `0.1.0`; last git tag (`v0.2.0`) is 213 commits stale, predates Phase 7 entirely | OWNER REVIEW REQUIRED | No (does not block engineering readiness) | **Yes** — proposed convention below, not silently adopted |
-| 23 | Signing | Code-signing status of MSI/NSIS | §5 below — unsigned; no certificate, signing identity, or CI signing credential exists anywhere in the repository | OWNER REVIEW REQUIRED | Depends on release policy | **Yes** — classification depends on whether this RC is for internal/testing distribution or public release |
-| 24 | Documentation | Reconciliation doc accurately reflects accepted state | This pass rewrote reconciliation §3–§9 with full evidence; CHANGELOG.md and `.kortex/roadmap.md`'s Phase 7 checklist remain stale (flagged, not silently edited — see §6 below) | PASS (for the reconciliation doc itself); documentation debt flagged separately | No | No — flagged for owner awareness only |
-| 25 | Graphify baseline | `built_at_commit == HEAD` | Regenerated this pass; graph rebuilt (real topology change — Graphify indexes `docs/architecture/*.md` content, not code-only), stamp reads `98d94b4c`, exactly matching HEAD at the time of regeneration | PASS | No | No |
-| 26 | Git cleanliness | Working tree clean, intended commit only | §7 below | PASS (after this pass's own commit) | No | No |
+KORTEX distinguishes two states that must never be collapsed into a single "production-ready" claim:
 
-## 2. Migration / Storage Verification Detail
+**TECHNICAL RC READINESS** — the implemented architecture and accepted production-hardening workstreams are complete enough to freeze a Release Candidate build. This does **not** imply the artifacts are publicly distributable.
 
-- **Fresh install**: `test_desktop_entrypoint_migration.py::TestFreshDatabase` and `TestFreshInstallWithMissingStorageDirectory` (the regression test added in `f55b6bb` for the exact defect that broke Desktop CI #41/#42) — both green.
-- **Existing fully-migrated database**: `TestFullyMigratedDatabase` — idempotent re-run, green.
-- **Legacy `create_all()`-only database** (pre-Alembic): `TestLegacyCreateAllDatabase` (2 cases, including the empty-but-present `alembic_version` table case found during the Desktop Installer milestone) — green.
-- **Partial/incomplete legacy schema**: `TestPartialLegacyDatabase` (2 adversarial cases) — confirmed to stamp no further than the last fully-verified revision, never guessing past a gap — green.
-- **Legitimately-tracked intermediate Alembic revision**: `TestPartiallyMigratedAlembicDatabase` — upgraded forward correctly, nothing dropped — green.
-- **CWD-independent execution**: `resolve_alembic_config()`/`resource_root()` use `sys._MEIPASS`/absolute paths, not the process's working directory — proven by the installer lifecycle test running the frozen backend from the real app-data directory as its CWD, not the source checkout.
-- **Storage topology**: `backend_process.rs::resolve_backend_sidecar_config_production_path_with_keys` derives `KORTEX_DATABASE_URL` and `KORTEX_STORAGE_DIR` from the *same* `resolve_app_data_dir()` value — one authoritative root, confirmed by the lifecycle test's direct filesystem inspection (database and `storage_data` both under `%APPDATA%\com.kortex.desktop`, absent from the install directory).
-- **Install-directory write behavior**: confirmed the install directory (`%LOCALAPPDATA%\KORTEX Desktop`) contains no `storage_data` subdirectory after a full run — the lifecycle test asserts this directly.
-- **Backup/Recovery interaction with the database**: not re-exercised this pass (frozen, no reproducible defect found); `test_recovery_integration.py`/`test_update_integration.py` remain part of the full backend suite and passed in this pass's run.
+**PUBLIC PRODUCTION RELEASE READINESS** — the RC has additionally satisfied release-policy requirements: artifact signing, release identity, distribution trust, an approved release version/tag, and any organization-required release credentials.
 
-## 3. Security Verification Detail
+The progression is:
 
-- **Execution identity / tenant isolation**: representative capability-identity tests (`test_capability_identity_propagation_architecture.py`, `test_production_capability_permissions.py`, and per-engine capability suites) are part of the 3,260 tests that passed in this pass's full-suite run. Not redesigned, not reopened; verified via continued-green status only, per Rule 2.
-- **Secret storage**: `Found`/`ConfirmedAbsent`/`Unreadable` semantics reconfirmed intact this pass (unit tests unchanged and passing); real OS-backed persistence now proven for the first time (§5.11) rather than assumed.
-- **Backup**: `test_crypto_manager_fail_closed_when_key_missing` and `test_verifier_missing_key` re-run directly this pass — both pass. Encryption is mandatory; missing/invalid key fails closed, does not fall back to plaintext.
-- **Recovery**: `test_recovery_security_adversarial.py` (6 tests) re-run directly this pass — all pass.
-- **Update**: `test_update_crypto_manifest.py` and `test_update_security_adversarial.py` (11 tests) re-run directly this pass — all pass. Manifest signature/hash verification, archive-traversal/ZIP-bomb/symlink defenses all exercised.
-- **License**: not touched, not re-audited beyond confirming its tests remain part of the passing full suite — no business/pricing logic added, per this pass's own scope rule.
-- **Desktop**: Tauri remains sole lifecycle owner (unchanged — `spawn_and_monitor`/`SidecarManager` untouched by this pass); frozen backend remains the production sidecar; keyring is now genuinely OS-native (§5.11); backend restart behavior reconfirmed via the lifecycle test's explicit kill-and-restart step.
-
-## 4. Test Results (exact counts, this pass)
-
-**Backend** (`pytest -q`, full suite):
 ```
-3,260 passed, 2 skipped, 1 failed
-```
-- 2 skipped: documented, pre-existing Ollama-unavailable skips (`test_ai_ollama_integration.py`) — environmental, not a gap in coverage of anything this RC touches.
-- 1 failed: `test_execution_envelope_and_idempotency.py::test_client_timeout_cancellation_does_not_strand_processing_record`. **Reproduced**: 3/3 passes in isolated single-test runs; 20/20 passes running its full file in isolation. **Cause**: real `asyncio.sleep()`-based concurrency-race simulation, sensitive to system load under the full 3,260+-test suite — the identical signature already documented as pre-existing in the Update Engine's own formal acceptance record (§5.6 of the reconciliation doc), which predates this pass and is structurally unreachable from anything this pass touched (no reference to Update/Recovery/Desktop-Installer/Keyring code exists in this test file). **Classification**: pre-existing, non-deterministic under load, not a regression, **not release-blocking**.
-
-**Desktop** (`pnpm test`, vitest):
-```
-design-system: 20 files, 50 passed, 0 failed
-apps/desktop:  74 files, 525 passed, 0 failed
+COMPLETED ENGINEERING → TECHNICAL RELEASE CANDIDATE → RELEASE IDENTITY / SIGNING → PUBLIC PRODUCTION RELEASE
 ```
 
-**Quality gates** (backend, repo-wide, re-run this pass): `ruff check .` — 0 errors. `mypy src` — 0 errors, 290 source files. **Quality gates** (desktop Rust, re-run this pass, prior to this pass's own doc-only changes): `cargo check` — clean. `cargo clippy` — exactly 1 pre-existing warning (`large_enum_variant`, `sidecar.rs`), documented in `desktop-ci.yml` since before this pass, not newly introduced.
+**KORTEX's current position:**
 
-## 5. Artifact / Release Identity
+```
+TECHNICAL RC READY
+PUBLIC PRODUCTION RELEASE: PENDING RELEASE IDENTITY / SIGNING POLICY
+```
+
+## 2. Current Baseline
 
 | Item | Value |
 |---|---|
-| `apps/desktop/package.json` version | `0.1.0` |
-| `apps/desktop/src-tauri/tauri.conf.json` version | `0.1.0` |
-| `apps/desktop/src-tauri/Cargo.toml` version | `0.1.0` |
-| `backend/pyproject.toml` version | `0.1.0` |
-| Docker image tag convention | `kortex-backend:dev` (compose dev), `kortex-backend:${KORTEX_IMAGE_TAG:-latest}` (compose prod) — no version-pinned tag scheme exists |
-| Last git tag | `v0.2.0`, pointing to `2b256d7` (`feat(recipe): implement Phase 2 Recipe Engine`) — **213 commits behind current HEAD**, predates all of Phase 7; not a usable RC-tag precedent |
-| MSI size | ≈134.7 MB |
-| NSIS size | ≈103.1 MB |
-| Frozen backend size (onedir, pre-archive) | ≈17.4 MB |
-| Docker image size | Not measured this pass (no local Docker daemon available in this environment — build/smoke-test evidence comes from CI only, consistent with how this was verified throughout the Docker milestone) |
-| Code signing | **Absent.** No certificate, `certificateThumbprint`/`signingIdentity` (checked in both `tauri.conf.json` and `tauri.windows.conf.json`), or CI signing credential exists anywhere in the repository. MSI and NSIS both build and install correctly unsigned — this is a distribution-trust gap (Windows SmartScreen will warn on an unsigned installer), not a functional defect in the installer itself. |
+| Accepted engineering baseline | `98d94b4c4da9cbec0b3c50af6894af88f8796aae` |
+| Documentation reconciliation commit | `86469c97820713ff9774973319d28331a51b55b7` |
+| Branch | `main` |
+| Supported RC distribution topologies | Windows x64 desktop installer (MSI + NSIS); Docker/headless production container |
 
-**Proposed versioning convention** (documented for owner approval, not adopted): semantic versioning (`MAJOR.MINOR.PATCH`) already declared in `CHANGELOG.md`'s own header ("this project adheres to Semantic Versioning"); a natural next step would be bumping all four `0.1.0` manifests together to a single synchronized version at the point the owner formally cuts this RC, tagged `v<version>-rc1` (or similar), but this pass does not perform that bump — it is a release-identity decision, not an engineering-readiness one.
+## 3. Completed Architecture — `DONE`
 
-## 6. Documentation Debt (flagged, not fixed this pass)
+| Phase | Status | Notes |
+|---|---|---|
+| Phase 1 — Core Microkernel & Runtime | `DONE` | |
+| Phase 2 — Business Foundation | `DONE` | |
+| Phase 3 — Desktop / UI | `DONE` | Tauri v2 shell, React/TS/Tailwind, IPC bridge, design system |
+| Phase 4 — AI Native Engine & Knowledge Layer | `DONE` | AI Engine (M1–M13), Tool Engine, Knowledge Engine, Document Intelligence, Capability Identity Propagation security |
+| Phase 5 — Advanced Business Engines & Approvals | `DONE` | Durable approvals, Process Intelligence, License Engine (M5.7) |
+| Phase 6 — Pilot Business Modules | `DONE` | Module base contract, Finance, HR & Payroll, Operations |
+| Phase 7 — Production Hardening | `DONE` | §4 below |
+| Application Completion track M7.1–M7.5 | `DONE` | Local runtime, AI Studio conversational, Connector/Document/Knowledge ↔ AI Studio integrations |
 
-- **`.kortex/roadmap.md:65-75`** still reads `Status: Planned` with all seven Phase 7 checklist boxes unchecked, contradicting the reconciliation document's now-accurate `DONE` statuses. Per the reconciliation document's own governance rule (§0: "if this document conflicts with the current roadmap... STOP and report the conflict — do not silently rewrite history"), this pass does not edit that file. Recommend an explicit owner-authorized pass to check those boxes.
-- **`CHANGELOG.md`** was last updated through the M7.5 (Knowledge Engine ↔ AI Studio) entry and its own `[Unreleased]` note already discloses a prior gap; it does not yet cover any Phase 7 Production Hardening work (Sentinel through Native Keyring) at all. Backfilling six-plus milestones' worth of changelog entries was judged disproportionate to this reconciliation pass's scope and was not attempted.
-- **External M7.x vs. native Phase 6/7 numbering conflict** (reconciliation §2) remains unresolved, exactly as it has been throughout — explicitly out of scope for every Production Hardening pass, this one included.
+**There is no next core engine.** The planned engineering roadmap is complete.
 
-## 7. Git State (at the time this document and the reconciliation update were authored)
+## 4. Phase 7 Production Hardening — `DONE`
 
-- HEAD before this pass's own commit: `98d94b4c4da9cbec0b3c50af6894af88f8796aae`
-- Files changed by this pass: `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md` (rewritten sections, no code touched), `docs/release/RELEASE_CANDIDATE_READINESS.md` (new, this file)
-- No source code, test, workflow, or configuration file was modified by this reconciliation pass — see the accompanying commit for the exact diff.
+| Work Package | Status | Evidence |
+|---|---|---|
+| Sentinel | `DONE` | Reconciliation §5.2 |
+| Monitoring Engine | `DONE` | Reconciliation §5.3 |
+| Backup Engine | `DONE` | Reconciliation §5.4 |
+| Recovery Engine | `DONE` | Reconciliation §5.5 |
+| Update Engine | `DONE` | Reconciliation §5.6 |
+| Docker Production Builds | `DONE` | Reconciliation §5.7 |
+| Desktop Installers (Windows MSI + NSIS) | `DONE` | Reconciliation §5.8 |
+| Database Migration Wiring *(repository-derived)* | `DONE` | Reconciliation §5.1 |
+| CI/CD *(repository-derived)* | `DONE` | Reconciliation §5.9 |
+| Production Secret Storage / Native Windows Keyring *(repository-derived)* | `DONE` | Reconciliation §5.11 |
 
-## 8. RC Gate
+## 5. Security Readiness — `PASS`
 
-See the final report delivered alongside this document for the formal `RC READY` / `RC NOT READY` determination and its precise reasoning. This document is the evidence matrix that determination is based on.
+| Area | Status | Evidence |
+|---|---|---|
+| Execution identity (authenticated identity remains execution identity) | `PASS` | `CapabilityExecutionContext` injected at registration-time, never caller-suppliable; `test_capability_identity_propagation_architecture.py` static guard against recurrence |
+| Tenant isolation | `PASS` | Authoritative principal-derived tenant across engines and business modules; caller tenant overrides rejected |
+| Secret storage — `Found` / `ConfirmedAbsent` / `Unreadable` semantics | `PASS` | `secure_keys.rs`; `Unreadable` fails closed and never generates a replacement key |
+| Secret storage — real OS backing | `PASS` | Windows Credential Manager verified across genuine process boundaries in CI (§10) |
+| Backup encryption fail-closed | `PASS` | AES-256-GCM mandatory; missing/invalid key aborts, no plaintext fallback |
+| Recovery authorization / rollback / operator halt | `PASS` | Journal-driven, staged-only, fail-closed on interrupted rollback |
+| Update manifest authenticity | `PASS` | Ed25519 signature + SHA-256 verification; archive traversal/ZIP-bomb/symlink defenses |
+| License (M5.7) infrastructure semantics | `PASS` | Unchanged; no business pricing/enforcement rules added |
+| Desktop (Tauri lifecycle ownership, read-mostly install dir) | `PASS` | §9 |
+
+## 6. Database / Migration Readiness — `PASS`
+
+| Case | Status |
+|---|---|
+| Fresh install / fresh database | `PASS` |
+| Fresh install with missing storage directory (real defect, fixed `f55b6bb`) | `PASS` — regression test added |
+| Existing fully-migrated database (idempotent re-run) | `PASS` |
+| Legacy `create_all()`-only database (pre-Alembic) | `PASS` |
+| Legacy database with present-but-empty `alembic_version` | `PASS` |
+| Partial / incomplete legacy schema | `PASS` — stamps no further than the last fully-verified revision, never guesses past a gap |
+| Legitimately-tracked intermediate Alembic revision | `PASS` — upgrades forward, drops nothing |
+| CWD-independent migration execution | `PASS` — absolute/`sys._MEIPASS` resolution, proven by the frozen backend running with app-data as CWD |
+
+Zero new migrations were introduced by any RC-preparation pass.
+
+## 7. Storage Topology — `PASS`
+
+One authoritative persistent application-data root, derived once in Rust (`backend_process.rs::resolve_app_data_dir` via Tauri's `app_data_dir()`) and passed to the backend as both working directory and explicit `KORTEX_DATABASE_URL`/`KORTEX_STORAGE_DIR`.
+
+| Requirement | Status |
+|---|---|
+| Database beneath the app-data root | `PASS` |
+| `storage_data` beneath the app-data root | `PASS` |
+| Backups beneath the persistent root | `PASS` |
+| Install directory read-mostly (no persistent writes) | `PASS` — verified absent from the install directory |
+| CWD does not determine production persistence | `PASS` |
+| Uninstall removes binaries, preserves data | `PASS` — database byte-identical (SHA-256) after uninstall |
+| Single persistent root (no second root, no per-engine sprawl) | `PASS` |
+
+## 8. Docker Production Readiness — `PASS`
+
+Image build, container startup, Alembic migration ahead of serving traffic, `/health` smoke test, non-root runtime, image-layer secret/VCS-metadata scan, container stop — all exercised by the Backend CI `docker` job on every push, most recently green at run `33992464212`. Persistent state externalized to a volume; production configuration explicit; fail-closed secret preflight.
+
+**Update Engine boundary**: `kortex.update.apply` is out of scope for the container topology — updating KORTEX in Docker means building a new image and replacing the container, with the persistent volume preserved. Update Engine does not and must not mutate a running container image.
+
+## 9. Windows Desktop Readiness — `PASS`
+
+| Requirement | Status |
+|---|---|
+| MSI builds | `PASS` |
+| NSIS builds | `PASS` |
+| Frozen backend bundled as a Tauri resource | `PASS` — build-time packaging guard asserts the real artifact |
+| Frozen backend boots; migrations run | `PASS` |
+| `/health` reachable | `PASS` — 4–7s across runs |
+| Desktop application launches | `PASS` |
+| Backend crash → Tauri restarts it → healthy again | `PASS` — new PID, 1–2s recovery |
+| Persistent data survives reinstall | `PASS` — byte-identical |
+| Uninstall removes binaries, preserves app data | `PASS` |
+| Install directory not used for persistent writes | `PASS` |
+| No secrets leaked into artifacts | `PASS` |
+
+Tauri remains the sole lifecycle owner of the application and the backend sidecar. No second supervisor, service, or scheduled task exists.
+
+## 10. Native Keyring — `PASS`
+
+The `keyring` dependency previously resolved with no platform feature, silently selecting the crate's in-memory **mock** store on every platform including Windows — so master/signing keys never persisted, despite `secure_keys.rs`'s fail-closed design assuming they did. Fixed by enabling `windows-native` (commit `98d94b4`).
+
+Proven, not mocked: a committed, `#[ignore]`-gated integration test re-invokes the compiled test binary as genuinely separate OS processes and verifies store → cross-process retrieve → exact match → delete → confirmed absence against the real Windows Credential Manager, using a disposable identifier distinct from production's. Independently cross-checked out-of-band via `cmdkey`. **Executed in Desktop CI run `33992464220`: success, 196s.** No secret value is printed, logged, or asserted against — only lengths and equality booleans.
+
+## 11. CI/CD — `PASS`
+
+| Workflow / Job | Latest Status |
+|---|---|
+| Backend CI — Lint, type-check, and test (Python 3.12) | `PASS` (`33992464212`) |
+| Backend CI — Docker build and smoke test | `PASS` (`33992464212`) |
+| Desktop CI — Typecheck and test (TypeScript) | `PASS` (`33992464220`) |
+| Desktop CI — Tauri shell (cargo check) | `PASS` (`33992464220`) |
+| Desktop CI — Windows installer build and smoke test | `PASS` (`33992464220`) |
+| Desktop CI — Real Windows keyring integration test | `PASS` (`33992464220`, 196s) |
+
+CI has demonstrably caught real defects rather than merely passing: Desktop CI #41 and #42 each surfaced a genuine, CI-only-reproducible failure that local testing could not have caught, both diagnosed and fixed using CI evidence.
+
+## 12. Test Evidence
+
+**Backend full suite**: `3,260 passed, 2 skipped, 1 failed` (3,263 collected).
+
+- **2 skipped** — pre-existing, documented Ollama-unavailable environmental skips.
+- **1 failed** — `test_execution_envelope_and_idempotency.py::test_client_timeout_cancellation_does_not_strand_processing_record`. Classification: **PRE-EXISTING NON-DETERMINISTIC TEST ISSUE**. Reproduced: passes 3/3 in isolated single-test runs and 20/20 running its full file in isolation; fails only under full-suite load. Identical signature to the flake already documented during Update Engine acceptance. Structurally unreachable from any recent work. **Not modified, not skipped, not weakened.** Does not block technical RC.
+
+This is deliberately **not** reported as "all tests passed."
+
+**Desktop suite**: `575 passed, 0 failed` (design-system 50, apps/desktop 525).
+**Rust (Tauri crate)**: `48 passed, 0 failed, 2 ignored` (the two real-OS-keyring tests, `#[ignore]`-gated by design, executed explicitly in CI).
+**Quality gates**: `ruff check .` — 0 errors. `mypy src` — 0 errors across 290 files. `cargo check` — clean. `cargo clippy` — 1 pre-existing `large_enum_variant` warning in `sidecar.rs`, documented before this work, not newly introduced.
+
+## 13. Artifact Evidence
+
+| Artifact | Value |
+|---|---|
+| Windows MSI | ≈134.7 MB |
+| Windows NSIS | ≈103.1 MB |
+| Frozen backend (onedir, pre-archive) | ≈17.4 MB |
+| Docker image | Built and smoke-tested in CI; size not measured locally (no local Docker daemon) |
+| Installer footprint reduction | `DEFERRED / POST-RC` — optional optimization; no build, CI, runtime, or distribution failure has ever resulted from current size |
+
+## 14. Release Identity / Signing
+
+### 14.1 Release Identity — `OWNER DECISION REQUIRED`
+
+Repository evidence is genuinely conflicting, so the correct RC version cannot be determined unilaterally:
+
+| Signal | Value |
+|---|---|
+| `apps/desktop/package.json`, `tauri.conf.json`, `Cargo.toml`, `backend/pyproject.toml` | all `0.1.0` |
+| `CHANGELOG.md` last released version | `[0.2.0]` (2026-08-07) — manifests were never bumped for it |
+| Latest git tag | `v0.2.0` → `2b256d7`, **213 commits stale**, Phase 2 era |
+| `docs/architecture/ARCHITECTURE_VERSION_1.0.md` | Architecture Version **1.0.0**, *"FROZEN & IMMUTABLE"*, ratified by the Chief Architect, 2026-08-08 |
+| Git tag `architecture-v1.0` | exists |
+
+**Recommended RC identifier (exactly one):**
+
+```
+KORTEX RC: v1.0.0-rc.1
+```
+
+**Rationale from repository evidence**: the architecture is formally frozen and ratified at version 1.0.0; the entire planned roadmap (Phases 1–7 plus the M7.1–M7.5 application-completion track) is complete; this is the first production-ready freeze of that complete, ratified architecture. Continuing a `0.x` line would materially understate a completed 1.0 architecture, and `0.2.0`→`0.3.0` would be indefensible given the scope delivered since (Phases 3–7 in their entirety).
+
+**Not performed, because not authorized** — the exact steps an owner would run after approval:
+1. Bump four manifests `0.1.0` → `1.0.0`: `apps/desktop/package.json`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/src-tauri/Cargo.toml`, `backend/pyproject.toml`.
+2. Add a `CHANGELOG.md` `[1.0.0]` entry covering Phase 7 (currently unwritten — see §15).
+3. `git tag -a v1.0.0-rc.1 -m "KORTEX v1.0.0-rc.1"`.
+
+No manifest was blindly bumped and no tag was created by this pass.
+
+### 14.2 Code Signing — `PUBLIC RELEASE BLOCKER` / technical RC `NOT BLOCKED`
+
+**Current state**: MSI and NSIS are **unsigned**. Verified by direct inspection — `certificateThumbprint`/`signingIdentity` absent from both `tauri.conf.json` and `tauri.windows.conf.json`; no signing step in `.github/workflows/desktop-ci.yml`; no certificate anywhere in the repository.
+
+| Question | Answer |
+|---|---|
+| What does signing protect? | Publisher identity (users can verify KORTEX published the installer) and artifact integrity (tamper detection between build and install). Without it, Windows SmartScreen/Defender warns users, and enterprise deployment policies commonly refuse unsigned installers outright. |
+| Which artifacts require signing? | The NSIS `-setup.exe`, the `.msi`, and the installed `kortex-desktop.exe` (and, per common practice, the bundled `kortex-backend.exe`). |
+| What infrastructure is missing? | An Authenticode code-signing certificate (OV or EV; EV avoids SmartScreen reputation build-up), a signing step in the Windows CI job, and Tauri signing configuration. |
+| What credentials are required? | The certificate and its private key — or, preferably, a cloud signing service (e.g. Azure Trusted Signing / an HSM-backed service) so the private key never exists as a file. |
+| Where must those credentials live? | GitHub Actions encrypted secrets or a cloud key vault referenced by CI. **Never in this repository**, never in a commit, never in a build log. |
+| Does this block technical RC? | **No.** Unsigned artifacts build, install, launch, and run correctly — proven repeatedly on fresh CI Windows runners. |
+| Does this block public distribution? | **Yes.** |
+
+No fake certificate, test certificate, or simulated signing step was added. Signing was not made to *appear* successful.
+
+## 15. Deferred Items
+
+| Item | Status | Reason |
+|---|---|---|
+| macOS/Linux desktop distribution (incl. `.dmg`) | `DEFERRED / POST-RC` — future platform expansion | Not in the RC distribution scope; not built, not faked, no placeholder or non-executable CI job added |
+| Docker OS-credential-store parity (OD-2) | `DEFERRED / POST-RC` | Docker production v1 uses the accepted operator-supplied-secret model. Native OS credential-store parity with the Windows desktop keyring is not an RC requirement and remains future release-engineering work. A container has no user-session credential store to bind to. |
+| Bare/server fresh-machine validation | `DEFERRED / POST-RC` deployment hardening | Outside the supported RC distribution topology (Windows desktop + Docker are both validated) |
+| Installer footprint optimization | `DEFERRED / POST-RC` optional optimization | No functional or distribution blocker demonstrated |
+| `CHANGELOG.md` Phase 7 backfill | `DEFERRED / POST-RC` documentation debt | Last updated through M7.5; covers no Phase 7 work. Required before a `[1.0.0]` release entry, not before technical RC freeze |
+| External M7.x vs. native Phase 6/7 numbering conflict | `DEFERRED` | Long-standing documentation-numbering question, explicitly out of scope for every production-hardening pass |
+| Pre-existing `sidecar.rs` `cargo fmt` drift and `large_enum_variant` clippy warning | `DEFERRED / POST-RC` | Predate all recent work; `fmt` is not part of the CI baseline; clippy is informational by documented, deliberate choice |
+
+## 16. Owner Decisions
+
+Exactly two remain. Both are release-policy decisions that cannot be determined from repository evidence.
+
+1. **RC version / tag** — `OWNER DECISION REQUIRED`. Recommended: `v1.0.0-rc.1`, with rationale and the exact four-file bump documented in §14.1. Conflicting in-repo signals (manifests `0.1.0`, CHANGELOG `0.2.0`, ratified architecture `1.0.0`) mean this cannot be settled unilaterally.
+2. **Public-release signing policy** — `OWNER DECISION REQUIRED`. Whether this RC is for internal/testing distribution (unsigned is acceptable) or public release (signing required first), and which signing approach to procure. See §14.2.
+
+No other owner decision is outstanding. OD-2, fresh-machine validation, macOS/Linux, and roadmap synchronization were all resolved to definitive statuses and are no longer owner decisions.
+
+## 17. RC Gate
+
+```
+TECHNICAL RC READY
+```
+
+KORTEX has no remaining core-engine implementation required for RC. The engineering roadmap is complete through Phase 7. Remaining work, if any, is release-policy/distribution work rather than core product engineering.
+
+```
+PUBLIC RELEASE PENDING SIGNING / RELEASE IDENTITY
+```
+
+Signing and release identity are the only remaining public-release requirements.
+
+## 18. Final Baseline / Freeze Procedure
+
+The repository is prepared so the owner can freeze the RC with explicit, minimal commands after approval. Nothing below has been performed.
+
+1. **Approve the RC identifier** (§14.1) — recommended `v1.0.0-rc.1`.
+2. **Bump the four version manifests** to the approved version (exact files listed in §14.1).
+3. **Add the `CHANGELOG.md` release entry** covering Phase 7 (§15).
+4. **Commit** the version bump and changelog.
+5. **Tag**:
+   ```
+   git tag -a v1.0.0-rc.1 -m "KORTEX v1.0.0-rc.1"
+   git push origin main --follow-tags
+   ```
+6. **Build the RC artifacts** from the tagged commit (PyInstaller freeze → `pnpm tauri build` → MSI + NSIS), or download them from the tagged commit's Desktop CI run artifacts.
+7. **Sign the artifacts** — only once §14.2's signing decision and credentials exist. Until then, artifacts are RC-internal, not for public distribution.
+
+**Freeze state at the time of this document**: roadmap, reconciliation, and RC readiness are mutually consistent with no unexplained contradiction; every deferred item has a stated reason; every remaining owner decision is explicit; Graphify is aligned with HEAD; the working tree is clean.
