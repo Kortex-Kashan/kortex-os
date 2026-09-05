@@ -2,7 +2,7 @@
 
 **Status of this document**: Permanent, living project-execution-control document for the Production Hardening / Production-Ready phase. It is not a one-time report — it must be reviewed first and updated with evidence by every future Production Hardening implementation pass. See §0 for the governance rules that apply to it.
 
-**Last updated**: this pass (formal acceptance of Database Migration Wiring + next-step planning), against HEAD `083990c2d8ba0dc76a851612d5c59a64e1ca29d7` at the start of the pass.
+**Last updated**: this pass (Final Production Reconciliation & Release Candidate Preparation — formal owner acceptance of Recovery Engine, Update Engine, CI/CD, Desktop Installers, and Production Secret Storage / Native Windows Keyring; see `docs/release/RELEASE_CANDIDATE_READINESS.md` for the consolidated RC evidence matrix produced by this same pass), against HEAD `98d94b4c4da9cbec0b3c50af6894af88f8796aae` at the start of the pass.
 
 ---
 
@@ -41,12 +41,12 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 
 `.kortex/roadmap.md:78`'s own note: the external "Phase 7 — KORTEX Running / Application Completion" track (milestones M7.1–M7.6, all Completed) is a **distinct numbering track** from this file's native Phase 6/7. The file explicitly states reconciling the two numbering schemes "is a documentation decision for the project owner, not made unilaterally here." **This remains unresolved and out of scope for every Production Hardening implementation pass** — do not invent a milestone number (no "M7.7") for any Production Hardening work package.
 
-## 3. Owner Decisions Required (OWNER DECISION — not resolved by any implementation pass to date)
+## 3. Owner Decisions Required (OWNER DECISION — status as of this pass)
 
-1. **Recovery Engine interpretation**: does the roadmap's "Recovery Engine" bullet require a new, centralizing platform engine, or does the existing, tested, engine-local recovery (Workflow's `hydrate_and_recover`/`recover_stranded_executions`/schedule recovery, Document's `DocumentRecoveryManager`) satisfy it — mirroring the same minimal-pilot interpretation precedent already set for Phase 6? Unresolved.
-2. **Deployment topology**: is KORTEX's production model exclusively desktop-sidecar-managed (where `secure_keys.rs` solves key persistence), or does it also need a standalone server/Docker deployment mode? The roadmap lists both "Docker production builds" and "Desktop installers" as separate bullets, implying both — but the current key-management design (`kernel_bootstrap.py`'s own docstring admission) has no answer for a non-sidecar deployment. Unresolved.
-3. **Migration boot-integration strategy**: should schema migrations run automatically at boot (current `create_all()` convenience preserved for dev, replaced/gated for prod), or as an explicit, separate deploy-time step? **Not yet decided** — deliberately left open by the Database Migration Wiring implementation (§5.1), which added Alembic alongside `create_all()` without touching the boot path, per its explicit scope lock.
-4. External M7.x vs. native Phase 6/7 numbering conflict (§2) — still unresolved.
+1. **Recovery Engine interpretation** — **RESOLVED BY OWNER ACCEPTANCE**. The centralizing-platform-engine interpretation was implemented (§5.5: durable journal, staged restore, multi-tier verification/rollback) and has now been formally accepted by the project owner as part of this Final Production Reconciliation pass. This document records that acceptance; it does not itself supply new reasoning for which interpretation is correct — the owner's acceptance of the as-built engine is the resolution.
+2. **Deployment topology** — **PARTIALLY RESOLVED BY OWNER ACCEPTANCE**. Both bullets are now real: Docker production builds (§5.7, DONE) and Desktop Installers (§5.8, DONE as of this pass) both exist and are accepted, confirming the roadmap's two-topology reading. The narrower question §5.7 already flagged — **OD-2, Docker secret-persistence parity with the desktop sidecar's OS-keychain mechanism** — remains **explicitly open**. It is a distinct question from "does the desktop sidecar's own keychain mechanism actually work" (§5.11 fixed a real defect there — the desktop `keyring` dependency was silently resolving to an in-memory mock on every platform, never touching Windows Credential Manager, despite `secure_keys.rs`'s fail-closed design assuming it did); OD-2 asks whether Docker's separate operator-supplied-secret model should *also* gain OS-keychain-equivalent persistence, which this pass does not resolve and was not authorized to resolve (no Docker changes).
+3. **Migration boot-integration strategy** — **RESOLVED IN PRACTICE, recorded as REPOSITORY-DERIVED FACT, not a new decision made by this pass**. Both accepted production topologies independently converged on the same pattern: an explicit, entrypoint-level migration step ahead of serving traffic (`docker/entrypoint.sh`'s `alembic upgrade head` before `exec uvicorn`; `desktop_entrypoint.py::run_migrations()` before `uvicorn.run`), with `Kernel.boot()`'s `create_all_tables()` left untouched as a dev-mode convenience that is a proven no-op against an already-migrated schema (§5.1's `test_create_all_and_alembic_schema_are_equivalent`). This pass observes and records that convergence; it did not decide it.
+4. External M7.x vs. native Phase 6/7 numbering conflict (§2) — still unresolved, out of scope for this or any Production Hardening pass (no new milestone number is to be invented to resolve it).
 
 ## 4. Production-Hardening Work Packages — Status Table
 
@@ -55,15 +55,16 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Database Migration Wiring | **DONE** | None | §5.1 | Formally accepted (§5.1) |
 | Phase 7 — Production Hardening — Sentinel Engine | **DONE** | None | §5.2 | Formally accepted (§5.2) |
 | Monitoring Engine | **DONE** | Sentinel (public interface) | §5.3 | Formally accepted (§5.3) |
-| Backup Engine | **DONE** | Migrations (now available) | §5.4 | Surgically verified, ready for owner acceptance (§5.4) |
-| Recovery Engine | **IMPLEMENTED — AWAITING REVIEW** | Backup, Migrations | §5.5 | Implemented and verified, awaiting formal owner review (§5.5) |
-| Update Engine | **IMPLEMENTED — AWAITING REVIEW** | Backup, Recovery, Migrations | §5.6 | Implemented and verified, awaiting formal owner review (§5.6) |
+| Backup Engine | **DONE** | Migrations (now available) | §5.4 | Formally accepted (§5.4) |
+| Recovery Engine | **DONE** | Backup, Migrations | §5.5 | Formally accepted this pass (§5.5) |
+| Update Engine | **DONE** | Backup, Recovery, Migrations | §5.6 | Formally accepted this pass (§5.6) |
 | Docker Production Builds | **DONE** | Migrations (available) | §5.7 | Formally accepted (§5.7) |
-| Desktop Installers | PENDING | CI/CD (for repeatable/signed builds) | §5.8 | Not planned yet |
-| CI/CD | **IMPLEMENTED — AWAITING REVIEW** | None | §5.9 | Pending review |
+| Desktop Installers | **DONE** | CI/CD | §5.8 | Formally accepted this pass (§5.8) |
+| CI/CD | **DONE** | None | §5.9 | Formally accepted this pass (§5.9) |
+| Production Secret Storage / Native Windows Keyring | **DONE** | Desktop Installers | §5.11 | Formally accepted this pass (§5.11) |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **Backup Engine is DONE** (surgically verified, §5.4) — verified across 47 targeted backup tests, 243 capability identity tests, 3,078 total backend test nodes, 0 regressions, zero migrations, and clean Graphify/ruff/mypy validation. **Phase 7 — Production Hardening — Recovery Engine is IMPLEMENTED — AWAITING REVIEW** (§5.5) — verified across 74 net new tests (10 targeted suites), 3,150 passed tests across full backend suite, 0 regressions against baseline, 0 database migrations, and clean Graphify/ruff/mypy validation. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). **Phase 7 — Production Hardening — Update Engine is IMPLEMENTED — AWAITING REVIEW** (§5.6) — verified across 85 targeted update tests (11 unit suites + 1 integration suite), 3,254 total backend test nodes, 0 regressions attributable to Update Engine (one real Update Engine defect — a `KORTEX_DATABASE_URL` env-var leak — was found and fixed; it had been masquerading as an unrelated flaky failure), 0 database migrations, and clean Graphify/ruff/mypy validation. **Docker Production Builds is DONE** (formally accepted, §5.7) — implementation commit `b4b5ffdc734bd339c97710532eb4c91bf1502ba9`, verified via GitHub Actions Backend CI (`33967913057`, PASS — production image build, container startup, Alembic migration invocation, `/health` smoke test, non-root runtime, image-layer secret/VCS-metadata scan, container stop) and Desktop CI (`33967913065`, PASS, unaffected), zero new database migrations, and clean Graphify at HEAD. Recovery/Update kernel-bootstrap wiring and OS-keychain-equivalent secret-persistence parity remain explicitly open, separately-tracked owner decisions (`implementation_plan.md` §20 OD-1/OD-2) — not silently resolved by this closure. Every other work package remains `PENDING` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
+**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **Backup Engine is DONE** (formally accepted, §5.4) — verified across 47 targeted backup tests, 243 capability identity tests, 3,078 total backend test nodes, 0 regressions, zero migrations, and clean Graphify/ruff/mypy validation. **Recovery Engine is DONE** (formally accepted this pass, §5.5) — implementation and verification unchanged from the prior "IMPLEMENTED — AWAITING REVIEW" record (74 net new tests, 3,150 passed full-suite, 0 regressions); this pass supplies the formal owner acceptance the governance rule in §0 requires before advancing past that status. **Update Engine is DONE** (formally accepted this pass, §5.6) — implementation and verification unchanged from the prior record (85 targeted tests, 3,250 passed full-suite, one genuine defect found and fixed during its own implementation pass, 0 regressions attributable to it); formally accepted this pass. **Docker Production Builds is DONE** (formally accepted, §5.7) — implementation commit `b4b5ffdc734bd339c97710532eb4c91bf1502ba9`, verified via GitHub Actions Backend CI (`33967913057`) and Desktop CI (`33967913065`), and reconfirmed still green at this pass's HEAD via Backend CI run `33992464212` (Docker build and smoke test: success). **Desktop Installers is DONE** (formally accepted this pass, §5.8) — real, not a stub: `tauri build` produces both MSI and NSIS, CI builds and installs both, the frozen Python backend is bundled and boots, and the full install/launch/health/crash-restart/reinstall-data-preservation/uninstall-data-preservation lifecycle is verified both locally and in CI. **CI/CD is DONE** (formally accepted this pass, §5.9) — the prior record's "Not executed" gap (no GitHub Actions run had occurred) is closed: both `backend-ci.yml` and `desktop-ci.yml` have now executed dozens of times across the Docker, Desktop Installer, and Native Keyring work, including genuine failures found and fixed through real CI evidence (Desktop CI #41/#42), not merely local dry-runs. **Production Secret Storage / Native Windows Keyring is DONE** (formally accepted this pass, §5.11) — a genuine pre-existing defect (the `keyring` dependency resolved to an in-memory mock on Windows, never touching real OS storage) was found, fixed, and proven via a real, CI-executed, `#[ignore]`-gated cross-process integration test against the actual Windows Credential Manager. Every owner decision this pass's authorization did not touch (§3) remains recorded exactly as before, updated only where this pass's own newly-accepted work changes the facts on the ground (see §3). Fresh-Machine (server/non-desktop) Validation remains `PENDING`, still blocked on Owner Decision #2's Docker-specific secret-persistence-parity question (§3) — not touched by this pass, not authorized for implementation. Do not treat `PENDING` as authorization to implement.
 
 ## 5. Work Package Detail
 
@@ -178,7 +179,10 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
   9. `Events & Diagnostics`: Decoupled asynchronous event emission (`kortex.backup.created`, `kortex.backup.verified`, `kortex.backup.deleted`, `kortex.backup.failed`, `kortex.backup.retention_pruned`) using canonical correlation IDs without secret leakage. `BackupDiagnosticsAdapter` conforms to `IEngineDiagnostics` with bounded ring buffer (50 entries) and self-contained metrics.
   10. `Boundaries Preserved`: Zero direct dependencies on Sentinel or Recovery. Does not attempt recovery, process supervision, or engine restarts. Sandboxed cleanly under `storage_data/backups/`.
 
-### 5.5 Recovery Engine — IMPLEMENTED — AWAITING REVIEW
+### 5.5 Recovery Engine — DONE
+
+**Formally accepted this pass** (Final Production Reconciliation & Release Candidate Preparation). The implementation and verification evidence below is unchanged from the prior "IMPLEMENTED — AWAITING REVIEW" record — this pass adds no new Recovery Engine code and re-verifies no new behavior beyond what is already documented. What changes is status only: the governance rule in §0 requires formal owner review/acceptance before advancing past "IMPLEMENTED — AWAITING REVIEW", and that acceptance has now been given. This also resolves Owner Decision #1 (§3) by acceptance of the as-built centralizing-engine interpretation.
+
 
 **Implementation record** (Phase 7 Production Hardening):
 The Phase 7 Recovery Engine has been implemented strictly adhering to `implementation_plan.md` and `docs/adr/ADR-0017-phase7-recovery-engine.md`.
@@ -218,7 +222,10 @@ The Phase 7 Recovery Engine has been implemented strictly adhering to `implement
 - **Regression Analysis**: Exact baseline comparison (3,078 baseline nodes): 0 new failures, 0 regressions.
 - **Quality Gates**: Ruff clean (0 errors, 0 format warnings across all 26 recovery source and test files), Mypy clean (0 errors across 15 recovery engine source files).
 
-### 5.6 Update Engine — IMPLEMENTED — AWAITING REVIEW
+### 5.6 Update Engine — DONE
+
+**Formally accepted this pass** (Final Production Reconciliation & Release Candidate Preparation). The implementation and verification evidence below is unchanged from the prior "IMPLEMENTED — AWAITING REVIEW" record — this pass adds no new Update Engine code and re-verifies no new behavior beyond what is already documented. What changes is status only: formal owner acceptance has now been given per §0's governance rule.
+
 
 **Implementation record** (Phase 7 Production Hardening):
 The Phase 7 Update Engine has been implemented strictly adhering to `implementation_plan.md` and `docs/adr/ADR-0018-phase7-update-engine.md`. Implementation was substantially complete on takeover; this pass inspected the existing worktree, fixed one genuine defect (below), closed several test-coverage gaps, and completed full-suite/static validation.
@@ -272,13 +279,42 @@ The Phase 7 Update Engine has been implemented strictly adhering to `implementat
   - This closure narrows, but does not fully resolve, this document's own §3 **Owner Decision #2** (deployment topology): the roadmap's own structure (Docker production builds vs. Desktop installers as separate bullets) establishes that a non-sidecar runtime mode is the thing this milestone builds — but the underlying key-management-parity question §3 also gestures at remains open per OD-2 above, and §3 itself is left unmodified by this closure.
 - **Update Engine boundary (explicit)**: Update Engine's live filesystem-mutation capability (`kortex.update.apply`) is out of scope for this container topology — its default swap target (`backend/src`) is a normally-read-only image layer. "Updating KORTEX in Docker" means building a new image and replacing the running container, with the persistent volume preserved; this does not modify Update Engine's accepted implementation or semantics in any way.
 
-### 5.8 Desktop Installers — PENDING
+### 5.8 Desktop Installers — DONE
 
-`tauri.conf.json` configures `msi`/`nsis` bundle targets (buildable manually) but has no signing identity (`certificateThumbprint`/`signingIdentity` absent) and no `updater` section; no CI/script anywhere invokes `tauri build`. Classified **STUB**. `backend_process.rs`, `sidecar.rs`, `secure_keys.rs` confirmed present (already-certified M7.1 work, not re-audited). Depends on CI/CD (§5.9) for repeatable, signed builds.
+**Status**: **DONE** (formally accepted this pass). Supersedes the prior `PENDING`/**STUB** classification in full — `tauri build` is now real, CI-invoked, and produces both installer formats from a genuinely bundled, working application.
 
-### 5.9 CI/CD — IMPLEMENTED — AWAITING REVIEW
+**Accepted implementation commits** (three, in sequence — see below for why three, not one):
+1. `9d6b8fe97f0251894c727db84c36d6fc1fc6ffb0` (`feat(desktop): implement Windows Desktop Installer distribution`) — froze the Python backend via PyInstaller (`installer/pyinstaller/kortex_backend.spec`, `--onedir`), bundled it into the Tauri shell via `tauri.conf.json`'s `bundle.resources`, established the unified persistent app-data root (`backend_process.rs::resolve_app_data_dir` via Tauri's `app.path().app_data_dir()`), added a CWD-independent Alembic migration entrypoint (`desktop_entrypoint.py`) with verified-safe legacy-database compatibility, fixed a real `tokio::spawn` panic only reachable from an actual installed build, and made OS-keyring failures fail closed instead of silently regenerating identity.
+2. `899aee3478487ef6779fdbaf22e3b8f8acb174f9` (`fix(desktop): correct Windows resource packaging and CI diagnostics`) — corrected a real CI regression: `bundle.resources` in the base `tauri.conf.json` made a bare Linux `cargo check` require a PyInstaller artifact only the Windows job ever produces. Fixed using Tauri's own native target-specific config mechanism (`tauri.windows.conf.json`, auto-merged by `tauri-build` based on the compile target triple — verified directly against the installed `tauri-utils` crate source, not assumed from documentation). Added a build-time packaging guard and rewrote the Windows installer smoke test's diagnostics (redirected stdout/stderr, distinct per-stage assertions, `if: always()` diagnostic/artifact uploads) after the smoke test itself failed in CI.
+3. `f55b6bb4a1597ff52da1eb4229af6e5e4ce89360` (`fix(desktop): create the database directory before running migrations`) — root-caused and fixed the smoke-test failure the previous commit's diagnostics exposed: on a genuinely fresh install, the app-data root existed but its `storage_data/` subdirectory (holding the database) did not — SQLite creates files, never directories — so `alembic upgrade head` died with `unable to open database file`, the frozen backend exited immediately, and Tauri's supervisor exhausted its restart attempts before `/health` ever came up. Local machines never exhibited this because leftover `storage_data/` directories from prior runs masked it; a fresh CI runner cannot. Fixed with the desktop equivalent of a step `docker/entrypoint.sh` already performs, for the same documented reason.
 
-**Implementation commit**: see `git log` for the `ci: establish production hardening CI validation` commit immediately following this document update. **Files introduced**: `.github/workflows/backend-ci.yml`, `.github/workflows/desktop-ci.yml`. No other file touched — `git status`/`git diff --stat` confirmed only `.github/` as new, untracked content before commit.
+**Why three commits, not one, for a single roadmap bullet**: this reflects a genuine linear discovery process — commit 1's own CI run (Desktop CI #41) surfaced a real regression that commit 2 fixed, and commit 2's own CI run (Desktop CI #42) surfaced a second, independent real defect that commit 3 fixed. Each commit's necessity is evidenced by the CI run immediately preceding it, not retrofitted.
+
+**CI evidence** (GitHub Actions, `windows-installer` job in `.github/workflows/desktop-ci.yml`, `windows-latest`):
+- Desktop CI #41 (`33981635499`) — **FAILED**: `Tauri shell (cargo check)` (exit 101, Linux job) and `Installer smoke test` (exit 1, ~106s).
+- Desktop CI #42 (`33985352738`) — `cargo check` **fixed** (verified green); `Installer smoke test` still failed (exit 1, ~113s) — diagnostics from commit 2 captured the real cause (`KORTEX: backend sidecar exited and exhausted its restart attempts`) for the first time.
+- Desktop CI #43 (`33989632849`) — **all green**: TypeScript, `cargo check`, and `Windows installer build and smoke test` (11m 37s total) all succeeded, including the smoke test.
+- Desktop CI #44 (`33992464220`, alongside the Native Keyring work, §5.11) — still green, confirming no regression: `Windows installer build and smoke test` succeeded end-to-end including the packaging guard and smoke test (30s).
+
+**Full installer lifecycle verified** (both in CI, to the extent the smoke test covers, and locally, covering stages the CI smoke test does not yet exercise): install (MSI and NSIS both independently confirmed buildable and installable) → locate installed application (bundled backend resource present) → launch the real installed Tauri executable → backend process exists and `/health` becomes reachable (4-7s across multiple runs) → kill the backend process → Tauri's existing supervisor restarts it under a new PID → `/health` reachable again (1-2s) → close application → reinstall over the existing installation → database confirmed byte-identical (SHA-256) across reinstall → uninstall → installed binaries removed, bundled backend removed → application data (database, `storage_data`) confirmed preserved and byte-identical. Run twice consecutively from a genuinely fresh machine state (no prior app-data), both fully passing, to distinguish deterministic behavior from flakiness.
+
+**Explicitly not resolved by this acceptance** (owner decisions, not silently closed):
+- **OD-DI-2 (code signing)**: both MSI and NSIS remain **unsigned**. No certificate, signing identity, or CI signing credential exists anywhere in the repository — confirmed by direct inspection of `tauri.conf.json`/`tauri.windows.conf.json` (`certificateThumbprint`/`signingIdentity` absent) and `.github/workflows/desktop-ci.yml` (no signing step). This is a distribution/release-engineering decision, not fabricated or invented here. See `docs/release/RELEASE_CANDIDATE_READINESS.md` for its RC classification.
+- **OD-DI-3 (macOS/Linux desktop distribution)**: explicitly out of scope, not built, not faked. Windows x64 is the only released desktop target.
+- **Keyring native backend**: was a real, separate defect discovered during this milestone's own smoke-test debugging and deliberately deferred to its own dedicated pass rather than opportunistically fixed here — see §5.11, now also DONE.
+
+**Package footprint** (informational, not a release blocker): MSI ≈134.7 MB, NSIS ≈103.1 MB, frozen backend ≈17.4 MB (onedir, pre-archive). No build, CI, or runtime failure has been caused by this size at any point across five CI runs.
+
+### 5.9 CI/CD — DONE
+
+**Formally accepted this pass.** The original implementation record below (§5.9's pre-existing text, retained verbatim as history) explicitly disclosed that no actual GitHub Actions run had ever occurred at the time it was written. That gap is now closed: both workflows have since executed **dozens of times** across the Docker (§5.7), Desktop Installers (§5.8), and Native Windows Keyring (§5.11) work — including genuine failures caught and fixed through real CI evidence, not merely passed on the first try:
+- Desktop CI runs `33967913065` (Docker milestone, unaffected job confirmation), `33981635499`/`33985352738`/`33989632849`/`33992464220` (Desktop Installer + Keyring milestones — #41 and #42 both contain real, CI-only-reproducible failures that were diagnosed and fixed using CI evidence itself, exactly the kind of "a genuinely broken PR is actually blocked" proof the original record flagged as unverified).
+- Backend CI runs `33967913057` (Docker) through `33992464212` (this pass's own HEAD) — consistently green across every push in this span.
+- The Rust `ubuntu-latest` runner behavior flagged as "Not verified" in the original record has since been exercised for real, repeatedly, including catching a genuine Linux-only `cargo check` regression (Desktop CI #41) that Windows-only local testing could not have caught — direct evidence resolving that stated unknown.
+
+No changes were made to the workflows' scope, triggers, or non-goals as part of this acceptance — this is a status change reflecting accumulated real-world execution evidence, not new implementation.
+
+**Original implementation commit**: see `git log` for the `ci: establish production hardening CI validation` commit immediately following this document's original writing. **Files introduced at that time**: `.github/workflows/backend-ci.yml`, `.github/workflows/desktop-ci.yml`. No other file touched — `git status`/`git diff --stat` confirmed only `.github/` as new, untracked content before that commit.
 
 **Original plan** (preserved for record; see "Planned this pass" wording it superseded): objective, why-it's-next, dependencies, explicit scope/non-goals, and acceptance criteria as originally written are retained below as history and were followed as written.
 
@@ -313,28 +349,65 @@ The Phase 7 Update Engine has been implemented strictly adhering to `implementat
 
 ### 5.10 Fresh-Machine Production Validation — PENDING
 
-**REPOSITORY-DERIVED, not a roadmap line item.** `backend/tests/e2e/test_m71_cold_start.py` proves desktop-sidecar-managed cold start (already certified, M7.1). No equivalent test exists for a bare/server-only deployment. `kernel_bootstrap.py`'s own docstring states the ephemeral-key fallback (when `KORTEX_MASTER_KEY`/`KORTEX_AUTH_SIGNING_PRIVATE_KEY` are unset) is "acceptable for M3's demonstration scope, not for a shipped product" — in production this is mitigated only because the desktop sidecar's `secure_keys.rs` supplies those env vars; a bare backend/server deployment has no such guarantee. `_default_sqlite_url()`'s storage directory default (`_default_app_data_dir()`) is a proper cross-platform path — but a separate `KORTEX_STORAGE_DIR`-controlled default elsewhere in `kernel_bootstrap.py` (`_DEFAULT_STORAGE_DIR = "kortex_api_storage"`) is cwd-relative, a real fresh-machine footgun for non-desktop deployments. Depends on Owner Decision #2 (§3) — validation scope depends entirely on which topology(ies) are authorized.
+**REPOSITORY-DERIVED, not a roadmap line item.** `backend/tests/e2e/test_m71_cold_start.py` proves desktop-sidecar-managed cold start (already certified, M7.1). No equivalent test exists for a bare/server-only deployment. `kernel_bootstrap.py`'s own docstring states the ephemeral-key fallback (when `KORTEX_MASTER_KEY`/`KORTEX_AUTH_SIGNING_PRIVATE_KEY` are unset) is "acceptable for M3's demonstration scope, not for a shipped product" — in production this is mitigated only because the desktop sidecar's `secure_keys.rs` supplies those env vars; a bare backend/server deployment has no such guarantee. `_default_sqlite_url()`'s storage directory default (`_default_app_data_dir()`) is a proper cross-platform path — but a separate `KORTEX_STORAGE_DIR`-controlled default elsewhere in `kernel_bootstrap.py` (`_DEFAULT_STORAGE_DIR = "kortex_api_storage"`) is cwd-relative, a real fresh-machine footgun for non-desktop deployments. Depends on Owner Decision #2 (§3) — validation scope depends entirely on which topology(ies) are authorized. **Not touched by this pass** — Docker's own fresh-machine path is separately covered by its own CI smoke test (§5.7); this item concerns a bare/non-containerized server deployment specifically, which remains unauthorized.
+
+### 5.11 Production Secret Storage / Native Windows Keyring — DONE
+
+**Status**: **DONE** (formally accepted this pass).
+
+**Accepted implementation commit**: `98d94b4c4da9cbec0b3c50af6894af88f8796aae` (`fix(desktop): enable native Windows Credential Manager for keyring`), from baseline `f55b6bb4a1597ff52da1eb4229af6e5e4ce89360` (the accepted Desktop Installers baseline, §5.8).
+
+**Defect found and fixed**: `apps/desktop/src-tauri/Cargo.toml` declared `keyring = "3"` with no platform feature enabled. Per the `keyring` crate's own source (`keyring-3.6.3/src/lib.rs`), this resolves to the crate's in-memory `mock` credential store on **every** platform, including Windows, unless a platform-native feature (`windows-native`, `apple-native`, `linux-native`/`*-secret-service`) is explicitly enabled. `secure_keys.rs`'s `KeyringKeyStore` and `ipc.rs`'s `KeyringTokenStore` were therefore never touching Windows Credential Manager in any build produced before this fix, including every prior Desktop Installer verification claim in §5.8 — those claims about "keyring failures fail closed instead of silently regenerating identity" were true against the mock, never proven against real OS persistence, until this pass. **Directly confirmed, not inferred**: a disposable probe crate mirroring the exact pre-fix dependency configuration stored a value in one process; a separate process reading it back reported `CONFIRMED_ABSENT`, not `Found`.
+
+**Corrective change**: `keyring = { version = "3", features = ["windows-native"] }` — the smallest change that activates the crate's existing native-backend support. `windows-native`'s extra dependencies (`windows-sys`, `byteorder`) are gated by the `keyring` crate itself under `[target.'cfg(target_os = "windows")']` (confirmed by reading its `Cargo.toml`), so this has no effect on non-Windows compilation and does not claim macOS/Linux native support. No change was needed to `secure_keys.rs`'s or `ipc.rs`'s existing `Found`/`ConfirmedAbsent`/`Unreadable` semantics — `keyring::Entry`/`keyring::Error` are backend-agnostic at the crate's public API, confirmed by reading `Entry::new`'s implementation directly, and the existing `unreadable_keyring_fails_closed_instead_of_silently_replacing_identity` unit test (against an in-memory `KeyStore` double) already proves that logic correctly, independent of which backend is active.
+
+**Real Windows Credential Manager verification** (not mocked, proven twice):
+- **Local, pre-commit**: a disposable probe ran the full lifecycle — fresh state (`ConfirmedAbsent`) → store (process A) → separate process B reads back, exact match → separate process C reads back, exact match → delete → `ConfirmedAbsent` again. Independently cross-checked via `cmdkey /list` (outside the `keyring` crate's own API): a real Windows Credential Manager entry (`LegacyGeneric:target=probe-account.kortex-keyring-probe-DISPOSABLE-TEST`) was observed to exist after store and be gone after delete.
+- **In CI**: the same lifecycle is now a committed, `#[ignore]`-gated Rust test (`secure_keys::tests::real_windows_keyring_integration::real_windows_keyring_persists_across_process_restart`) that re-invokes the compiled test binary as genuinely separate OS processes — not merely a second in-process call, which the mock backend would also satisfy — under a disposable service/user identifier distinct from `KeyringKeyStore`'s real production identifiers, invoked by exact name in `.github/workflows/desktop-ci.yml`'s `windows-installer` job. No secret value is ever printed, logged, or asserted against directly — only lengths and equality booleans. **Ran in Desktop CI #44 (`33992464220`): success, 196s.**
+
+**No regression to Desktop Installers (§5.8)**: the full installer lifecycle (install → launch → `/health` → crash/restart → reinstall-data-preservation → uninstall-data-preservation) was re-verified locally with this change in place, all passing, and Desktop CI #44's `Installer smoke test` step passed in 30s — no change to installer behavior, only to the dependency backing one internal mechanism.
+
+**Verification results**:
+- `cargo test --lib`: 48 passed, 0 failed, 2 ignored (the two new real-backend tests, `#[ignore]`-gated by design) — local and equivalent in CI.
+- Real Windows keyring integration test: 3/3 consecutive local runs passed; 1/1 CI run passed (196s).
+- `cargo check`: clean. `cargo fmt --check`: unrelated pre-existing drift confirmed present in `sidecar.rs` before this commit (not part of the CI baseline, which never runs `fmt`) — not introduced by this work, not fixed by this work (out of scope). `cargo clippy`: exactly the same one pre-existing, already-documented `large_enum_variant` warning in `sidecar.rs` — zero new warnings.
+- `pnpm typecheck`: clean.
+
+**Explicitly not resolved by this acceptance**:
+- **macOS/Linux native credential-store parity** — out of scope; only Windows is a released target (§5.8's OD-DI-3).
+- **OD-2 (§3, Docker secret-persistence parity)** — a distinct question about whether Docker's separate operator-supplied-secret model should *also* gain OS-keychain-equivalent persistence; this pass fixed the desktop sidecar's own mechanism, which is not the same question, and does not resolve it.
 
 ## 6. Critical Path (PROPOSED SEQUENCING — not roadmap text)
+
+**Status as of this pass**: every item below except the last is now `DONE`. Retained as history to show the sequencing that was actually followed, not as a forward-looking plan.
 
 ```
 Migrations (DONE, formally accepted)
     |
-    +-- Update Engine (needs safe schema upgrade path)
-    +-- Backup Engine (needs schema-version awareness)
-    +-- Docker (container-level migration-on-start, not create_all())
+    +-- Update Engine (DONE — formally accepted this pass)
+    +-- Backup Engine (DONE)
+    +-- Docker (DONE)
     |
     v
-Sentinel / Monitoring (metrics + dashboard aggregation)
+Sentinel / Monitoring (DONE)
     |
     v
-Desktop Installer signing + CI/CD automation
+Desktop Installer (DONE — formally accepted this pass, §5.8)
+    +-- Native Windows Keyring (DONE — formally accepted this pass, §5.11)
+    +-- CI/CD (DONE — formally accepted this pass, §5.9; real GitHub Actions
+    |          execution evidence now exists across all of the above)
     |
     v
-Fresh-machine production validation (topology-dependent, Owner Decision #2)
+[NOT DONE] Desktop installer code signing (OD-DI-2, §5.8) — release-engineering
+           decision, see docs/release/RELEASE_CANDIDATE_READINESS.md
+    |
+    v
+[NOT DONE] Fresh-machine production validation for a bare/server (non-Docker,
+           non-desktop) topology — topology-dependent, Owner Decision #2 (§3),
+           genuinely unauthorized and untouched
 ```
 
-Recovery Engine sits outside this chain — it is blocked on Owner Decision #1, not on any dependency-ordered implementation step.
+Recovery Engine no longer sits outside this chain as of this pass — Owner Decision #1 (§3) is resolved by acceptance of the as-built engine.
 
 ## 7. Parallel Work (PROPOSED SEQUENCING)
 
@@ -345,10 +418,10 @@ Recovery Engine sits outside this chain — it is blocked on Owner Decision #1, 
 ## 8. Production Gate
 
 Evidence that must exist before declaring Production-Ready:
-- **EXISTING ROADMAP REQUIREMENT**: all seven Phase 7 checklist items in `.kortex/roadmap.md:62-72` implemented and checked.
-- **REPOSITORY-DERIVED REQUIREMENT**: a real, tested schema-upgrade path exists (§5.1 — now satisfied), since the roadmap's own "Update Engine" bullet is meaningless without one.
-- **REPOSITORY-DERIVED REQUIREMENT**: the ephemeral-key-fallback risk documented in `kernel_bootstrap.py`'s own docstring is resolved or explicitly scoped out for whichever deployment topology(ies) are authorized (Owner Decision #2).
-- **PROPOSED SEQUENCING**: Migrations first (done), then the dependency-ordered chain in §6.
+- **EXISTING ROADMAP REQUIREMENT**: all seven Phase 7 checklist items in `.kortex/roadmap.md:62-72` implemented. **Documentation inconsistency, flagged not silently resolved**: `.kortex/roadmap.md:65-75` still reads `Status: Planned` with all seven checkboxes unchecked, while this document now records all seven as formally accepted `DONE`. Per this document's own §0 governance rule ("if this document conflicts with the current roadmap... STOP and report the conflict — do not silently rewrite history"), this pass does **not** edit `.kortex/roadmap.md` itself — that file's own update ceremony is left for explicit owner action, reported here as a genuine, outstanding documentation-reconciliation item rather than resolved unilaterally.
+- **REPOSITORY-DERIVED REQUIREMENT**: a real, tested schema-upgrade path exists (§5.1 — satisfied), since the roadmap's own "Update Engine" bullet is meaningless without one.
+- **REPOSITORY-DERIVED REQUIREMENT**: the ephemeral-key-fallback risk documented in `kernel_bootstrap.py`'s own docstring is resolved or explicitly scoped out for whichever deployment topology(ies) are authorized (Owner Decision #2). **Resolved for the desktop-sidecar topology** (§5.11 — real OS keyring now backs key persistence). **Still open for a bare/server topology** (§5.10, unauthorized/untouched) and for Docker's own operator-supplied-secret model specifically (OD-2, §3).
+- **PROPOSED SEQUENCING**: Migrations first (done), then the dependency-ordered chain in §6 — now complete except for installer signing and bare-server fresh-machine validation.
 
 ## 9. Out of Scope (all Production Hardening passes, unless a future pass is explicitly re-authorized for one of these)
 
