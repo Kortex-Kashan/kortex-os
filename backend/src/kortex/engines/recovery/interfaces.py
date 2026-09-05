@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from kortex.engines.recovery.constants import RecoveryJournalPhase
 from kortex.engines.recovery.models import (
     CreateRecoveryRequest,
     CreateRecoveryResponse,
@@ -20,7 +21,6 @@ from kortex.engines.recovery.models import (
     ListRecoveriesRequest,
     ListRecoveriesResponse,
     RecoveryJournalEntry,
-    RecoveryJournalPhase,
     VerifyRecoveryRequest,
     VerifyRecoveryResponse,
 )

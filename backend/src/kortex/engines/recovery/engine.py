@@ -742,9 +742,14 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
 
         try:
             res = await backup_engine.create_backup(req)
-            checkpoint_id = res.backup_id
+            checkpoint_raw = getattr(res, "backup_id", None)
         except Exception as exc:
             raise PreRecoveryCheckpointError(f"Pre-recovery safety backup creation failed: {exc}") from exc
+
+        if not isinstance(checkpoint_raw, str) or not checkpoint_raw:
+            raise PreRecoveryCheckpointError(f"Safety backup creation returned invalid backup_id: {checkpoint_raw!r}")
+
+        checkpoint_id: str = checkpoint_raw
 
         # Verify checkpoint artifact exists and is discoverable
         checkpoint_file = Path(self._config.backup_directory) / f"{checkpoint_id}{BACKUP_EXTENSION}"
