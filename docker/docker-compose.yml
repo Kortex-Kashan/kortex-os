@@ -1,0 +1,34 @@
+# KORTEX OS — local development stack.
+#
+# SQLite-only v1 topology (implementation_plan.md §7 -- PostgreSQL is
+# documented elsewhere as aspirational but is not actually wired anywhere in
+# backend/src beyond a single dialect-label branch; shipping a Postgres
+# service here would present untested functionality as production-ready).
+#
+# Usage (matches the command CONTRIBUTING.md already documents):
+#   cp docker/.env.example docker/.env   # then fill in real key values
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml logs -f
+#   docker compose -f docker/docker-compose.yml down
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    image: kortex-backend:dev
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - kortex_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status < 400 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+
+volumes:
+  kortex_data:

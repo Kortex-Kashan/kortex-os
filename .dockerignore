@@ -1,0 +1,59 @@
+# Build-context hygiene for docker/Dockerfile.backend (build context = repo
+# root). Dockerfile.backend COPYs only specific paths (backend/src,
+# backend/alembic.ini, backend/alembic, docker/entrypoint.sh) -- these
+# patterns keep everything else out of what gets sent to the Docker daemon,
+# for build speed and to guarantee no VCS metadata, dev artifact, or local
+# secret ever reaches the daemon, even transiently.
+
+.git/
+.github/
+.claude/
+.agents/
+.vscode/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+node_modules/
+graphify-out/
+docs/
+apps/
+installer/
+marketplace/
+recipes/
+sdk/
+shared/
+templates/
+knowledge/
+tools/
+design-system/
+.kortex/
+
+backend/tests/
+
+storage_data/
+data/
+logs/
+kortex_local.db
+kortex_local.db-wal
+kortex_local.db-shm
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+.env
+.env.*
+!docker/.env.example
+
+implementation_plan.md
+CHANGELOG.md
+*.log
+*.bak
+*.tmp

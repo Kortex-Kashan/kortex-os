@@ -1,0 +1,52 @@
+# KORTEX OS — production deployment topology.
+#
+# SQLite-only v1 topology (implementation_plan.md §7/§8, Owner Decisions
+# §20). No reverse proxy, TLS terminator, or cloud infrastructure is
+# included -- the application has no TLS-termination code of its own; front
+# this service with whatever reverse proxy/TLS terminator your environment
+# already uses if it must be reachable outside a private network.
+#
+# Usage:
+#   cp docker/.env.example docker/.env   # then fill in real, operator-managed
+#                                         # secret values -- NEVER commit this
+#                                         # file (already git-ignored)
+#   KORTEX_IMAGE_TAG=0.1.0 docker compose -f docker/docker-compose.prod.yml up -d
+#
+# "Updating KORTEX in Docker" means: build a new image (new KORTEX_IMAGE_TAG)
+# -> redeploy this compose file referencing it -> the persistent volume is
+# preserved -> entrypoint.sh's `alembic upgrade head` carries the database
+# forward on first boot of the new container. This is container replacement
+# via image rebuild, not an in-place mutable update -- Update Engine's own
+# live filesystem-mutation capability is out of scope for this topology
+# (implementation_plan.md §8).
+
+services:
+  backend:
+    image: kortex-backend:${KORTEX_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # Generous grace period: an in-flight Backup/Recovery/Update operation
+    # holding a maintenance lock may need more than Docker's 10s default to
+    # reach a safe interruption point. A harder kill after this window is
+    # recoverable, not catastrophic -- these engines already have a
+    # journal-driven crash-recovery sweep for exactly this scenario
+    # (implementation_plan.md §12, §17).
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    volumes:
+      - kortex_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status < 400 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    # No port published by default -- uncomment only if this container is
+    # meant to be reached directly (e.g. behind a host-level reverse proxy
+    # on the same machine). Prefer a dedicated reverse-proxy/edge service in
+    # front of this one for anything internet-facing; none is included here.
+    # ports:
+    #   - "8000:8000"
+
+volumes:
+  kortex_data:

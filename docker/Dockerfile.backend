@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+#
+# KORTEX OS — Production backend image.
+#
+# Packages the existing FastAPI/uvicorn backend (backend/src/kortex) exactly
+# as it already runs today (apps/server/README.md's documented headless
+# entrypoint: `uvicorn kortex.api.main:app --host 0.0.0.0 --port 8000`).
+# This image does not fork a second application or bypass Kernel
+# initialization -- it invokes the same, unmodified ASGI app object the
+# desktop sidecar and the headless-server stub both already reference.
+#
+# See implementation_plan.md (§6, §7, §9, §11, §12) for the evidence and
+# reasoning behind every decision made here.
+
+ARG PYTHON_VERSION=3.12-slim-bookworm
+
+# ---------------------------------------------------------------------------
+# Stage 1: builder -- resolves and installs Python dependencies into a venv.
+# Nothing from this stage except /opt/venv crosses into the runtime stage, so
+# no build toolchain or pip cache ever reaches the final image.
+# ---------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION} AS builder
+
+# Every dependency in backend/requirements.txt ships a manylinux wheel for
+# cp312/x86_64 (proven by backend-ci.yml's own successful `pip install` with
+# no compiler toolchain, only libgl1/libglib2.0-0 as system deps) -- no
+# build-essential/gcc is installed here.
+WORKDIR /build
+COPY backend/requirements.txt ./requirements.txt
+
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime -- minimal image, non-root, no build tooling.
+# ---------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION} AS runtime
+
+LABEL org.opencontainers.image.title="kortex-backend" \
+      org.opencontainers.image.description="KORTEX OS backend (headless/server mode)" \
+      org.opencontainers.image.licenses="MIT"
+
+# The exact, minimal system-library set backend-ci.yml already proves is
+# sufficient for opencv-python-headless + rapidocr-onnxruntime on Debian/
+# Ubuntu (backend-ci.yml:39-40) -- nothing more, nothing invented.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dedicated non-root runtime user/group (fixed IDs for reproducibility).
+RUN groupadd --gid 10001 kortex \
+    && useradd --uid 10001 --gid kortex --create-home --shell /usr/sbin/nologin kortex
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Only what the application needs to run: source tree + Alembic migration
+# environment. Tests, dev tooling, docs, and every other repository
+# directory are excluded by .dockerignore and are never referenced here.
+COPY backend/src /app/backend/src
+COPY backend/alembic.ini /app/backend/alembic.ini
+COPY backend/alembic /app/backend/alembic
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && mkdir -p /data \
+    && chown -R kortex:kortex /data /app
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH="/app/backend/src" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    KORTEX_STORAGE_DIR="storage_data" \
+    KORTEX_DATABASE_URL="sqlite+aiosqlite:////data/storage_data/kortex_local.db"
+
+# Canonical storage root (implementation_plan.md §6, Resolution A): WORKDIR
+# is the persistent-volume mount point, so the relative string "storage_data"
+# (KORTEX_STORAGE_DIR above, and Backup/Recovery/Update's own hardcoded
+# relative constants) resolves identically, under /data, for every engine --
+# with zero change to any accepted engine's source.
+WORKDIR /data
+VOLUME ["/data"]
+
+USER kortex
+
+EXPOSE 8000
+
+# start-period is a conservative placeholder -- no repository evidence
+# measures actual cold-start duration for the full 16-engine boot sequence
+# (DocumentIntelligenceEngine's OCR-model loading is the likely long pole).
+# Re-measure and adjust during real deployment validation (docker/README.md).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status < 400 else 1)"]
+
+ENTRYPOINT ["/entrypoint.sh"]
