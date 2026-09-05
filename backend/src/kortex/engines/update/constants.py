@@ -1,0 +1,146 @@
+"""KORTEX Update Engine constants and enumerations.
+
+Phase 7 — Production Hardening — Update Engine.
+Governed by AGENTS.md and KORTEX Architecture v1.0.0.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Final
+
+# Engine Identity
+UPDATE_ENGINE_NAME: Final[str] = "update"
+CURRENT_ENGINE_VERSION: Final[str] = "1.0.0"
+UPDATE_SECURITY_CLASSIFICATION: Final[str] = "INTERNAL"
+
+# Format Versions
+CURRENT_MANIFEST_FORMAT_VERSION: Final[str] = "1.0"
+CURRENT_JOURNAL_FORMAT_VERSION: Final[str] = "1.0"
+
+# Canonical 6 Capabilities
+CAPABILITY_UPDATE_CHECK = "kortex.update.check"
+CAPABILITY_UPDATE_STAGE = "kortex.update.stage"
+CAPABILITY_UPDATE_APPLY = "kortex.update.apply"
+CAPABILITY_UPDATE_GET = "kortex.update.get"
+CAPABILITY_UPDATE_CANCEL = "kortex.update.cancel"
+CAPABILITY_UPDATE_DIAGNOSTICS_GET = "kortex.update.diagnostics.get"
+
+ALL_UPDATE_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        CAPABILITY_UPDATE_CHECK,
+        CAPABILITY_UPDATE_STAGE,
+        CAPABILITY_UPDATE_APPLY,
+        CAPABILITY_UPDATE_GET,
+        CAPABILITY_UPDATE_CANCEL,
+        CAPABILITY_UPDATE_DIAGNOSTICS_GET,
+    }
+)
+
+# Permissions
+PERMISSION_UPDATE_READ = "system:update:read"
+PERMISSION_UPDATE_MANAGE = "system:update:manage"
+
+UPDATE_CAPABILITY_PERMISSIONS: Final[dict[str, str]] = {
+    CAPABILITY_UPDATE_CHECK: PERMISSION_UPDATE_READ,
+    CAPABILITY_UPDATE_STAGE: PERMISSION_UPDATE_MANAGE,
+    CAPABILITY_UPDATE_APPLY: PERMISSION_UPDATE_MANAGE,
+    CAPABILITY_UPDATE_GET: PERMISSION_UPDATE_READ,
+    CAPABILITY_UPDATE_CANCEL: PERMISSION_UPDATE_MANAGE,
+    CAPABILITY_UPDATE_DIAGNOSTICS_GET: PERMISSION_UPDATE_READ,
+}
+
+# Frozen Canonical 12 Events
+EVENT_UPDATE_CHECKED = "kortex.update.checked"
+EVENT_UPDATE_MANIFEST_VERIFIED = "kortex.update.manifest.verified"
+EVENT_UPDATE_STAGED = "kortex.update.staged"
+EVENT_UPDATE_SAFETY_CHECKPOINT_CREATED = "kortex.update.safety_checkpoint.created"
+EVENT_UPDATE_QUIESCED = "kortex.update.quiesced"
+EVENT_UPDATE_MIGRATED = "kortex.update.migrated"
+EVENT_UPDATE_APPLIED = "kortex.update.applied"
+EVENT_UPDATE_VERIFIED = "kortex.update.verified"
+EVENT_UPDATE_COMPLETED = "kortex.update.completed"
+EVENT_UPDATE_FAILED = "kortex.update.failed"
+EVENT_UPDATE_ROLLED_BACK = "kortex.update.rolled_back"
+EVENT_UPDATE_OPERATOR_INTERVENTION_REQUIRED = "kortex.update.operator_intervention_required"
+
+ALL_UPDATE_EVENTS: frozenset[str] = frozenset(
+    {
+        EVENT_UPDATE_CHECKED,
+        EVENT_UPDATE_MANIFEST_VERIFIED,
+        EVENT_UPDATE_STAGED,
+        EVENT_UPDATE_SAFETY_CHECKPOINT_CREATED,
+        EVENT_UPDATE_QUIESCED,
+        EVENT_UPDATE_MIGRATED,
+        EVENT_UPDATE_APPLIED,
+        EVENT_UPDATE_VERIFIED,
+        EVENT_UPDATE_COMPLETED,
+        EVENT_UPDATE_FAILED,
+        EVENT_UPDATE_ROLLED_BACK,
+        EVENT_UPDATE_OPERATOR_INTERVENTION_REQUIRED,
+    }
+)
+
+
+class UpdateState(str, Enum):
+    """Public lifecycle states for KORTEX Update Engine."""
+
+    IDLE = "IDLE"
+    CHECKING = "CHECKING"
+    AVAILABLE = "AVAILABLE"
+    STAGING = "STAGING"
+    STAGED = "STAGED"
+    CHECKPOINTING = "CHECKPOINTING"
+    QUIESCING = "QUIESCING"
+    MIGRATING = "MIGRATING"
+    APPLYING = "APPLYING"
+    VERIFYING = "VERIFYING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    ROLLBACK_REQUIRED = "ROLLBACK_REQUIRED"
+    ROLLING_BACK = "ROLLING_BACK"
+    ROLLED_BACK = "ROLLED_BACK"
+    FAILED_NEEDS_OPERATOR = "FAILED_NEEDS_OPERATOR"
+
+
+class UpdateJournalPhase(str, Enum):
+    """Internal durable write-ahead journal phases for Update operations."""
+
+    CREATED = "CREATED"
+    MANIFEST_VERIFIED = "MANIFEST_VERIFIED"
+    ARTIFACT_ACQUIRED = "ARTIFACT_ACQUIRED"
+    ARTIFACT_VERIFIED = "ARTIFACT_VERIFIED"
+    STAGED = "STAGED"
+    CHECKPOINT_CREATED = "CHECKPOINT_CREATED"
+    QUIESCED = "QUIESCED"
+    SCHEMA_MIGRATED = "SCHEMA_MIGRATED"
+    FILES_SWAPPED = "FILES_SWAPPED"
+    VERIFIED = "VERIFIED"
+    COMMITTED = "COMMITTED"
+    FAILED = "FAILED"
+    ROLLING_BACK = "ROLLING_BACK"
+    ROLLED_BACK = "ROLLED_BACK"
+    FAILED_NEEDS_OPERATOR = "FAILED_NEEDS_OPERATOR"
+
+
+# Archive Defense & Resource Limits
+MAX_ARCHIVE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+MAX_UNCOMPRESSED_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_EXPANSION_RATIO = 10.0
+MAX_FILE_COUNT = 10_000
+MAX_SINGLE_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MB
+MAX_PATH_LENGTH = 260
+SAFETY_RESERVE_BYTES = 500 * 1024 * 1024  # 500 MB reserve for filesystem
+
+# File & Directory Paths
+DEFAULT_UPDATE_DIR = "storage_data/.update"
+DEFAULT_STAGING_SUBDIR = "staging"
+JOURNAL_FILENAME = "journal.json"
+MAINTENANCE_LOCK_FILENAME = "maintenance.lock"
+HISTORY_FILENAME = "history.json"
+UPDATE_PACKAGE_EXTENSION = ".kortex-update"
+MANIFEST_FILENAME = "manifest.json"
+CHECKSUMS_FILENAME = "checksums.json"
+MAX_HISTORY_ENTRIES = 50
+DEFAULT_QUIESCENCE_TIMEOUT_SECONDS = 30.0
+DEFAULT_POST_UPDATE_VERIFICATION_TIMEOUT_SECONDS = 30.0

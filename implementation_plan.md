@@ -1,552 +1,680 @@
-# Final Implementation Plan — Phase 7: Production Hardening — Monitoring Engine
+# KORTEX OS — Phase 7 Update Engine
+## Implementation Plan (Surgically Hardened)
 
-**Item**: Phase 7 — Production Hardening — Monitoring Engine (Metrics, Dashboards, and Operational Telemetry)  
-**Phase**: Phase 7 (Production Hardening)  
-**Status**: PLANNED (Awaiting Owner Authorization for Implementation)  
-**Document**: `docs/architecture/monitoring_engine_implementation_plan.md` (and canonical workspace copy `implementation_plan.md`)  
-**Architectural Authority**: KORTEX Architecture v1.0.0, ADR-0015 (proposed)  
-**Reconciliation Control**: `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md` §5.3  
+**Target Component**: Update Engine (`kortex.engines.update`)  
+**Phase**: Phase 7 — Production Hardening  
+**Document Status**: READY FOR IMPLEMENTATION  
+**Architectural Baseline**: Commit `f857bdebe97b1d936df0576ba09aacae0dced5a1` (main)  
+**Governance**: Governed by `AGENTS.md` (AI Engineering Constitution) and KORTEX Architecture v1.0.0.
 
 ---
 
 ## 1. Executive Summary
 
-The Monitoring Engine is the centralized operational telemetry, metric aggregation, time-series retention, and dashboard query layer for KORTEX OS. It is the observational and numerical peer to the Sentinel Engine:
-- **Sentinel Engine** answers: *"Is something unhealthy or broken?"* (Discrete health states, invariant verification, failure classification, crash-loop circuit breaker, recovery requests).
-- **Monitoring Engine** answers: *"What is happening, how often, how fast, how much resource is being consumed, and what operational state should the operator see?"* (Continuous telemetry, counters, gauges, latency percentiles, throughput rates, rolling time-series buffers, and consolidated dashboard views).
+The **Update Engine** is the authoritative infrastructure engine responsible for discovering, authenticating, verifying, staging, and coordinating the controlled application of KORTEX OS software updates.
 
-The engine operates under strict local-first architectural discipline: 100% in-memory bounded state, zero database migrations, zero external network dependencies, strictly non-invasive polling with cooperative timeouts, and fail-closed RBAC access control.
+Operating in a local-first, offline-capable environment across Windows desktop containers (Tauri + Python sidecar) and optional server/containerized topologies, software updates represent a critical operational boundary. Applying an update carries severe operational risks: file-lock contention on Windows, power interruptions during file replacement, relational database schema drift, corrupted package downloads, and malicious update injection.
 
----
+This implementation plan establishes a **production-hardened, zero-database-migration, cryptographically verified, crash-consistent, and rollback-safe** architecture for Update Engine. It strictly honors the boundaries established by prior Phase 7 engines:
+- **Backup Engine (ADR-0016)** remains the sole engine for capturing full-instance point-in-time state.
+- **Recovery Engine (ADR-0017)** remains the sole engine for restoring operational state from backups upon catastrophic failure.
+- **Sentinel Engine (ADR-0014)** remains the sole health and deadlock supervisor.
+- **Monitoring Engine (ADR-0015)** remains the sole telemetry and metrics aggregator.
 
-## 2. Mission
-
-### 2.1 What Monitoring Engine MUST Do
-1. **Collect Continuous Metrics**: Periodically sweep registered system engines and business modules implementing `IEngineDiagnostics`, extracting operational throughput, error counters, and latencies.
-2. **Standardize Metric Primitives**: Provide thread-safe `Counter`, `Gauge`, `Histogram` (with approximate p50, p90, p95, p99 percentile estimations via sliding-window reservoir), and `Timer` primitives.
-3. **Retain Bounded Time-Series**: Maintain rolling in-memory circular buffers (last 60 minutes at 10-second resolution, max 360 samples per series) for UI charting.
-4. **Collect System Telemetry**: Measure process RSS memory, CPU usage, active thread counts, and active asyncio tasks using pure Python standard library capabilities.
-5. **Aggregate Operational Dashboard**: Serve consolidated runtime dashboard payloads combining Sentinel health, engine throughput, resource consumption, and active alerts using direct internal component aggregation (no recursive capability dispatch).
-6. **Evaluate Operational Thresholds**: Evaluate metrics against warning and critical boundaries with 10% hysteresis and 60-second cooldown to emit clean alert events without flapping.
-7. **Enforce Security Boundaries**: Guard all capabilities with strict authentication, execution context validation, `INTERNAL` classification, and `system:monitoring:read` permission for operator callers, while using `kortex-monitoring-system` solely for internal background operations.
-8. **Own Lifecycle Cleanly**: Follow `BaseEngine` lifecycle contracts, starting and stopping background tasks cleanly without leaking coroutines or polling recursively.
-
-### 2.2 What Monitoring Engine MUST NOT Do
-1. **MUST NOT Execute Recovery**: Monitoring never restarts engines, kills workers, terminates processes, or executes recovery logic (strict BaseEngine boundary).
-2. **MUST NOT Duplicate Sentinel Authority**: Monitoring does not evaluate subsystem health states or crash-loop circuit breakers. Sentinel owns health classification; Monitoring queries Sentinel and displays health in dashboard views.
-3. **MUST NOT Persist to Database**: Zero database tables, zero Alembic migrations. All state is strictly ephemeral and in-memory.
-4. **MUST NOT Export to External SaaS**: No Prometheus pushgateways, Datadog agents, or cloud OpenTelemetry exporters in the local-first runtime.
-5. **MUST NOT Cause Alert Storms**: No periodic snapshot broadcast spam; threshold events use hysteresis and cooldown.
-6. **MUST NOT Cause Memory Leaks**: Hard cardinality caps (max 200 metric names, max 500 series) and circular ring buffers prevent unbounded memory growth.
-7. **MUST NOT Block Startup or Shutdown**: Collector operations use per-engine timeouts (1.0s) and clean task cancellation.
+Update Engine introduces zero new Alembic database migrations and zero persistent SQL tables. Its coordination state is 100% durable write-ahead filesystem journaling (`storage_data/.update/journal.json`). It enforces Ed25519 digital signature verification, SHA-256 checksum validation, hostile archive defenses (ZIP bomb/slip mitigation), mandatory pre-update safety checkpoints, and multi-step verification gates before and after mutation.
 
 ---
 
-## 3. Non-Goals
+## 2. Current Repository Baseline
 
-- **No Distributed Tracing**: No Jaeger or Zipkin distributed trace collectors.
-- **No Long-term Analytics Warehouse**: No DuckDB, ClickHouse, or TimescaleDB integrations; historical analysis belongs to external tooling if ever exported.
-- **No Direct Desktop UI Code**: Monitoring Engine provides backend capability API contracts; it contains zero React, Vue, or Tauri UI code.
-- **No Business Logic Mutation**: Monitoring cannot trigger workflows, approve documents, or mutate business entities.
+The implementation plan is derived against the verified green repository baseline:
 
----
+- **Branch**: `main`
+- **HEAD Commit**: `f857bdebe97b1d936df0576ba09aacae0dced5a1`
+- **Origin Sync**: `origin/main` == `HEAD` (working tree 100% clean)
+- **Backend Test Suite**: 3,154 collected, 3,152 passed, 2 skipped (optional Ollama integration tests), 0 failed
+- **Repository-Wide Mypy**: `python -m mypy src` -> 0 issues across 274 source files
+- **Ruff Code Quality**: `ruff check src tests` (0 errors), `ruff format --check src tests` (528 files clean)
+- **Desktop CI**: Green / Success
+- **Backend CI**: Green / Success
 
-## 4. Current Repository Findings
-
-1. **Package Stub**: `backend/src/kortex/engines/monitoring/__init__.py` exists as an empty 2-line docstring (`"KORTEX Monitoring Engine — Metrics collection, dashboards, and alerting."`). Zero other source files exist.
-2. **Diagnostics Interface**: `IEngineDiagnostics` is formally defined in `backend/src/kortex/engines/storage/interfaces.py` and implemented across all engines:
-   - `health() -> dict[str, Any]`
-   - `metrics() -> dict[str, Any]`
-   - `diagnostics() -> dict[str, Any]`
-   - `status() -> str`
-   - `version() -> str`
-   - `capabilities() -> list[str]`
-3. **Existing Real Implementations**:
-   - `ConnectorDiagnostics`: Records `total_executions`, `successful_executions`, `failed_executions`, `total_latency_ms`, `average_latency_ms`, `per_driver_executions`, `per_action_type_executions`.
-   - `SentinelDiagnostics`: Records `checks_run`, `deadlock_inspections`, `starvation_events`, `integrity_failures`, `recovery_requests_emitted`, `crash_loops_detected`, `tracked_operations`.
-   - `WorkflowEngine`: Records instance executions, step durations, and scheduler state.
-   - `SecurityEngine`: Records authentication counts, token issuance, and authorization checks.
-4. **Kernel Registration**: `Kernel.get_all_engines() -> dict[str, BaseEngine]` provides a clean, public, non-reflective mechanism to discover all running engines.
-5. **Dependencies**: `psutil` is NOT in `pyproject.toml`. Process metrics must use Python standard library (`ctypes`, `resource`, `os`, `asyncio`, `threading`) with optional `psutil` fallback if present.
+The baseline already includes fully accepted and certified implementations of:
+- Phase 1: Core Microkernel & Runtime (IoC container, event bus, capability dispatcher, database manager)
+- Phase 2: Business Foundation (Security Engine, Storage Engine, Connector Registry)
+- Phase 3: Desktop Shell (Tauri Rust container, secure key manager, TypeScript UI)
+- Phase 4: AI Native Engine & Knowledge Layer (Document Engine, Knowledge Engine, Document Intelligence)
+- Phase 5: Advanced Business Engines & Approvals (Workflow Engine, License Engine)
+- Phase 6: Pilot Business Modules (Finance, HR & Payroll, Operations)
+- Phase 7 Hardening: Database Migration Wiring (Alembic baseline), Sentinel Engine, Monitoring Engine, Backup Engine, and Recovery Engine.
 
 ---
 
-## 5. Graphify Findings
+## 3. Graphify Findings
 
-- **Knowledge Graph State**: 15,546 nodes, 36,260 edges, 556 communities.
-- **Freshness**: `built_at_commit == 2bb9db4a` (synchronized with HEAD).
-- **Hub Analysis**: `BaseEngine`, `Kernel`, `IEngineDiagnostics`, and `SentinelEngine` form the primary structural hubs connecting runtime lifecycle, health evaluation, and operational monitoring.
-- **Isolation Verification**: No reverse imports from business modules or future engines exist into the monitoring namespace.
+Architectural graph discovery was executed on the current repository worktree using Graphify:
 
----
+- **built_at_commit**: `f857bdebe97b1d936df0576ba09aacae0dced5a1`
+- **HEAD Commit Match**: Exact 40-character match
+- **Total Nodes**: 17,010
+- **Total Edges**: 39,639
+- **Communities**: 523
 
-## 6. Dependency Graph & Sentinel Interaction
-
-```
-                                  +-------------------+
-                                  |      Kernel       |
-                                  +---------+---------+
-                                            |
-                         +------------------+------------------+
-                         |                                     |
-                         v                                     v
-               +-------------------+                 +-------------------+
-               |  SecurityEngine   |                 |    EventEngine    |
-               | (Auth & RBAC)     |                 |  (Alert Routing)  |
-               +---------+---------+                 +---------+---------+
-                         |                                     |
-                         v                                     v
-+-------------------------------------------------------------------------+
-|                            MonitoringEngine                             |
-|                                                                         |
-|  +-------------------+  +--------------------+  +--------------------+  |
-|  |  MetricsCollector |  |   MetricRegistry   |  |  TimeSeriesBuffer  |  |
-|  +---------+---------+  +---------+----------+  +---------+----------+  |
-|            |                      |                       |             |
-|            |                      +-----------+-----------+             |
-|            |                                  |                         |
-|            v                                  v                         |
-|  +-------------------+              +--------------------+              |
-|  | ThresholdEvaluator|              | CapabilityHandlers |              |
-|  +---------+---------+              +---------+----------+              |
-+------------|----------------------------------|-------------------------+
-             |                                  |
-             v (publishes alerts)               v (serves queries)
-    [kortex.monitoring.*]              [Desktop UI / Operator]
-             ^
-             | (reads via public interface / event cache)
-   +---------+---------+
-   |  SentinelEngine   |
-   | (Health Authority)|
-   +-------------------+
-```
-
-### 6.1 Architectural Resolution: Monitoring ↔ Sentinel Dependency
-1. **How Monitoring Obtains Sentinel State**:
-   - Monitoring subscribes to Sentinel's public event `kortex.sentinel.health.changed` upon startup, maintaining an in-memory cached health summary (`_last_known_sentinel_health`).
-   - For on-demand dashboard composition, Monitoring looks up Sentinel via the public Kernel registry: `sentinel = self._kernel.get_all_engines().get("sentinel")`.
-   - If present, it queries the public `IEngineDiagnostics` contract: `sentinel.health()`.
-   - Monitoring **NEVER** imports `SentinelEngine` private implementation classes, private state, or internal detectors.
-2. **Why This Is Architecturally Safe**:
-   - **Zero Circular Dependency**: Sentinel evaluates engine lifecycle health via standard `BaseEngine.health_check()` across all engines (skipping `"sentinel"`). Monitoring collects operational metrics via `IEngineDiagnostics.metrics()` across all engines (skipping `"monitoring"`).
-   - Neither engine's polling loop invokes the other's polling loop.
-3. **Behavior When Sentinel Is Unavailable**:
-   - If Sentinel is not registered, not booted, or disabled, Monitoring functions 100% normally:
-     - Dashboard health block gracefully defaults to:
-       ```json
-       {
-         "status": "UNKNOWN",
-         "source": "sentinel_absent",
-         "message": "Sentinel Engine is not registered or not booted."
-       }
-       ```
-     - System resource metrics, engine throughput metrics, and time-series buffers continue operating without interruption.
-4. **Independent Operation**:
-   - Sentinel runs independently without Monitoring.
-   - Monitoring runs independently without Sentinel.
+Key structural observations from Graphify:
+1. `backend/src/kortex/engines/update/__init__.py` exists as a stub (2 lines) containing only a module docstring; no classes, functions, or submodules currently exist.
+2. `kortex.core.kernel.Kernel` provides standard engine lifecycle dispatch (`register_engine`, `boot`, `shutdown`, `get_engine`, `register_capability`, `invoke_capability`).
+3. `kortex.engines.security.providers.local_crypto.LocalCrypto` serves as the authoritative, vetted cryptographic provider for SHA-256 hashing and Ed25519 digital signature verification.
+4. `kortex.engines.backup.engine.BackupEngine` and `kortex.engines.recovery.engine.RecoveryEngine` provide certified public capability contracts and clean programmatic APIs for state capture and restoration.
 
 ---
 
-## 7. Architecture & Component Design
+## 4. Strict Fact / Requirement / Proposal Separation
 
-The Monitoring Engine is divided into modular, single-responsibility components:
+To avoid architectural ambiguity, all statements in this plan are classified into:
 
-```
-backend/src/kortex/engines/monitoring/
-├── __init__.py          # Public exports (MonitoringEngine, models, constants)
-├── constants.py         # Capability names, event topics, thresholds, limits
-├── interfaces.py        # IMonitoringEngine, IMetricRegistry, ITimeSeriesBuffer
-├── models.py            # Pydantic models (MetricType, MetricValue, DashboardData, Config)
-├── metrics.py           # Metric primitives (Counter, Gauge, Histogram, Timer)
-├── registry.py          # MetricRegistry container with cardinality enforcement
-├── timeseries.py        # TimeSeriesBuffer with bounded rolling deques
-├── collector.py         # MetricsCollector background polling task
-├── normalizer.py        # DiagnosticsNormalizer mapping IEngineDiagnostics to canonical metrics
-├── thresholds.py        # ThresholdEvaluator with hysteresis and alert state machine
-├── events.py            # MonitoringEventPublisher
-├── engine.py            # MonitoringEngine(BaseEngine, IEngineDiagnostics)
-├── diagnostics.py       # MonitoringDiagnostics adapter conforming to IEngineDiagnostics
-└── README.md            # Architectural documentation
-```
+### A. Repository-Derived Facts
+- `RecoveryEngine` provides `create_recovery(CreateRecoveryRequest)` where `CreateRecoveryRequest` requires `backup_id: str` and `confirm_destructive_restore: bool = False`. It does NOT have a `target_type` field.
+- `BackupEngine` provides `create_backup(CreateBackupRequest)` taking `scope: BackupScope` (`FULL_INSTANCE`), `idempotency_key: str | None`, and `metadata: dict[str, Any]`.
+- `SentinelEngine` does NOT provide a maintenance-lock API, update-mode suppression, or integrity-verifier callback for external engines. It provides `evaluate_health()`, `verify_integrity()`, and `inspect_deadlocks()`.
+- `MonitoringEngine` provides `IMonitoringEngine` with `record_metric`, `query_timeseries`, and `get_dashboard`. It is observational only.
+- `LocalCrypto` provides `hash_sha256`, `verify_sha256`, `sign_ed25519`, and `verify_ed25519`.
+- Running `.exe` and `.pyd`/`.dll` files on Windows cannot be overwritten in-place while executing.
+- `DatabaseEngineManager` owns database connectivity and provides `disconnect()` to close connection pools.
 
----
+### B. Architecture & Roadmap Requirements
+- Phase 7 Update Engine is an infrastructure engine; it contains zero business logic (`AGENTS.md` Art. 6).
+- Zero Alembic database migrations and zero persistent SQL database tables for Update Engine.
+- Updates must not cause unrecoverable data loss or live-state corruption.
+- In-place live schema downgrades (`alembic downgrade`) are forbidden; database rollback relies on point-in-time snapshot restoration.
 
-## 8. Metric Model & Primitives
+### C. Proposed Update Engine Design
+- Introduction of the `.kortex-update` package format (signed ZIP archive containing backend code, migrations, and assets).
+- Introduction of signed JSON update manifests (`kortex-update-manifest-v1.0`).
+- Compiled vendor public keys dictionary (`COMPILED_VENDOR_UPDATE_KEYS`).
+- Staging directory under `storage_data/.update/staging/<update_id>/`.
+- Write-ahead journal under `storage_data/.update/journal.json`.
 
-### 8.1 Metric Types
-1. **`Counter`**:
-   - **Semantics**: Monotonically increasing numerical value representing cumulative occurrences.
-   - **Update**: `inc(amount: float = 1.0)`. Amount must be strictly non-negative (`amount >= 0.0`); negative values raise `ValueError`.
-   - **Reset**: Resets to 0 only on explicit engine reset.
-   - **Thread Safety**: Protected by `threading.Lock`.
-2. **`Gauge`**:
-   - **Semantics**: Instantaneous numerical value representing current state (can increase, decrease, or remain constant).
-   - **Update**: `set(value: float)`, `inc(amount: float = 1.0)`, `dec(amount: float = 1.0)`. Value must be finite (`math.isfinite(value)`).
-   - **Thread Safety**: Protected by `threading.Lock`.
-3. **`Histogram`**:
-   - **Semantics**: Statistical distribution of numeric samples over a sliding window.
-   - **Reservoir Model**: Per-series circular buffer of the last $N = 1,000$ samples (`collections.deque(maxlen=1000)`).
-   - **Statistical Meaning**: Percentiles are **approximate statistical estimations** representing the retained 1,000-sample population, NOT exact lifetime percentiles.
-   - **Calculation Method**: Linear rank interpolation over sorted reservoir:
-     - Rank: $R = \frac{P}{100} \times (n - 1)$
-     - Let $k = \lfloor R \rfloor$, $d = R - k$.
-     - Percentile: $V = s_k + d \times (s_{k+1} - s_k)$ (if $k+1 < n$, else $s_k$).
-   - **Edge Cases**:
-     - $n = 0$: `count = 0`, `sum = 0.0`, `min = None`, `max = None`, `avg = 0.0`, all percentiles return `None`.
-     - $n = 1$: `count = 1`, `sum = s_0`, `min = s_0`, `max = s_0`, `avg = s_0`, all percentiles return `s_0`.
-     - $1 < n < 100$: Rank interpolation is mathematically valid; $p99$ evaluates near maximum.
-   - **Concurrency**: `record(value: float)` is protected by `threading.Lock`. Snapshot generation copies samples under lock and sorts outside the lock to minimize lock contention.
-4. **`Timer`**:
-   - **Semantics**: Measures execution durations in milliseconds.
-   - **Usage**: Context manager `with timer.time(): ...` updating underlying Histogram and Counter.
+### D. Owner Decisions
+- Zero unresolved internal architectural decisions. Operational boundaries regarding host desktop installer packaging and container orchestration handoff are explicitly documented.
 
 ---
 
-## 9. Normalization Contract (`IEngineDiagnostics`)
+## 5. Public Recovery API Contract
 
-Existing engines return heterogeneous data in `metrics()` and `health()`. The `DiagnosticsNormalizer` component enforces a deterministic translation without requiring any changes to existing source engines:
+The Update Engine must interact with Recovery Engine strictly through its authoritative public contract.
 
-### 9.1 Three Distinct Data Categories
-1. **Canonical Metric**: Extracted scalar numeric measurements (`int`, `float`) conforming to:
-   - Dotted lowercase naming: `[a-z][a-z0-9_]*(\.[a-z0-9_]+)*`
-   - Source prefix: Automatically prepended if missing (e.g. `connector.executions_total`).
-   - Finite numeric validation: Checked via `math.isfinite()`. `NaN`, `+Infinity`, and `-Infinity` are **strictly rejected** (dropped with warning and increment of `normalization_rejections_total`).
-2. **Diagnostic Metadata**: Engine state strings, semantic version strings, capability lists, and timestamps:
-   - Stored in engine metadata dictionary; **NEVER** inserted into numerical time-series buffers.
-3. **Arbitrary Diagnostic Payload**: Complex, nested, or non-numeric structures:
-   - **Simple String-to-Number Mappings** (e.g. `{"per_driver_executions": {"postgres": 10, "http": 5}}`):
-     Extracted into canonical metric series with labels if key matches permitted label keys:
-     `metric_name="connector.driver_executions_total"`, `labels={"driver": "postgres"}`, `value=10.0`.
-   - **Booleans**: Normalized to `1.0` (`True`) or `0.0` (`False`) as Gauges.
-   - **`None` Values**: Discarded from the current cycle (no data point recorded; **NEVER silently converted to 0.0**).
-   - **Strings, Lists, Complex Objects**: Preserved in raw diagnostics snapshot; omitted from numeric series.
-   - **Metric Collisions**: If an engine emits duplicate metric keys, the first valid numeric key takes precedence, and a collision warning is recorded.
+### Verified Contract
+- **Interface**: `kortex.engines.recovery.interfaces.IRecoveryEngine`
+- **Facade**: `kortex.engines.recovery.engine.RecoveryEngine`
+- **Method Signature**:
+  ```python
+  async def create_recovery(self, request: CreateRecoveryRequest) -> CreateRecoveryResponse:
+  ```
+- **Request Model (`kortex.engines.recovery.models.CreateRecoveryRequest`)**:
+  ```python
+  class CreateRecoveryRequest(BaseModel):
+      backup_id: str
+      confirm_destructive_restore: bool = False
+      encryption_key: str | None = None
+      idempotency_key: str | None = None
+      metadata: dict[str, Any] = Field(default_factory=dict)
+  ```
 
----
-
-## 10. Cardinality & Label Limits
-
-### 10.1 Limits & Collision Prevention
-- **Series Identity**: A series is uniquely identified by `series_id = f"{metric_name}{{{','.join(f'{k}={v}' for k, v in sorted(labels.items()))}}}"`.
-- **Label Value Validation**:
-  - `MAX_LABEL_VALUE_LENGTH = 64`.
-  - **NO TRUNCATION**: Blind truncation can collapse distinct series (e.g. `tenant_long_name_alpha` and `tenant_long_name_beta`) into identical strings, creating false series collisions.
-  - If a label value exceeds 64 characters or contains invalid characters (control characters, whitespace), the metric series is **rejected deterministically** with an error log and an increment of `cardinality_rejections_total`.
-- **Allowed Label Keys Whitelist**: `{"subsystem", "driver", "status", "error_type", "action_type", "severity", "entity_type"}`. Any unknown label key causes the label to be omitted.
-- **Maximum Labels per Series**: 5.
-- **Maximum Metric Names**: 200.
-- **Maximum Active Series**: 500 across all labels.
-  - When the 501st series is registered, it is rejected and `cardinality_limit_exceeded` is incremented.
-
-### 10.2 Calculable Memory Upper Bound
-- Max active series: 500.
-- Max points per series deque: 360 points.
-- Max points in memory: $500 \times 360 = 180,000$ points.
-- Point tuple `(timestamp_float, value_float)`: ~72 bytes overhead in Python.
-- $180,000 \times 72\text{ bytes} \approx 12.96\text{ MB}$.
-- Deque and series metadata: ~500 KB.
-- Histogram reservoirs (max 20 histograms $\times$ 1000 floats): ~160 KB.
-- **Absolute Maximum Upper Bound**: **$< 15.0\text{ MB}$** under 100% capacity saturation.
-- **Typical Operational Footprint**: **$< 2.0\text{ MB}$** (50 series $\times$ 360 points).
-
----
-
-## 11. Time-Series Retention Model
-
-- **Sampling Interval**: 10.0 seconds.
-- **Retention Duration**: 3,600 seconds (60 minutes).
-- **Buffer Capacity**: $3,600 / 10 = 360$ points per series.
-- **Data Structure**: `collections.deque(maxlen=360)` storing `(timestamp_utc_iso: str, value: float)`.
-- **Pacing Mechanism**: Collector loop uses `time.monotonic()` for interval calculation to prevent drift. Point timestamps use UTC ISO-8601 strings.
-- **Eviction**: Automatic FIFO eviction by deque when the 361st point arrives.
-
----
-
-## 12. System Resource Telemetry
-
-To preserve local-first portability without introducing heavy third-party dependencies, system telemetry uses 100% Python standard library mechanisms:
-
-| Metric Name | Mandatory? | Unit | Collection Method (Pure Standard Library) | Fallback Behavior |
-|---|---|---|---|---|
-| `system.memory_rss_bytes` | Mandatory | Bytes | Windows: `ctypes.windll.kernel32.K32GetProcessMemoryInfo`<br>Linux/POSIX: `resource.getrusage(RUSAGE_SELF).ru_maxrss * 1024` | `tracemalloc.get_traced_memory()[0]` if OS call fails |
-| `system.cpu_percent` | Mandatory | % | Measured delta over sampling interval using `os.times()`: $\frac{\Delta (\text{user}+\text{sys})}{\Delta \text{wall}} \times 100.0$ | Returns `0.0` on first cycle |
-| `system.asyncio_tasks_active` | Mandatory | Count | `len(asyncio.all_tasks())` | Pure Python stdlib; never fails |
-| `system.threads_active` | Mandatory | Count | `threading.active_count()` | Pure Python stdlib; never fails |
-| `system.event_loop_lag_ms` | Optional | ms | Read from `SentinelEngine.last_deadlock_report.loop_lag_ms` if present; fallback to `asyncio.sleep(0)` delta | Returns `None` if loop measurement unavailable |
-
-- **Third-Party Dependency Decision**: `psutil` is **NOT REQUIRED**. All mandatory metrics are collected using standard library `ctypes` (Windows), `resource` (POSIX), and `os`/`asyncio`/`threading`. If `psutil` happens to be installed in the environment, Monitoring may optionally use it as an optimization, but never requires it.
-
----
-
-## 13. Security & Dual Identity Context
-
-Security is strictly separated into two distinct operational contexts:
-
-### 13.1 Context A: Internal Background Execution
-- **Identity**: `kortex-monitoring-system` (`principal_type = PrincipalType.SYSTEM`, `clearance_level = "INTERNAL"`).
-- **Usage**: Used exclusively by MonitoringEngine for internal background operations:
-  - Polling background engines.
-  - Publishing threshold alert events (`sender="monitoring"`).
-  - Internal audit logging.
-- **Isolation**: External callers can NEVER assume or impersonate `kortex-monitoring-system`.
-
-### 13.2 Context B: Human / Operator API Queries
-- **Identity**: Calling user's authenticated principal (e.g. `principal_id = "admin-1"`).
-- **Enforcement**:
-  - `requires_authentication=True`: Rejects unauthenticated calls with `AuthenticationError`.
-  - `requires_execution_context=True`: Execution context is supplied by SecurityEngine.
-  - `security_classification="INTERNAL"`: Requires internal clearance level.
-  - `required_permissions=["system:monitoring:read"]`: Evaluated against caller's roles. Rejects unauthorized calls with `AuthorizationDeniedError`.
-- **Tenancy**: Metrics are system-wide infrastructure statistics without tenant PII. No caller-controlled tenant parameters exist.
-
----
-
-## 14. Capabilities & Internal Dashboard Composition
-
-Exactly FOUR capabilities are implemented:
-
-| Capability Name | Purpose | Request Parameters | Max Result Bound |
-|---|---|---|---|
-| `kortex.monitoring.metrics.get` | Granular real-time metric query across engines | `subsystem: Optional[str]`, `metric_names: Optional[list[str]]` | Max 200 metrics, $< 10\text{ KB}$ |
-| `kortex.monitoring.timeseries.get` | Time-series historical data points for UI charts | `metric_name: str`, `duration_seconds: Optional[int] = 3600` | Max 360 points, $< 15\text{ KB}$ |
-| `kortex.monitoring.dashboard.get` | High-level unified operational summary | `{}` | Max 10 top metrics, 20 engines, $< 20\text{ KB}$ |
-| `kortex.monitoring.diagnostics.get` | Standard `IEngineDiagnostics` conformance for Monitoring | `{}` | Standard diagnostics schema |
-
-### 14.1 Dashboard Internal Composition (No Capability Dispatch)
-- `handle_dashboard_get` **NEVER** dispatches internal requests to `metrics.get` or `timeseries.get` via `Kernel.invoke_capability`.
-- It directly accesses internal Python memory objects:
-  - System telemetry from `self._collector.last_system_telemetry`
-  - Top throughput metrics from `self._registry.get_top_metrics(limit=10)`
-  - Active alerts from `self._threshold_evaluator.get_active_alerts()`
-  - Sentinel health summary from `self._get_sentinel_health_summary()`
-- Direct, fast, in-memory aggregation (< 5ms response time) with deterministic alphabetical ordering.
-
----
-
-## 15. Threshold Authority & State Machine
-
-### 15.1 Strict Separation of Authority
-- **Monitoring Engine**:
-  - `OBSERVE` $\rightarrow$ `MEASURE` $\rightarrow$ `EVALUATE THRESHOLD` $\rightarrow$ `EMIT OPERATIONAL ALERT`.
-  - Concerns: High CPU, high memory, high latency, queue depth.
-  - Monitoring does NOT declare an engine `FAILED` and does NOT request recovery.
-- **Sentinel Engine**:
-  - `ASSESS HEALTH` $\rightarrow$ `VERIFY INVARIANTS` $\rightarrow$ `CLASSIFY FAILURE` $\rightarrow$ `REQUEST RECOVERY`.
-  - Concerns: Crashed engines, broken database connection, deadlocks, crash-loops.
-- **Recovery Engine (Future)**:
-  - `EXECUTE RECOVERY` (restarts, rollbacks, fallbacks).
-
-### 15.2 Alert State Machine & Hysteresis
-- **States**: `NORMAL`, `WARNING`, `CRITICAL`.
-- **Consecutive Cycle Verification**: Value must exceed threshold for **2 consecutive cycles (20s)** before triggering an alert. Transient single-cycle spikes are ignored.
-- **10% Hysteresis Justification**: If memory threshold is 1,024 MB, a value oscillating between 1,023 MB and 1,025 MB would cause alert flapping every 10s. With 10% hysteresis, recovery requires dropping below $1,024 \times (1 - 0.10) = 921.6\text{ MB}$.
-- **60-Second Cooldown**: Once an alert is emitted, repeated events are suppressed for at least 60 seconds while the state remains unchanged.
-- **Recovery Event**: When the value recovers below the hysteresis threshold for 2 consecutive cycles, a single `kortex.monitoring.threshold.recovered` event is emitted.
-
----
-
-## 16. Event Model
-
-Exactly TWO event topics are implemented:
-
-| Event Topic | Trigger | Payload Attributes | Priority |
-|---|---|---|---|
-| `kortex.monitoring.threshold.exceeded` | Metric exceeds threshold for 2 consecutive cycles | `metric_name`, `current_value`, `threshold`, `severity` (`WARNING`/`CRITICAL`), `subsystem`, `timestamp` | HIGH |
-| `kortex.monitoring.threshold.recovered`| Metric drops below hysteresis threshold for 2 consecutive cycles | `metric_name`, `current_value`, `threshold`, `subsystem`, `timestamp` | NORMAL |
-
-- **Removal of Snapshot Events**: `kortex.monitoring.snapshot.emitted` was critically evaluated and **permanently eliminated**. Polling via `dashboard.get` provides on-demand visibility; emitting periodic 60-second broadcast events pollutes the event bus.
-- **Event Properties**: UUIDv4 `event_id`, UTC ISO-8601 `timestamp`, preserved `correlation_id`, strictly bounded payload (< 1 KB), no secrets.
-
----
-
-## 17. Persistence Decision
-
-### 17.1 NO MIGRATION
-- **Verdict**: Strictly zero database tables, zero Alembic revisions.
-- **Rationale**: High-frequency operational metrics (sampled every 10s) written to SQLite would cause continuous disk I/O, database write locks, WAL file growth, and vacuum contention. Bounded circular in-memory deques provide instantaneous query response, zero disk overhead, and automatic FIFO eviction.
-- **State Ephemerality**: Operational metrics reset on application restart by design.
-
----
-
-## 18. Configuration Model (`MonitoringConfig`)
-
-Validated via Pydantic settings:
-- `KORTEX_MONITORING_COLLECT_INTERVAL_SECONDS`: float = 10.0 (bounds: 1.0 to 60.0)
-- `KORTEX_MONITORING_BUFFER_MAX_POINTS`: int = 360 (bounds: 60 to 1440)
-- `KORTEX_MONITORING_ENABLED`: bool = True
-- `KORTEX_MONITORING_PROBE_TIMEOUT_SECONDS`: float = 1.0 (bounds: 0.2 to 5.0)
-- `KORTEX_MONITORING_MEMORY_WARNING_THRESHOLD_MB`: float = 1024.0
-- `KORTEX_MONITORING_MEMORY_CRITICAL_THRESHOLD_MB`: float = 2048.0
-- `KORTEX_MONITORING_EVENT_LOOP_LAG_WARNING_SECONDS`: float = 0.5
-- `KORTEX_MONITORING_EVENT_LOOP_LAG_CRITICAL_SECONDS`: float = 1.5
-
----
-
-## 19. Lifecycle & Bootstrap
-
-### 19.1 Bootstrap Sequence
-In `backend/src/kortex/api/kernel_bootstrap.py`:
+### Authoritative Call in Update Engine
+When post-mutation rollback is required:
 ```python
-# Phase 7 — Production Hardening
-kernel.register_engine(SentinelEngine())
-kernel.register_engine(MonitoringEngine())
-await kernel.boot()
+recovery_request = CreateRecoveryRequest(
+    backup_id=checkpoint_backup_id,
+    confirm_destructive_restore=True,
+    metadata={
+        "origin": "update_engine_post_mutation_rollback",
+        "update_id": update_id,
+        "failed_phase": journal.current_phase.value,
+        "error_message": error_message,
+    }
+)
+recovery_response = await recovery_engine.create_recovery(recovery_request)
 ```
 
-### 19.2 Lifecycle Implementation
-- `initialize()`: Sets up registry, allocates deques, registers capabilities with Kernel.
-- `start()`: Spawns `_collector_loop` in `_background_tasks`.
-- `stop()`: Cancels `_collector_loop`, awaits completion with timeout (3.0s), marks state `STOPPED`.
-- `reset()`: Clears in-memory buffers and counters.
+### Inviolable Boundaries
+1. Update Engine NEVER invokes internal methods of `RecoveryEngine` (e.g. `_db_restorer`, `_storage_restorer`, `_quiescence_manager`).
+2. Update Engine NEVER passes fabricated fields like `target_type` or `confirm_destructive` to `CreateRecoveryRequest`.
+3. Update Engine asserts `confirm_destructive_restore=True`; otherwise Recovery Engine fails closed immediately.
+4. Recovery Engine remains the sole authority for restoring SQLite snapshots and storage trees.
 
 ---
 
-## 20. Failure Modes & Mitigations Matrix
+## 6. Sentinel Public Interfaces
 
-| Failure Mode | Detection | System Response | Isolation / Mitigation |
+### Repository Findings
+Inspection of `backend/src/kortex/engines/sentinel/`:
+- `SentinelEngine` defines: `evaluate_health()`, `verify_integrity()`, `inspect_deadlocks()`, and capability handlers.
+- **ABSENT**: Sentinel has **no** maintenance-lock API, **no** alert-suppression API, **no** update-specific mode, and **no** update-engine callbacks.
+
+### Architectural Correction
+1. Update Engine will **NOT** claim or assume that "Sentinel recognizes maintenance lock" or that "Sentinel suppresses alerts during update."
+2. Update Engine quiescence is managed entirely within Update Engine (`UpdateQuiescenceManager` via `storage_data/.update/maintenance.lock`).
+3. Post-update verification will NOT depend on private Sentinel verifiers; Update Engine performs direct, self-contained post-update integrity checks (SQLite `PRAGMA integrity_check;`, schema revision verification, engine import sanity).
+4. `SentinelEngine.evaluate_health()` MAY be invoked as an informational, non-blocking operational query post-restart, but Sentinel is never in the critical path of update safety.
+
+---
+
+## 7. Monitoring Public Interfaces
+
+### Repository Findings
+Inspection of `backend/src/kortex/engines/monitoring/`:
+- Monitoring Engine implements `IMonitoringEngine` with `record_metric()`, `query_timeseries()`, and `get_dashboard()`.
+- It implements `IEngineDiagnostics` and monitors system metrics through public interfaces.
+
+### Architectural Correction
+1. Monitoring is strictly observational.
+2. Update Engine will NOT rely on Monitoring to confirm update health or manage update state.
+3. Update Engine implements `IEngineDiagnostics` (`health()`, `metrics()`, `diagnostics()`) so Monitoring can observe Update Engine metrics without private coupling.
+4. Update Engine publishes canonical events onto `EventEngine` for asynchronous Monitoring ingestion.
+
+---
+
+## 8. Capability Surface Re-evaluation
+
+The capability surface is derived strictly from operational needs:
+
+| Capability Name | Type | Auth | Permission | Sensitivity | Purpose |
+|---|---|---|---|---|---|
+| `kortex.update.check` | Query | Yes | `system:update:read` | `INTERNAL` | Checks for available updates against signed manifests. |
+| `kortex.update.stage` | Mutation | Yes | `system:update:manage` | `INTERNAL` | Downloads, verifies, and stages the update archive in isolated staging. |
+| `kortex.update.apply` | Mutation | Yes | `system:update:manage` | `INTERNAL` | Coordinates safety checkpoint, enters quiescence, applies migration, swaps files, and verifies. |
+| `kortex.update.get` | Query | Yes | `system:update:read` | `INTERNAL` | Retrieves active update progress, journal state, and version status. |
+| `kortex.update.cancel` | Mutation | Yes | `system:update:manage` | `INTERNAL` | Safely aborts an unapplied update in `AVAILABLE` or `STAGED` state, purging staging files. |
+| `kortex.update.diagnostics.get` | Query | Yes | `system:update:read` | `INTERNAL` | Operational telemetry conforming to `IEngineDiagnostics`. |
+
+### Re-evaluation of `kortex.update.rollback`
+- **Architectural Decision**: A public `kortex.update.rollback` capability is **REPLACED** by `kortex.update.cancel`.
+- **Rationale**:
+  1. Once an update has completed, rolling back to an older state is fundamentally **Disaster Recovery**, which belongs exclusively to `kortex.recovery.create`. Creating a public `update.rollback` capability would establish an ambiguous, competing disaster recovery control plane.
+  2. If an update fails mid-flight during `kortex.update.apply`, rollback is **automated internally** by the update coordinator (reversing staged file swaps and delegating database restoration to `RecoveryEngine`).
+  3. If an operator wishes to cancel a staged update *before* mutation, they invoke `kortex.update.cancel`, which purges staging artifacts and resets state to `IDLE`.
+
+---
+
+## 9. Live Alembic Migration & Rollback Compatibility Matrix
+
+Live schema migration must be handled with extreme rigor across all possible operational scenarios:
+
+| Case | Scenario Description | Engine Action | Migration Policy | Rollback Policy | Authority |
+|---|---|---|---|---|---|
+| **Case A** | Current app version == update target schema (no migration required). | Proceed with component swap directly. | Skipped. | If file swap fails: reverse file swap. Live DB untouched. | Update-Local |
+| **Case B** | Target app requires newer schema (migration required). | Quiesce system; run `alembic upgrade <target_rev>`. | Executed forward against live DB under quiescence. | If migration fails: DB was NOT downgraded in-place. Invoke Recovery with checkpoint. | RecoveryEngine |
+| **Case C** | Migration succeeds, but component replacement fails (e.g. locked files). | Halt application swap immediately. | Forward migration completed, but code is old! | Incompatible state! Invoke Recovery to restore pre-update DB snapshot. | RecoveryEngine |
+| **Case D** | Component replacement succeeds, but post-update verification fails. | Halt update commit. | Forward migration completed; code is new. | Revert swapped files from `.rollback` copies; invoke Recovery to restore pre-update DB snapshot. | RecoveryEngine |
+| **Case E** | Process crashes during migration. | Startup sweep detects crash during `MIGRATING` phase. | Incomplete migration state! | Halt startup; invoke Recovery to restore pre-update DB snapshot. | RecoveryEngine |
+| **Case F** | Process crashes after component replacement, before commit journal. | Startup sweep runs post-update verification. | Migration was completed. | If verification passes: commit journal. If fails: invoke Recovery restore. | Update / Recovery |
+| **Case G** | Recovery is required after live schema has advanced. | Live DB is at Rev N+1; code or validation failed. | In-place `alembic downgrade` is FORBIDDEN. | Recovery Engine replaces entire SQLite DB file with pre-update snapshot (Rev N). | RecoveryEngine |
+| **Case H** | Previous app version incompatible with migrated schema. | Old code cannot execute against migrated DB. | Live DB has advanced. | Mandatory restore of pre-update DB snapshot via Recovery before restarting old app. | RecoveryEngine |
+| **Case I** | Staged update package has schema revision older than current DB. | Preflight compatibility check detects downgrade. | FORBIDDEN. Reject update immediately. | Zero mutation. Staging purged. | Update-Local |
+| **Case J** | Target schema revision requires multi-step migration path. | Manifest declares target revision; Alembic resolves dependency chain. | Sequential forward migration executed under quiescence. | If any intermediate step fails: full snapshot restoration via Recovery. | RecoveryEngine |
+
+### Inviolable Rules
+1. In-place live schema downgrades (`alembic downgrade`) are **STRICTLY FORBIDDEN**.
+2. Live migrations execute only after the safety checkpoint is fully verified and quiescence is established.
+3. If an update aborts after schema migration has touched the live database, database restoration is performed exclusively by **restoring the pre-update SQLite backup snapshot via Recovery Engine**.
+
+---
+
+## 10. Removal of Global "Atomic Update" Claims
+
+A multi-component software update across SQLite database files, Python packages, static assets, and configuration files **cannot be globally atomic**.
+
+### Accurate Architectural Characterization
+- **Individual File Replacement**: Atomic within the same filesystem where supported (`os.replace`).
+- **Update Architecture**: **Staged, journaled, crash-consistent, and rollback-recoverable**.
+- **Crash Consistency**: Guaranteed by write-ahead journaling (`storage_data/.update/journal.json`) using `write -> flush -> fsync -> os.replace`.
+- **Failure Recovery**: Guaranteed by preserving `.rollback_<id>` file copies and a verified pre-update full-instance backup via `BackupEngine`.
+
+---
+
+## 11. Lifecycle State Machine & Durable Journal Reconciliation
+
+The public lifecycle states and internal durable journal phases are explicitly mapped:
+
+### Mapping Table
+
+| Public Lifecycle State | Description | Corresponding Journal Phase(s) | Durable On-Disk Data |
 |---|---|---|---|
-| **Engine `metrics()` hangs** | `asyncio.wait_for(timeout=1.0)` | Aborts call, records timeout metric | Collector continues to next engine; monitoring loop never blocks |
-| **Engine `metrics()` throws** | `except Exception` in collector | Logs warning, increments `collection_failures_total` | Isolated per-engine; remaining engines collected normally |
-| **Malformed metric values (NaN/Inf)** | `math.isfinite(val) is False` | Value rejected, warning logged | Time-series buffer remains clean and numeric |
-| **Cardinality explosion** | Series count $\ge 500$ | Rejects new series, increments `cardinality_rejections` | Memory usage remains strictly bounded |
-| **Sentinel unavailable / not booted** | `_kernel.get_engine("sentinel")` raises `ResourceNotFoundError` | Dashboard marks health as `UNKNOWN` | Dashboard still serves system resource and engine metrics |
-| **EventEngine unavailable** | Event publish raises exception | Logs warning, does not fail collection | Internal metrics collection unaffected by event bus failures |
-| **Rapid restart / stop during collection** | `asyncio.CancelledError` received | Flushes current cycle, exits loop immediately | Clean shutdown guaranteed within 3.0 seconds |
+| `IDLE` | Ready for update checks. | None (or archived) | `journal.json` absent or completed |
+| `CHECKING` | Checking manifest. | None (ephemeral) | In-memory only |
+| `AVAILABLE` | Valid update discovered. | None (ephemeral) | In-memory manifest metadata |
+| `STAGING` | Downloading & extracting archive. | `CREATED`, `MANIFEST_VERIFIED`, `ARTIFACT_ACQUIRED` | Staging workspace path, manifest hash |
+| `STAGED` | Staging verified; ready for apply. | `STAGED` | Component checksums, staging location |
+| `CHECKPOINTING` | Creating safety backup. | `STAGED` | Checkpoint in progress |
+| `QUIESCING` | Acquiring lock; draining conns. | `CHECKPOINT_CREATED` | `safety_checkpoint_id`, `maintenance.lock` |
+| `MIGRATING` | Running Alembic migrations. | `QUIESCED` | Target revision, migration start time |
+| `APPLYING` | Swapping code & assets. | `SCHEMA_MIGRATED` | Migration completed flag |
+| `VERIFYING` | Running post-swap verification. | `FILES_SWAPPED` | List of `.rollback` snapshot paths |
+| `COMPLETED` | Update finished successfully. | `COMMITTED` | Completion timestamp, duration |
+| `FAILED` | Pre-mutation abort (clean state). | `FAILED` | Failure reason; live state untouched |
+| `ROLLBACK_REQUIRED` | Post-mutation failure detected. | `ROLLING_BACK` | Target checkpoint ID, rollback trigger |
+| `ROLLING_BACK` | Recovery Engine restoring DB. | `ROLLING_BACK` | Recovery operation ID |
+| `ROLLED_BACK` | Checkpoint successfully restored. | `ROLLED_BACK` | Rollback completion timestamp |
+| `FAILED_NEEDS_OPERATOR`| Catastrophic failure; halted. | `FAILED_NEEDS_OPERATOR`| Diagnostic error notes, active lock |
 
 ---
 
-## 21. Self-Observability of Monitoring
+## 12. Complete Crash-Point Matrix (22 Points)
 
-To prevent recursive monitoring, Monitoring Engine exposes its own metrics directly through its `IEngineDiagnostics` implementation:
-- `collector_cycles_total`: Cumulative collection sweeps.
-- `collector_duration_last_ms`: Duration of the last sweep.
-- `collector_duration_avg_ms`: Rolling average collection duration.
-- `collection_failures_total`: Count of failed engine metric extractions.
-- `tracked_metrics_count`: Number of distinct metrics registered.
-- `buffer_points_total`: Total data points held across all deques.
-- `active_alerts_count`: Number of active threshold breaches.
-
----
-
-## 22. Testing Plan
-
-### 22.1 Unit Tests
-1. `backend/tests/unit/test_monitoring_primitives.py`:
-   - `Counter`: Monotonic increment, non-negative enforcement, reset.
-   - `Gauge`: Set, inc, dec, bounds.
-   - `Histogram`: Sliding-window reservoir sampling (1,000 max), linear rank interpolation for p50/p90/p95/p99, edge cases (0 samples, 1 sample, small sample), thread safety.
-   - `Timer`: Context manager duration measurement.
-2. `backend/tests/unit/test_monitoring_registry.py`:
-   - Registration, name formatting validation, duplicate handling.
-   - Cardinality enforcement: rejecting series beyond limit (500).
-   - Label validation: whitelist enforcement, rejecting values > 64 chars without truncation collisions.
-3. `backend/tests/unit/test_monitoring_normalizer.py`:
-   - Normalizing scalar numbers, booleans to 1.0/0.0, simple nested dict breakdowns.
-   - Rejecting `NaN`, `+Inf`, `-Inf`, and invalid strings.
-   - `None` handling (skipping point without converting to 0.0).
-4. `backend/tests/unit/test_monitoring_timeseries.py`:
-   - Deque bounded FIFO eviction (never exceeds 360 points).
-   - Time-range queries (`duration_seconds`), ordering, empty buffers.
-5. `backend/tests/unit/test_monitoring_thresholds.py`:
-   - Warning and critical threshold crossings (2-cycle requirement).
-   - 10% hysteresis recovery logic.
-   - 60s cooldown and duplicate suppression.
-6. `backend/tests/unit/test_monitoring_collector.py`:
-   - Polling `IEngineDiagnostics` across mock engines.
-   - Self-exclusion (verifying `"monitoring"` is never polled).
-   - Per-engine timeout isolation (1.0s).
-   - Pure stdlib system resource collection (RSS, CPU, tasks, threads).
-7. `backend/tests/unit/test_monitoring_engine.py`:
-   - Lifecycle transitions (`UNINITIALIZED` → `READY` → `RUNNING` → `STOPPED`).
-   - Capability registration and handlers.
-   - Diagnostics protocol conformance (`IEngineDiagnostics`).
-   - Sentinel dependency decoupling (graceful `UNKNOWN` when Sentinel absent).
-
-### 22.2 Integration Tests
-1. `backend/tests/integration/test_monitoring_integration.py`:
-   - Full Kernel boot with `MonitoringEngine` registered.
-   - Capability dispatch for all 4 capabilities via `kernel.invoke_capability()`.
-   - Security verification:
-     - Unauthenticated requests raise `AuthenticationError`.
-     - Unauthorized requests (missing `system:monitoring:read`) raise `AuthorizationDeniedError`.
-     - Operator caller identity preserved in execution context.
-   - Direct internal dashboard composition verification (no nested capability dispatch).
-   - Live dashboard verification combining Sentinel health and engine metrics.
-   - Clean shutdown verification (no dangling background tasks).
-
-### 22.3 Regression Invariant
-- Execute full backend test suite:
-  `NEW FAILURE NODE IDs CAUSED BY MONITORING = 0` against the accepted baseline of 19 pre-existing failures.
+| # | Crash Point | Durable Journal Phase | Live System State | Startup Action | Recovery Authority |
+|---|---|---|---|---|---|
+| 1 | During manifest discovery | None | Clean | No-op; remains `IDLE`. | None |
+| 2 | During manifest verification | None | Clean | No-op; remains `IDLE`. | None |
+| 3 | During compatibility validation | `CREATED` | Staging initiated | Purge staging directory. | Update-Local |
+| 4 | During archive download | `MANIFEST_VERIFIED` | Partial archive | Purge incomplete download. | Update-Local |
+| 5 | During archive extraction | `ARTIFACT_ACQUIRED` | Partial staging tree | Purge staging directory. | Update-Local |
+| 6 | After extraction, before preflight | `ARTIFACT_VERIFIED` | Staged tree unverified | Purge staging directory. | Update-Local |
+| 7 | During safety backup creation | `STAGED` | Staged tree verified | Checkpoint unfinalized; purge staging. | Update-Local |
+| 8 | Checkpoint complete, before lock | `CHECKPOINT_CREATED` | Checkpoint valid | Checkpoint retained; purge staging. | Update-Local |
+| 9 | During quiescence connection drain | `CHECKPOINT_CREATED` | Lock present, DB open | Release lock; purge staging. | Update-Local |
+| 10 | Connections drained, before migrate| `QUIESCED` | DB disconnected | Reconnect DB; release lock; abort. | Update-Local |
+| 11 | Mid-execution of Alembic migration | `QUIESCED` | Corrupt / partial DB schema | **Invoke RecoveryEngine with checkpoint**. | **RecoveryEngine** |
+| 12 | Migration done, before journal sync | `QUIESCED` | DB at new revision | **Invoke RecoveryEngine with checkpoint**. | **RecoveryEngine** |
+| 13 | After migration journal committed | `SCHEMA_MIGRATED` | DB migrated; code old | **Invoke RecoveryEngine with checkpoint**. | **RecoveryEngine** |
+| 14 | During preparation of file swaps | `SCHEMA_MIGRATED` | DB migrated; files old | **Invoke RecoveryEngine with checkpoint**. | **RecoveryEngine** |
+| 15 | Mid-execution of file swaps | `SCHEMA_MIGRATED` | Partial files swapped | Revert `.rollback` files; **invoke Recovery**. | **RecoveryEngine** |
+| 16 | Between individual directory swaps | `SCHEMA_MIGRATED` | Inconsistent file trees | Revert `.rollback` files; **invoke Recovery**. | **RecoveryEngine** |
+| 17 | All files swapped, before verify | `FILES_SWAPPED` | Files new; DB new | Resume post-update verification. | Update-Local |
+| 18 | During post-update verification | `FILES_SWAPPED` | Files new; DB new | Re-run verification. If fail -> rollback. | Update / Recovery |
+| 19 | Verification done, before commit | `FILES_SWAPPED` | Verified healthy | Commit journal -> `COMMITTED`. | Update-Local |
+| 20 | Mid-execution of reverse file swap | `ROLLING_BACK` | Mixed file state | Re-attempt reverse swap; if fail -> operator.| Update / Operator |
+| 21 | Mid-execution of RecoveryEngine | `ROLLING_BACK` | DB restore in progress | RecoveryEngine resumes journal sweep. | **RecoveryEngine** |
+| 22 | Corrupted / unparseable journal | Any | Ambiguous | Halt boot fail-closed; `FAILED_NEEDS_OPERATOR`. | Operator Required |
 
 ---
 
-## 23. File-Level Implementation Map
+## 13. Proposed `.kortex-update` Package Format & Signing
 
-| File Path | Action | Expected Classes / Functions | Dependencies | Covering Tests |
-|---|---|---|---|---|
-| `backend/src/kortex/engines/monitoring/__init__.py` | Modify | Public exports: `MonitoringEngine`, models, constants | `engine.py`, `models.py` | Unit & Integration |
-| `backend/src/kortex/engines/monitoring/constants.py` | Create | Capability names, event topics, default thresholds, limits | None | `test_monitoring_engine.py` |
-| `backend/src/kortex/engines/monitoring/interfaces.py` | Create | Protocols: `IMonitoringEngine`, `IMetricRegistry`, `ITimeSeriesBuffer` | `models.py` | `test_monitoring_primitives.py` |
-| `backend/src/kortex/engines/monitoring/models.py` | Create | Pydantic models: `MetricType`, `MetricValue`, `MetricSnapshot`, `DashboardData`, `MonitoringConfig` | `pydantic` | `test_monitoring_primitives.py` |
-| `backend/src/kortex/engines/monitoring/metrics.py` | Create | Thread-safe primitives: `Counter`, `Gauge`, `Histogram`, `Timer` | `models.py` | `test_monitoring_primitives.py` |
-| `backend/src/kortex/engines/monitoring/registry.py` | Create | `MetricRegistry` with cardinality caps (max 500 series) | `metrics.py`, `constants.py` | `test_monitoring_registry.py` |
-| `backend/src/kortex/engines/monitoring/normalizer.py`| Create | `DiagnosticsNormalizer` converting heterogeneous diagnostics to canonical metrics | `models.py` | `test_monitoring_normalizer.py` |
-| `backend/src/kortex/engines/monitoring/timeseries.py` | Create | `TimeSeriesBuffer` managing bounded deques (`maxlen=360`) | `models.py`, `constants.py` | `test_monitoring_timeseries.py` |
-| `backend/src/kortex/engines/monitoring/collector.py` | Create | `MetricsCollector` sweeping `IEngineDiagnostics` with 1.0s timeout & system telemetry | `registry.py`, `normalizer.py` | `test_monitoring_collector.py` |
-| `backend/src/kortex/engines/monitoring/thresholds.py` | Create | `ThresholdEvaluator` with 10% hysteresis and 60s cooldown | `models.py`, `events.py` | `test_monitoring_thresholds.py` |
-| `backend/src/kortex/engines/monitoring/events.py` | Create | `MonitoringEventPublisher` for threshold events | `core.events` | `test_monitoring_thresholds.py` |
-| `backend/src/kortex/engines/monitoring/diagnostics.py` | Create | `MonitoringDiagnostics(IEngineDiagnostics)` adapter | `storage.interfaces` | `test_monitoring_engine.py` |
-| `backend/src/kortex/engines/monitoring/engine.py` | Create | `MonitoringEngine(BaseEngine, IEngineDiagnostics)` | `collector.py`, `thresholds.py` | `test_monitoring_engine.py`, integration |
-| `backend/src/kortex/engines/monitoring/README.md` | Create | Engine architecture, capabilities, and events documentation | None | Documentation |
-| `backend/src/kortex/api/kernel_bootstrap.py` | Modify | Register `MonitoringEngine` right after `SentinelEngine` | `monitoring.engine` | `test_monitoring_integration.py` |
-| `docs/adr/ADR-0015-phase7-monitoring-engine.md` | Create | ADR for Phase 7 Monitoring Engine | None | Architectural documentation |
+### Format Status: PROPOSED NEW FORMAT
+The `.kortex-update` package format is a proposed standard for KORTEX core platform updates.
 
----
+### Package Architecture
+A `.kortex-update` package is a standard ZIP archive containing:
+```
+package.zip (renamed to .kortex-update)
+  ├── manifest.json              <-- Canonical update manifest
+  ├── checksums.json             <-- SHA-256 digest of every contained file
+  ├── backend/                   <-- Updated Python packages and modules
+  ├── alembic/                   <-- New migration scripts (if any)
+  └── assets/                    <-- Static assets (if any)
+```
 
-## 24. Sequencing / Order of Implementation
+### Cryptographic Primitives (100% Reused from `LocalCrypto`)
+- **Hashing**: SHA-256 via `LocalCrypto.hash_sha256()` and `verify_sha256()`.
+- **Signatures**: Ed25519 via `LocalCrypto.verify_ed25519()`.
+- **Encoding**: RFC 4648 Base64URL without padding (`b64url_encode` / `b64url_decode` from LicenseEngine).
+- **Canonicalization**: Duplicate key rejection via `parse_json_safe()`.
 
-1. **Phase A: Core Models & Primitives** (`constants.py`, `models.py`, `interfaces.py`, `metrics.py`, `test_monitoring_primitives.py`).
-2. **Phase B: Normalization, Registry & Buffer** (`normalizer.py`, `registry.py`, `timeseries.py`, `test_monitoring_normalizer.py`, `test_monitoring_registry.py`, `test_monitoring_timeseries.py`).
-3. **Phase C: Collector & System Telemetry** (`collector.py`, `test_monitoring_collector.py`).
-4. **Phase D: Thresholds & Alert Events** (`thresholds.py`, `events.py`, `test_monitoring_thresholds.py`).
-5. **Phase E: Engine & Diagnostics Protocol** (`engine.py`, `diagnostics.py`, `test_monitoring_engine.py`).
-6. **Phase F: Bootstrap & Integration** (`kernel_bootstrap.py`, `test_monitoring_integration.py`).
-7. **Phase G: Verification & Documentation** (`README.md`, ADR-0015, Ruff, Mypy, full-suite regression, Graphify).
-
----
-
-## 25. Risks & Mitigations
-
-1. **Risk**: Slow or hanging engine `metrics()` call delays entire collection cycle.  
-   **Mitigation**: Enforce strict `asyncio.wait_for(timeout=1.0)` per engine.
-2. **Risk**: High-frequency metric ingestion causes memory growth.  
-   **Mitigation**: Bounded deques (`maxlen=360`), max 500 series limit, max 1,000 samples per histogram reservoir (hard ceiling $< 15\text{ MB}$).
-3. **Risk**: Rapid metric fluctuations cause alert storms.  
-   **Mitigation**: 2-cycle trigger requirement, 10% hysteresis recovery threshold, and 60-second cooldown per metric alert.
-4. **Risk**: OS portability differences in system resource measurements.  
-   **Mitigation**: Standard library platform branches (Windows ctypes, POSIX resource) with pure Python fallbacks.
+### Key Rotation & Trust Chain
+- Compiled public keys dictionary:
+  ```python
+  COMPILED_VENDOR_UPDATE_KEYS: dict[str, bytes] = {
+      "kortex-vendor-release-root-2026": bytes.fromhex("..."),
+      "kortex-vendor-release-root-2027": bytes.fromhex("..."),
+  }
+  ```
+- Unknown `kid`: Rejected with `UnknownSigningKeyError`.
+- Signature mismatch: Rejected with `InvalidManifestSignatureError`.
+- Checksum mismatch: Rejected with `ArtifactChecksumMismatchError`.
+- All trust failures fail closed immediately before disk extraction.
 
 ---
 
-## 26. Open Decisions & Owner Visibility
+## 14. Manifest Trust Model
 
-### 26.1 Resolved by Architecture
-- **Sentinel Coupling**: Resolved via public `IEngineDiagnostics.health()` and event subscription with graceful `UNKNOWN` fallback. Zero private imports.
-- **Normalization**: Resolved via `DiagnosticsNormalizer` handling scalars, booleans, simple dict breakdowns, and finite validation without changing existing engines.
-- **Cardinality Limits**: Resolved with deterministic rejection (no truncation collisions) and hard caps (200 names, 500 series, $< 15\text{ MB}$ RAM).
-- **Histogram Semantics**: Resolved as approximate percentiles over sliding-window reservoir ($N = 1000$) via linear rank interpolation.
-- **System Telemetry**: Resolved using pure standard library (`ctypes`, `resource`, `os`, `asyncio`, `threading`) without requiring `psutil`.
-- **Security Contexts**: Resolved by separating internal background identity (`kortex-monitoring-system`) from operator query execution context (`system:monitoring:read`).
-- **Dashboard Composition**: Resolved via direct internal component queries without nested capability dispatch.
-- **Threshold Authority**: Resolved via clean boundary: Monitoring measures and emits alerts; Sentinel assesses health and requests recovery; Recovery executes recovery.
-- **Persistence**: Confirmed NO MIGRATION (100% ephemeral in-memory state).
+The Update Manifest cryptographically binds all release parameters into a single signed document.
 
-### 26.2 Implementation Detail
-- Default collection interval: 10.0 seconds.
-- Default time-series retention: 360 points (60 minutes).
-- Reservoir sample size: 1,000 samples.
-- Whitelisted label keys: `subsystem`, `driver`, `status`, `error_type`, `action_type`, `severity`, `entity_type`.
+### Four Independent Trust Gates
+1. **Authenticity**: Who signed it? Verified via Ed25519 signature over canonical manifest payload matching compiled vendor public key.
+2. **Integrity**: Was it altered? Verified by checking SHA-256 digest of `.kortex-update` against `package.sha256` in manifest.
+3. **Compatibility**: Can this system run it? Verified by checking `min_supported_version <= current_version`, matching OS/architecture, and schema revision continuity.
+4. **Authorization**: Is this execution permitted? Verified by requiring `system:update:manage` permission and valid execution context.
 
-### 26.3 Owner Decisions Required
-**OWNER DECISIONS REQUIRED: NONE**  
-All architectural ambiguities identified during review have been resolved strictly within existing KORTEX Architecture v1.0.0 contracts. The plan is complete and ready for implementation authorization.
+---
+
+## 15. Justification of `history.json`
+
+### Purpose & Architecture
+- `storage_data/.update/history.json` maintains a bounded audit record of the last 50 completed or rolled-back update operations.
+- **Authority**: It is strictly **INFORMATIONAL**. Active execution authority resides 100% in `journal.json`.
+- **Resilience**: If `history.json` is missing or corrupt, Update Engine resets it to an empty array without failing boot or interrupting update operations.
+- **Security**: It records update ID, target version, duration, and status. It NEVER records secrets, tokens, or credentials.
+
+---
+
+## 16. Storage and Target Update Topology
+
+| System Path / Target | Classification | Update Engine Policy |
+|---|---|---|
+| `backend/src/kortex/` | **UPDATE** | Replaced via staged file swap; original preserved in `.rollback_<id>`. |
+| `backend/alembic/versions/` | **UPDATE** | New migration scripts copied to live migration directory. |
+| `backend/alembic/` core | **PRESERVE** | `env.py`, `alembic.ini`, and `script.py.mako` preserved. |
+| `kortex_local.db` | **PRESERVE** | Data preserved; schema advanced via forward Alembic migration. |
+| `storage_data/` (documents, blobs) | **PRESERVE** | Managed storage is preserved completely; never deleted or swapped. |
+| `storage_data/backups/` | **EXCLUDE** | Backup archives are strictly excluded from update staging and swaps. |
+| `storage_data/.recovery/` | **EXCLUDE** | Recovery state is strictly excluded. |
+| `storage_data/.update/` | **EXCLUDE** | Update Engine's own working directory. |
+| `kortex-desktop.exe` | **DELEGATE** | Desktop shell binary update delegated to host Tauri installer. |
+| Docker container images | **DELEGATE** | Container updates delegated to external container orchestrator. |
+| `.venv/` / Python binary | **UNSUPPORTED** | Virtual environment binaries are not updated in-process. |
+
+---
+
+## 17. Desktop / Tauri Boundary
+
+1. The desktop application consists of a Tauri Rust shell (`kortex-desktop.exe`) and a Python backend sidecar.
+2. Running Windows `.exe` files cannot be overwritten while executing.
+3. Update Engine manages backend code, modules, engines, migrations, and static assets.
+4. If a desktop shell update is required, Update Engine stages the installer and emits event `kortex.update.applied`. The desktop frontend prompts the user to restart, triggering the native Tauri updater or host installer upon exit.
+
+---
+
+## 18. Docker / Container Boundary
+
+1. In Docker or containerized server deployments, container images are immutable.
+2. Update Engine detects container execution (`KORTEX_CONTAINER=1` or `/.dockerenv`).
+3. In container mode, Update Engine operates in **VERIFY_AND_MIGRATE_ONLY** mode: it can check manifests and coordinate database migrations, but disables filesystem self-replacement.
+4. Full container updates are performed by the container orchestrator pulling the new container image.
+
+---
+
+## 19. Backup Safety Checkpoint
+
+### Contract Verification
+Update Engine invokes `BackupEngine.create_backup()`:
+```python
+checkpoint_req = CreateBackupRequest(
+    scope=BackupScope.FULL_INSTANCE,
+    metadata={
+        "origin": "pre_update_safety_checkpoint",
+        "is_safety_checkpoint": True,
+        "target_update_id": update_id,
+        "target_version": manifest.target_version,
+    }
+)
+checkpoint_res = await backup_engine.create_backup(checkpoint_req)
+```
+
+### Inviolable Invariant
+**Update performs no destructive mutation of the live database or managed storage state before the safety checkpoint is fully accepted.** If checkpoint creation fails, update aborts immediately.
+
+---
+
+## 20. Quiescence and Concurrency
+
+1. **Internal Mutex**: `asyncio.Lock` ensures only one update operation runs concurrently.
+2. **Cross-Engine Mutual Exclusion**: Before starting, Update Engine verifies that:
+   - `storage_data/backups/` has no active backup lock.
+   - `storage_data/.recovery/maintenance.lock` is not active.
+   - If Backup or Recovery is active, Update Engine raises `UpdateConcurrencyError`.
+3. **Maintenance Lock**: Update Engine writes `storage_data/.update/maintenance.lock`.
+4. **Connection Pool Draining**: Calls `DatabaseEngineManager.disconnect()` to close database connections and flush SQLite WAL pages before file swapping or migration.
+
+---
+
+## 21. Disk-Space Model
+
+Before downloading, staging, or mutating, Update Engine calculates required disk space:
+
+$$\text{Required Space} = (1.0 \times \text{Package Size}) + (1.5 \times \text{Extracted Size}) + (1.0 \times \text{Live DB Size}) + (1.0 \times \text{Estimated Backup Size}) + 500\text{ MB Reserve}$$
+
+If available disk space on the target filesystem is less than Required Space, the operation aborts with `UpdateInsufficientDiskSpaceError` before any download or staging.
+
+---
+
+## 22. Archive Security & Staging Isolation
+
+Staging occurs strictly under `storage_data/.update/staging/<update_id>/`.
+
+### Archive Extraction Defenses
+- **Path Traversal Rejection**: Rejects any member path containing `..`, leading slashes (`/`), drive letters (`C:`), or UNC paths (`\\`).
+- **Symlink / Hardlink Defense**: Rejects members with symlink or hardlink attributes.
+- **Decompression Bomb Defense**:
+  - Maximum archive size: 500 MB.
+  - Maximum uncompressed size: 2.0 GB.
+  - Maximum expansion ratio: 10:1.
+  - Maximum file count: 10,000 files.
+  - Maximum single file size: 250 MB.
+
+---
+
+## 23. Three-Layer Rollback Authority
+
+```
++-------------------------------------------------------------------------+
+| Layer 1: Update-Local Rollback                                          |
+| - Responsible for: Aborting pre-mutation staging, cleaning temp files,  |
+|   and reverting swapped file copies from .rollback_<id> snapshots.      |
+| - Authority: UpdateEngine                                               |
++-------------------------------------------------------------------------+
+                                    |
+                                    v (if live database was migrated)
++-------------------------------------------------------------------------+
+| Layer 2: Recovery-Backed Restoration                                    |
+| - Responsible for: Restoring point-in-time SQLite snapshot and storage  |
+|   trees from pre-update safety checkpoint.                              |
+| - Authority: RecoveryEngine (via kortex.recovery.create)                |
++-------------------------------------------------------------------------+
+                                    |
+                                    v (if Recovery fails or journal corrupt)
++-------------------------------------------------------------------------+
+| Layer 3: Operator Intervention                                          |
+| - Responsible for: Halting system fail-closed in maintenance mode;      |
+|   generating diagnostic forensic reports for human administrator.       |
+| - Authority: Human Operator                                             |
++-------------------------------------------------------------------------+
+```
+
+---
+
+## 24. Post-Update Verification
+
+Before declaring an update `COMMITTED`, Update Engine executes five deterministic verification checks:
+1. **Journal Invariant Check**: Journal phase is `FILES_SWAPPED`.
+2. **Database Integrity Check**: Executes SQLite `PRAGMA integrity_check;` returning `ok`.
+3. **Schema Revision Check**: Queries live DB `alembic_version` and asserts it matches `manifest.database.target_revision`.
+4. **Engine Import Sanity**: Dynamically imports core packages (`kortex.core`, `kortex.engines.security`, etc.) to verify no missing modules or syntax errors.
+5. **No Residual Rollback State**: Asserts no conflicting lock files or unfinished transactions remain.
+
+---
+
+## 25. Failure and Operator States
+
+- **`FAILED` (Terminal)**: Update aborted prior to mutation; staging purged; live system completely intact.
+- **`ROLLBACK_REQUIRED` (Transient)**: Post-mutation failure detected; triggers Recovery restoration.
+- **`ROLLING_BACK` (Transient)**: Recovery restoration executing.
+- **`ROLLED_BACK` (Terminal)**: System restored to pre-update checkpoint; maintenance lock released.
+- **`FAILED_NEEDS_OPERATOR` (Terminal, Blocked)**: Rollback failed or journal corrupted. Maintenance lock remains engaged; system refuses live mutation until human intervention.
+
+---
+
+## 26. Idempotency Model
+
+Authoritative Operation Identity: `update_id = hash_sha256(manifest.manifest_id + package.sha256)[:16]`.
+
+- **Same check repeated**: Returns identical check result.
+- **Same stage repeated**: If staging already verified, returns existing staged status without re-downloading.
+- **Same apply repeated**: If update already `COMMITTED`, returns existing completion response.
+- **Concurrent apply**: Second request rejected with `UpdateConcurrencyError`.
+- **Apply on completed**: Rejected as `ALREADY_CURRENT`.
+
+---
+
+## 27. Retention and Cleanup
+
+- Staging workspaces (`staging/<update_id>/`) are purged immediately upon `COMMITTED`, `FAILED`, or `ROLLED_BACK`.
+- `.rollback_<id>` file copies are removed only after post-update verification passes and journal is `COMMITTED`.
+- Active journal (`journal.json`) is NEVER deleted during an active operation.
+- Pre-update safety checkpoint is retained in `BackupEngine` and protected against retention pruning until explicitly released by administrator.
+
+---
+
+## 28. Security Contract & Parameter Protection
+
+### Rejected Caller Fields
+To prevent privilege escalation and security bypass:
+- Callers cannot supply `tenant_id` or `principal_id` (enforced via `CapabilityExecutionContext`).
+- Callers cannot specify arbitrary filesystem extraction paths.
+- Callers cannot specify arbitrary Alembic target revisions.
+- Callers cannot bypass digital signature or checksum verification.
+
+---
+
+## 29. Canonical Events Contract (12 Canonical Events)
+
+Namespace: `kortex.update.*`
+
+1. `kortex.update.checked`: Update check completed.
+2. `kortex.update.manifest.verified`: Manifest signature and expiration verified.
+3. `kortex.update.staged`: Artifact downloaded and extracted in staging.
+4. `kortex.update.safety_checkpoint.created`: Pre-update backup created and verified.
+5. `kortex.update.quiesced`: Maintenance lock acquired, connections drained.
+6. `kortex.update.migrated`: Alembic forward migrations applied to live DB.
+7. `kortex.update.applied`: Files swapped into live paths; rollback copies created.
+8. `kortex.update.verified`: Post-update verification passed.
+9. `kortex.update.completed`: Update transaction committed.
+10. `kortex.update.failed`: Update aborted pre-mutation.
+11. `kortex.update.rolled_back`: System state restored via Recovery.
+12. `kortex.update.operator_intervention_required`: Catastrophic failure; halted.
+
+---
+
+## 30. Diagnostics (`IEngineDiagnostics`)
+
+`UpdateDiagnosticsAdapter` conforms to `IEngineDiagnostics`:
+- `health()`: Reports status (`HEALTHY`, `MAINTENANCE`, `DEGRADED`, `FAILED`), current version, and lock status.
+- `metrics()`: Reports `updates_attempted`, `updates_completed`, `updates_failed`, `updates_rolled_back`, last duration.
+- `diagnostics()`: Reports active journal phase, staging directory, and failure forensic details.
+
+---
+
+## 31. Zero Database Migrations Confirmed
+
+- Update Engine requires **0 new Alembic migrations** and **0 persistent SQL tables**.
+- State is persisted exclusively on the filesystem (`storage_data/.update/journal.json`).
+
+---
+
+## 32. Focused Test Plan (11 Suites)
+
+1. `test_update_constants_models.py`: Model validation, enum mapping, config defaults.
+2. `test_update_manifest_crypto.py`: Manifest parsing, canonicalization, Ed25519 signature checks, key lookup, expired manifests.
+3. `test_update_archive_security.py`: ZIP slip traversal, ZIP bombs, symlinks, absolute paths.
+4. `test_update_version_compatibility.py`: Semver evaluation, downgrade rejection, platform checks.
+5. `test_update_staging_manager.py`: Staging lifecycle, extraction, disk-space preflight.
+6. `test_update_journal_crash.py`: Write-ahead journaling, atomic persistence, crash recovery sweep (all 22 crash points).
+7. `test_update_quiescence.py`: Maintenance lock, connection draining, timeout handling.
+8. `test_update_migration_orchestrator.py`: Staged Alembic forward migration, Cases A through J validation.
+9. `test_update_security_adversarial.py`: Missing context, unauthorized principals, tenant spoofing.
+10. `test_update_engine_capabilities.py`: 6 capability handlers, lifecycle states, `IEngineDiagnostics`.
+11. `test_update_integration.py`: End-to-end update flow, safety checkpointing, file swap, RecoveryEngine rollback.
+
+---
+
+## 33. Concrete Implementation File Map
+
+17 concrete files under `backend/src/kortex/engines/update/`:
+
+1. `__init__.py`: Package public surface, exports, version.
+2. `constants.py`: Canonical capabilities, events, permissions, states, default limits.
+3. `exceptions.py`: Typed hierarchy rooted at `UpdateError`.
+4. `models.py`: Pydantic request/response, manifest, and journal schemas.
+5. `interfaces.py`: Typing Protocols (`IUpdateEngine`, `IUpdateVerifier`, `IUpdateJournal`).
+6. `crypto.py`: Canonical manifest serialization, Ed25519 signature verification, vendor key resolution.
+7. `manifest.py`: Manifest parser with duplicate key rejection and schema validation.
+8. `compatibility.py`: Semver evaluation, platform matching, downgrade prevention.
+9. `staging.py`: Secure archive extraction, ZIP slip/bomb defense, disk space checks.
+10. `journal.py`: 14-phase write-ahead filesystem journal manager (`journal.json`).
+11. `quiescence.py`: Process maintenance lockfile and connection pool draining.
+12. `migrator.py`: Alembic forward migration runner.
+13. `applier.py`: Atomic component swapper with `.rollback` snapshot retention.
+14. `events.py`: Decoupled asynchronous publisher for 12 canonical events.
+15. `diagnostics.py`: Conformance adapter for `IEngineDiagnostics`.
+16. `engine.py`: Primary `UpdateEngine(BaseEngine)` coordinator facade.
+17. `README.md`: Architecture specification and engine documentation.
+
+---
+
+## 34. Deterministic Runtime Sequence
+
+```
+1. kortex.update.check
+   - Fetch manifest -> verify Ed25519 signature -> verify expiration -> verify compatibility.
+2. kortex.update.stage
+   - Preflight disk space -> acquire archive -> verify SHA-256 -> extract securely -> verify components.
+3. kortex.update.apply
+   - Request BackupEngine full backup -> verify 10 checkpoint conditions.
+   - Acquire maintenance lock -> disconnect DatabaseEngineManager.
+   - Run Alembic forward migration (alembic upgrade).
+   - Swap component files -> preserve .rollback copies.
+   - Reconnect database -> execute post-update verification.
+   - If verification passes: Commit journal -> release lock -> emit completed.
+   - If verification fails: Revert files -> invoke RecoveryEngine.create_recovery(checkpoint_id).
+```
+
+---
+
+## 35. Reconciliation Status Transition
+
+Upon completion of this planning pass:
+- Update `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`:
+  - Work Package 5.6 transitions from `PENDING` to `PLANNED`.
+  - Next step: Implementation master prompt.
+
+---
+
+## 36. Implementation Readiness Checklist
+
+- [x] Recovery public API verified (`CreateRecoveryRequest(backup_id, confirm_destructive_restore=True)`).
+- [x] Backup public API verified (`CreateBackupRequest(scope=BackupScope.FULL_INSTANCE)`).
+- [x] Sentinel public interfaces verified (observational; no unsupported maintenance hooks).
+- [x] Monitoring public interfaces verified (observational; `IEngineDiagnostics` conformance).
+- [x] Repository facts separated from proposals.
+- [x] Capability surface justified (`kortex.update.cancel` replaces ambiguous rollback).
+- [x] Update rollback vs Recovery authority resolved (3-layer model).
+- [x] Live Alembic migration compatibility model complete (Cases A to J).
+- [x] Migration failure/rollback model complete (snapshot restore via RecoveryEngine).
+- [x] No global atomicity claim (staged, journaled, crash-consistent, recoverable).
+- [x] Lifecycle ↔ journal relationship explicit (mapping table).
+- [x] Journal schema/version explicit (14 phases, atomic fsync).
+- [x] Crash matrix complete (22 crash points covered).
+- [x] Artifact format/signing model evidence-backed (`LocalCrypto` Ed25519 + SHA-256).
+- [x] Key rotation behavior defined.
+- [x] `history.json` justified as bounded, informational log.
+- [x] Storage/update topology mapped (UPDATE, PRESERVE, EXCLUDE, DELEGATE, UNSUPPORTED).
+- [x] Desktop/Tauri boundary verified (external installer / Tauri updater).
+- [x] Docker boundary verified (container orchestrator image management).
+- [x] Backup safety checkpoint fully defined (10 conditions).
+- [x] Quiescence/concurrency model evidence-backed (`maintenance.lock`, pool draining).
+- [x] Disk-space model realistic and measurable.
+- [x] Archive security complete (hostile input defenses).
+- [x] Rollback authority explicit.
+- [x] Post-update verification defined (5 deterministic gates).
+- [x] Failure/operator states explicit (`FAILED_NEEDS_OPERATOR`).
+- [x] Idempotency explicit.
+- [x] Retention/cleanup safe.
+- [x] Security contract explicit (rejected caller fields).
+- [x] Event contract evidence-backed (12 canonical events).
+- [x] Diagnostics contract evidence-backed (`IEngineDiagnostics`).
+- [x] Zero Update DB migrations confirmed.
+- [x] Focused test matrix complete (11 test suites).
+- [x] Implementation file map complete (17 files).
+- [x] Runtime sequence complete.
+- [x] Reconciliation status updated to `PLANNED`.
+- [x] Zero unresolved architectural ambiguity remains.
+
+---
+
+## 37. Final Planning Verdict
+
+```
+================================================================================
+UPDATE PLAN — READY FOR IMPLEMENTATION
+================================================================================
+```
+
+The plan is fully specified, evidence-backed, mathematically and architecturally bounded, and directly executable by an implementation engineer without requiring unresolved architectural decisions.
