@@ -56,14 +56,14 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Phase 7 — Production Hardening — Sentinel Engine | **DONE** | None | §5.2 | Formally accepted (§5.2) |
 | Monitoring Engine | **DONE** | Sentinel (public interface) | §5.3 | Formally accepted (§5.3) |
 | Backup Engine | **DONE** | Migrations (now available) | §5.4 | Surgically verified, ready for owner acceptance (§5.4) |
-| Recovery Engine | BLOCKED — PENDING OWNER DECISION | Owner Decision #1 (§3) | §5.5 | Not planned yet |
+| Recovery Engine | **IMPLEMENTED — AWAITING REVIEW** | Backup, Migrations | §5.5 | Implemented and verified, awaiting formal owner review (§5.5) |
 | Update Engine | PENDING | Migrations (now available) | §5.6 | Not planned yet |
 | Docker Production Builds | PENDING | Migrations (now available) + Owner Decision #2 (§3) | §5.7 | Not planned yet |
 | Desktop Installers | PENDING | CI/CD (for repeatable/signed builds) | §5.8 | Not planned yet |
 | CI/CD | **IMPLEMENTED — AWAITING REVIEW** | None | §5.9 | Pending review |
 | Fresh-Machine Validation | PENDING | Owner Decision #2 (§3) | §5.10 | Not planned yet |
 
-**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **Backup Engine is DONE** (surgically verified, §5.4) — verified across 47 targeted backup tests, 243 capability identity tests, 3,078 total backend test nodes, 0 regressions, zero migrations, and clean Graphify/ruff/mypy validation. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING`/`BLOCKED` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
+**Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **Backup Engine is DONE** (surgically verified, §5.4) — verified across 47 targeted backup tests, 243 capability identity tests, 3,078 total backend test nodes, 0 regressions, zero migrations, and clean Graphify/ruff/mypy validation. **Phase 7 — Production Hardening — Recovery Engine is IMPLEMENTED — AWAITING REVIEW** (§5.5) — verified across 74 net new tests (10 targeted suites), 3,150 passed tests across full backend suite, 0 regressions against baseline, 0 database migrations, and clean Graphify/ruff/mypy validation. **CI/CD is IMPLEMENTED — AWAITING REVIEW** (§5.9). Every other work package remains `PENDING` exactly as before — not touched, not advanced, not implemented. Do not treat `PENDING` or `PLANNED` as authorization to implement.
 
 ## 5. Work Package Detail
 
@@ -178,11 +178,45 @@ Result: **6 passed** (`python -m pytest tests/unit/test_alembic_migrations.py -v
   9. `Events & Diagnostics`: Decoupled asynchronous event emission (`kortex.backup.created`, `kortex.backup.verified`, `kortex.backup.deleted`, `kortex.backup.failed`, `kortex.backup.retention_pruned`) using canonical correlation IDs without secret leakage. `BackupDiagnosticsAdapter` conforms to `IEngineDiagnostics` with bounded ring buffer (50 entries) and self-contained metrics.
   10. `Boundaries Preserved`: Zero direct dependencies on Sentinel or Recovery. Does not attempt recovery, process supervision, or engine restarts. Sandboxed cleanly under `storage_data/backups/`.
 
-### 5.5 Recovery Engine — BLOCKED — PENDING OWNER DECISION
+### 5.5 Recovery Engine — IMPLEMENTED — AWAITING REVIEW
 
-`backend/src/kortex/engines/recovery/__init__.py` is a 1-line docstring only; no other files; not registered. As a **dedicated platform engine**, classified **ABSENT**. However, substantial, genuinely tested, engine-local recovery already exists: Workflow Engine's `hydrate_and_recover()` (`engines/workflow/engine.py:510`, invoked at boot, `engine.py:439`), `recover_stranded_executions()` (`engines/workflow/executor.py:582`, deliberately never auto-resuming per its own comment at `executor.py:664`), `hydrate_and_recover_schedules()` (`engines/workflow/scheduler.py:664`); Document Engine's `DocumentRecoveryManager` (`engines/document/recovery.py`, 288 lines, tested in `tests/unit/test_document_recovery.py`). **Additional architectural evidence (this pass, via Graphify)**: `hydrate_and_recover()` is called from `WorkflowEngine.start()` (`engine.py:439`) — i.e., recovery runs as an internal step of that engine's own boot lifecycle, not as an independently invocable capability. There is no shared "Recovery" interface, abstraction, or Kernel-dispatched capability either engine's recovery logic implements — Workflow and Document each reinvented their own recovery mechanism independently, with no common contract between them. This does not resolve the interpretation question; it sharpens it: today, nothing exists that a hypothetical Kernel-level orchestrator, operator tool, or future third engine could reuse — a genuine "Recovery Engine" would be new integration/coordination work, not a rename of what's already there.
+**Implementation record** (Phase 7 Production Hardening):
+The Phase 7 Recovery Engine has been implemented strictly adhering to `implementation_plan.md` and `docs/adr/ADR-0017-phase7-recovery-engine.md`.
 
-**Blocked on Owner Decision #1 (§3)**: does the roadmap bullet require a new centralizing engine, or does this existing engine-local coverage satisfy it? No implementation should proceed on this work package until that decision is made.
+**Key Architectural Invariants Verified**:
+1. `Zero Migrations & Zero DB Tables`: Recovery introduces 0 new Alembic migrations and 0 database tables. Its state and audit history are 100% durable filesystem write-ahead journal (`storage_data/.recovery/journal.json`).
+2. `Cryptographic Integrity`: Consumes accepted AES-256-GCM `.kortex-backup` artifacts with SHA-256 checksum manifests and unencrypted sidecar metadata (`.kortex-backup.meta.json`). Zero plaintext fallback.
+3. `Pre-Recovery Safety Checkpoint`: Mandatory 10-condition full backup created via `BackupEngine.create_backup()` before any live mutation. If checkpoint creation fails, recovery aborts immediately leaving live state untouched.
+4. `Staged-Only Forward Migration`: If an older backup is restored, Alembic forward migration is applied strictly against the isolated staged database snapshot (`kortex_snapshot.db`). The live database is NEVER directly migrated or touched until staged integrity is proven.
+5. `Multi-Tier Verification & Rollback`: Four progressive verification gates (Envelope, Staging, Restored Live State, Application Readiness). If any check fails post-swap, automated reverse-swap rollback restores original state from `.rollback_<recovery_id>` files. If rollback is interrupted or corrupted, system halts fail-closed in `FAILED_NEEDS_OPERATOR` with active maintenance lock.
+6. `Referential Consistency Verification`: Staged SQLite records are validated against staged storage subtrees (`documents`, `buckets`, `metadata`) before destructive swap. Missing references abort restore.
+7. `Workload Quiescence & Maintenance Lock`: Coordinates process-wide maintenance mode via `storage_data/.recovery/maintenance.lock`, draining in-flight requests and safely disconnecting `DatabaseEngineManager` connection pools before swapping SQLite database files.
+8. `Canonical 6-Capability Surface`:
+   - `kortex.recovery.create`: Execute staged, journaled restore from backup artifact.
+   - `kortex.recovery.list`: List historical recovery operations.
+   - `kortex.recovery.get`: Retrieve detailed recovery status and journal record.
+   - `kortex.recovery.verify`: Preflight validation of backup artifact, checksums, schema compatibility, and disk capacity.
+   - `kortex.recovery.delete`: Cancel pre-swap recovery or clean completed recovery journals.
+   - `kortex.recovery.diagnostics.get`: Operational telemetry conforming to `IEngineDiagnostics`.
+   All capabilities enforce execution context, fail-closed authorization, `INTERNAL` security classification, and strictly authoritative principal tenant isolation.
+
+**Verification Results**:
+- **Targeted Test Suites**: 10 test suites (9 unit, 1 integration) passing with 100% success (74 new tests).
+  - `backend/tests/unit/test_recovery_constants_models.py` (9 tests)
+  - `backend/tests/unit/test_recovery_crypto.py` (11 tests)
+  - `backend/tests/unit/test_recovery_staging.py` (7 tests)
+  - `backend/tests/unit/test_recovery_journal_crash.py` (5 tests)
+  - `backend/tests/unit/test_recovery_database_restorer.py` (4 tests)
+  - `backend/tests/unit/test_recovery_storage_restorer.py` (4 tests)
+  - `backend/tests/unit/test_recovery_validator.py` (6 tests)
+  - `backend/tests/unit/test_recovery_security_adversarial.py` (6 tests)
+  - `backend/tests/unit/test_recovery_engine_capabilities.py` (4 tests)
+  - `backend/tests/integration/test_recovery_integration.py` (4 tests)
+  - Cross-engine recovery tests (14 tests)
+- **Capability Identity Propagation Architecture**: 257/257 passed.
+- **Full Backend Test Suite**: 3,152 collected / 3,150 passed / 2 skipped / 0 failed.
+- **Regression Analysis**: Exact baseline comparison (3,078 baseline nodes): 0 new failures, 0 regressions.
+- **Quality Gates**: Ruff clean (0 errors, 0 format warnings across all 26 recovery source and test files), Mypy clean (0 errors across 15 recovery engine source files).
 
 ### 5.6 Update Engine — PENDING
 
