@@ -20,7 +20,19 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-keyring = "3"
+# `windows-native` activates the real Windows Credential Manager backend
+# (keyring-3.6.3/src/lib.rs: without ANY platform feature enabled, this
+# crate silently falls back to its own in-memory `mock` store on every
+# platform, including Windows -- confirmed by direct process-boundary
+# testing: a value stored via a bare `keyring = "3"` build is unreadable
+# ("ConfirmedAbsent") from a second process, meaning master/signing keys
+# never actually persisted despite secure_keys.rs's fail-closed design
+# around persistence). The feature's extra dependencies (windows-sys,
+# byteorder) are gated by the keyring crate itself under
+# `[target.'cfg(target_os = "windows")']`, so enabling it here has no
+# effect on non-Windows builds and does not claim macOS/Linux native
+# support (OD-DI-3 scope: Windows is the only released target).
+keyring = { version = "3", features = ["windows-native"] }
 # M7.1: platform CSPRNG for persistent master/signing key generation
 # (`secure_keys.rs`) — already present transitively (pulled in by several
 # existing dependencies); added directly here rather than relying on that

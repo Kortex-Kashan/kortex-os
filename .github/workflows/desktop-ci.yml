@@ -157,6 +157,18 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Proves the `keyring` dependency's `windows-native` feature (Cargo.toml)
+      # actually resolves to the real Windows Credential Manager on this
+      # runner, not the crate's own in-memory mock -- a genuine cross-process
+      # persistence test, not a mocked one, using a disposable service/user
+      # identifier distinct from KeyringKeyStore's real production identifiers
+      # so it cannot collide with anything real. Explicitly selected by exact
+      # name and `--ignored` since it touches a real OS credential store (see
+      # secure_keys.rs's own doc on why it is not part of the default suite).
+      - name: Real Windows keyring integration test (native Credential Manager persistence)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib -- --ignored real_windows_keyring_persists_across_process_restart --test-threads=1 --nocapture
+
       # Windows runners already ship WebView2 -- unlike the Linux `rust` job
       # above, no system-library install step is needed here; `tauri-cli`
       # auto-provisions WiX/NSIS themselves on first use.
