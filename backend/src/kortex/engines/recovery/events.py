@@ -17,16 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from kortex.engines.event.engine import EventPriority
 from kortex.engines.recovery.constants import (
-    EVENT_RECOVERY_CHECKPOINT_CREATED,
     EVENT_RECOVERY_COMPLETED,
-    EVENT_RECOVERY_DELETED,
     EVENT_RECOVERY_FAILED,
-    EVENT_RECOVERY_OPERATOR_REQUIRED,
+    EVENT_RECOVERY_OPERATOR_INTERVENTION_REQUIRED,
+    EVENT_RECOVERY_PRECHECK_PASSED,
+    EVENT_RECOVERY_QUIESCED,
     EVENT_RECOVERY_REQUESTED,
-    EVENT_RECOVERY_ROLLBACK_REQUIRED,
     EVENT_RECOVERY_ROLLED_BACK,
+    EVENT_RECOVERY_SAFETY_CHECKPOINT_CREATED,
     EVENT_RECOVERY_STAGED,
-    EVENT_RECOVERY_STARTED,
     EVENT_RECOVERY_SWAPPED,
     EVENT_RECOVERY_VALIDATED,
     EVENT_RECOVERY_VERIFIED,
@@ -109,22 +108,22 @@ class RecoveryEventPublisher:
         )
         await self.publish_event(EVENT_RECOVERY_REQUESTED, payload)
 
-    async def emit_started(self, recovery_id: str, backup_id: str) -> None:
+    async def emit_precheck_passed(self, recovery_id: str, backup_id: str) -> None:
         payload = RecoveryLifecycleEventPayload(
             recovery_id=recovery_id,
             backup_id=backup_id,
             state=RecoveryState.PRECHECKING,
         )
-        await self.publish_event(EVENT_RECOVERY_STARTED, payload)
+        await self.publish_event(EVENT_RECOVERY_PRECHECK_PASSED, payload)
 
-    async def emit_checkpoint_created(self, recovery_id: str, backup_id: str, checkpoint_id: str) -> None:
+    async def emit_safety_checkpoint_created(self, recovery_id: str, backup_id: str, checkpoint_id: str) -> None:
         payload = RecoveryLifecycleEventPayload(
             recovery_id=recovery_id,
             backup_id=backup_id,
             state=RecoveryState.CHECKPOINTING,
             safety_checkpoint_id=checkpoint_id,
         )
-        await self.publish_event(EVENT_RECOVERY_CHECKPOINT_CREATED, payload)
+        await self.publish_event(EVENT_RECOVERY_SAFETY_CHECKPOINT_CREATED, payload)
 
     async def emit_validated(self, recovery_id: str, backup_id: str) -> None:
         payload = RecoveryLifecycleEventPayload(
@@ -141,6 +140,14 @@ class RecoveryEventPublisher:
             state=RecoveryState.STAGING,
         )
         await self.publish_event(EVENT_RECOVERY_STAGED, payload)
+
+    async def emit_quiesced(self, recovery_id: str, backup_id: str) -> None:
+        payload = RecoveryLifecycleEventPayload(
+            recovery_id=recovery_id,
+            backup_id=backup_id,
+            state=RecoveryState.PREPARING_SWAP,
+        )
+        await self.publish_event(EVENT_RECOVERY_QUIESCED, payload)
 
     async def emit_swapped(self, recovery_id: str, backup_id: str) -> None:
         payload = RecoveryLifecycleEventPayload(
@@ -186,15 +193,6 @@ class RecoveryEventPublisher:
         )
         await self.publish_event(EVENT_RECOVERY_FAILED, payload, priority=EventPriority.HIGH)
 
-    async def emit_rollback_required(self, recovery_id: str, backup_id: str, error_msg: str) -> None:
-        payload = RecoveryLifecycleEventPayload(
-            recovery_id=recovery_id,
-            backup_id=backup_id,
-            state=RecoveryState.ROLLBACK_REQUIRED,
-            error_message=error_msg,
-        )
-        await self.publish_event(EVENT_RECOVERY_ROLLBACK_REQUIRED, payload, priority=EventPriority.CRITICAL)
-
     async def emit_rolled_back(self, recovery_id: str, backup_id: str) -> None:
         payload = RecoveryLifecycleEventPayload(
             recovery_id=recovery_id,
@@ -203,19 +201,13 @@ class RecoveryEventPublisher:
         )
         await self.publish_event(EVENT_RECOVERY_ROLLED_BACK, payload, priority=EventPriority.HIGH)
 
-    async def emit_operator_required(self, recovery_id: str, backup_id: str, error_msg: str) -> None:
+    async def emit_operator_intervention_required(self, recovery_id: str, backup_id: str, error_msg: str) -> None:
         payload = RecoveryLifecycleEventPayload(
             recovery_id=recovery_id,
             backup_id=backup_id,
             state=RecoveryState.FAILED_NEEDS_OPERATOR,
             error_message=error_msg,
         )
-        await self.publish_event(EVENT_RECOVERY_OPERATOR_REQUIRED, payload, priority=EventPriority.CRITICAL)
-
-    async def emit_deleted(self, recovery_id: str) -> None:
-        payload = RecoveryLifecycleEventPayload(
-            recovery_id=recovery_id,
-            backup_id="",
-            state=RecoveryState.COMPLETED,
+        await self.publish_event(
+            EVENT_RECOVERY_OPERATOR_INTERVENTION_REQUIRED, payload, priority=EventPriority.CRITICAL
         )
-        await self.publish_event(EVENT_RECOVERY_DELETED, payload)

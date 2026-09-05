@@ -27,20 +27,19 @@ CAPABILITY_RECOVERY_DIAGNOSTICS_GET: Final[str] = "kortex.recovery.diagnostics.g
 PERMISSION_RECOVERY_READ: Final[str] = "system:recovery:read"
 PERMISSION_RECOVERY_MANAGE: Final[str] = "system:recovery:manage"
 
-# Lifecycle Events
-EVENT_RECOVERY_REQUESTED: Final[str] = "recovery.requested"
-EVENT_RECOVERY_STARTED: Final[str] = "recovery.started"
-EVENT_RECOVERY_CHECKPOINT_CREATED: Final[str] = "recovery.checkpoint_created"
-EVENT_RECOVERY_VALIDATED: Final[str] = "recovery.validated"
-EVENT_RECOVERY_STAGED: Final[str] = "recovery.staged"
-EVENT_RECOVERY_SWAPPED: Final[str] = "recovery.swapped"
-EVENT_RECOVERY_VERIFIED: Final[str] = "recovery.verified"
-EVENT_RECOVERY_COMPLETED: Final[str] = "recovery.completed"
-EVENT_RECOVERY_FAILED: Final[str] = "recovery.failed"
-EVENT_RECOVERY_ROLLBACK_REQUIRED: Final[str] = "recovery.rollback_required"
-EVENT_RECOVERY_ROLLED_BACK: Final[str] = "recovery.rolled_back"
-EVENT_RECOVERY_OPERATOR_REQUIRED: Final[str] = "recovery.operator_required"
-EVENT_RECOVERY_DELETED: Final[str] = "recovery.deleted"
+# Lifecycle Events (Canonical 12-event contract per implementation_plan.md)
+EVENT_RECOVERY_REQUESTED: Final[str] = "kortex.recovery.requested"
+EVENT_RECOVERY_PRECHECK_PASSED: Final[str] = "kortex.recovery.precheck.passed"
+EVENT_RECOVERY_SAFETY_CHECKPOINT_CREATED: Final[str] = "kortex.recovery.safety_checkpoint.created"
+EVENT_RECOVERY_VALIDATED: Final[str] = "kortex.recovery.validated"
+EVENT_RECOVERY_STAGED: Final[str] = "kortex.recovery.staged"
+EVENT_RECOVERY_QUIESCED: Final[str] = "kortex.recovery.quiesced"
+EVENT_RECOVERY_SWAPPED: Final[str] = "kortex.recovery.swapped"
+EVENT_RECOVERY_VERIFIED: Final[str] = "kortex.recovery.verified"
+EVENT_RECOVERY_COMPLETED: Final[str] = "kortex.recovery.completed"
+EVENT_RECOVERY_FAILED: Final[str] = "kortex.recovery.failed"
+EVENT_RECOVERY_ROLLED_BACK: Final[str] = "kortex.recovery.rolled_back"
+EVENT_RECOVERY_OPERATOR_INTERVENTION_REQUIRED: Final[str] = "kortex.recovery.operator_intervention_required"
 
 # File Extensions, Names, and Paths
 DEFAULT_RECOVERY_STAGING_DIR: Final[str] = "storage_data/.recovery_staging"

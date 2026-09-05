@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kortex.engines.recovery.constants import (
     CAPABILITY_RECOVERY_CREATE,
     CAPABILITY_RECOVERY_DELETE,
@@ -12,6 +14,18 @@ from kortex.engines.recovery.constants import (
     CURRENT_ENGINE_VERSION,
     CURRENT_RECOVERY_FORMAT_VERSION,
     CURRENT_RECOVERY_JOURNAL_VERSION,
+    EVENT_RECOVERY_COMPLETED,
+    EVENT_RECOVERY_FAILED,
+    EVENT_RECOVERY_OPERATOR_INTERVENTION_REQUIRED,
+    EVENT_RECOVERY_PRECHECK_PASSED,
+    EVENT_RECOVERY_QUIESCED,
+    EVENT_RECOVERY_REQUESTED,
+    EVENT_RECOVERY_ROLLED_BACK,
+    EVENT_RECOVERY_SAFETY_CHECKPOINT_CREATED,
+    EVENT_RECOVERY_STAGED,
+    EVENT_RECOVERY_SWAPPED,
+    EVENT_RECOVERY_VALIDATED,
+    EVENT_RECOVERY_VERIFIED,
     PERMISSION_RECOVERY_MANAGE,
     PERMISSION_RECOVERY_READ,
     RECOVERY_DEFAULT_LOCK_TIMEOUT_SECONDS,
@@ -237,3 +251,91 @@ def test_recovery_response_and_diagnostics() -> None:
     )
     assert diag.engine_name == "recovery"
     assert diag.state == "READY"
+
+
+def test_canonical_12_recovery_events_contract() -> None:
+    """Verify exactly 12 canonical Recovery event names adhering to implementation_plan.md."""
+    expected_events = {
+        "kortex.recovery.requested",
+        "kortex.recovery.precheck.passed",
+        "kortex.recovery.safety_checkpoint.created",
+        "kortex.recovery.validated",
+        "kortex.recovery.staged",
+        "kortex.recovery.quiesced",
+        "kortex.recovery.swapped",
+        "kortex.recovery.verified",
+        "kortex.recovery.completed",
+        "kortex.recovery.failed",
+        "kortex.recovery.rolled_back",
+        "kortex.recovery.operator_intervention_required",
+    }
+
+    actual_events = {
+        EVENT_RECOVERY_REQUESTED,
+        EVENT_RECOVERY_PRECHECK_PASSED,
+        EVENT_RECOVERY_SAFETY_CHECKPOINT_CREATED,
+        EVENT_RECOVERY_VALIDATED,
+        EVENT_RECOVERY_STAGED,
+        EVENT_RECOVERY_QUIESCED,
+        EVENT_RECOVERY_SWAPPED,
+        EVENT_RECOVERY_VERIFIED,
+        EVENT_RECOVERY_COMPLETED,
+        EVENT_RECOVERY_FAILED,
+        EVENT_RECOVERY_ROLLED_BACK,
+        EVENT_RECOVERY_OPERATOR_INTERVENTION_REQUIRED,
+    }
+
+    assert len(actual_events) == 12
+    assert actual_events == expected_events
+    for event in actual_events:
+        assert event.startswith("kortex.recovery.")
+
+
+@pytest.mark.asyncio
+async def test_recovery_event_publisher_lifecycle_emissions() -> None:
+    """Verify RecoveryEventPublisher emits all 12 canonical events with correct payloads."""
+    from unittest.mock import MagicMock
+
+    from kortex.engines.recovery.events import RecoveryEventPublisher
+
+    kernel = MagicMock()
+    event_engine = MagicMock()
+    kernel.event_engine = event_engine
+    published_topics: list[str] = []
+
+    def mock_publish(topic: str, payload: dict, priority: str = "NORMAL"):
+        published_topics.append(topic)
+        return True
+
+    event_engine.publish = mock_publish
+
+    publisher = RecoveryEventPublisher(kernel=kernel)
+
+    await publisher.emit_requested("rec-1", "bck-1")
+    await publisher.emit_precheck_passed("rec-1", "bck-1")
+    await publisher.emit_safety_checkpoint_created("rec-1", "bck-1", "chk-1")
+    await publisher.emit_validated("rec-1", "bck-1")
+    await publisher.emit_staged("rec-1", "bck-1")
+    await publisher.emit_quiesced("rec-1", "bck-1")
+    await publisher.emit_swapped("rec-1", "bck-1")
+    await publisher.emit_verified("rec-1", "bck-1")
+    await publisher.emit_completed("rec-1", "bck-1", "chk-1", 5)
+    await publisher.emit_failed("rec-1", "bck-1", "simulated error")
+    await publisher.emit_rolled_back("rec-1", "bck-1")
+    await publisher.emit_operator_intervention_required("rec-1", "bck-1", "fatal rollback failure")
+
+    assert len(published_topics) == 12
+    assert published_topics == [
+        "kortex.recovery.requested",
+        "kortex.recovery.precheck.passed",
+        "kortex.recovery.safety_checkpoint.created",
+        "kortex.recovery.validated",
+        "kortex.recovery.staged",
+        "kortex.recovery.quiesced",
+        "kortex.recovery.swapped",
+        "kortex.recovery.verified",
+        "kortex.recovery.completed",
+        "kortex.recovery.failed",
+        "kortex.recovery.rolled_back",
+        "kortex.recovery.operator_intervention_required",
+    ]

@@ -442,6 +442,9 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
             )
             # Re-acquire lock to ensure system remains contained
             self._quiescence_manager.acquire_maintenance_lock(journal.recovery_id)
+            await self._event_publisher.emit_operator_intervention_required(
+                journal.recovery_id, journal.backup_id, str(exc)
+            )
             raise RecoveryOperatorActionRequiredError(
                 f"FATAL: Rollback failed during crash recovery: {exc}. System halted in fail-closed MAINTENANCE state."
             ) from exc
@@ -494,7 +497,6 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
             artifact_path, sidecar_meta = self._validator.locate_artifact(request.backup_id)
 
             # 2. Precheck & Envelope verification
-            await self._event_publisher.emit_started(recovery_id, request.backup_id)
             self._validator.verify_envelope(artifact_path, sidecar_meta)
 
             # Compute disk space requirement
@@ -514,10 +516,11 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
                 live_storage_size=live_storage_size,
                 target_volume_dir=live_storage,
             )
+            await self._event_publisher.emit_precheck_passed(recovery_id, request.backup_id)
 
             # 3. Create Mandatory Pre-Recovery Safety Checkpoint
             checkpoint_id = await self._create_safety_checkpoint(recovery_id)
-            await self._event_publisher.emit_checkpoint_created(recovery_id, request.backup_id, checkpoint_id)
+            await self._event_publisher.emit_safety_checkpoint_created(recovery_id, request.backup_id, checkpoint_id)
 
             # 4. Write Initial Journal
             target_ident = TargetIdentity(
@@ -607,6 +610,7 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
                 db_mgr = self._kernel.db if self._kernel is not None and hasattr(self._kernel, "db") else None
                 if db_mgr is not None:
                     await self._quiescence_manager.enter_quiescence(self._kernel, db_mgr)
+                await self._event_publisher.emit_quiesced(recovery_id, request.backup_id)
 
                 # 11. Destructive Swaps
                 self._journal_manager.record_phase(RecoveryJournalPhase.STORAGE_SWAP_PARTIAL, operation="SWAP_STORAGE")
@@ -705,7 +709,6 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
                     RecoveryJournalPhase.VERIFYING,
                 }:
                     logger.critical("Failure occurred post-swap for '%s'. Executing automated rollback!", recovery_id)
-                    await self._event_publisher.emit_rollback_required(recovery_id, request.backup_id, str(exc))
                     await self._execute_automated_rollback(active_j)
                     await self._event_publisher.emit_rolled_back(recovery_id, request.backup_id)
                     raise RecoveryRollbackError(
@@ -827,7 +830,6 @@ class RecoveryEngine(BaseEngine, IRecoveryEngine, IEngineDiagnostics):
             self._staging_manager.cleanup_workspace(request.recovery_id)
             self._journal_manager.delete_journal()
             self._quiescence_manager.release_maintenance_lock()
-            await self._event_publisher.emit_deleted(request.recovery_id)
             return DeleteRecoveryResponse(
                 recovery_id=request.recovery_id,
                 deleted=True,

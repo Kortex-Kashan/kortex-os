@@ -70,3 +70,22 @@ The Recovery Engine consumes tamper-evident `.kortex-backup` archives, creates a
 | `kortex.recovery.verify` | `system:recovery:manage` | `INTERNAL` | Non-destructive preflight validation and capacity check. |
 | `kortex.recovery.delete` | `system:recovery:manage` | `INTERNAL` | Clean completed journal or cancel pre-swap recovery. |
 | `kortex.recovery.diagnostics.get` | `system:recovery:read` | `INTERNAL` | Retrieve operational telemetry and health metrics. |
+
+---
+
+## Lifecycle Events (Canonical 12-Event Contract)
+
+| # | Event Topic | Lifecycle Phase / Boundary |
+|---|---|---|
+| 1 | `kortex.recovery.requested` | Request received and validated; prior to staging |
+| 2 | `kortex.recovery.precheck.passed` | Envelope and disk preflight verification passed |
+| 3 | `kortex.recovery.safety_checkpoint.created` | Mandatory safety backup captured and verified |
+| 4 | `kortex.recovery.validated` | Backup archive extraction and checksum verification passed |
+| 5 | `kortex.recovery.staged` | Staged DB and storage consistency verification passed |
+| 6 | `kortex.recovery.quiesced` | Workload drained and database connections disconnected |
+| 7 | `kortex.recovery.swapped` | Destructive database and storage file swaps completed |
+| 8 | `kortex.recovery.verified` | Post-swap SQLite and storage referential verification passed |
+| 9 | `kortex.recovery.completed` | Recovery successfully completed; maintenance lock released |
+| 10 | `kortex.recovery.failed` | Unrecoverable error occurred; pre-mutation failure |
+| 11 | `kortex.recovery.rolled_back` | Post-swap failure detected; reverse-swap successfully restored |
+| 12 | `kortex.recovery.operator_intervention_required` | Fatal failure during rollback; system halted in maintenance |
