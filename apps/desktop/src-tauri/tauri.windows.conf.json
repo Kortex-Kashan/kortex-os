@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../../dist/kortex-backend": "kortex-backend"
+    }
+  }
+}

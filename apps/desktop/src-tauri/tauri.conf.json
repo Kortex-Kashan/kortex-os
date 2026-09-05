@@ -31,9 +31,6 @@
       "icons/icon.ico"
     ],
     "targets": ["msi", "nsis"],
-    "resources": {
-      "../../../dist/kortex-backend": "kortex-backend"
-    },
     "windows": {
       "wix": {
         "upgradeCode": "71b2a7f2-94c1-4a51-8925-4d22890d6de3"

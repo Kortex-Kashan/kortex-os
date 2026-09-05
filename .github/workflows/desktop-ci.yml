@@ -174,9 +174,40 @@ jobs:
           Write-Output "MSI: $($msi.FullName) ($([math]::Round($msi.Length / 1MB, 1)) MB)"
           Write-Output "NSIS: $($nsis.FullName) ($([math]::Round($nsis.Length / 1MB, 1)) MB)"
 
+      # Packaging guard for tauri.windows.conf.json's bundle.resources: this
+      # is the REAL destination tauri-build's copy_resources() writes to
+      # (target_dir joined with the resource map's target value
+      # "kortex-backend"), confirmed against this repository's own local
+      # `tauri build` output -- not a guessed or documented-only path. A
+      # silent bundle.resources regression (e.g. the platform config file
+      # going missing) would otherwise let `tauri build` succeed while
+      # shipping an installer with no backend inside; this makes that loud
+      # and immediate instead of waiting for the smoke test below to expose
+      # it indirectly as a health-check failure.
+      - name: Verify frozen backend resource was actually packaged
+        shell: pwsh
+        run: |
+          $bundled = "apps/desktop/src-tauri/target/release/kortex-backend/kortex-backend.exe"
+          if (-not (Test-Path $bundled)) {
+            throw "Frozen backend resource was not copied into the Tauri build output at $bundled -- bundle.resources packaging failed (see tauri.windows.conf.json)"
+          }
+          Write-Output "Packaged backend resource confirmed at $bundled"
+
       # Silent install -> launch -> poll /health -> uninstall, using
       # freshly-generated, throwaway keys (never committed, never reused) --
       # mirrors the Docker CI job's own throwaway-secret pattern (Part 1 §18).
+      #
+      # Distinct assertion messages, redirected stdout/stderr, and failure-
+      # path diagnostics were added here to make a future failure
+      # diagnosable from CI evidence alone. The installed app is a
+      # `windows_subsystem = "windows"` release build with no file logger
+      # (see backend_process.rs / Cargo.toml) -- redirecting Start-Process's
+      # own stdout/stderr is the only diagnostic channel this workflow can
+      # add without touching product source. It captures the Tauri process's
+      # own output only: the frozen backend child's stdout/stderr are piped
+      # by sidecar.rs but never drained by production code, so backend-side
+      # output is not, and cannot be made, visible here without a source
+      # change -- deliberately out of scope for this commit.
       - name: Installer smoke test (install, launch, health, uninstall)
         shell: pwsh
         run: |
@@ -184,7 +215,7 @@ jobs:
           Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
 
           $exe = "$env:LOCALAPPDATA\KORTEX Desktop\kortex-desktop.exe"
-          if (-not (Test-Path $exe)) { throw "Installed executable not found at $exe" }
+          if (-not (Test-Path $exe)) { throw "ASSERTION [installed executable missing]: not found at $exe" }
 
           $masterBytes = New-Object byte[] 32
           [System.Security.Cryptography.RandomNumberGenerator]::Fill($masterBytes)
@@ -193,16 +224,33 @@ jobs:
           [System.Security.Cryptography.RandomNumberGenerator]::Fill($signingBytes)
           $env:KORTEX_AUTH_SIGNING_PRIVATE_KEY = "0x" + (($signingBytes | ForEach-Object { $_.ToString("x2") }) -join '')
 
-          Start-Process -FilePath $exe
+          $stdoutLog = "$env:RUNNER_TEMP\kortex-desktop-stdout.log"
+          $stderrLog = "$env:RUNNER_TEMP\kortex-desktop-stderr.log"
+          $proc = Start-Process -FilePath $exe -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+
           $healthy = $false
+          $lastErr = "(no attempt made)"
           for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 1
+            if ($proc.HasExited) {
+              throw "ASSERTION [desktop process exited early]: kortex-desktop.exe exited with code $($proc.ExitCode) before becoming healthy"
+            }
             try {
               $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 2 -UseBasicParsing
               if ($resp.StatusCode -lt 400) { $healthy = $true; break }
-            } catch {}
+              $lastErr = "HTTP $($resp.StatusCode)"
+            } catch {
+              $lastErr = $_.Exception.Message
+            }
           }
-          if (-not $healthy) { throw "Installed application did not become healthy within 30s" }
+
+          if (-not $healthy) {
+            $desktopProc = Get-Process kortex-desktop -ErrorAction SilentlyContinue
+            $backendProc = Get-Process kortex-backend -ErrorAction SilentlyContinue
+            $portState = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
+            Write-Output "DIAGNOSTIC: desktop process present=$($null -ne $desktopProc); backend process present=$($null -ne $backendProc); port 8000 listeners=$($portState.Count); last health-check error=$lastErr"
+            throw "ASSERTION [health endpoint unreachable]: /health did not become reachable within 30s"
+          }
           Write-Output "Installed application healthy after $($i + 1)s"
 
           Get-Process kortex-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -210,16 +258,39 @@ jobs:
           Start-Sleep -Seconds 2
 
           $uninstaller = "$env:LOCALAPPDATA\KORTEX Desktop\uninstall.exe"
-          if (Test-Path $uninstaller) {
+          if (-not (Test-Path $uninstaller)) {
+            Write-Output "DIAGNOSTIC: uninstaller not found at $uninstaller -- skipping uninstall invocation; this absence may itself be a defect"
+          } else {
             Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait
           }
-          Start-Sleep -Seconds 1
-          if (Test-Path $exe) { throw "Uninstall did not remove the installed executable" }
+
+          # NSIS uninstallers commonly self-relaunch from %TEMP% and detach,
+          # so -Wait returning is not proof removal has completed -- poll
+          # instead of asserting once immediately.
+          $removed = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            if (-not (Test-Path $exe)) { $removed = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $removed) { throw "ASSERTION [uninstall failure]: $exe still present $($i + 1)s after the uninstaller returned" }
+
+      - name: Upload smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kortex-desktop-smoke-test-diagnostics
+          path: |
+            ${{ runner.temp }}\kortex-desktop-stdout.log
+            ${{ runner.temp }}\kortex-desktop-stderr.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kortex-desktop-windows-installers
           path: |
             apps/desktop/src-tauri/target/release/bundle/msi/*.msi
             apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
           retention-days: 7
+          if-no-files-found: ignore
