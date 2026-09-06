@@ -62,11 +62,7 @@ Reachable but failing → possibly a defect. Unreachable → **environmental**, 
 
 ## Backup fails with `BackupEncryptionError`
 
-**This is DEFECT-001.** On desktop, `KORTEX_MASTER_KEY` is `0x`-prefixed and the Backup Engine does not accept that format. Use the bare-hex `KORTEX_BACKUP_KEY` workaround in `KNOWN_FINDINGS.md`, and **record that you used it**. Do not file a duplicate.
-
-## Sentinel reports the `backup` subsystem unhealthy
-
-Same root cause — DEFECT-001. Sentinel is correctly reporting a real condition; that part is working as designed.
+DEFECT-001 (Backup Engine rejecting the desktop's `0x`-prefixed `KORTEX_MASTER_KEY`) is **resolved** — both the `0x`-prefixed and bare-hex forms are now accepted from either `KORTEX_MASTER_KEY` or `KORTEX_BACKUP_KEY`. If you still see this error, check `KNOWN_FINDINGS.md` for a possible new, different cause before filing — it is not the previously-known one.
 
 ## The seeder fails
 

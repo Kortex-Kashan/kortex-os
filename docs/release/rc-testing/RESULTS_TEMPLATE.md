@@ -14,7 +14,6 @@
 | Commit SHA | |
 | Machine state | clean machine / reused / VM snapshot |
 | Ollama available | yes / no |
-| DEFECT-001 backup workaround in use | yes / no |
 
 ## Summary
 

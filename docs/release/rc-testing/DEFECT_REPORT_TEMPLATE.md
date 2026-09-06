@@ -24,7 +24,7 @@
 
 ## Preconditions
 
-*Environment state, dataset, which principal, whether the DEFECT-001 backup workaround was in use.*
+*Environment state, dataset, which principal.*
 
 ## Steps to reproduce
 

@@ -67,11 +67,37 @@ class BackupCryptoManager:
 
     @staticmethod
     def _resolve_key_from_env() -> bytes | None:
-        """Attempt to resolve a 32-byte key from environment variables."""
+        """Attempt to resolve a 32-byte key from environment variables.
+
+        Case 0 (`0x`-prefixed hex) is the platform's canonical key
+        representation, not a Backup-specific format: `kernel_bootstrap.py`'s
+        `_resolve_key` already decodes it identically for every other
+        consumer of `KORTEX_MASTER_KEY`/`KORTEX_AUTH_SIGNING_PRIVATE_KEY`,
+        `docker/entrypoint.sh`'s `require_key` already validates it at the
+        container boundary, and `docker/.env.example` documents it explicitly
+        ("either a '0x'-prefixed 64-hex-character string or a UTF-8 value of
+        at least 32 bytes"). The Windows desktop sidecar
+        (`secure_keys.rs::hex_encode`) generates exactly this form. This
+        case was simply never implemented here (DEFECT-001) -- Backup was
+        the one consumer out of step with an already-established contract,
+        not a case of the desktop producing a non-standard value.
+        """
         for var_name in ("KORTEX_BACKUP_KEY", "KORTEX_MASTER_KEY"):
             val = os.environ.get(var_name)
             if not val:
                 continue
+
+            # Case 0: "0x"-prefixed 64-character hex string (32 bytes).
+            # Checked before Case 1 since it is a distinct, unambiguous
+            # representation -- a 66-character "0x..." value can never
+            # collide with Case 1's exact-64-character bare-hex check.
+            if val.startswith("0x") and len(val) == 66:
+                try:
+                    raw = binascii.unhexlify(val[2:])
+                    if len(raw) == _AES_256_KEY_BYTES:
+                        return raw
+                except (binascii.Error, ValueError):
+                    pass
 
             # Case 1: 64-character hex string (32 bytes)
             if len(val) == 64:

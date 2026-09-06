@@ -92,7 +92,7 @@ A P0 that is **PRE-EXISTING** and a P0 that is a **REGRESSION** are very differe
 | Sentinel | Failure detection (FAIL-01) | Both | Backend failure observed | |
 | **Monitoring** | Metrics (GP-27) | Both | Metrics reflect activity | |
 | Monitoring | Diagnostics (GP-27) | Both | 200 | |
-| **Backup** | Create (BR-02) | Both | Artifact produced | ⚠ DEFECT-001 on desktop |
+| **Backup** | Create (BR-02) | Both | Artifact produced | |
 | Backup | Verify (BR-03) | Both | Valid | |
 | Backup | Encryption/fail-closed | Both | No key → refuses | |
 | Backup | Tampered artifact (BR-04) | Both | Rejected | |

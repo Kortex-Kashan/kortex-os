@@ -207,13 +207,13 @@ INSTALL → LAUNCH → CREATE DATA → CLOSE → REOPEN → VERIFY DATA
 ## 5. Backup / Recovery (BR-01 … BR-06)
 
 ⚠️ **Disposable data only.** Never run recovery against anything you care about.
-⚠️ **DEFECT-001 applies** — on desktop you need the bare-hex `KORTEX_BACKUP_KEY` workaround, and you must record that you used it.
+DEFECT-001 (Backup Engine could not resolve the desktop's `0x`-prefixed key) is **resolved** — no workaround is required.
 
 ### BR-01 Create a known dataset
 Create clearly identifiable records (e.g. invoice `RC-BACKUP-001`). Record IDs.
 
 ### BR-02 Create a backup
-`INVOKE kortex.backup.create {...}` → expect 200 and a backup ID. Confirm the artifact appears under `storage_data\backups\`. **Failure:** `BackupEncryptionError` → DEFECT-001.
+`INVOKE kortex.backup.create {...}` → expect 200 and a backup ID. Confirm the artifact appears under `storage_data\backups\`. **Failure:** any `BackupEncryptionError` here would be a **new** defect — DEFECT-001, the previously-known cause, is resolved.
 
 ### BR-03 Verify the backup
 `INVOKE kortex.backup.verify {"backup_id":"..."}` → expect 200, valid. Then `kortex.backup.list` / `.get`. Record the ID and any checksum returned.

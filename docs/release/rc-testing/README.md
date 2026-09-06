@@ -127,7 +127,7 @@ KORTEX_MASTER_KEY=<64 hex chars>
 KORTEX_AUTH_SIGNING_PRIVATE_KEY=<64 hex chars>
 ```
 
-> **Use the bare 64-hex form (no `0x` prefix)** for `KORTEX_MASTER_KEY`. See `KNOWN_FINDINGS.md` DEFECT-001 — a `0x`-prefixed key is accepted by the platform generally but **not** by the Backup Engine, which then fails closed.
+Either the bare 64-hex form or the `0x`-prefixed form works for `KORTEX_MASTER_KEY` — both are accepted platform-wide, including by the Backup Engine (`KNOWN_FINDINGS.md` DEFECT-001, resolved).
 
 `docker/.env` is git-ignored. **Never commit it. Never paste a real key into a defect report.**
 

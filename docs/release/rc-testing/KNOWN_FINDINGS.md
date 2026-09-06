@@ -13,7 +13,35 @@ Read this before filing a defect. These were found while preparing and validatin
 | **Classification** | **PRE-EXISTING** (not a regression from any recent commit) |
 | **Type** | Correctness / configuration-contract mismatch |
 | **Environment** | Windows desktop RC build; any deployment where `KORTEX_MASTER_KEY` carries the `0x` prefix |
-| **Status** | Open — reported, **not fixed** |
+| **Status** | **RESOLVED** — commit `<see git log for the exact SHA of "fix: align desktop backup key format with backup crypto">` |
+
+### Resolution
+
+**Root cause confirmed**: `BackupCryptoManager._resolve_key_from_env` (`backend/src/kortex/engines/backup/crypto.py`) was the *only* consumer of `KORTEX_MASTER_KEY`/`KORTEX_BACKUP_KEY` on the platform that did not implement the `0x`-prefixed hex representation. That representation is not a Backup-specific or desktop-specific quirk — it is the platform's own established, triply-documented canonical format:
+- `kernel_bootstrap.py::_resolve_key` already decodes it identically.
+- `docker/entrypoint.sh::require_key` already validates it at the container boundary.
+- `docker/.env.example` already documents it explicitly: *"either a '0x'-prefixed 64-hex-character string or a UTF-8 value of at least 32 bytes."*
+
+The Windows desktop sidecar (`secure_keys.rs::hex_encode`, `format!("0x{}", ...)`) was producing exactly this already-canonical form. **The producer was correct; the one consumer was not.**
+
+**Canonical representation**: unchanged — `0x` + 64 lowercase hex characters, decoding to exactly 32 bytes. No new format was introduced.
+
+**Correction**: added the missing `0x`-prefixed case to `_resolve_key_from_env`, mirroring `kernel_bootstrap.py`'s own decoding exactly. The two pre-existing formats (bare 64-char hex, base64) are untouched and still resolve identically. No change to `secure_keys.rs`, Docker's key model, AES-256-GCM behavior, or any accepted architecture.
+
+**Backward compatibility**: no migration was needed. Because this exact defect made backup fail closed on every prior desktop attempt, **no encrypted backup was ever successfully produced with a `0x`-prefixed key** — there is nothing pre-existing to migrate or silently invalidate.
+
+**Regression tests added** (`backend/tests/unit/test_backup_crypto.py`): acceptance of the exact desktop-generated format; acceptance via both `KORTEX_MASTER_KEY` and `KORTEX_BACKUP_KEY`; confirmation the two pre-existing formats are undisturbed; fail-closed rejection of malformed near-matches (bad hex, wrong decoded length); confirmation no failure path leaks key material; and a real AES-256-GCM encrypt/decrypt round trip using the exact desktop-generated key representation.
+
+**Real desktop verification**: executed against a live backend (real Alembic-migrated database, real `kortex.api.main:app`), with `KORTEX_MASTER_KEY` set to a freshly generated `0x`-prefixed key exactly as `secure_keys.rs` would produce, and **`KORTEX_BACKUP_KEY` deliberately unset — no workaround**:
+
+| Step | Result |
+|---|---|
+| `kortex.backup.create` | **200** — real backup ID returned |
+| `kortex.backup.verify` | **200** — `is_valid`, `checksum_verified`, `encryption_verified`, `schema_compatible` all present |
+
+**Recovery/Update prerequisite**: Recovery and Update both take their mandatory pre-mutation checkpoint via the exact same `BackupEngine.create_backup()` path just verified above, so the dependency each has on Backup is satisfied. Their own capability endpoints (`kortex.recovery.verify`, `kortex.update.check`) are not reachable through the current desktop API surface for a **separate, pre-existing reason unrelated to this defect**: `kernel_bootstrap.py` does not register `RecoveryEngine`/`UpdateEngine` at all (confirmed directly — neither appears anywhere in that file), a gap already tracked as Owner Decision OD-1 in the Docker Production Builds reconciliation record, predating this fix and explicitly out of its authorized scope. The full Recovery (62 tests) and Update (85 tests) suites were re-run after this fix with zero regressions.
+
+**The bare-hex `KORTEX_BACKUP_KEY` workaround previously documented here is no longer required or referenced anywhere in this test environment.**
 
 ### Summary
 
