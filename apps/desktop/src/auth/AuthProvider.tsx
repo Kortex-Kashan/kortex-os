@@ -8,6 +8,7 @@ import type { AuthState, BootstrapCredentials, LoginCredentials } from "./authTy
 import { waitForBackendReady } from "./backendReadiness";
 import { bootstrapFirstAdmin } from "./bootstrapCapability";
 import { clearCachedIdentity, loadCachedIdentity, saveCachedIdentity } from "./identityCache";
+import { completeOAuthLogin, type OAuthProviderId } from "./oauthCapability";
 
 interface AuthContextValue {
   state: AuthState;
@@ -22,6 +23,14 @@ interface AuthContextValue {
    * if the backend drops mid-request.
    */
   bootstrap: (credentials: BootstrapCredentials) => Promise<void>;
+  /**
+   * Phase A: completes an OAuth sign-in (Google/Microsoft) after the
+   * system browser redirects back via the `kortex-auth://` deep link
+   * (`useOAuthDeepLink`). Mirrors `login()`'s exact success/failure state
+   * transitions — a real session was already minted server-side by the
+   * time this resolves `ok: true`, exactly like a password login.
+   */
+  loginWithOAuth: (provider: OAuthProviderId, code: string, state: string) => Promise<void>;
   /**
    * M7.1: re-runs the startup backend-readiness check from a
    * `BACKEND_UNAVAILABLE` state — the user-facing "Retry" action
@@ -218,6 +227,29 @@ export function AuthProvider({ children }: AuthProviderProps) {
     [login],
   );
 
+  const loginWithOAuth = React.useCallback(async (provider: OAuthProviderId, code: string, state: string) => {
+    if (loginInFlightRef.current) {
+      return;
+    }
+    loginInFlightRef.current = true;
+    setState({ status: "AUTHENTICATING" });
+    try {
+      const outcome = await completeOAuthLogin(provider, code, state);
+      if (outcome.ok) {
+        saveCachedIdentity(outcome.identity);
+        setState({ status: "AUTHENTICATED", identity: outcome.identity });
+      } else if (outcome.kind === "BACKEND_UNAVAILABLE") {
+        setState({ status: "BACKEND_UNAVAILABLE" });
+      } else {
+        setState({ status: "AUTHENTICATION_ERROR", message: outcome.message });
+      }
+    } catch {
+      setState({ status: "BACKEND_UNAVAILABLE" });
+    } finally {
+      loginInFlightRef.current = false;
+    }
+  }, []);
+
   const retryConnection = React.useCallback(() => {
     setConnectionAttemptGeneration((generation) => generation + 1);
   }, []);
@@ -239,8 +271,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, []);
 
   const value = React.useMemo<AuthContextValue>(
-    () => ({ state, login, logout, bootstrap, retryConnection, reportIpcResult }),
-    [state, login, logout, bootstrap, retryConnection, reportIpcResult],
+    () => ({ state, login, logout, bootstrap, loginWithOAuth, retryConnection, reportIpcResult }),
+    [state, login, logout, bootstrap, loginWithOAuth, retryConnection, reportIpcResult],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

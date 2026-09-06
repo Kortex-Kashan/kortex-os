@@ -1,3 +1,4 @@
+import { AccountApp } from "@/features/account/components/AccountApp";
 import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { Dashboard } from "@/features/dashboard/components/Dashboard";
@@ -5,6 +6,7 @@ import { DocumentKnowledgeApp } from "@/features/document-knowledge/components/D
 import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
 import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import {
+  AccountIcon,
   AiStudioIcon,
   ConnectorIcon,
   DashboardIcon,
@@ -68,5 +70,14 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     route: "/document-knowledge",
     component: DocumentKnowledgeApp,
     permissions: ["kortex.document.view", "kortex.knowledge.view"],
+  },
+  {
+    id: "account",
+    name: "Account",
+    description: "Manage your identity, password, and sign-in.",
+    icon: AccountIcon,
+    route: "/account",
+    component: AccountApp,
+    permissions: ["kortex.account.view"],
   },
 ];

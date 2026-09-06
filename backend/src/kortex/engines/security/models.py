@@ -142,6 +142,36 @@ class TokenPayload(BaseModel):
     )
 
 
+class OAuthStatePayload(BaseModel):
+    """The claims encoded by a signed OAuth `state` parameter (Phase A), plus
+    its detached Ed25519 signature — structurally identical in *shape* to
+    `TokenPayload` in spirit (self-contained, self-validating, short-lived)
+    but a distinct model on purpose: `AuthenticationManager.issue_oauth_state`/
+    `verify_oauth_state` sign/verify a domain-separated byte encoding (a
+    `"oauth-state:"` prefix) so a captured OAuth `state` value can never be
+    replayed as a session `TokenPayload` or vice versa, even though both are
+    signed with the same platform Ed25519 keypair.
+
+    `intent="login"` means "resolve to an existing linked account or fail
+    honestly" (no `tenant_id`/`principal_id`/`principal_type`); `intent=
+    "link"` means "attach this external identity to the already-authenticated
+    caller who initiated this flow" (`tenant_id`/`principal_id`/
+    `principal_type` identify that caller, captured server-side when the
+    flow began — never a value the OAuth callback itself could forge, since
+    the whole payload is signed).
+    """
+
+    nonce: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    intent: str = Field(min_length=1)
+    tenant_id: str | None = None
+    principal_id: str | None = None
+    principal_type: str | None = None
+    issued_at_utc: datetime
+    expires_at_utc: datetime
+    signature: bytes | None = Field(default=None, description="Detached Ed25519 signature. Never trusted unread.")
+
+
 class CryptographicSignature(BaseModel):
     """The result of a digital signature operation.
 
@@ -223,6 +253,18 @@ class PrincipalRecord(SQLAlchemyBaseModel):
     credential_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
     roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Phase A (post-RC authentication completion): a principal's contact
+    # address, used exclusively for the "forgot password" flow's
+    # look-up-by-email step (`AuthenticationManager.request_password_reset`).
+    # Nullable — most existing principals (every one provisioned before this
+    # column existed) have no email on record, and `USER` is the only
+    # principal type expected to ever set one. Globally unique (not
+    # per-tenant) so a reset request can resolve a principal from an email
+    # alone, with no tenant context available yet at that point in the flow.
+    # Unlike `PrincipalRecord`'s own other columns, this one was added to an
+    # already-deployed table, so it ships with a real, additive Alembic
+    # migration rather than relying on `Base.metadata.create_all()`.
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
 
 
 class RolePermissionRecord(SQLAlchemyBaseModel):
@@ -253,6 +295,69 @@ class RolePermissionRecord(SQLAlchemyBaseModel):
 
     role: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     permission: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class PasswordResetTokenRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for a single-use password-reset token (Phase A).
+
+    Colocated in `security/models.py` per the same cross-engine convention
+    `SecretRecord`/`PrincipalRecord`/`RolePermissionRecord`/`AuditRecord`
+    already establish. A brand-new table, so — unlike `PrincipalRecord.email`
+    above — it is auto-created via the existing `Base.metadata.create_all()`
+    boot path; no Alembic migration required.
+
+    `token_hash` holds a SHA-256 digest of the opaque, single-use reset
+    token handed to the email provider — the raw token itself is never
+    persisted anywhere, mirroring `PrincipalRecord.credential_hash`'s
+    one-way-only precedent. `used_at_utc` is set exactly once, at first
+    successful redemption, making the token single-use; a `None` value means
+    still unredeemed.
+    """
+
+    __tablename__ = "security_password_reset_tokens"
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at_utc: Mapped[datetime] = mapped_column(nullable=False)
+    used_at_utc: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class OAuthIdentityLinkRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model linking an external OAuth identity to an existing
+    KORTEX principal (Phase A). A brand-new table, auto-created via the
+    existing `Base.metadata.create_all()` boot path — no Alembic migration
+    required, same precedent as `PasswordResetTokenRecord` above.
+
+    OAuth here is a second *sign-in method* for an account that already
+    exists, never a self-registration path (consistent with this platform's
+    admin-provisioned registration model — see `register_principal`): a
+    `kortex.security.oauth.complete` callback with `intent="login"` and no
+    matching row here returns an honest "no linked account" outcome rather
+    than creating one.
+
+    `(provider, external_subject)` is unique — one external identity maps to
+    at most one KORTEX principal, never more than one, closing any
+    possibility of two different KORTEX accounts silently claiming the same
+    external identity. `(tenant_id, principal_id, principal_type, provider)`
+    is also unique — a principal can link at most one identity per provider.
+    """
+
+    __tablename__ = "security_oauth_identity_links"
+    __table_args__ = (
+        UniqueConstraint("provider", "external_subject", name="uq_oauth_link_provider_subject"),
+        UniqueConstraint(
+            "tenant_id", "principal_id", "principal_type", "provider", name="uq_oauth_link_principal_provider"
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(nullable=False)
 
 
 class UniversalAuditEntry(BaseModel):

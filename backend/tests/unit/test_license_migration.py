@@ -14,7 +14,6 @@ existing database (baseline 81d6d64c51ba)
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,23 +52,36 @@ _TEST_PRIV_BYTES = _TEST_PRIV.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoE
 _TEST_PUB_BYTES = _TEST_PRIV.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
-def _alembic_cfg(db_path: str) -> Config:
-    os.environ["KORTEX_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
+def _alembic_cfg() -> Config:
+    """Builds `Config` from `KORTEX_DATABASE_URL`, which the calling test is
+    responsible for setting via `monkeypatch.setenv` (never a direct
+    `os.environ[...] =` assignment) -- a real, previously-latent bug found
+    during Phase A: this function used to set `KORTEX_DATABASE_URL` itself
+    via a direct assignment, leaking it for the rest of the pytest process
+    and pointing every subsequent test with no explicit override (the
+    documented shared-default-database fallback many other test files rely
+    on) at this test's own tmp_path file -- left, by this test's own last
+    step, downgraded to the pre-license baseline revision. That silently
+    broke every later test expecting the real shared default schema, most
+    visibly Phase A's own `email` column (added well past this file's
+    baseline revision) once a migration finally depended on a column
+    existing rather than only a table.
+    """
     cfg = Config(str(_ALEMBIC_INI))
     cfg.set_main_option("script_location", str(_ALEMBIC_SCRIPT_DIR))
     return cfg
 
 
-def _upgrade_to_baseline(db_path: str) -> None:
-    command.upgrade(_alembic_cfg(db_path), "81d6d64c51ba")
+def _upgrade_to_baseline() -> None:
+    command.upgrade(_alembic_cfg(), "81d6d64c51ba")
 
 
-def _upgrade_to_head(db_path: str) -> None:
-    command.upgrade(_alembic_cfg(db_path), "head")
+def _upgrade_to_head() -> None:
+    command.upgrade(_alembic_cfg(), "head")
 
 
-def _downgrade_to_baseline(db_path: str) -> None:
-    command.downgrade(_alembic_cfg(db_path), "81d6d64c51ba")
+def _downgrade_to_baseline() -> None:
+    command.downgrade(_alembic_cfg(), "81d6d64c51ba")
 
 
 def _issue_test_token(crypto_engine: LicenseCryptoEngine, tenant_id: str) -> str:
@@ -92,12 +104,13 @@ def _issue_test_token(crypto_engine: LicenseCryptoEngine, tenant_id: str) -> str
 
 
 @pytest.mark.asyncio
-async def test_license_table_migration_full_lifecycle(tmp_path: Path) -> None:
+async def test_license_table_migration_full_lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_file = tmp_path / "test_migration_lifecycle.db"
     db_path = str(db_file).replace("\\", "/")
+    monkeypatch.setenv("KORTEX_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
 
     # Step 1: Existing database at baseline revision 81d6d64c51ba
-    await asyncio.to_thread(_upgrade_to_baseline, db_path)
+    await asyncio.to_thread(_upgrade_to_baseline)
 
     engine_baseline = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine_baseline.connect() as conn:
@@ -107,7 +120,7 @@ async def test_license_table_migration_full_lifecycle(tmp_path: Path) -> None:
     await engine_baseline.dispose()
 
     # Step 2: Migration upgrade to head (applies b4e89f123c5a)
-    await asyncio.to_thread(_upgrade_to_head, db_path)
+    await asyncio.to_thread(_upgrade_to_head)
 
     # Step 3: kortex_licenses table verification
     engine_head = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
@@ -185,7 +198,7 @@ async def test_license_table_migration_full_lifecycle(tmp_path: Path) -> None:
 
     # Step 7: Downgrade behavior (back to baseline 81d6d64c51ba)
     await db_manager.disconnect()
-    await asyncio.to_thread(_downgrade_to_baseline, db_path)
+    await asyncio.to_thread(_downgrade_to_baseline)
 
     engine_post = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine_post.connect() as conn:

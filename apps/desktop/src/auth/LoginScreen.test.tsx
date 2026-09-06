@@ -4,13 +4,37 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginScreen } from "./LoginScreen";
 import type { AuthState } from "./authTypes";
 
-const { useAuthMock, loginSpy } = vi.hoisted(() => ({
+const { useAuthMock, loginSpy, requestPasswordResetMock, resetPasswordMock } = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
   loginSpy: vi.fn(),
+  requestPasswordResetMock: vi.fn(),
+  resetPasswordMock: vi.fn(),
 }));
 
 vi.mock("./AuthProvider", () => ({
   useAuth: useAuthMock,
+}));
+
+vi.mock("./authCapability", () => ({
+  requestPasswordReset: requestPasswordResetMock,
+  resetPassword: resetPasswordMock,
+}));
+
+// OAuthLoginButtons calls getOAuthConfig() on mount — mocked here to resolve
+// "not configured" so no button renders, keeping every existing test's DOM
+// assertions (autofocus, field queries, etc.) unaffected. Tests that
+// specifically exercise OAuth buttons override this per-test.
+vi.mock("./oauthCapability", () => ({
+  getOAuthConfig: vi.fn().mockResolvedValue({ google: false, microsoft: false }),
+  beginOAuthLogin: vi.fn(),
+}));
+
+vi.mock("./useOAuthDeepLink", () => ({
+  useOAuthDeepLink: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-shell", () => ({
+  open: vi.fn(),
 }));
 
 function mockAuth(state: AuthState) {
@@ -152,5 +176,44 @@ describe("LoginScreen error states", () => {
     rerender(<LoginScreen />);
 
     expect(screen.getByLabelText("Password")).toHaveValue("");
+  });
+});
+
+describe("LoginScreen forgot/reset password navigation", () => {
+  it("switches to the Forgot Password form and back", () => {
+    mockAuth({ status: "UNAUTHENTICATED" });
+    render(<LoginScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+    expect(screen.getByRole("heading", { name: "Reset your password" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to sign in" }));
+    expect(screen.getByLabelText("Tenant ID")).toBeInTheDocument();
+  });
+
+  it("switches to the Reset Password form directly and back", () => {
+    mockAuth({ status: "UNAUTHENTICATED" });
+    render(<LoginScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Have a reset token? Reset your password" }));
+    expect(screen.getByRole("heading", { name: "Set a new password" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to sign in" }));
+    expect(screen.getByLabelText("Tenant ID")).toBeInTheDocument();
+  });
+
+  it("shows a success message on the login form after a successful reset", async () => {
+    resetPasswordMock.mockResolvedValueOnce({ ok: true });
+    mockAuth({ status: "UNAUTHENTICATED" });
+    render(<LoginScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Have a reset token? Reset your password" }));
+    fireEvent.change(screen.getByLabelText("Reset token"), { target: { value: "token" } });
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "brand-new-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+
+    expect(
+      await screen.findByText("Your password has been reset. Sign in with your new password."),
+    ).toBeInTheDocument();
   });
 });

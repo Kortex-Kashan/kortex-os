@@ -67,6 +67,22 @@ export interface LoginCredentials {
 }
 
 /**
+ * Phase A: the "Forgot password?" request form's input — deliberately just
+ * an email, no tenant/username. `kortex.security.auth.request_password_reset`
+ * always responds identically regardless of match (enumeration resistance).
+ */
+export interface PasswordResetRequestInput {
+  email: string;
+}
+
+/** Phase A: the Reset Password screen's input — a token pasted from the
+ * (dev-mode-logged, for now) reset email, plus the new password. */
+export interface PasswordResetInput {
+  token: string;
+  newPassword: string;
+}
+
+/**
  * M7.1 first-run setup form input. Deliberately the same three fields as
  * `LoginCredentials` — the administrator created here is the same identity
  * the user then signs in with, using this exact tenant ID/username/

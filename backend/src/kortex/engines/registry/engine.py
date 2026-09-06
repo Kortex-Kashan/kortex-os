@@ -34,6 +34,31 @@ _BOOTSTRAP_EXEMPT_CAPABILITIES = frozenset(
         # closed the moment any principal already exists, exactly mirroring
         # how `authenticate` fails closed on any credential mismatch.
         "kortex.security.bootstrap.create_admin",
+        # Phase A (post-RC authentication completion): forgot/reset password
+        # must be reachable before any session token exists — that is the
+        # entire point of the flow (a signed-out user who cannot authenticate
+        # is exactly who needs it). Neither is a general bypass: the reset
+        # token itself is the credential being verified
+        # (`AuthenticationManager.reset_password`), and the request endpoint
+        # never reveals whether an email matched a principal
+        # (enumeration-resistant, mirroring `authenticate`'s own discipline).
+        "kortex.security.auth.request_password_reset",
+        "kortex.security.auth.reset_password",
+        # Phase A: OAuth sign-in (Google/Microsoft) for an existing account.
+        # `get_config`/`login_begin` are unauthenticated reads/redirects —
+        # there is no session yet by definition on the signed-out login
+        # screen. `login_complete` is likewise reachable pre-session (the
+        # whole point of "sign in with Google"); it mints a real session
+        # token itself, via the same generic "bootstrap-exempt capability
+        # returning a SecurityPrincipal" mechanism `authenticate` already
+        # uses (`kortex.api.main._invoke`), on successfully resolving an
+        # existing linked account. It never creates a principal — an
+        # external identity with no linked account fails closed with
+        # `OAuthNoLinkedAccountError`, exactly mirroring how
+        # `bootstrap.create_admin` fails closed once a principal exists.
+        "kortex.security.oauth.get_config",
+        "kortex.security.oauth.login_begin",
+        "kortex.security.oauth.login_complete",
     }
 )
 """Capabilities permitted to register with `requires_authentication=False` —

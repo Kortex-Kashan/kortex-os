@@ -81,3 +81,12 @@ export function DocumentKnowledgeIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+export function AccountIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...baseProps(props)}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+    </svg>
+  );
+}

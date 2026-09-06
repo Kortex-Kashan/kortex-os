@@ -45,6 +45,9 @@ from kortex.engines.security.exceptions import (
     AuthenticationError,
     AuthorizationDeniedError,
     InvalidSignatureError,
+    OAuthLinkConflictError,
+    OAuthProviderNotConfiguredError,
+    PrincipalAlreadyExistsError,
     SecurityEngineError,
 )
 from kortex.engines.workflow.exceptions import (
@@ -85,6 +88,12 @@ def map_exception(exc: BaseException) -> ErrorMapping:
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
     if isinstance(exc, AuthenticationError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.UNAUTHORIZED)
+    if isinstance(exc, PrincipalAlreadyExistsError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
+    if isinstance(exc, OAuthLinkConflictError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.CONFLICT)
+    if isinstance(exc, OAuthProviderNotConfiguredError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.SERVICE_UNAVAILABLE)
     if isinstance(exc, AIPolicyViolationError):
         return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.UNPROCESSABLE_ENTITY)
     if isinstance(exc, AIGovernanceQuotaExceededError):

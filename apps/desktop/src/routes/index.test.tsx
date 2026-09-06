@@ -72,6 +72,10 @@ const { invokeMock } = vi.hoisted(() => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+// Phase A: LoginScreen's OAuthLoginButtons calls these on mount/click — the
+// real plugins reach into `window.__TAURI_INTERNALS__`, absent in jsdom.
+vi.mock("@tauri-apps/plugin-deep-link", () => ({ onOpenUrl: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: vi.fn() }));
 
 beforeEach(async () => {
   hasSessionResponse = true;

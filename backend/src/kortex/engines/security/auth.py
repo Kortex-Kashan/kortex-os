@@ -53,7 +53,10 @@ Explicit M3 non-goals (see the ratified architecture / implementation plan):
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -69,6 +72,12 @@ from kortex.engines.security.exceptions import (
     BootstrapClosedError,
     BootstrapValidationError,
     InvalidTokenError,
+    OAuthLinkConflictError,
+    OAuthStateError,
+    PasswordPolicyError,
+    PasswordResetError,
+    PrincipalAlreadyExistsError,
+    PrincipalRegistrationValidationError,
     SecurityEngineError,
     SigningKeyError,
     TokenExpiredError,
@@ -76,6 +85,9 @@ from kortex.engines.security.exceptions import (
 from kortex.engines.security.interfaces import IAuthenticationManager, ICryptoProvider
 from kortex.engines.security.models import (
     CryptographicSignature,
+    OAuthIdentityLinkRecord,
+    OAuthStatePayload,
+    PasswordResetTokenRecord,
     PrincipalRecord,
     PrincipalType,
     RolePermissionRecord,
@@ -87,6 +99,15 @@ from kortex.engines.storage.interfaces import IDataStore
 _SIGNING_KEY_LENGTH_BYTES = 32
 _HEX_KEY_LENGTH_CHARS = 64
 _TOKEN_TTL = timedelta(minutes=15)
+_MIN_PASSWORD_LENGTH = 8
+_RESET_TOKEN_TTL = timedelta(minutes=30)
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_OAUTH_STATE_TTL = timedelta(minutes=10)
+# Domain separation: an OAuth `state` payload and a session `TokenPayload`
+# are both signed with the same platform Ed25519 keypair, so a distinct
+# byte prefix ensures one can never be replayed as the other even if their
+# other fields happened to coincide.
+_OAUTH_STATE_DOMAIN_PREFIX = b"oauth-state:"
 
 # M7.1 first-run bootstrap. A fixed, well-known sentinel identity used
 # exclusively as a concurrency mutex (see `bootstrap_first_admin` below) —
@@ -553,6 +574,474 @@ class AuthenticationManager(IAuthenticationManager):
             expires_at_utc=expires_at_utc,
             signature=signature.signature,
         )
+
+    # -- Principal Registration (Phase A: admin-provisioned "Register") ----
+
+    async def register_principal(
+        self,
+        tenant_id: str,
+        principal_id: str,
+        password: str,
+        roles: list[str],
+        email: str | None = None,
+    ) -> None:
+        """Create a new `USER` principal. Admin-only at the capability layer
+        (`SecurityEngine` gates this behind `security:principal:write`).
+
+        Deliberately distinct from `provision_principal`: this is a real
+        "create a user" operation and raises `PrincipalAlreadyExistsError`
+        on a duplicate `(tenant_id, principal_id)` rather than silently
+        no-op'ing — an admin submitting a duplicate username needs to see
+        that conflict, not have it silently swallowed the way
+        `provision_principal`'s own, unrelated system-principal-bootstrap
+        use case requires.
+
+        Raises:
+            PrincipalRegistrationValidationError: Empty tenant/username,
+                empty roles, or a malformed email. Never includes the
+                submitted password.
+            PasswordPolicyError: `password` is shorter than
+                `_MIN_PASSWORD_LENGTH`.
+            PrincipalAlreadyExistsError: A principal already exists at
+                `(tenant_id, principal_id, USER)`.
+        """
+        if not (isinstance(tenant_id, str) and tenant_id.strip()):
+            raise PrincipalRegistrationValidationError("A tenant ID is required.")
+        if not (isinstance(principal_id, str) and principal_id.strip()):
+            raise PrincipalRegistrationValidationError("A username is required.")
+        if not roles:
+            raise PrincipalRegistrationValidationError("At least one role is required.")
+        if email is not None and not _EMAIL_PATTERN.match(email):
+            raise PrincipalRegistrationValidationError("The email address is not valid.")
+        if not isinstance(password, str) or len(password) < _MIN_PASSWORD_LENGTH:
+            raise PasswordPolicyError(f"Password must be at least {_MIN_PASSWORD_LENGTH} characters.")
+
+        credential_hash = self._password_hasher.hash(password)
+
+        async def _action(session: AsyncSession) -> None:
+            stmt = select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == tenant_id,
+                PrincipalRecord.principal_id == principal_id,
+                PrincipalRecord.principal_type == PrincipalType.USER.value,
+            )
+            res = await session.execute(stmt)
+            if res.scalar_one_or_none() is not None:
+                raise PrincipalAlreadyExistsError(
+                    f"A principal already exists for tenant '{tenant_id}' with username '{principal_id}'."
+                )
+            session.add(
+                PrincipalRecord(
+                    id=str(uuid.uuid4()),
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    principal_type=PrincipalType.USER.value,
+                    enabled=True,
+                    credential_hash=credential_hash,
+                    roles=list(roles),
+                    attributes={},
+                    email=email,
+                )
+            )
+
+        await self._run_in_transaction(_action)
+
+    async def set_email(self, tenant_id: str, principal_id: str, principal_type: str, email: str) -> None:
+        """Set or replace the caller's own contact email (self-service,
+        used by Account settings), consulted only by the password-reset
+        look-up. Raises `PrincipalRegistrationValidationError` for a
+        malformed address, `AuthenticationError` (generic, matching
+        `authenticate()`'s own precedent) if the principal cannot be found.
+        """
+        if not _EMAIL_PATTERN.match(email):
+            raise PrincipalRegistrationValidationError("The email address is not valid.")
+
+        async def _action(session: AsyncSession) -> None:
+            stmt = select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == tenant_id,
+                PrincipalRecord.principal_id == principal_id,
+                PrincipalRecord.principal_type == principal_type,
+            )
+            res = await session.execute(stmt)
+            record = res.scalar_one_or_none()
+            if record is None:
+                raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+            record.email = email
+
+        await self._run_in_transaction(_action)
+
+    # -- Password Change / Reset (Phase A) ----------------------------------
+
+    async def change_password(
+        self,
+        tenant_id: str,
+        principal_id: str,
+        principal_type: str,
+        current_password: str,
+        new_password: str,
+    ) -> None:
+        """Change a principal's own password after verifying the current one.
+
+        Raises:
+            AuthenticationError: `current_password` does not verify —
+                identical, generic failure message to `authenticate()`
+                (never reveals whether the principal exists vs. the
+                password is simply wrong).
+            PasswordPolicyError: `new_password` is shorter than
+                `_MIN_PASSWORD_LENGTH`.
+        """
+        if not isinstance(new_password, str) or len(new_password) < _MIN_PASSWORD_LENGTH:
+            raise PasswordPolicyError(f"Password must be at least {_MIN_PASSWORD_LENGTH} characters.")
+
+        snapshot = await self._load_principal(tenant_id, principal_id, principal_type)
+        if snapshot is None or not snapshot.enabled or not snapshot.credential_hash:
+            raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+        if not self._verify_credential(current_password, snapshot.credential_hash):
+            raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+
+        new_hash = self._password_hasher.hash(new_password)
+
+        async def _action(session: AsyncSession) -> None:
+            stmt = select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == tenant_id,
+                PrincipalRecord.principal_id == principal_id,
+                PrincipalRecord.principal_type == principal_type,
+            )
+            res = await session.execute(stmt)
+            record = res.scalar_one_or_none()
+            if record is None:
+                raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+            record.credential_hash = new_hash
+
+        await self._run_in_transaction(_action)
+
+    async def request_password_reset(self, email: str) -> str | None:
+        """Look up a principal by `email` and, if found, create a single-use
+        reset token. Returns the **raw** token to the caller (`SecurityEngine`
+        hands it to the configured `IEmailProvider`; it is never persisted
+        or returned any further than that) — or `None` if no principal has
+        that email on record.
+
+        Deliberately does not raise or otherwise distinguish "no match" from
+        "match found" in any externally observable way: the caller
+        (`SecurityEngine.request_password_reset_capability`) must present
+        the identical generic response regardless of this method's return
+        value, mirroring `authenticate()`'s own enumeration-resistance
+        discipline.
+        """
+
+        async def _find(session: AsyncSession) -> _PrincipalSnapshot | None:
+            stmt = select(PrincipalRecord).where(PrincipalRecord.email == email, PrincipalRecord.enabled.is_(True))
+            res = await session.execute(stmt)
+            record = res.scalar_one_or_none()
+            if record is None:
+                return None
+            return _PrincipalSnapshot(
+                principal_id=record.principal_id,
+                principal_type=record.principal_type,
+                tenant_id=record.tenant_id,
+                enabled=record.enabled,
+                credential_hash=record.credential_hash,
+                roles=list(record.roles),
+                attributes=dict(record.attributes),
+            )
+
+        snapshot = cast(_PrincipalSnapshot | None, await self._run_in_transaction(_find))
+        if snapshot is None:
+            return None
+
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        issued_at = datetime.now(UTC)
+        expires_at = issued_at + _RESET_TOKEN_TTL
+
+        async def _store(session: AsyncSession) -> None:
+            session.add(
+                PasswordResetTokenRecord(
+                    id=str(uuid.uuid4()),
+                    tenant_id=snapshot.tenant_id,
+                    principal_id=snapshot.principal_id,
+                    principal_type=snapshot.principal_type,
+                    token_hash=token_hash,
+                    expires_at_utc=expires_at,
+                    used_at_utc=None,
+                )
+            )
+
+        await self._run_in_transaction(_store)
+        return raw_token
+
+    async def reset_password(self, token: str, new_password: str) -> None:
+        """Redeem a single-use password-reset token, setting `new_password`.
+
+        Raises:
+            PasswordResetError: The token is missing/malformed/unknown,
+                expired, or already used. Never distinguishes which.
+            PasswordPolicyError: `new_password` is shorter than
+                `_MIN_PASSWORD_LENGTH`.
+        """
+        if not isinstance(token, str) or not token:
+            raise PasswordResetError("This password reset link is invalid or has expired.")
+        if not isinstance(new_password, str) or len(new_password) < _MIN_PASSWORD_LENGTH:
+            raise PasswordPolicyError(f"Password must be at least {_MIN_PASSWORD_LENGTH} characters.")
+
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        new_hash = self._password_hasher.hash(new_password)
+
+        async def _action(session: AsyncSession) -> None:
+            stmt = select(PasswordResetTokenRecord).where(PasswordResetTokenRecord.token_hash == token_hash)
+            res = await session.execute(stmt)
+            reset_record = res.scalar_one_or_none()
+            if reset_record is None or reset_record.used_at_utc is not None:
+                raise PasswordResetError("This password reset link is invalid or has expired.")
+
+            # SQLite round-trips a plain `Mapped[datetime]` as timezone-naive
+            # regardless of what was written — normalize to aware-UTC before
+            # comparing against `datetime.now(UTC)` (naive-vs-aware raises
+            # `TypeError`, not a clean bool, mirroring the exact hazard
+            # `verify_token` already guards against for `TokenPayload`).
+            expires_at = reset_record.expires_at_utc
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at < datetime.now(UTC):
+                raise PasswordResetError("This password reset link is invalid or has expired.")
+
+            principal_stmt = select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == reset_record.tenant_id,
+                PrincipalRecord.principal_id == reset_record.principal_id,
+                PrincipalRecord.principal_type == reset_record.principal_type,
+            )
+            principal_res = await session.execute(principal_stmt)
+            principal_record = principal_res.scalar_one_or_none()
+            if principal_record is None or not principal_record.enabled:
+                raise PasswordResetError("This password reset link is invalid or has expired.")
+
+            principal_record.credential_hash = new_hash
+            reset_record.used_at_utc = datetime.now(UTC)
+
+        await self._run_in_transaction(_action)
+
+    # -- OAuth (Phase A: Google/Microsoft sign-in for an existing account) --
+
+    @staticmethod
+    def _build_oauth_state_signing_payload(state: OAuthStatePayload) -> bytes:
+        parts = (
+            state.nonce,
+            state.provider,
+            state.intent,
+            state.tenant_id or "",
+            state.principal_id or "",
+            state.principal_type or "",
+            state.issued_at_utc.isoformat(),
+            state.expires_at_utc.isoformat(),
+        )
+        encoded = _OAUTH_STATE_DOMAIN_PREFIX
+        for part in parts:
+            part_bytes = part.encode("utf-8")
+            encoded += len(part_bytes).to_bytes(4, "big") + part_bytes
+        return encoded
+
+    async def issue_oauth_state(
+        self,
+        provider: str,
+        intent: str,
+        tenant_id: str | None = None,
+        principal_id: str | None = None,
+        principal_type: str | None = None,
+    ) -> OAuthStatePayload:
+        """Issue a short-lived (10-minute), signed OAuth `state` payload.
+
+        Self-contained and self-validating, exactly like `issue_token` —
+        never persisted, never looked up server-side on the callback. For
+        `intent="link"`, `tenant_id`/`principal_id`/`principal_type` capture
+        the already-authenticated caller who initiated the flow, signed
+        alongside the rest of the payload so the callback cannot be
+        redirected to link a different principal than the one who started it.
+        """
+        issued_at_utc = datetime.now(UTC)
+        state = OAuthStatePayload(
+            nonce=secrets.token_urlsafe(16),
+            provider=provider,
+            intent=intent,
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+            principal_type=principal_type,
+            issued_at_utc=issued_at_utc,
+            expires_at_utc=issued_at_utc + _OAUTH_STATE_TTL,
+        )
+        payload_bytes = self._build_oauth_state_signing_payload(state)
+        signature = self._verification_service.sign(payload_bytes, self._signing_private_key, self._signing_public_key)
+        return state.model_copy(update={"signature": signature.signature})
+
+    async def verify_oauth_state(self, state: OAuthStatePayload) -> OAuthStatePayload:
+        """Verify a signed OAuth `state` payload's signature and expiry.
+
+        Raises `OAuthStateError` (never a more specific exception) for any
+        failure reason — missing signature, tampered claims, or expiry —
+        matching `PasswordResetError`'s "never distinguish which" precedent.
+        """
+        if state.signature is None:
+            raise OAuthStateError("This sign-in attempt is invalid or has expired.")
+
+        payload_bytes = self._build_oauth_state_signing_payload(state)
+        signature_model = CryptographicSignature(
+            algorithm="ed25519", signature=state.signature, public_key=self._signing_public_key
+        )
+        try:
+            self._verification_service.verify_signature_strict(payload_bytes, signature_model)
+        except Exception as exc:
+            raise OAuthStateError("This sign-in attempt is invalid or has expired.") from exc
+
+        now = datetime.now(UTC)
+        try:
+            is_temporally_invalid = now > state.expires_at_utc or now < state.issued_at_utc
+        except TypeError:
+            is_temporally_invalid = True
+        if is_temporally_invalid:
+            raise OAuthStateError("This sign-in attempt is invalid or has expired.")
+
+        return state
+
+    async def resolve_oauth_link(self, provider: str, external_subject: str) -> SecurityPrincipal | None:
+        """Look up the KORTEX principal linked to `(provider, external_subject)`.
+
+        Returns `None` if no link exists or the linked principal is
+        disabled/deleted — the caller (`SecurityEngine`) treats this as an
+        honest "no linked account" outcome, never an error, and never
+        auto-creates a principal (OAuth is a second sign-in method for an
+        existing account, not a registration path).
+        """
+
+        async def _action(session: AsyncSession) -> _PrincipalSnapshot | None:
+            link_stmt = select(OAuthIdentityLinkRecord).where(
+                OAuthIdentityLinkRecord.provider == provider,
+                OAuthIdentityLinkRecord.external_subject == external_subject,
+            )
+            link = (await session.execute(link_stmt)).scalar_one_or_none()
+            if link is None:
+                return None
+            principal_stmt = select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == link.tenant_id,
+                PrincipalRecord.principal_id == link.principal_id,
+                PrincipalRecord.principal_type == link.principal_type,
+            )
+            record = (await session.execute(principal_stmt)).scalar_one_or_none()
+            if record is None or not record.enabled:
+                return None
+            return _PrincipalSnapshot(
+                principal_id=record.principal_id,
+                principal_type=record.principal_type,
+                tenant_id=record.tenant_id,
+                enabled=record.enabled,
+                credential_hash=record.credential_hash,
+                roles=list(record.roles),
+                attributes=dict(record.attributes),
+            )
+
+        snapshot = cast(_PrincipalSnapshot | None, await self._run_in_transaction(_action))
+        if snapshot is None:
+            return None
+        return SecurityPrincipal(
+            principal_id=snapshot.principal_id,
+            principal_type=PrincipalType(snapshot.principal_type),
+            tenant_id=snapshot.tenant_id,
+            roles=list(snapshot.roles),
+            attributes=dict(snapshot.attributes),
+        )
+
+    async def link_oauth_identity(
+        self,
+        tenant_id: str,
+        principal_id: str,
+        principal_type: str,
+        provider: str,
+        external_subject: str,
+    ) -> None:
+        """Link an external OAuth identity to an already-authenticated
+        principal (self-service, from Account settings).
+
+        Raises `OAuthLinkConflictError` if `external_subject` is already
+        linked to a *different* principal — never silently reassigned.
+        Replaces (rather than duplicates) an existing link this same
+        principal already has for `provider`, so re-linking the identical
+        provider is idempotent.
+        """
+
+        async def _action(session: AsyncSession) -> None:
+            conflict_stmt = select(OAuthIdentityLinkRecord).where(
+                OAuthIdentityLinkRecord.provider == provider,
+                OAuthIdentityLinkRecord.external_subject == external_subject,
+            )
+            conflict = (await session.execute(conflict_stmt)).scalar_one_or_none()
+            if conflict is not None and (
+                conflict.tenant_id != tenant_id
+                or conflict.principal_id != principal_id
+                or conflict.principal_type != principal_type
+            ):
+                raise OAuthLinkConflictError(
+                    f"This {provider} account is already linked to a different KORTEX user."
+                )
+            if conflict is not None:
+                return  # Already linked identically — idempotent no-op.
+
+            own_stmt = select(OAuthIdentityLinkRecord).where(
+                OAuthIdentityLinkRecord.tenant_id == tenant_id,
+                OAuthIdentityLinkRecord.principal_id == principal_id,
+                OAuthIdentityLinkRecord.principal_type == principal_type,
+                OAuthIdentityLinkRecord.provider == provider,
+            )
+            own = (await session.execute(own_stmt)).scalar_one_or_none()
+            if own is not None:
+                await session.delete(own)
+                await session.flush()
+
+            session.add(
+                OAuthIdentityLinkRecord(
+                    id=str(uuid.uuid4()),
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    provider=provider,
+                    external_subject=external_subject,
+                    linked_at=datetime.now(UTC),
+                )
+            )
+
+        await self._run_in_transaction(_action)
+
+    async def unlink_oauth_identity(
+        self, tenant_id: str, principal_id: str, principal_type: str, provider: str
+    ) -> bool:
+        """Remove the caller's own link for `provider`, if any. Returns
+        `True` if a link was removed, `False` if none existed."""
+
+        async def _action(session: AsyncSession) -> bool:
+            stmt = select(OAuthIdentityLinkRecord).where(
+                OAuthIdentityLinkRecord.tenant_id == tenant_id,
+                OAuthIdentityLinkRecord.principal_id == principal_id,
+                OAuthIdentityLinkRecord.principal_type == principal_type,
+                OAuthIdentityLinkRecord.provider == provider,
+            )
+            record = (await session.execute(stmt)).scalar_one_or_none()
+            if record is None:
+                return False
+            await session.delete(record)
+            return True
+
+        return cast(bool, await self._run_in_transaction(_action))
+
+    async def list_oauth_links(self, tenant_id: str, principal_id: str, principal_type: str) -> list[str]:
+        """Return the list of provider names the caller currently has linked."""
+
+        async def _action(session: AsyncSession) -> list[str]:
+            stmt = select(OAuthIdentityLinkRecord.provider).where(
+                OAuthIdentityLinkRecord.tenant_id == tenant_id,
+                OAuthIdentityLinkRecord.principal_id == principal_id,
+                OAuthIdentityLinkRecord.principal_type == principal_type,
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return list(rows)
+
+        return cast(list[str], await self._run_in_transaction(_action))
 
     async def verify_token(self, token: TokenPayload) -> SecurityPrincipal:
         """Verify a session token and return the resolved `SecurityPrincipal`.

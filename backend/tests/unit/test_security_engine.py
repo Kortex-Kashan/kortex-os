@@ -54,6 +54,18 @@ _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.secret.put",  # M7.3
     "kortex.security.signature.verify",
     "kortex.security.bootstrap.create_admin",  # M7.1
+    "kortex.security.auth.change_password",  # Phase A
+    "kortex.security.auth.request_password_reset",  # Phase A
+    "kortex.security.auth.reset_password",  # Phase A
+    "kortex.security.principal.register",  # Phase A
+    "kortex.security.principal.set_email",  # Phase A
+    "kortex.security.oauth.get_config",  # Phase A
+    "kortex.security.oauth.login_begin",  # Phase A
+    "kortex.security.oauth.login_complete",  # Phase A
+    "kortex.security.oauth.link_begin",  # Phase A
+    "kortex.security.oauth.link_complete",  # Phase A
+    "kortex.security.oauth.unlink",  # Phase A
+    "kortex.security.oauth.list_links",  # Phase A
 ]
 _STILL_PLACEHOLDER_CAPABILITY_NAMES = [
     "kortex.security.signature.verify",

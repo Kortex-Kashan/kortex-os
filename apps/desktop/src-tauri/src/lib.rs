@@ -25,6 +25,7 @@ use events::EventRelayState;
 use ipc::{IpcClientState, KeyringTokenStore};
 use sidecar::SidecarSupervision;
 use tauri::Manager;
+use tauri_plugin_deep_link::DeepLinkExt;
 
 /// Set (by the window-close/exit handlers below) *before* they call
 /// `SidecarSupervision::shutdown` — read by `backend_process`'s monitor
@@ -37,7 +38,28 @@ type ShutdownIntentFlag = Arc<AtomicBool>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Phase A: must be the first plugin registered (per
+    // `tauri-plugin-single-instance`'s own documented requirement) —
+    // on Windows, the OS delivers an OAuth `kortex-auth://` callback
+    // as argv to a brand-new process launch rather than an event on
+    // the already-running one; this plugin detects that and forwards
+    // argv to the existing instance's own deep-link handler below
+    // instead, so a pending OAuth flow's in-memory state is never
+    // orphaned in an abandoned second window. The callback here is a
+    // no-op: forwarding alone is enough to trigger `on_open_url`
+    // below in the *original* process. `single-instance` does not
+    // support mobile, hence the `desktop` gate (this app only ships
+    // desktop targets, but the gate matches the plugin's own contract).
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
+    }
+
+    builder
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             ipc::invoke_capability,
             ipc::has_session,
@@ -50,6 +72,23 @@ pub fn run() {
             app.manage(ShutdownIntentFlag::new(AtomicBool::new(false)));
             app.manage(Arc::new(IpcClientState::new(Arc::new(KeyringTokenStore))));
             app.manage(Arc::new(EventRelayState::default()));
+
+            // Phase A: register the `kortex-auth://` scheme with the OS at
+            // runtime (Windows/Linux only — macOS resolves schemes solely
+            // from the bundled Info.plist, and `register_all` on macOS is a
+            // documented no-op). Registering unconditionally in `.setup()`
+            // — not gated behind "first run" — is itself idempotent and
+            // matches this plugin's own documented usage; it re-registers
+            // to the current executable path on every launch, which
+            // matters after an in-place update (`kortex.update.apply`)
+            // moves the binary. The frontend consumes incoming URLs via
+            // `@tauri-apps/plugin-deep-link`'s own `onOpenUrl` listener —
+            // no custom Rust-side relay is needed, the plugin emits its
+            // event directly.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                app.deep_link().register_all()?;
+            }
 
             // M7.1: resolve the real backend command and spawn it —
             // replaces the permanently-`Disabled` supervision state this

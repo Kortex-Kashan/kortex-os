@@ -32,11 +32,38 @@ from kortex.engines.security.models import PrincipalType, SecurityPrincipal
 
 
 def create_sqlite_database(path: Path, table_name: str, sample_text: str) -> None:
-    """Helper to initialize a real SQLite database file."""
+    """Helper to initialize a real SQLite database file, stamped at the
+    baseline Alembic revision (`81d6d64c51ba`) without replicating that
+    revision's entire real schema -- deliberately synthetic/minimal, only
+    enough to exercise the backup/recovery round-trip mechanism itself.
+
+    `security_principals` is included (empty) because Phase A's
+    `e1a2b3c4d5f6` migration is the first to `ALTER TABLE` an existing
+    table rather than only `CREATE TABLE` new ones -- `apply_staged_migration`
+    forward-migrating this fixture to head now requires the table it alters
+    to actually exist, exactly as a real database stamped at `81d6d64c51ba`
+    always would (the baseline revision creates it). No other real
+    baseline table is added here; none of them is targeted by an
+    `ALTER TABLE` migration today.
+    """
     conn = sqlite3.connect(path)
     cur = conn.cursor()
     cur.execute(f"CREATE TABLE {table_name} (id INTEGER PRIMARY KEY, content TEXT);")
     cur.execute(f"INSERT INTO {table_name} (content) VALUES (?);", (sample_text,))  # noqa: S608
+    cur.execute(
+        "CREATE TABLE security_principals ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "tenant_id VARCHAR(64) NOT NULL, "
+        "principal_id VARCHAR(255) NOT NULL, "
+        "principal_type VARCHAR(32) NOT NULL, "
+        "enabled BOOLEAN NOT NULL, "
+        "credential_hash VARCHAR(512), "
+        "roles TEXT NOT NULL, "
+        "attributes TEXT NOT NULL, "
+        "created_at DATETIME, "
+        "updated_at DATETIME"
+        ");"
+    )
     cur.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL);")
     cur.execute("INSERT INTO alembic_version (version_num) VALUES ('81d6d64c51ba');")
     conn.commit()

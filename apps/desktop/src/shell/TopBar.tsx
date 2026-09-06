@@ -86,7 +86,7 @@ export function TopBar() {
             <DropdownMenuItem onSelect={toggleTheme}>
               {theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
             </DropdownMenuItem>
-            <DropdownMenuItem disabled>Profile</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => navigate("/account")}>Account</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void auth.logout()}>Sign out</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

@@ -12,6 +12,9 @@ import {
 } from "@kortex/design-system";
 
 import { useAuth } from "./AuthProvider";
+import { ForgotPasswordForm } from "./ForgotPasswordForm";
+import { OAuthLoginButtons } from "./OAuthLoginButtons";
+import { ResetPasswordForm } from "./ResetPasswordForm";
 import { EyeIcon, EyeOffIcon } from "./icons";
 
 /**
@@ -31,6 +34,8 @@ import { EyeIcon, EyeOffIcon } from "./icons";
  */
 export function LoginScreen() {
   const auth = useAuth();
+  const [view, setView] = React.useState<"login" | "forgot" | "reset">("login");
+  const [resetSuccessMessage, setResetSuccessMessage] = React.useState<string | null>(null);
   const [tenantId, setTenantId] = React.useState("");
   const [principalId, setPrincipalId] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -82,6 +87,18 @@ export function LoginScreen() {
       </div>
 
       <Card className="w-full max-w-sm">
+        {view === "forgot" ? (
+          <ForgotPasswordForm onBack={() => setView("login")} onGoToReset={() => setView("reset")} />
+        ) : view === "reset" ? (
+          <ResetPasswordForm
+            onBack={() => setView("login")}
+            onResetSuccess={() => {
+              setResetSuccessMessage("Your password has been reset. Sign in with your new password.");
+              setView("login");
+            }}
+          />
+        ) : (
+          <>
         <CardHeader>
           <CardTitle>Sign in</CardTitle>
           <CardDescription>Enter your tenant, username, and password to continue.</CardDescription>
@@ -116,7 +133,17 @@ export function LoginScreen() {
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="login-password">Password</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="login-password">Password</Label>
+                <button
+                  type="button"
+                  onClick={() => setView("forgot")}
+                  disabled={isAuthenticating}
+                  className="text-caption text-muted-foreground underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Forgot password?
+                </button>
+              </div>
               <div className="relative">
                 <Input
                   id="login-password"
@@ -141,6 +168,12 @@ export function LoginScreen() {
               </div>
             </div>
 
+            {resetSuccessMessage && (
+              <p role="status" className="text-body text-foreground">
+                {resetSuccessMessage}
+              </p>
+            )}
+
             {auth.state.status === "AUTHENTICATION_ERROR" && (
               <p role="alert" className="text-body text-destructive">
                 {auth.state.message}
@@ -161,8 +194,19 @@ export function LoginScreen() {
                 "Sign In"
               )}
             </Button>
+            <OAuthLoginButtons />
+            <button
+              type="button"
+              onClick={() => setView("reset")}
+              disabled={isAuthenticating}
+              className="self-center text-caption text-muted-foreground underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Have a reset token? Reset your password
+            </button>
           </form>
         </CardContent>
+          </>
+        )}
       </Card>
     </div>
   );

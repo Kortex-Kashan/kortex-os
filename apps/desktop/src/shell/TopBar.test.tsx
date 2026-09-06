@@ -84,11 +84,29 @@ describe("TopBar", () => {
     // AUTHENTICATED.
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.getByText("Switch to dark theme")).toBeInTheDocument();
-    expect(screen.getByText("Profile").closest("[role=menuitem]")).toHaveAttribute(
+    // Phase A: "Profile" was renamed "Account" and wired to a real route —
+    // no longer a permanent placeholder.
+    expect(screen.getByText("Account").closest("[role=menuitem]")).not.toHaveAttribute(
       "data-disabled",
     );
     expect(screen.getByText("Sign out").closest("[role=menuitem]")).not.toHaveAttribute(
       "data-disabled",
     );
+  });
+
+  it("navigates to /account when the Account menu item is selected", async () => {
+    renderTopBar();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "User menu" }), {
+      button: 0,
+      pointerId: 1,
+    });
+    fireEvent.click(await screen.findByText("Account"));
+
+    // The memory router has no "/account" route registered in this
+    // standalone render, so a genuine navigation renders react-router's
+    // own default error boundary rather than TopBar itself — proving the
+    // click actually triggered navigation instead of doing nothing.
+    expect(await screen.findByText("404 Not Found")).toBeInTheDocument();
   });
 });

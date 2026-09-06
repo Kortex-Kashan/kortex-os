@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { IpcResultEnvelope } from "@/ipc/client";
 
-import { checkStoredSession, classifyIpcFailure, login } from "./authCapability";
+import { checkStoredSession, classifyIpcFailure, login, requestPasswordReset, resetPassword } from "./authCapability";
 
 const { invokeCapabilityMock } = vi.hoisted(() => ({ invokeCapabilityMock: vi.fn() }));
 
@@ -167,6 +167,100 @@ describe("checkStoredSession", () => {
   it("returns BACKEND_UNAVAILABLE when invokeCapability rejects outright", async () => {
     invokeCapabilityMock.mockRejectedValueOnce(new Error("tauri ipc failure"));
     expect(await checkStoredSession()).toBe("BACKEND_UNAVAILABLE");
+  });
+});
+
+describe("requestPasswordReset", () => {
+  it("calls kortex.security.auth.request_password_reset with the email", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(envelope({ payload: { result: { message: "generic message" } } }));
+
+    await requestPasswordReset({ email: "alice@example.com" });
+
+    expect(invokeCapabilityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityName: "kortex.security.auth.request_password_reset",
+        parameters: { email: "alice@example.com" },
+      }),
+    );
+  });
+
+  it("resolves ok:true with the identical generic message on SUCCESS", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(
+      envelope({ payload: { result: { message: "If that email is registered, a password reset link has been sent." } } }),
+    );
+
+    const outcome = await requestPasswordReset({ email: "alice@example.com" });
+
+    expect(outcome).toEqual({
+      ok: true,
+      message: "If that email is registered, a password reset link has been sent.",
+    });
+  });
+
+  it("resolves ok:true with the generic message even on a non-transport FAILURE — never distinguishing match from no-match", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(
+      envelope({ status: "FAILURE", errors: [{ category: "EXECUTION_FAILED", message: "x", correlationId: "c" }] }),
+    );
+
+    const outcome = await requestPasswordReset({ email: "nobody@example.com" });
+
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("resolves BACKEND_UNAVAILABLE when invokeCapability rejects outright", async () => {
+    invokeCapabilityMock.mockRejectedValueOnce(new Error("tauri ipc failure"));
+
+    const outcome = await requestPasswordReset({ email: "alice@example.com" });
+
+    expect(outcome).toEqual({ ok: false, kind: "BACKEND_UNAVAILABLE", message: expect.any(String) });
+  });
+});
+
+describe("resetPassword", () => {
+  it("calls kortex.security.auth.reset_password with snake_case parameters", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(envelope({ payload: { result: { reset: true } } }));
+
+    await resetPassword({ token: "the-token", newPassword: "brand-new-password" });
+
+    expect(invokeCapabilityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityName: "kortex.security.auth.reset_password",
+        parameters: { token: "the-token", new_password: "brand-new-password" },
+      }),
+    );
+  });
+
+  it("resolves ok:true on SUCCESS", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(envelope({ payload: { result: { reset: true } } }));
+    const outcome = await resetPassword({ token: "the-token", newPassword: "brand-new-password" });
+    expect(outcome).toEqual({ ok: true });
+  });
+
+  it("resolves INVALID_TOKEN surfacing the backend's message on FAILURE", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(
+      envelope({
+        status: "FAILURE",
+        errors: [
+          { category: "PERMISSION_DENIED", message: "This password reset link is invalid or has expired.", correlationId: "c" },
+        ],
+      }),
+    );
+
+    const outcome = await resetPassword({ token: "bad-token", newPassword: "brand-new-password" });
+
+    expect(outcome).toEqual({
+      ok: false,
+      kind: "INVALID_TOKEN",
+      message: "This password reset link is invalid or has expired.",
+    });
+  });
+
+  it("resolves BACKEND_UNAVAILABLE when invokeCapability rejects outright", async () => {
+    invokeCapabilityMock.mockRejectedValueOnce(new Error("tauri ipc failure"));
+
+    const outcome = await resetPassword({ token: "the-token", newPassword: "brand-new-password" });
+
+    expect(outcome).toEqual({ ok: false, kind: "BACKEND_UNAVAILABLE", message: expect.any(String) });
   });
 });
 

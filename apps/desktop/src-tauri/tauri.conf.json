@@ -21,6 +21,13 @@
       }
     ]
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["kortex-auth"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "icon": [

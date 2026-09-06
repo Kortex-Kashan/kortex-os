@@ -12,6 +12,10 @@ import { App } from "./App";
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+// Phase A: LoginScreen's OAuthLoginButtons calls these on mount/click — the
+// real plugins reach into `window.__TAURI_INTERNALS__`, absent in jsdom.
+vi.mock("@tauri-apps/plugin-deep-link", () => ({ onOpenUrl: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: vi.fn() }));
 
 // M7.1: `AuthProvider`'s startup effect now gates the whole session check
 // behind a real (bounded-retry) `get_system_health` poll first

@@ -33,6 +33,18 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # effect on non-Windows builds and does not claim macOS/Linux native
 # support (OD-DI-3 scope: Windows is the only released target).
 keyring = { version = "3", features = ["windows-native"] }
+# Phase A (post-RC authentication completion): OAuth sign-in (Google/
+# Microsoft) callback handling. `deep-link` opens `kortex-auth://` URLs
+# into this app; `single-instance` is required alongside it on Windows,
+# where the OS delivers a deep link as argv to a *new* process launch
+# rather than an event on the already-running one — this plugin detects
+# that and forwards argv to the existing instance instead, so the pending
+# OAuth flow's in-memory state is never orphaned in an abandoned second
+# window. Neither plugin adds a second process supervisor: both operate
+# entirely within Tauri's own existing single lifecycle owner.
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-shell = "2"
 # M7.1: platform CSPRNG for persistent master/signing key generation
 # (`secure_keys.rs`) — already present transitively (pulled in by several
 # existing dependencies); added directly here rather than relying on that

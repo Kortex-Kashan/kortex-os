@@ -6,9 +6,13 @@
 // constraint.
 
 import { invokeCapability, type IpcResultEnvelope } from "@/ipc/client";
-import type { AuthIdentity, LoginCredentials } from "./authTypes";
+import type { AuthIdentity, LoginCredentials, PasswordResetInput, PasswordResetRequestInput } from "./authTypes";
 
 const AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate";
+// Phase A: bootstrap-exempt, reachable while signed out — see
+// `backend/src/kortex/engines/registry/engine.py`'s `_BOOTSTRAP_EXEMPT_CAPABILITIES`.
+const REQUEST_PASSWORD_RESET_CAPABILITY = "kortex.security.auth.request_password_reset";
+const RESET_PASSWORD_CAPABILITY = "kortex.security.auth.reset_password";
 
 /**
  * `kortex.security.signature.verify` (Security Engine, M6) — used here
@@ -149,6 +153,81 @@ export async function checkStoredSession(): Promise<SessionCheckResult> {
     return "VALID";
   }
   return "BACKEND_UNAVAILABLE";
+}
+
+export type PasswordResetRequestOutcome =
+  | { ok: true; message: string }
+  | { ok: false; kind: "BACKEND_UNAVAILABLE"; message: string };
+
+/**
+ * Calls `kortex.security.auth.request_password_reset` (Phase A). Always
+ * resolves `ok: true` with the identical generic message on a real
+ * `SUCCESS` envelope — the backend itself never reveals whether `email`
+ * matched a principal, so this wrapper has nothing further to distinguish.
+ * Only a genuinely unreachable backend resolves to `BACKEND_UNAVAILABLE`.
+ */
+export async function requestPasswordReset(input: PasswordResetRequestInput): Promise<PasswordResetRequestOutcome> {
+  let envelope: IpcResultEnvelope;
+  try {
+    envelope = await invokeCapability({
+      requestId: newRequestId(),
+      capabilityName: REQUEST_PASSWORD_RESET_CAPABILITY,
+      parameters: { email: input.email },
+    });
+  } catch {
+    return { ok: false, kind: "BACKEND_UNAVAILABLE", message: "The backend is unreachable." };
+  }
+
+  if (envelope.status === "SUCCESS") {
+    const payload = envelope.payload?.result;
+    const message =
+      payload && typeof payload === "object" && typeof (payload as Record<string, unknown>).message === "string"
+        ? ((payload as Record<string, unknown>).message as string)
+        : "If that email is registered, a password reset link has been sent.";
+    return { ok: true, message };
+  }
+
+  const category = envelope.errors[0]?.category;
+  if (category === "SERVICE_UNAVAILABLE" || category === "TIMEOUT_EXCEEDED") {
+    return { ok: false, kind: "BACKEND_UNAVAILABLE", message: "The backend is unreachable." };
+  }
+  // Any other failure shape still resolves to the identical generic
+  // message a caller would see on success — never distinguishing "no
+  // match" from a backend-side validation quirk to an outside observer.
+  return { ok: true, message: "If that email is registered, a password reset link has been sent." };
+}
+
+export type ResetPasswordOutcome =
+  | { ok: true }
+  | { ok: false; kind: "INVALID_TOKEN"; message: string }
+  | { ok: false; kind: "BACKEND_UNAVAILABLE"; message: string };
+
+/** Calls `kortex.security.auth.reset_password` (Phase A). */
+export async function resetPassword(input: PasswordResetInput): Promise<ResetPasswordOutcome> {
+  let envelope: IpcResultEnvelope;
+  try {
+    envelope = await invokeCapability({
+      requestId: newRequestId(),
+      capabilityName: RESET_PASSWORD_CAPABILITY,
+      parameters: { token: input.token, new_password: input.newPassword },
+    });
+  } catch {
+    return { ok: false, kind: "BACKEND_UNAVAILABLE", message: "The backend is unreachable." };
+  }
+
+  if (envelope.status === "SUCCESS") {
+    return { ok: true };
+  }
+
+  const category = envelope.errors[0]?.category;
+  if (category === "SERVICE_UNAVAILABLE" || category === "TIMEOUT_EXCEEDED") {
+    return { ok: false, kind: "BACKEND_UNAVAILABLE", message: "The backend is unreachable." };
+  }
+  return {
+    ok: false,
+    kind: "INVALID_TOKEN",
+    message: envelope.errors[0]?.message ?? "This password reset link is invalid or has expired.",
+  };
 }
 
 export type IpcFailureKind = "UNAUTHORIZED" | "FORBIDDEN" | "OTHER";

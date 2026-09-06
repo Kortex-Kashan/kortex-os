@@ -64,6 +64,82 @@ class BootstrapValidationError(SecurityEngineError):
     submitted password in its message."""
 
 
+# -- Principal Registration / Password Reset / Change (Phase A) -------------
+
+
+class PrincipalAlreadyExistsError(SecurityEngineError):
+    """Raised by `register_principal` when a principal already exists at the
+    requested `(tenant_id, principal_id, principal_type)` — a genuine
+    conflict an admin needs to see, unlike `provision_principal`'s
+    deliberate silent idempotent no-op for its own, unrelated
+    system-principal-bootstrap use case."""
+
+
+class PrincipalRegistrationValidationError(SecurityEngineError):
+    """Raised when `register_principal` input fails validation (empty
+    tenant/username, empty roles, or a malformed email). Never includes the
+    submitted password."""
+
+
+class PasswordPolicyError(SecurityEngineError):
+    """Raised whenever a submitted new password fails the minimum-length
+    policy — shared across `change_password`, `reset_password`, and
+    `register_principal`. Distinct from `BootstrapValidationError` (which
+    remains scoped to `bootstrap_first_admin` only, unmodified) so this
+    milestone's new methods don't silently repurpose bootstrap's own
+    exception for an unrelated call path. Never includes the submitted
+    password."""
+
+
+class OAuthStateError(AuthenticationError):
+    """Raised when a presented OAuth `state` parameter is missing, malformed,
+    fails signature verification, or has expired (Phase A). A subclass of
+    `AuthenticationError`, matching `PasswordResetError`'s exact precedent —
+    the signed state *is* the credential being verified here."""
+
+
+class OAuthExchangeError(SecurityEngineError):
+    """Raised when exchanging an authorization code, or fetching the
+    external identity, fails against the provider's own endpoints (network
+    failure, invalid/expired code, malformed response). Never includes the
+    authorization code or any token in its message."""
+
+
+class OAuthProviderNotConfiguredError(SecurityEngineError):
+    """Raised when an OAuth flow is attempted for a provider with no
+    configured client ID/secret. The UI is expected to never reach this by
+    disabling the corresponding button per `oauth.get_config`'s report, but
+    the backend still fails closed rather than trusting the frontend gate."""
+
+
+class OAuthLinkConflictError(SecurityEngineError):
+    """Raised when linking would attach an external OAuth identity that is
+    already linked to a *different* KORTEX principal — never silently
+    reassigned or stolen."""
+
+
+class OAuthNoLinkedAccountError(AuthenticationError):
+    """Raised when an `intent="login"` OAuth callback resolves a real
+    external identity that has no linked KORTEX principal. OAuth is a
+    second sign-in method for an existing account, never a self-registration
+    path — this is the honest, explicit outcome rather than silently
+    creating an account or returning a generic authentication failure."""
+
+
+class PasswordResetError(AuthenticationError):
+    """Raised when a presented password-reset token is missing, malformed,
+    expired, or already used.
+
+    A subclass of `AuthenticationError` (not a fresh `SecurityEngineError`
+    subtree), mapping through the existing `PERMISSION_DENIED`/401
+    exception taxonomy exactly like every other "this credential does not
+    grant you anything" identity-layer rejection — the reset token is
+    itself the credential being verified here. Never distinguishes
+    "missing" from "expired" from "already used" in its message
+    (enumeration-resistance precedent, mirroring
+    `_GENERIC_AUTH_FAILURE_MESSAGE`)."""
+
+
 # -- Authorization (Milestone M4) --------------------------------------------
 
 

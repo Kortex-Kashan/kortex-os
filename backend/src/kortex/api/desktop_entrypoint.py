@@ -40,13 +40,16 @@ logger = logging.getLogger("kortex.api.desktop_entrypoint")
 # The *complete* set of tables each migration revision introduces (verified
 # by direct extraction from each revision file's own `upgrade()` body -- not
 # hand-transcribed, and not just one representative table per revision).
-# Order is the actual migration chain, oldest first. Every one of these
-# migrations only ever does `op.create_table` (+ `op.create_index` on a
+# Order is the actual migration chain, oldest first. Every revision through
+# `4c99c2ff7376` only ever does `op.create_table` (+ `op.create_index` on a
 # table it just created in the same migration) -- confirmed by grepping each
-# revision's `upgrade()` for every `op.*` call -- so table-existence is a
-# sufficient (not merely convenient) proxy for "this revision's schema
-# changes are fully present"; there is no `add_column`/`alter_column` this
-# check would need to additionally account for.
+# revision's `upgrade()` for every `op.*` call -- so table-existence alone is
+# a sufficient proxy for those revisions' schema changes being fully
+# present. `e1a2b3c4d5f6` (Phase A) is the first revision that instead does
+# `op.add_column` on an *already-existing* table -- an empty table set here
+# correctly records "no new table," and `_COLUMN_REQUIREMENTS` below is the
+# parallel, column-level check this kind of revision needs that a pure
+# table-existence walk cannot express.
 _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
     (
         "81d6d64c51ba",
@@ -100,7 +103,19 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     ("4c99c2ff7376", frozenset({"ops_vehicles", "ops_vehicle_tracking_records", "ops_incidents"})),
+    ("e1a2b3c4d5f6", frozenset()),
 )
+
+# Column-level counterpart to `_REVISION_CHAIN` for a revision that adds a
+# column to an already-existing table rather than creating a new one --
+# keyed by revision, each value a tuple of `(table, column)` pairs that must
+# ALL already exist for that revision to be considered safely verified
+# present. A revision with no entry here (every revision through
+# `4c99c2ff7376`) has no additional column-level requirement beyond its own
+# table-existence check in `_REVISION_CHAIN`.
+_COLUMN_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "e1a2b3c4d5f6": (("security_principals", "email"),),
+}
 
 
 def is_frozen() -> bool:
@@ -233,29 +248,45 @@ def stamp_revision_for_preexisting_database(db_path: Path) -> None:
         has_recorded_revision = "alembic_version" in existing and bool(
             conn.execute("SELECT 1 FROM alembic_version LIMIT 1").fetchone()
         )
+        if has_recorded_revision:
+            return  # Already stamped -- nothing to do here.
+
+        # Walk the chain oldest-to-newest, accumulating the *complete* table set
+        # each revision requires. `safe_revision` only ever advances past a
+        # revision when every single table it introduces is actually present --
+        # never on the strength of one representative table alone. This is the
+        # deliberate safety property: a database missing even one table from an
+        # otherwise-later-looking revision (a genuinely partial/corrupted legacy
+        # schema) is stamped no further than the last revision that is fully,
+        # completely verified -- never guessed past that point. Whatever gap
+        # remains is then left for the normal `upgrade head` call below to
+        # surface as a loud, diagnosable failure (e.g. "table already exists" for
+        # the subset that *is* present, or a clean create for what's genuinely
+        # missing) -- never silently skipped and never silently mis-stamped.
+        #
+        # A revision with a `_COLUMN_REQUIREMENTS` entry (today, only
+        # `e1a2b3c4d5f6`) additionally requires every one of its
+        # `(table, column)` pairs to already exist on that table -- the
+        # column-level counterpart of the table-level check above, for a
+        # revision whose own `_REVISION_CHAIN` table set is empty because it
+        # alters an existing table rather than creating a new one.
+        safe_revision: str | None = None
+        for revision, new_tables in _REVISION_CHAIN:
+            if not new_tables.issubset(existing):
+                break
+            column_requirements = _COLUMN_REQUIREMENTS.get(revision, ())
+            if column_requirements:
+                missing_column = False
+                for table, column in column_requirements:
+                    table_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                    if column not in table_columns:
+                        missing_column = True
+                        break
+                if missing_column:
+                    break
+            safe_revision = revision
     finally:
         conn.close()
-
-    if has_recorded_revision:
-        return  # Already stamped -- nothing to do here.
-
-    # Walk the chain oldest-to-newest, accumulating the *complete* table set
-    # each revision requires. `safe_revision` only ever advances past a
-    # revision when every single table it introduces is actually present --
-    # never on the strength of one representative table alone. This is the
-    # deliberate safety property: a database missing even one table from an
-    # otherwise-later-looking revision (a genuinely partial/corrupted legacy
-    # schema) is stamped no further than the last revision that is fully,
-    # completely verified -- never guessed past that point. Whatever gap
-    # remains is then left for the normal `upgrade head` call below to
-    # surface as a loud, diagnosable failure (e.g. "table already exists" for
-    # the subset that *is* present, or a clean create for what's genuinely
-    # missing) -- never silently skipped and never silently mis-stamped.
-    safe_revision: str | None = None
-    for revision, new_tables in _REVISION_CHAIN:
-        if not new_tables.issubset(existing):
-            break
-        safe_revision = revision
 
     if safe_revision is None:
         # Not even the baseline's complete table set is present -- either a
