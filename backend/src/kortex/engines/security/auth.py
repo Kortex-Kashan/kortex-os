@@ -977,9 +977,7 @@ class AuthenticationManager(IAuthenticationManager):
                 or conflict.principal_id != principal_id
                 or conflict.principal_type != principal_type
             ):
-                raise OAuthLinkConflictError(
-                    f"This {provider} account is already linked to a different KORTEX user."
-                )
+                raise OAuthLinkConflictError(f"This {provider} account is already linked to a different KORTEX user.")
             if conflict is not None:
                 return  # Already linked identically — idempotent no-op.
 

@@ -20,9 +20,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("security_principals", sa.Column("email", sa.String(length=320), nullable=True))
-    op.create_index(
-        op.f("ix_security_principals_email"), "security_principals", ["email"], unique=True
-    )
+    op.create_index(op.f("ix_security_principals_email"), "security_principals", ["email"], unique=True)
 
 
 def downgrade() -> None:
