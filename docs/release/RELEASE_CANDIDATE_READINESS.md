@@ -2,6 +2,8 @@
 
 **Authoritative RC readiness document.** Produced by the Final Production Reconciliation pass and finalized by the Final RC Ambiguity Resolution & Baseline Freeze pass. For per-work-package implementation detail and acceptance records, see `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`; for roadmap completion status, see `.kortex/roadmap.md`.
 
+> **Manual RC validation:** the test environment and runbook the Chief Architect uses to exercise, stress, and attempt to break this RC live in **[`rc-testing/`](rc-testing/README.md)**. That directory also records defects found while building the environment (`rc-testing/KNOWN_FINDINGS.md`) — including **DEFECT-001 (P1, pre-existing)**, which makes the Backup Engine non-functional on the Windows desktop build. Those findings are captured and classified but deliberately **not fixed**; they are for owner review, and none of them changes the technical-RC determination recorded below without that review.
+
 **Status terminology used here, and nowhere blurred**: `DONE`, `PASS`, `TECHNICAL RC READY`, `OWNER DECISION REQUIRED`, `DEFERRED / POST-RC`, `PUBLIC RELEASE BLOCKER`.
 
 ---
