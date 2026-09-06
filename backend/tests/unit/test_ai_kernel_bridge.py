@@ -50,6 +50,7 @@ class FakeKernel:
         required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
     ) -> dict[str, object]:
         descriptor: dict[str, object] = {
             "name": name,
@@ -61,6 +62,7 @@ class FakeKernel:
             "required_permissions": required_permissions,
             "requires_authentication": requires_authentication,
             "security_classification": security_classification,
+            "requires_execution_context": requires_execution_context,
         }
         self.registered_capabilities[name] = descriptor
         return descriptor

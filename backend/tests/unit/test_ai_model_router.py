@@ -196,8 +196,10 @@ class _LyingIdentityProvider(BaseAIProvider):
         return True
 
 
-def _request() -> LLMRequest:
-    return LLMRequest(request_id="r1", tenant_id="t1", user_id="u1", conversation_id="c1", prompt="hi")
+def _request(model_id: str | None = None) -> LLMRequest:
+    return LLMRequest(
+        request_id="r1", tenant_id="t1", user_id="u1", conversation_id="c1", prompt="hi", model_id=model_id
+    )
 
 
 def _router(*providers: BaseAIProvider) -> tuple[ModelRouter, ProviderRegistry]:
@@ -802,3 +804,115 @@ async def test_routing_never_mutates_the_registry() -> None:
     with pytest.raises(NoRoutableProviderError):
         await router.select_model(_request(), {"endpoint_type": "network"})
     assert [m.provider_id for m in registry.list_providers()] == before
+
+
+# --------------------------------------------------------------------------
+# D1 — model-granular routing (Phase B model channel)
+#
+# The amendment `ai_engine_m3_model_router_spec.md` §18 D1 prescribed:
+# `LLMRequest.model_id` is the model channel, filtered in discovery. These
+# tests pin the safety property §7 demanded — a request for one model can
+# never be served by a provider that would run a different one.
+# --------------------------------------------------------------------------
+
+
+async def test_model_id_routes_to_the_provider_advertising_that_model() -> None:
+    gpt = _FakeProvider("openai", supported_models=["gpt-4o", "gpt-4o-mini"])
+    claude = _FakeProvider("anthropic", supported_models=["claude-sonnet-4"])
+    router, _ = _router(gpt, claude)
+
+    candidates = await router.select_candidates(_request(model_id="claude-sonnet-4"), {})
+
+    assert [m.provider_id for m in candidates] == ["anthropic"]
+
+
+async def test_provider_with_multiple_models_is_selectable_per_model() -> None:
+    """One provider instance, many models — the cloud-provider shape that the
+    pre-D1 one-instance-per-model workaround could not express."""
+    multi = _FakeProvider("openai", supported_models=["gpt-4o", "gpt-4o-mini", "o3"])
+    router, _ = _router(multi)
+
+    for model in ("gpt-4o", "gpt-4o-mini", "o3"):
+        candidates = await router.select_candidates(_request(model_id=model), {})
+        assert [m.provider_id for m in candidates] == ["openai"], model
+        assert model in candidates[0].supported_models
+
+
+async def test_unsupported_model_fails_safely_rather_than_falling_back() -> None:
+    """No candidate must be offered for a model nobody advertises — the
+    request fails loudly instead of being answered by some other model."""
+    router, _ = _router(
+        _FakeProvider("openai", supported_models=["gpt-4o"]),
+        _FakeProvider("ollama-llama3", supported_models=["llama3"]),
+    )
+
+    assert await router.select_candidates(_request(model_id="model-nobody-has"), {}) == []
+    with pytest.raises(NoRoutableProviderError):
+        await router.select_model(_request(model_id="model-nobody-has"), {})
+
+
+async def test_omitted_model_id_preserves_pre_amendment_behavior() -> None:
+    """Backwards compatibility: `None` means no preference, so every provider
+    still qualifies exactly as it did before D1 landed."""
+    a = _FakeProvider("a", supported_models=["m1"])
+    b = _FakeProvider("b", supported_models=["m2"])
+    router, _ = _router(a, b)
+
+    candidates = await router.select_candidates(_request(), {})
+
+    assert {m.provider_id for m in candidates} == {"a", "b"}
+
+
+async def test_fallback_candidates_all_serve_the_requested_model() -> None:
+    """The anti-silent-substitution guarantee (M3 spec §7): every candidate
+    handed to the fallback chain advertises the requested model, so failing
+    over can never quietly execute a different one."""
+    primary = _FakeProvider("primary", supported_models=["shared-model"])
+    secondary = _FakeProvider("secondary", supported_models=["shared-model"])
+    impostor = _FakeProvider("impostor", supported_models=["some-other-model"])
+    router, _ = _router(primary, secondary, impostor)
+
+    candidates = await router.select_candidates(_request(model_id="shared-model"), {})
+
+    assert [m.provider_id for m in candidates] == ["primary", "secondary"]
+    assert all("shared-model" in m.supported_models for m in candidates)
+    assert "impostor" not in [m.provider_id for m in candidates]
+
+
+async def test_pinned_provider_lacking_the_requested_model_raises() -> None:
+    """Pinning is a caller assertion, so an unsatisfiable model pin raises
+    rather than silently returning a provider that runs something else."""
+    router, _ = _router(_FakeProvider("openai", supported_models=["gpt-4o"]))
+
+    with pytest.raises(NoRoutableProviderError):
+        await router.select_candidates(_request(model_id="claude-sonnet-4"), {"provider_id": "openai"})
+
+
+async def test_pinned_provider_with_the_requested_model_resolves() -> None:
+    router, _ = _router(_FakeProvider("openai", supported_models=["gpt-4o", "o3"]))
+
+    candidates = await router.select_candidates(_request(model_id="o3"), {"provider_id": "openai"})
+
+    assert [m.provider_id for m in candidates] == ["openai"]
+
+
+async def test_model_id_still_rejected_in_the_routing_context() -> None:
+    """The context is still not the channel — only the request is. The error
+    must now point the caller at `LLMRequest.model_id`."""
+    router, _ = _router(_FakeProvider("a", supported_models=["m1"]))
+
+    with pytest.raises(RoutingValidationError) as excinfo:
+        await router.select_candidates(_request(), {"model_id": "m1"})
+
+    assert "LLMRequest.model_id" in str(excinfo.value)
+
+
+async def test_model_filter_composes_with_cloud_gating() -> None:
+    """The model filter must not weaken the fail-closed cloud default: a
+    cloud provider serving the model is still excluded without allow_cloud."""
+    cloud = _FakeProvider("openai", endpoint_type="cloud", supported_models=["gpt-4o"])
+    router, _ = _router(cloud)
+
+    assert await router.select_candidates(_request(model_id="gpt-4o"), {}) == []
+    allowed = await router.select_candidates(_request(model_id="gpt-4o"), {"allow_cloud": True})
+    assert [m.provider_id for m in allowed] == ["openai"]

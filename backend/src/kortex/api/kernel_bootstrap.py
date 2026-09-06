@@ -217,6 +217,15 @@ async def build_and_boot_kernel() -> Kernel:
         custom_providers=[ollama_provider],
         registered_engines=list(kernel.get_all_engines().keys()),
         ai_identity=ai_identity,
+        # Phase B / B1d: the AI engine resolves each tenant's provider
+        # credential per request through these two callables. Bound here for
+        # the same reason as `ai_identity` above -- this module is the
+        # composition root that may import `SecurityEngine`, and
+        # `kortex.engines.ai.*` may not. Bound methods, not the engine
+        # itself: the AI engine gets exactly "read one secret" and "write one
+        # secret", not a handle on Security Engine.
+        secret_getter=security_engine.get_secret,
+        secret_putter=security_engine.put_secret,
     )
     kernel.register_engine(ai_engine)
 

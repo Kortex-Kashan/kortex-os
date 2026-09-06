@@ -40,12 +40,12 @@ this sort key and nothing else.
 """
 
 _MODEL_ID_REJECTION = (
-    "Routing context key 'model_id' is not supported. The router selects a "
-    "provider, not a model: LLMRequest carries no model field, so a routed "
-    "model choice cannot reach the provider that executes it, and honouring "
-    "it would risk silently running a different model than requested. "
-    "Model-granular routing requires an additive LLMRequest.model_id field "
-    "(see ai_engine_m3_model_router_spec.md sections 7 and 18/D1)."
+    "Routing context key 'model_id' is not supported. Set the model on the "
+    "request instead: LLMRequest.model_id is the supported model channel "
+    "(the D1 amendment, ai_engine_m3_model_router_spec.md sections 7 and "
+    "18/D1). The request is the channel execution itself uses, so a model "
+    "filtered there is the model the provider actually runs; a context key "
+    "would not reach the provider and could silently run a different model."
 )
 
 
@@ -156,15 +156,16 @@ class ModelRouter:
     async def select_candidates(self, request: LLMRequest, context: dict[str, Any]) -> list[AIProviderMetadata]:
         """Return every qualifying provider, best first.
 
-        `request` is accepted for interface conformance but no field of it is
-        read: `LLMRequest` carries no classification, task type, model, or
-        provider preference. It becomes meaningful when such a field is added
-        additively, which is why the parameter is part of the frozen
-        signature.
+        `request.model_id` (D1) is the one field of `request` this method
+        reads — the amendment the frozen signature was always holding the
+        parameter open for. `None` means "no model preference" and
+        reproduces the pre-amendment behavior exactly.
 
         An explicit pin is treated as a caller assertion — violating it
         raises. Discovery is treated as a query — matching nothing returns an
-        empty list.
+        empty list. That distinction applies to the model filter too: a
+        pinned provider that lacks the requested model raises, while
+        discovery simply yields no candidate.
 
         Raises:
             RoutingValidationError: The routing context is invalid.
@@ -175,11 +176,12 @@ class ModelRouter:
                 `endpoint_type` constraint.
         """
         ctx = _parse_context(context)
+        model_id = request.model_id
 
         if ctx.provider_id is not None:
-            return self._resolve_pinned(ctx, ctx.provider_id)
+            return self._resolve_pinned(ctx, ctx.provider_id, model_id)
 
-        return self._discover(ctx)
+        return self._discover(ctx, model_id)
 
     async def select_model(self, request: LLMRequest, context: dict[str, Any]) -> AIProviderMetadata:
         """Return the single best-ranked qualifying provider.
@@ -201,12 +203,19 @@ class ModelRouter:
             raise NoRoutableProviderError(f"No routable AI provider matched the routing constraints.{hint}")
         return candidates[0]
 
-    def _resolve_pinned(self, ctx: RoutingContext, pinned_id: str) -> list[AIProviderMetadata]:
+    def _resolve_pinned(
+        self, ctx: RoutingContext, pinned_id: str, model_id: str | None = None
+    ) -> list[AIProviderMetadata]:
         """Resolve an explicitly pinned provider, or raise explaining why not.
 
         `allow_cloud` is deliberately not consulted: naming a provider is
         itself the explicit, conscious placement decision that the
         cloud-egress default exists to force.
+
+        A pinned provider that does not advertise `model_id` raises rather
+        than silently returning a provider that would run some other model
+        (D1, M3 spec §7). Pinning is a caller assertion, so violating it is
+        an error — matching how an unsatisfied `endpoint_type` pin behaves.
         """
         provider = self._registry.get(pinned_id)
         metadata = provider.metadata  # single authoritative read
@@ -224,9 +233,13 @@ class ModelRouter:
                 f"Provider '{pinned_id}' has endpoint type '{metadata.endpoint_type}', "
                 f"which does not satisfy the requested '{ctx.endpoint_type}'."
             )
+        if model_id is not None and model_id not in metadata.supported_models:
+            raise NoRoutableProviderError(
+                f"Provider '{pinned_id}' does not advertise the requested model; it cannot serve this request."
+            )
         return [metadata]
 
-    def _discover(self, ctx: RoutingContext) -> list[AIProviderMetadata]:
+    def _discover(self, ctx: RoutingContext, model_id: str | None = None) -> list[AIProviderMetadata]:
         """Enumerate, filter, and rank every qualifying registered provider."""
         enumerated_ids = _dedupe_preserving_order(
             [metadata.provider_id for metadata in self._registry.list_providers()]
@@ -252,6 +265,13 @@ class ModelRouter:
                     continue
             elif metadata.endpoint_type == "cloud" and not ctx.allow_cloud:
                 # Fail closed: absent an explicit decision, data never leaves the premises.
+                continue
+
+            # D1 model filter. Every surviving candidate advertises the
+            # requested model, so the fallback chain can only ever try
+            # providers that serve *that* model — a fallback can never
+            # silently substitute a different one (M3 spec §7).
+            if model_id is not None and model_id not in metadata.supported_models:
                 continue
 
             candidates.append(metadata)

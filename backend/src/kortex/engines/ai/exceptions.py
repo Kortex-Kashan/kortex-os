@@ -24,6 +24,18 @@ class AIBootstrapError(AIOrchestrationError):
     """Raised when runtime bootstrap, dependency assembly, or startup validation fails."""
 
 
+class AIEngineNotConfiguredError(AIOrchestrationError):
+    """A capability needs a collaborator the engine was constructed without.
+
+    Phase B: the provider-configuration capabilities require a
+    `provider_config_store` and, to store a credential, a `secret_putter`.
+    When composition did not supply them the capability fails explicitly
+    rather than appearing to succeed -- a "configure provider" call that
+    silently stored nothing would leave the tenant believing their key is
+    saved, which is exactly the fake-completeness this platform forbids.
+    """
+
+
 class AIProviderError(AIOrchestrationError):
     """Base exception for AI provider adapter errors.
 
@@ -294,6 +306,7 @@ class AIGovernanceApprovalRequiredError(AIGovernanceError):
 
 __all__ = [
     "AIBootstrapError",
+    "AIEngineNotConfiguredError",
     "AIGovernanceApprovalRequiredError",
     "AIGovernanceError",
     "AIGovernanceNotFoundError",

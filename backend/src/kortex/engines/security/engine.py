@@ -176,8 +176,12 @@ _CANONICAL_CAPABILITIES: list[tuple[str, str]] = [
 # Security — Capability Identity Propagation) — never from a caller-supplied
 # parameter. `change_password`/`set_email` act on the caller's own identity;
 # `register` needs the caller's tenant to scope the new principal to.
+#
+# Phase B adds `secret.get`: it must decrypt under the caller's REAL tenant,
+# never a tenant named in `request.parameters` (see `get_secret_capability`).
 _EXECUTION_CONTEXT_REQUIRED_CAPABILITIES = frozenset(
     {
+        _SECRET_GET_CAPABILITY,
         _AUTH_CHANGE_PASSWORD_CAPABILITY,
         _PRINCIPAL_REGISTER_CAPABILITY,
         _PRINCIPAL_SET_EMAIL_CAPABILITY,
@@ -382,8 +386,13 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
             for capability_name, description in _CANONICAL_CAPABILITIES:
                 requires_authentication = True
                 if capability_name == _SECRET_GET_CAPABILITY:
-                    handler: Callable[..., Any] = self._secret_store.get_secret
-                    capability_description = f"{description} Encrypted, fail-closed (Milestone M2)."
+                    # Phase B / B-3: was `self._secret_store.get_secret`
+                    # bound directly, which made the caller-supplied
+                    # `tenant_id` authoritative. See `get_secret_capability`.
+                    handler: Callable[..., Any] = self.get_secret_capability
+                    capability_description = (
+                        f"{description} Encrypted, fail-closed, tenant-bound to the verified caller (M2 + Phase B)."
+                    )
                 elif capability_name == _SECRET_PUT_CAPABILITY:
                     handler = self.put_secret_capability
                     capability_description = f"{description} Encrypted, tenant-scoped, audited (Milestone M7.3)."
@@ -917,6 +926,91 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         """Encrypt and persist a secret under a handle."""
         return await self.secret_store.put_secret(secret_handle, tenant_id, plaintext)
 
+    async def get_secret_capability(
+        self,
+        secret_handle: str,
+        tenant_id: str | None = None,
+        execution_context: CapabilityExecutionContext | None = None,
+        **_extra: Any,
+    ) -> str:
+        """Capability handler for `kortex.security.secret.get` (Phase B / B-3).
+
+        Closes the gap `put_secret_capability`'s docstring flagged when M7.3
+        shipped. Before this, the capability registered
+        `SecretStore.get_secret` as its handler *directly*, so its
+        `tenant_id` argument came straight from `request.parameters` and was
+        fully authoritative: any principal holding `security:read` — a
+        deliberately broad permission that also gates `authorize` and
+        `signature.verify` — could decrypt ANY tenant's secret merely by
+        naming that tenant. `SecretStore`'s own AES-GCM tenant binding did
+        not help: it authenticates that the ciphertext belongs to the
+        `tenant_id` it is given, and it was being given the attacker's.
+
+        The tenant now comes from the dispatcher-verified
+        `CapabilityExecutionContext` (`requires_execution_context=True`), so
+        the AAD binding is finally checked against the caller's *real*
+        tenant. A caller-supplied `tenant_id` survives only when no verified
+        identity is present — in-process/system callers, which reach the
+        engine method (`get_secret`) rather than this capability anyway.
+
+        The plaintext is returned to the authorized caller, as before, but
+        is never logged, never placed in an audit `context`, and never
+        included in an exception message. `**_extra` absorbs any additional
+        caller-supplied parameter (notably a `tenant_id` alias) rather than
+        raising a `TypeError` that would leak handler shape.
+        """
+        resolved = self._tenant_from_context(execution_context, tenant_id)
+        if not resolved:
+            raise SecretStoreError("tenant_id is required to resolve a secret.")
+
+        store = self.secret_store
+        try:
+            plaintext = await store.get_secret(secret_handle, resolved)
+        except Exception:
+            await self._record_security_audit(
+                action=_SECRET_GET_CAPABILITY,
+                actor_id=self._actor_id_from_context(execution_context),
+                actor_type=self._actor_type_from_context(execution_context),
+                tenant_id=resolved,
+                resource_id=secret_handle,
+                context={"result": "failure"},
+            )
+            raise
+
+        await self._record_security_audit(
+            action=_SECRET_GET_CAPABILITY,
+            actor_id=self._actor_id_from_context(execution_context),
+            actor_type=self._actor_type_from_context(execution_context),
+            tenant_id=resolved,
+            resource_id=secret_handle,
+            context={"result": "success"},
+        )
+        return plaintext
+
+    @staticmethod
+    def _tenant_from_context(
+        execution_context: CapabilityExecutionContext | None,
+        claimed_tenant_id: str | None,
+    ) -> str | None:
+        """Authoritative tenant for one invocation: the verified one, or the
+        caller's claim only when no identity was injected."""
+        principal = execution_context.principal if execution_context is not None else None
+        if principal is not None and principal.tenant_id:
+            return principal.tenant_id
+        return claimed_tenant_id
+
+    @staticmethod
+    def _actor_id_from_context(execution_context: CapabilityExecutionContext | None) -> str:
+        principal = execution_context.principal if execution_context is not None else None
+        return principal.principal_id if principal is not None else "system"
+
+    @staticmethod
+    def _actor_type_from_context(execution_context: CapabilityExecutionContext | None) -> str:
+        principal = execution_context.principal if execution_context is not None else None
+        if principal is None:
+            return "SYSTEM_ENGINE"
+        return _actor_type_for_principal_type(principal.principal_type.value)
+
     async def put_secret_capability(
         self,
         secret_handle: str,
@@ -926,15 +1020,12 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
     ) -> dict[str, Any]:
         """Capability handler for `kortex.security.secret.put` (M7.3).
 
-        Unlike the pre-existing `kortex.security.secret.get` capability
-        (which registers `self._secret_store.get_secret` directly and has
-        never taken a `principal` parameter, so it still trusts a
-        caller-supplied `tenant_id` as-is -- a pre-existing gap, unrelated to
-        and not introduced by this capability, flagged here rather than
-        silently carried forward), this handler derives tenant identity from
-        the Kernel-verified `principal` whenever one is present, exactly like
-        every other M7.3 capability. A caller-supplied `tenant_id` is used
-        only when no principal was injected (trusted internal callers).
+        Derives tenant identity from the Kernel-verified `principal` whenever
+        one is present, exactly like every other M7.3 capability. A
+        caller-supplied `tenant_id` is used only when no principal was
+        injected (trusted internal callers). Phase B gave the read side the
+        same treatment via `get_secret_capability` — the gap this docstring
+        used to flag as pre-existing and unclosed.
 
         Never returns the plaintext value, in the response, an exception, or
         the generic dispatch audit context (the Kernel dispatcher's own

@@ -107,7 +107,20 @@ class OllamaProvider(BaseAIProvider):
             await self._client.aclose()
 
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
-        """Generate a non-streaming completion via Ollama's `/api/generate` endpoint."""
+        """Generate a non-streaming completion via Ollama's `/api/generate` endpoint.
+
+        Honors the D1 model channel defensively: this instance serves exactly
+        one model, so a request naming a different one is refused rather than
+        silently answered by this instance's own model. `ModelRouter` already
+        filters candidates by `model_id`, so this should be unreachable
+        through routed execution — it exists so a *direct* provider call
+        cannot bypass that guarantee either (M3 spec §7).
+        """
+        if request.model_id is not None and request.model_id != self._model_name:
+            raise PermanentProviderError(
+                f"Ollama provider '{self.provider_id}' serves a different model than the one requested; "
+                "refusing to substitute it."
+            )
         start = time.perf_counter()
         options: dict[str, Any] = {"temperature": request.temperature}
         if request.max_tokens is not None:

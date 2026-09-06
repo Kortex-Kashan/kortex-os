@@ -15,6 +15,7 @@ API key, bearer token, or password.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -93,6 +94,47 @@ class AIModelSummary(BaseModel):
     provider_display_name: str
 
 
+class AIProviderConfig(BaseModel):
+    """One tenant's configuration of one AI provider (Phase B / B1d).
+
+    Security boundary, restated for the field that matters: this model
+    carries `secret_handle`, a Security Engine `SecretStore` reference —
+    **never** the API key itself. There is deliberately no field a plaintext
+    credential could be assigned to, so "the credential leaked into the
+    config row / the capability response / the event payload" is not a bug
+    that can be introduced later without adding a field here first.
+
+    Tenant-scoped by construction: `(tenant_id, provider_id)` is the
+    identity. Tenant A configuring `openai` and tenant B configuring
+    `openai` are two independent rows with two independent secret handles —
+    which is why `ProviderRegistry` (process-global, not tenant-scoped)
+    must never hold this state. The registry stays a catalogue of *what
+    providers exist*; this is the record of *which tenant enabled which one
+    and where its credential lives*.
+
+    `enabled` is a real gate, not a display flag: a disabled configuration
+    must not resolve a credential and must not route.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str
+    provider_id: str
+    enabled: bool = True
+    secret_handle: str | None = None
+    default_model: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _validate_identity(self) -> AIProviderConfig:
+        if not self.tenant_id.strip():
+            raise ValueError("tenant_id must not be empty")
+        if not self.provider_id.strip():
+            raise ValueError("provider_id must not be empty")
+        return self
+
+
 class LLMRequest(BaseModel):
     """Request payload for a single AI generation call.
 
@@ -113,6 +155,23 @@ class LLMRequest(BaseModel):
     `ToolDefinition` model: tool invocation is out of scope for Milestone 1,
     and defining `ToolDefinition`'s shape now, before the milestone that
     consumes it exists, would be a guess.
+
+    `model_id` (Phase B / D1) is the deferred M1 amendment prescribed by
+    `ai_engine_m3_model_router_spec.md` §18 D1 — the channel that makes
+    model-granular routing safe. Before it existed, `ModelRouter`
+    deliberately rejected a `model_id` routing-context key (see
+    `router._MODEL_ID_REJECTION`) because a routed model choice had no way
+    to reach the provider that executes it: a provider advertising
+    `["qwen2.5:7b", "deepseek-v3"]` asked for `deepseek-v3` would have
+    silently run `qwen2.5:7b` (M3 spec §7). The field lives on the
+    *request* — the same channel execution uses — precisely so the model
+    the router filtered on is the model the provider runs.
+
+    Additive and backwards compatible by construction: `None` means "no
+    model preference," reproducing the pre-amendment behavior exactly, so
+    every existing caller that omits it is unaffected. A routing *context*
+    `model_id` key remains rejected: the request, not the context, is the
+    supported channel.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -122,6 +181,7 @@ class LLMRequest(BaseModel):
     user_id: str
     conversation_id: str
     prompt: str
+    model_id: str | None = None
     system_instruction: str | None = None
     context_documents: list[str] = Field(default_factory=list)
     tools: list[dict[str, Any]] = Field(default_factory=list)
@@ -195,6 +255,8 @@ class TokenUsage(BaseModel):
 
 
 __all__ = [
+    "AIModelSummary",
+    "AIProviderConfig",
     "AIProviderMetadata",
     "CredentialRequirement",
     "EndpointType",

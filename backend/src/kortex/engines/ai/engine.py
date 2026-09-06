@@ -44,11 +44,13 @@ from kortex.engines.ai.agent import (
     ResumeToken,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.credentials import TenantCredentialResolver, provider_secret_handle
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.events import (
     AIBaseEvent,
 )
 from kortex.engines.ai.exceptions import (
+    AIEngineNotConfiguredError,
     AIGovernanceQuotaExceededError,
     AIProviderTimeoutError,
     ConversationStoreError,
@@ -76,6 +78,7 @@ from kortex.engines.ai.memory import (
 )
 from kortex.engines.ai.models import (
     AIModelSummary,
+    AIProviderConfig,
     AIProviderMetadata,
     LLMRequest,
     LLMResponse,
@@ -101,6 +104,75 @@ from kortex.engines.ai.tools import (
 logger = logging.getLogger("kortex.engines.ai")
 
 DEFAULT_GENERATION_TIMEOUT_SECONDS: Final[float] = 60.0
+
+
+def _principal_from(execution_context: Any) -> Any:
+    """Resolve the dispatcher-verified principal for one invocation (Phase B).
+
+    Identity reaches an AI capability handler through the dispatcher-injected
+    `CapabilityExecutionContext` (`requires_execution_context=True`), the same
+    mechanism Workflow Engine and Security Engine already use.
+
+    Duck-typed on purpose: `kortex.engines.security` is an AST-enforced
+    forbidden import for this module, so only `.principal`/`.tenant_id` are
+    read and no security type is ever imported.
+
+    Phase B mechanism change: M6.1-1/M6.2-2 delivered this identity through a
+    handler parameter named `principal`, which `RegistryEngine.register_
+    capability` auto-infers into `legacy_principal_bridge=True`. That worked,
+    but the bridge is the deprecated channel — it hands over a bare principal
+    with none of the execution context's request/correlation/session fields,
+    and it is inferred from a parameter name rather than declared. These
+    handlers now take `execution_context` instead, so the same registrations
+    auto-infer `requires_execution_context=True` and no AI capability uses
+    the bridge. The tenant-rebinding logic each handler already had is
+    unchanged; only the channel it reads from is.
+    """
+    if execution_context is None:
+        return None
+    return getattr(execution_context, "principal", None)
+
+
+def _provider_config_view(config: AIProviderConfig) -> dict[str, Any]:
+    """Wire view of one provider configuration.
+
+    Built field by field rather than via `model_dump()` so that adding a
+    field to `AIProviderConfig` can never silently widen what crosses the
+    capability boundary. `has_credential` answers the only question a UI
+    actually has ("is this provider set up?") without exposing anything
+    about the credential itself; `secret_handle` is a `SecretStore`
+    reference, not secret material, and is what the tenant needs in order to
+    reason about their own configuration.
+    """
+    return {
+        "tenant_id": config.tenant_id,
+        "provider_id": config.provider_id,
+        "enabled": config.enabled,
+        "has_credential": config.secret_handle is not None,
+        "secret_handle": config.secret_handle,
+        "default_model": config.default_model,
+        "created_at": config.created_at.isoformat() if config.created_at else None,
+        "updated_at": config.updated_at.isoformat() if config.updated_at else None,
+    }
+
+
+def _authoritative_tenant_id(execution_context: Any, claimed_tenant_id: str) -> str:
+    """Return the tenant a handler must act on, ignoring any caller claim.
+
+    A verified principal's tenant always wins over `claimed_tenant_id`, so a
+    caller cannot reach another tenant's governance policy, quota, agent
+    task, or audit records by passing that tenant's id. When no verified
+    identity is present (in-process/system callers and the existing unit
+    tests), the supplied value stands — the dispatcher is what guarantees a
+    principal exists for every externally reachable invocation.
+    """
+    principal = _principal_from(execution_context)
+    if principal is None:
+        return claimed_tenant_id
+    verified = getattr(principal, "tenant_id", None)
+    if not verified:
+        return claimed_tenant_id
+    return str(verified)
 
 
 # ---------------------------------------------------------------------------
@@ -347,12 +419,33 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         throttler: TenantConcurrencyThrottler | None = None,
         governance_manager: AIGovernanceManager | None = None,
         default_generation_timeout_seconds: float = DEFAULT_GENERATION_TIMEOUT_SECONDS,
+        provider_config_store: Any = None,
+        secret_getter: Any = None,
+        secret_putter: Any = None,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
 
         If components are omitted, sensible default subsystem instances are created.
+
+        `provider_config_store`/`secret_getter`/`secret_putter` (Phase B /
+        B1d) are the tenant provider-configuration surface. All three are
+        injected and typed `Any` rather than imported: the store is created
+        by `bootstrap.py` from a `data_store`, and the two secret callables
+        are `SecurityEngine.get_secret`/`put_secret` — and
+        `kortex.engines.security` is an AST-forbidden import here. When any
+        is absent the provider-configuration capabilities fail explicitly
+        (`AIEngineNotConfiguredError`) rather than pretending to store a
+        credential; see `configure_provider`.
         """
         super().__init__()
+        self._provider_config_store = provider_config_store
+        self._secret_getter = secret_getter
+        self._secret_putter = secret_putter
+        self._credential_resolver = (
+            TenantCredentialResolver(provider_config_store, secret_getter)
+            if provider_config_store is not None and secret_getter is not None
+            else None
+        )
         self._default_generation_timeout_seconds = default_generation_timeout_seconds
         self._throttler = throttler if throttler is not None else TenantConcurrencyThrottler()
         self._provider_registry = provider_registry if provider_registry is not None else ProviderRegistry()
@@ -512,6 +605,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Generate an LLM response with context composition and model routing",
                 provider=self.name,
                 handler=self.generate_response,
+                requires_execution_context=True,
                 required_permissions=["ai:generate"],
                 security_classification="INTERNAL",
             )
@@ -520,6 +614,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Orchestrate a bounded multi-step agent reasoning workflow",
                 provider=self.name,
                 handler=self.orchestrate_agent,
+                requires_execution_context=True,
                 required_permissions=["ai:orchestrate"],
                 security_classification="INTERNAL",
             )
@@ -528,6 +623,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Resume a paused agent reasoning workflow with verified token",
                 provider=self.name,
                 handler=self.resume_agent,
+                requires_execution_context=True,
                 required_permissions=["ai:orchestrate"],
                 security_classification="INTERNAL",
             )
@@ -536,6 +632,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Invoke an authorized AI tool capability",
                 provider=self.name,
                 handler=self.invoke_tool,
+                requires_execution_context=True,
                 required_permissions=["ai:execute"],
                 security_classification="INTERNAL",
             )
@@ -544,6 +641,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Retrieve durable conversation turns for a conversation",
                 provider=self.name,
                 handler=self.get_conversation_history,
+                requires_execution_context=True,
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
@@ -576,6 +674,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Cancel an active or paused agent reasoning task",
                 provider=self.name,
                 handler=self.cancel_agent_task,
+                requires_execution_context=True,
                 required_permissions=["ai:orchestrate"],
                 security_classification="INTERNAL",
             )
@@ -584,6 +683,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Retrieve the persisted status of an agent reasoning task",
                 provider=self.name,
                 handler=self.get_agent_task,
+                requires_execution_context=True,
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
@@ -592,8 +692,42 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="List agent reasoning tasks for a tenant, optionally filtered by status",
                 provider=self.name,
                 handler=self.list_agent_tasks,
+                requires_execution_context=True,
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
+            )
+
+            # Tenant Provider Configuration Capabilities (Phase B / B1d).
+            # `configure` is RESTRICTED and gated on `ai:manage`: it writes a
+            # provider credential into the tenant's SecretStore. Its
+            # `api_key` parameter name is load-bearing for audit redaction --
+            # see `configure_provider`.
+            kernel.register_capability(
+                name="kortex.ai.provider.configure",
+                description="Configure an AI provider for the calling tenant, storing its credential as a secret",
+                provider=self.name,
+                handler=self.configure_provider,
+                requires_execution_context=True,
+                required_permissions=["ai:manage"],
+                security_classification="RESTRICTED",
+            )
+            kernel.register_capability(
+                name="kortex.ai.provider.config.list",
+                description="List the calling tenant's AI provider configurations (never their credentials)",
+                provider=self.name,
+                handler=self.list_provider_configs,
+                requires_execution_context=True,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+            )
+            kernel.register_capability(
+                name="kortex.ai.provider.config.remove",
+                description="Remove one of the calling tenant's AI provider configurations",
+                provider=self.name,
+                handler=self.remove_provider_config,
+                requires_execution_context=True,
+                required_permissions=["ai:manage"],
+                security_classification="RESTRICTED",
             )
 
             # AI Governance Capabilities (M5.5)
@@ -602,6 +736,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Evaluate prompts and proposed tool calls against tenant governance policy",
                 provider=self.name,
                 handler=self.evaluate_governance_policy,
+                requires_execution_context=True,
                 required_permissions=["ai:governance"],
                 security_classification="INTERNAL",
             )
@@ -610,6 +745,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Create or update tenant AI governance and guardrail policy",
                 provider=self.name,
                 handler=self.upsert_governance_policy,
+                requires_execution_context=True,
                 required_permissions=["ai:manage"],
                 security_classification="RESTRICTED",
             )
@@ -618,6 +754,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Retrieve active AI governance policy for a tenant",
                 provider=self.name,
                 handler=self.get_governance_policy,
+                requires_execution_context=True,
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
@@ -626,6 +763,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Retrieve token consumption quota and usage for a tenant",
                 provider=self.name,
                 handler=self.get_tenant_quota,
+                requires_execution_context=True,
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
@@ -634,6 +772,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Update tenant token budget limits and concurrency limits",
                 provider=self.name,
                 handler=self.update_tenant_quota,
+                requires_execution_context=True,
                 required_permissions=["ai:manage"],
                 security_classification="RESTRICTED",
             )
@@ -642,6 +781,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Query immutable AI reasoning decision records",
                 provider=self.name,
                 handler=self.query_decision_records,
+                requires_execution_context=True,
                 required_permissions=["audit:read"],
                 security_classification="INTERNAL",
             )
@@ -650,6 +790,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Evaluate text against prompt injection, safety patterns, and PII guardrails",
                 provider=self.name,
                 handler=self.check_content_guardrail,
+                requires_execution_context=True,
                 required_permissions=["ai:generate"],
                 security_classification="INTERNAL",
             )
@@ -658,6 +799,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Create a durable human approval request for an AI action",
                 provider=self.name,
                 handler=self.create_governance_approval,
+                requires_execution_context=True,
                 required_permissions=["ai:orchestrate"],
                 security_classification="INTERNAL",
             )
@@ -720,35 +862,43 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         request: LLMRequest,
         routing_context: RoutingContext | None = None,
         timeout_seconds: float | None = None,
-        principal: Any = None,
+        execution_context: Any = None,
     ) -> LLMResponse:
         """Generate an AI text response with context composition, routing, history tracking, and global timeout.
 
-        `principal` (M6.1-1): the Kernel dispatcher injects its own
-        verified identity into any handler parameter literally named
-        `principal` (`core/dispatch.py`'s `_invoke_handler`), regardless of
-        this parameter's declared type — typed here as `Any`, not
-        `SecurityPrincipal`, because `kortex.engines.security` is a hard,
-        AST-enforced forbidden import for this module (see
-        `test_ai_engine.py::test_m8_files_quarantine_forbidden_imports`).
-        Only `.tenant_id` is read, duck-typed, never imported.
+        Identity arrives as `execution_context` (M6.1-1, corrected in Phase
+        B): the Kernel dispatcher builds a `CapabilityExecutionContext` from
+        its own verified session and injects it into this parameter because
+        the capability registers `requires_execution_context=True`. Typed
+        `Any`, not the real class, because `kortex.engines.security` is a
+        hard, AST-enforced forbidden import for this module (see
+        `test_ai_engine.py::test_m8_files_quarantine_forbidden_imports`);
+        only `.principal.tenant_id` is read, duck-typed, never imported.
 
-        Before this fix, tenant scope for governance, quota, persistence,
-        and audit came entirely from the caller-constructed
-        `request.tenant_id` field, with nothing cross-checking it against
-        the authenticated caller's real tenant — the same class of gap
-        M6.0-3 closed on 12 Workflow Engine handlers. When a verified
-        `principal` is present, its `tenant_id` is authoritative: the
-        request is corrected to it before anything below reads
-        `request.tenant_id`, so every existing line of this method (already
-        governance/quota/persistence/audit-tested) is unaffected by this
-        fix without further changes.
+        `principal` remains for direct in-process callers and the existing
+        handler-level tests, and wins when supplied. M6.1-1 declared it
+        alone and described it as dispatcher-injected, but the dispatcher
+        only injects a bare `principal` for capabilities registered with
+        `legacy_principal_bridge=True` — which no AI capability ever was —
+        so through dispatch it was always `None` and the re-binding below
+        never ran. See `_principal_from`.
+
+        Before that re-binding, tenant scope for governance, quota,
+        persistence, and audit came entirely from the caller-constructed
+        `request.tenant_id`, with nothing cross-checking it against the
+        authenticated caller's real tenant — the same class of gap M6.0-3
+        closed on 12 Workflow Engine handlers. A verified identity's
+        `tenant_id` is authoritative: the request is corrected to it before
+        anything below reads `request.tenant_id`, so every existing line of
+        this method (already governance/quota/persistence/audit-tested) is
+        unaffected without further changes.
         """
         effective_timeout = timeout_seconds if timeout_seconds is not None else self._default_generation_timeout_seconds
         start_time = time.perf_counter()
         require_identifier(request.tenant_id, "tenant_id")
         require_identifier(request.conversation_id, "conversation_id")
 
+        principal = _principal_from(execution_context)
         if principal is not None:
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != request.tenant_id:
@@ -922,11 +1072,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         self,
         task: AgentTask,
         authorizer: ToolAuthorizer | None = None,
-        principal: Any = None,
+        execution_context: Any = None,
     ) -> AgentExecutionResult:
         """Orchestrate a bounded multi-step agent reasoning workflow.
 
-        `principal` (M6.2-2): same fix as `generate_response` (M6.1-1) and
+        Identity (M6.2-2, wired through `execution_context` in Phase B):
+        same fix as `generate_response` (M6.1-1) and
         for the identical reason, now with materially higher stakes --
         `AgentOrchestrator` eventually reaches `KernelToolExecutionPort`,
         which (as of M6.2-1) authenticates as a REAL AI system principal
@@ -942,6 +1093,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(task.tenant_id, "tenant_id")
         require_identifier(task.task_id, "task_id")
 
+        principal = _principal_from(execution_context)
         if principal is not None:
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
@@ -982,16 +1134,18 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         resume_token: ResumeToken,
         approved_tool_calls: list[ToolCall],
         authorizer: ToolAuthorizer | None = None,
-        principal: Any = None,
+        execution_context: Any = None,
     ) -> AgentExecutionResult:
         """Resume a paused agent workflow with a verified ResumeToken.
 
-        `principal` (M6.2-2): same tenant-correction fix as `orchestrate_agent`.
+        Identity (M6.2-2, wired through `execution_context` in Phase B):
+        same tenant-correction fix as `orchestrate_agent`.
         """
         start_time = time.perf_counter()
         require_identifier(task.tenant_id, "tenant_id")
         require_identifier(task.task_id, "task_id")
 
+        principal = _principal_from(execution_context)
         if principal is not None:
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
@@ -1031,12 +1185,27 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 self.logger.warning("Agent resume failed: %s", exc)
                 raise
 
-    async def cancel_agent_task(self, task_id: str, tenant_id: str) -> bool:
-        """Cancel an active or paused agent task across local and durable task stores."""
+    async def cancel_agent_task(self, task_id: str, tenant_id: str, execution_context: Any = None) -> bool:
+        """Cancel an active or paused agent task across local and durable task stores.
+
+        `tenant_id` is the store's isolation key, so a verified identity
+        overrides the caller's claim (`_authoritative_tenant_id`): otherwise
+        a caller in tenant B could cancel tenant A's running agent task
+        simply by naming tenant A.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         return await self._agent_orchestrator.cancel_task(task_id, tenant_id)
 
-    async def get_agent_task(self, task_id: str, tenant_id: str) -> PersistedAgentTaskRecord | None:
-        """Retrieve a persisted agent task record by identity."""
+    async def get_agent_task(
+        self, task_id: str, tenant_id: str, execution_context: Any = None
+    ) -> PersistedAgentTaskRecord | None:
+        """Retrieve a persisted agent task record by identity.
+
+        Tenant scope comes from the verified identity when one is present —
+        the task record carries prompts and reasoning steps, so reading
+        another tenant's is a disclosure, not just a lookup.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         return await self._agent_orchestrator.get_task(task_id, tenant_id)
 
     async def list_agent_tasks(
@@ -1044,8 +1213,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         tenant_id: str,
         status: AgentStatus | str | None = None,
         limit: int = 50,
+        execution_context: Any = None,
     ) -> list[PersistedAgentTaskRecord]:
         """List persisted agent task records for a tenant, optionally filtered by status.
+
+        Tenant scope comes from the verified identity when one is present,
+        for the same disclosure reason as `get_agent_task`.
 
         `status` accepts a raw string in addition to `AgentStatus` so this
         method is safe to invoke as a Kernel capability handler, where
@@ -1056,6 +1229,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         `StrEnum` equality would silently "work" while the SQL-backed
         store's `status.value` access would raise `AttributeError`.
         """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         normalized_status = AgentStatus(status) if isinstance(status, str) else status
         return await self._agent_orchestrator.list_tasks(tenant_id, normalized_status, limit)
 
@@ -1064,16 +1238,18 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         tenant_id: str,
         tool_call: ToolCall,
         authorizer: ToolAuthorizer | None = None,
-        principal: Any = None,
+        execution_context: Any = None,
     ) -> ToolResult:
         """Invoke an authorized tool capability through the tool invoker subsystem.
 
-        `principal` (M6.2-2): same tenant-correction fix as `generate_response`/
+        Identity (M6.2-2, wired through `execution_context` in Phase B):
+        same tenant-correction fix as `generate_response`/
         `orchestrate_agent` -- a caller-supplied `tenant_id` is never
         authoritative once a verified principal is available.
         """
         start_time = time.perf_counter()
 
+        principal = _principal_from(execution_context)
         if principal is not None:
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             tenant_id = principal_tenant_id
@@ -1168,16 +1344,18 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         tenant_id: str,
         conversation_id: str,
         offset: int = 0,
-        principal: Any = None,
+        execution_context: Any = None,
     ) -> list[ConversationTurn]:
         """Return the durable conversation turns for `conversation_id` (M7.2).
 
         A thin, read-only wrapper over the existing `AIMemoryManager` /
-        `IConversationStore` -- no new persistence subsystem. `principal`
-        (same tenant-correction pattern as `invoke_tool`/`generate_response`):
-        a caller-supplied `tenant_id` is never authoritative once a verified
-        principal is available.
+        `IConversationStore` -- no new persistence subsystem. Identity
+        (same tenant-correction pattern as `invoke_tool`/`generate_response`,
+        wired through `execution_context` in Phase B): a caller-supplied
+        `tenant_id` is never authoritative once a verified principal is
+        available.
         """
+        principal = _principal_from(execution_context)
         if principal is not None:
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             tenant_id = principal_tenant_id
@@ -1228,6 +1406,119 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             result = result.model_copy(update={"degraded": True})
         return result
 
+    # -- Tenant Provider Configuration Handlers (Phase B / B1d) --------------
+
+    @property
+    def credential_resolver(self) -> TenantCredentialResolver | None:
+        """Per-request tenant credential resolution, or None when unwired.
+
+        Deliberately exposed as the *resolver*, never as resolved values:
+        there is no `get_api_key`-shaped accessor on this engine, and no
+        credential is ever stored on it. See `credentials.py`.
+        """
+        return self._credential_resolver
+
+    def _require_provider_config_store(self) -> Any:
+        if self._provider_config_store is None:
+            raise AIEngineNotConfiguredError(
+                "Provider configuration is unavailable: the AI engine was constructed without a "
+                "provider_config_store. Configure it through KernelProductionBootstrap."
+            )
+        return self._provider_config_store
+
+    async def configure_provider(
+        self,
+        provider_id: str,
+        api_key: str | None = None,
+        default_model: str | None = None,
+        enabled: bool = True,
+        execution_context: Any = None,
+    ) -> dict[str, Any]:
+        """Configure one AI provider for the calling tenant (Phase B / B1d).
+
+        The secret parameter is named `api_key` on purpose and must keep that
+        name: `core.idempotency.sanitize_for_persistence` redacts by exact
+        key, and `api_key` is in its `SENSITIVE_KEY_NAMES` set. The Kernel
+        dispatcher runs that sanitizer over `request.parameters` before they
+        reach the audit log, so a rename to `key`/`token_value`/`credential_
+        value` would silently start writing live provider credentials into
+        the audit trail. This is why the parameter is not called anything
+        more descriptive.
+
+        The key is handed straight to Security Engine's `SecretStore` (via
+        the injected `secret_putter`) and only the resulting handle is
+        persisted; `ai_provider_configs` has no column that could hold it.
+        The returned dict likewise carries the handle and never the value.
+
+        Tenant scope comes from the verified execution context, never from a
+        parameter — configuring a provider *for another tenant* would let a
+        caller plant a credential the other tenant's requests would then
+        use.
+        """
+        store = self._require_provider_config_store()
+        tenant_id = _authoritative_tenant_id(execution_context, "")
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        secret_handle: str | None = None
+        if api_key is not None:
+            if not api_key.strip():
+                raise ValueError("api_key must not be empty or whitespace-only.")
+            if self._secret_putter is None:
+                raise AIEngineNotConfiguredError(
+                    "Cannot store a provider credential: the AI engine was constructed without a "
+                    "secret_putter. Refusing to record a configuration that claims a credential it did not store."
+                )
+            secret_handle = provider_secret_handle(provider_id)
+            # Secret first, configuration second, deliberately. If the
+            # config write then fails, the stored secret is orphaned but
+            # unreachable (nothing references the handle) and the next
+            # configure overwrites it. The reverse order would leave a
+            # configuration advertising `has_credential=True` for a
+            # credential that was never stored — a provider that looks set
+            # up and is not.
+            await self._secret_putter(secret_handle, tenant_id, api_key)
+
+        config = await store.upsert(
+            AIProviderConfig(
+                tenant_id=tenant_id,
+                provider_id=provider_id,
+                enabled=enabled,
+                secret_handle=secret_handle,
+                default_model=default_model,
+            )
+        )
+        return _provider_config_view(config)
+
+    async def list_provider_configs(self, execution_context: Any = None) -> list[dict[str, Any]]:
+        """List the calling tenant's provider configurations.
+
+        Returns handles and flags only -- never a credential, and never
+        another tenant's rows (the tenant comes from the verified identity,
+        and the store filters in SQL).
+        """
+        store = self._require_provider_config_store()
+        tenant_id = _authoritative_tenant_id(execution_context, "")
+        require_identifier(tenant_id, "tenant_id")
+        configs = await store.list_for_tenant(tenant_id)
+        return [_provider_config_view(config) for config in configs]
+
+    async def remove_provider_config(self, provider_id: str, execution_context: Any = None) -> dict[str, Any]:
+        """Remove one of the calling tenant's provider configurations.
+
+        The `SecretStore` entry is intentionally left in place: this engine
+        has no authority to delete Security Engine records, and a config row
+        removed by mistake is recoverable while a destroyed secret is not.
+        The orphaned handle is unreachable without a configuration row
+        pointing at it.
+        """
+        store = self._require_provider_config_store()
+        tenant_id = _authoritative_tenant_id(execution_context, "")
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+        removed = await store.delete(tenant_id, provider_id)
+        return {"provider_id": provider_id, "tenant_id": tenant_id, "removed": removed}
+
     # -- AI Governance Capability Handlers (M5.5) ----------------------------
 
     async def evaluate_governance_policy(
@@ -1235,8 +1526,16 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         tenant_id: str,
         prompt: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Evaluate prompt guardrails and proposed tool calls against tenant policy."""
+        """Evaluate prompt guardrails and proposed tool calls against tenant policy.
+
+        Tenant scope comes from the verified identity when one is present:
+        evaluating against another tenant's policy both reveals that
+        tenant's configured guardrails and would let a caller pick whichever
+        tenant's policy is most permissive.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         require_identifier(tenant_id, "tenant_id")
         policy = await self._governance_manager.get_policy(tenant_id)
 
@@ -1267,17 +1566,33 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     async def upsert_governance_policy(
         self,
         policy: dict[str, Any] | AIGovernancePolicy,
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Create or update a tenant AI governance policy."""
+        """Create or update a tenant AI governance policy.
+
+        The tenant lives inside the submitted policy, so the verified
+        identity is applied to the validated model rather than to a
+        parameter — without it, a caller could rewrite another tenant's
+        guardrails (for example disabling them) by naming that tenant in
+        the payload.
+        """
         pol = AIGovernancePolicy.model_validate(policy) if isinstance(policy, dict) else policy
+        authoritative = _authoritative_tenant_id(execution_context, pol.tenant_id)
+        if authoritative != pol.tenant_id:
+            pol = pol.model_copy(update={"tenant_id": authoritative})
         saved = await self._governance_manager.set_policy(pol)
         return saved.model_dump(mode="json")
 
     async def get_governance_policy(
         self,
         tenant_id: str,
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Retrieve the governance policy for a tenant."""
+        """Retrieve the governance policy for a tenant.
+
+        Tenant scope comes from the verified identity when one is present.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         require_identifier(tenant_id, "tenant_id")
         policy = await self._governance_manager.get_policy(tenant_id)
         return policy.model_dump(mode="json")
@@ -1285,8 +1600,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     async def get_tenant_quota(
         self,
         tenant_id: str,
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Retrieve token consumption quota for a tenant."""
+        """Retrieve token consumption quota for a tenant.
+
+        Tenant scope comes from the verified identity when one is present —
+        a quota reading exposes another tenant's AI usage volume.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         require_identifier(tenant_id, "tenant_id")
         quota = await self._governance_manager.quota_manager.get_or_create_quota(tenant_id)
         return quota.model_dump(mode="json")
@@ -1294,9 +1615,19 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     async def update_tenant_quota(
         self,
         quota: dict[str, Any] | AITenantQuota,
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Update token consumption quota and concurrency limits for a tenant."""
+        """Update token consumption quota and concurrency limits for a tenant.
+
+        The tenant lives inside the submitted quota, so the verified
+        identity is applied to the validated model — the same correction
+        `upsert_governance_policy` makes, and for the same reason: raising
+        another tenant's budget is a cost attack on that tenant.
+        """
         q = AITenantQuota.model_validate(quota) if isinstance(quota, dict) else quota
+        authoritative = _authoritative_tenant_id(execution_context, q.tenant_id)
+        if authoritative != q.tenant_id:
+            q = q.model_copy(update={"tenant_id": authoritative})
         if self._governance_manager._store is not None:
             await self._governance_manager._store.save_quota(q)
         else:
@@ -1310,8 +1641,15 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         offset: int = 0,
         user_id: str | None = None,
         task_id: str | None = None,
+        execution_context: Any = None,
     ) -> list[dict[str, Any]]:
-        """Query immutable AI decision audit records."""
+        """Query immutable AI decision audit records.
+
+        Tenant scope comes from the verified identity when one is present.
+        Decision records carry prompts, reasoning, and tool arguments, so
+        this is the highest-value read in the governance surface.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         require_identifier(tenant_id, "tenant_id")
         if self._governance_manager._store is not None:
             records = await self._governance_manager._store.query_decision_records(
@@ -1328,8 +1666,17 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         self,
         text: str,
         tenant_id: str | None = None,
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Check and sanitize content against prompt injection, safety patterns, and PII."""
+        """Check and sanitize content against prompt injection, safety patterns, and PII.
+
+        `tenant_id` stays optional (`None` means "evaluate against the
+        built-in defaults"), but when a verified identity is present it
+        selects the policy, so a caller cannot borrow another tenant's more
+        permissive guardrails to get text through.
+        """
+        if _principal_from(execution_context) is not None:
+            tenant_id = _authoritative_tenant_id(execution_context, tenant_id or "")
         policy = None
         if tenant_id:
             policy = await self._governance_manager.get_policy(tenant_id)
@@ -1343,8 +1690,15 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         goal: str,
         proposed_calls: list[dict[str, Any]],
         required_role: str = "ai_approver",
+        execution_context: Any = None,
     ) -> dict[str, Any]:
-        """Create a durable human approval request for an AI action."""
+        """Create a durable human approval request for an AI action.
+
+        Tenant scope comes from the verified identity when one is present —
+        otherwise a caller could inject an approval request into another
+        tenant's approval queue.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, tenant_id)
         require_identifier(tenant_id, "tenant_id")
         require_identifier(task_id, "task_id")
         approval_id = str(uuid.uuid4())

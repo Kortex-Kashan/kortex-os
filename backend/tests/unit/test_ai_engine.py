@@ -94,6 +94,7 @@ class InMemoryKernelBridge(IKernelBridge):
         required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
     ) -> object:
         self.capabilities[name] = {
             "description": description,
@@ -102,6 +103,7 @@ class InMemoryKernelBridge(IKernelBridge):
             "required_permissions": required_permissions,
             "requires_authentication": requires_authentication,
             "security_classification": security_classification,
+            "requires_execution_context": requires_execution_context,
         }
 
     async def publish_event(
@@ -1129,6 +1131,23 @@ class _FakePrincipal:
         self.principal_id = "kortex-ai-system"
 
 
+class _FakeExecutionContext:
+    """Stand-in for the dispatcher-built `CapabilityExecutionContext`.
+
+    Phase B moved AI handlers off the legacy `principal` bridge onto
+    `requires_execution_context=True`, so these handler-level tests now
+    inject identity through the same parameter the dispatcher fills. Only
+    `.principal` is read (duck-typed — `kortex.engines.security` is an
+    AST-forbidden import for the AI engine), so this mirrors the real
+    context's contract exactly. The end-to-end proof that the *dispatcher*
+    populates it lives in `tests/integration/test_ai_tenant_isolation_dispatch.py`.
+    """
+
+    def __init__(self, tenant_id: str) -> None:
+        self.principal = _FakePrincipal(tenant_id)
+        self.tenant_id = tenant_id
+
+
 @pytest.mark.asyncio
 async def test_orchestrate_agent_forces_principal_tenant_not_spoofed_task_tenant() -> None:
     """SECURITY (M6.2-2): before this fix, `orchestrate_agent` never
@@ -1158,7 +1177,7 @@ async def test_orchestrate_agent_forces_principal_tenant_not_spoofed_task_tenant
         conversation_id="conv-spoof-1",
         goal="do something",
     )
-    result = await engine.orchestrate_agent(spoofed_task, principal=_FakePrincipal("tenant_b"))
+    result = await engine.orchestrate_agent(spoofed_task, execution_context=_FakeExecutionContext("tenant_b"))
 
     assert result.tenant_id == "tenant_b"
     assert result.tenant_id != "tenant_a"
@@ -1179,7 +1198,7 @@ async def test_invoke_tool_forces_principal_tenant_not_spoofed_caller_tenant() -
     await engine.initialize(kernel)
 
     call = ToolCall(call_id="call-spoof", tool_name="get_weather", arguments={"city": "Paris"})
-    await engine.invoke_tool("tenant_a", call, principal=_FakePrincipal("tenant_b"))
+    await engine.invoke_tool("tenant_a", call, execution_context=_FakeExecutionContext("tenant_b"))
 
     assert kernel.invocations[-1][2] == "tenant_b"
     assert kernel.invocations[-1][2] != "tenant_a"
@@ -1243,14 +1262,18 @@ async def test_get_conversation_history_forces_principal_tenant_not_spoofed_call
     await engine.generate_response(request)
 
     # Caller claims tenant_a, but the verified principal is actually tenant_b.
-    history = await engine.get_conversation_history("tenant_a", "conv-shared-id", principal=_FakePrincipal("tenant_b"))
+    history = await engine.get_conversation_history(
+        "tenant_a", "conv-shared-id", execution_context=_FakeExecutionContext("tenant_b")
+    )
 
     assert len(history) == 1
     assert history[0].user_content == "secret to tenant B"
 
     # And the reverse: a real tenant_a principal must not see tenant_b's data
     # even when passing tenant_b's id as the (untrusted) argument.
-    isolated = await engine.get_conversation_history("tenant_b", "conv-shared-id", principal=_FakePrincipal("tenant_a"))
+    isolated = await engine.get_conversation_history(
+        "tenant_b", "conv-shared-id", execution_context=_FakeExecutionContext("tenant_a")
+    )
     assert isolated == []
 
 

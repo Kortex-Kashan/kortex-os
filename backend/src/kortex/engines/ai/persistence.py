@@ -49,7 +49,7 @@ from kortex.engines.ai.exceptions import (
     ConversationStoreError,
 )
 from kortex.engines.ai.memory import ConversationTurn, require_identifier
-from kortex.engines.ai.models import TokenUsage
+from kortex.engines.ai.models import AIProviderConfig, TokenUsage
 from kortex.engines.ai.tools import ToolCall
 from kortex.engines.storage.interfaces import IDataStore
 
@@ -563,6 +563,183 @@ class AITenantQuotaRow(BaseModel):
     max_concurrent_generations: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
 
 
+class AIProviderConfigRow(BaseModel):
+    """Relational store model for one tenant's configuration of one AI provider.
+
+    Phase B / B1d. There is deliberately no plaintext credential column:
+    `secret_handle` references a Security Engine `SecretStore` entry, and the
+    key itself never enters this table, this module, or any AI engine row.
+    A dump of `ai_provider_configs` therefore discloses which providers a
+    tenant enabled — not a single credential.
+
+    `(tenant_id, provider_id)` is unique, so "configure this provider" is an
+    idempotent upsert rather than an ever-growing history, and one tenant's
+    row can never shadow another's.
+    """
+
+    __tablename__ = "ai_provider_configs"
+    __table_args__ = (UniqueConstraint("tenant_id", "provider_id", name="uq_ai_provider_config_tenant_provider"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    secret_handle: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    default_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AIProviderConfigStore:
+    """Relational persistence for tenant AI provider configurations (Phase B).
+
+    Reads and writes rows only. It never resolves a credential, never holds
+    one in memory, and has no dependency on Security Engine — resolution is
+    `credentials.TenantCredentialResolver`'s job, which composes this store
+    with an injected secret-getter. Keeping the two apart is what stops a
+    "just cache the resolved key on the config" shortcut from ever being the
+    convenient option.
+    """
+
+    def __init__(self, data_store: IDataStore) -> None:
+        self._data_store = data_store
+
+    @staticmethod
+    def _to_model(row: AIProviderConfigRow) -> AIProviderConfig:
+        return AIProviderConfig(
+            tenant_id=row.tenant_id,
+            provider_id=row.provider_id,
+            enabled=row.enabled,
+            secret_handle=row.secret_handle,
+            default_model=row.default_model,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    async def get(self, tenant_id: str, provider_id: str) -> AIProviderConfig | None:
+        """Fetch one tenant's configuration of one provider, or None."""
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> AIProviderConfigRow | None:
+            stmt = select(AIProviderConfigRow).where(
+                AIProviderConfigRow.tenant_id == tenant_id,
+                AIProviderConfigRow.provider_id == provider_id,
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return None if row is None else self._to_model(row)
+
+    async def list_for_tenant(self, tenant_id: str) -> list[AIProviderConfig]:
+        """Every provider configuration belonging to one tenant.
+
+        Tenant-filtered in the query, not after it: there is no code path
+        here that loads another tenant's rows and discards them later.
+        """
+        require_identifier(tenant_id, "tenant_id")
+
+        async def _action(session: AsyncSession) -> list[AIProviderConfigRow]:
+            stmt = (
+                select(AIProviderConfigRow)
+                .where(AIProviderConfigRow.tenant_id == tenant_id)
+                .order_by(AIProviderConfigRow.provider_id)
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [self._to_model(row) for row in rows]
+
+    async def upsert(self, config: AIProviderConfig) -> AIProviderConfig:
+        """Create or update one tenant's configuration of one provider.
+
+        `secret_handle`/`default_model` are updated only when the incoming
+        config states them: re-enabling a provider, or changing its default
+        model, must not silently orphan an already-stored credential handle.
+        Clearing a handle is `clear_secret_handle`'s explicit job.
+        """
+        require_identifier(config.tenant_id, "tenant_id")
+        require_identifier(config.provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> AIProviderConfigRow:
+            now = datetime.datetime.now(datetime.UTC)
+            stmt = select(AIProviderConfigRow).where(
+                AIProviderConfigRow.tenant_id == config.tenant_id,
+                AIProviderConfigRow.provider_id == config.provider_id,
+            )
+            existing = (await session.execute(stmt)).scalar_one_or_none()
+
+            if existing is not None:
+                existing.enabled = config.enabled
+                if config.secret_handle is not None:
+                    existing.secret_handle = config.secret_handle
+                if config.default_model is not None:
+                    existing.default_model = config.default_model
+                existing.updated_at = now
+                await session.flush()
+                return existing
+
+            row = AIProviderConfigRow(
+                id=str(uuid.uuid4()),
+                tenant_id=config.tenant_id,
+                provider_id=config.provider_id,
+                enabled=config.enabled,
+                secret_handle=config.secret_handle,
+                default_model=config.default_model,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+            return row
+
+        row = await self._data_store.execute_in_transaction(_action)
+        return self._to_model(row)
+
+    async def clear_secret_handle(self, tenant_id: str, provider_id: str) -> bool:
+        """Detach the credential handle from a configuration.
+
+        Returns False when there was no such configuration. Deleting the
+        `SecretStore` entry the handle pointed at is the caller's separate
+        responsibility — this store must not reach into Security Engine.
+        """
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> bool:
+            stmt = select(AIProviderConfigRow).where(
+                AIProviderConfigRow.tenant_id == tenant_id,
+                AIProviderConfigRow.provider_id == provider_id,
+            )
+            existing = (await session.execute(stmt)).scalar_one_or_none()
+            if existing is None:
+                return False
+            existing.secret_handle = None
+            existing.updated_at = datetime.datetime.now(datetime.UTC)
+            await session.flush()
+            return True
+
+        return bool(await self._data_store.execute_in_transaction(_action))
+
+    async def delete(self, tenant_id: str, provider_id: str) -> bool:
+        """Remove one tenant's configuration of one provider."""
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> bool:
+            stmt = select(AIProviderConfigRow).where(
+                AIProviderConfigRow.tenant_id == tenant_id,
+                AIProviderConfigRow.provider_id == provider_id,
+            )
+            existing = (await session.execute(stmt)).scalar_one_or_none()
+            if existing is None:
+                return False
+            await session.delete(existing)
+            return True
+
+        return bool(await self._data_store.execute_in_transaction(_action))
+
+
 class AIDecisionAuditRow(BaseModel):
     """Relational store model for immutable AI reasoning decision records."""
 
@@ -969,6 +1146,8 @@ __all__ = [
     "AIDecisionAuditRow",
     "AIGovernancePolicyRow",
     "AIGovernanceStore",
+    "AIProviderConfigRow",
+    "AIProviderConfigStore",
     "AITenantQuotaRow",
     "StorageAgentTaskStore",
     "StorageConversationStore",

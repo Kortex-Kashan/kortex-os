@@ -45,6 +45,7 @@ from kortex.engines.ai.memory import (
 )
 from kortex.engines.ai.persistence import (
     AIGovernanceStore,
+    AIProviderConfigStore,
     StorageAgentTaskStore,
     StorageConversationStore,
 )
@@ -177,6 +178,8 @@ class KernelProductionBootstrap:
         registered_engines: set[str] | list[str] | None = None,
         exporter: ITelemetryExporter | None = None,
         ai_identity: AISystemIdentity | None = None,
+        secret_getter: Any | None = None,
+        secret_putter: Any | None = None,
     ) -> AIOrchestrationEngine:
         """Construct all subsystems, wire production ports, and return a production-ready AIOrchestrationEngine.
 
@@ -195,6 +198,19 @@ class KernelProductionBootstrap:
                 `kortex.api.kernel_bootstrap`, which already imports
                 `SecurityEngine` for other bootstrap-time concerns — this
                 package never does.
+            secret_getter: Optional `(secret_handle, tenant_id) -> plaintext`
+                coroutine — in production `SecurityEngine.get_secret`
+                (Phase B / B1d). Passed in for the same reason as
+                `ai_identity`: `kortex.engines.security` is an AST-forbidden
+                import for this package, so composition happens in
+                `kortex.api.kernel_bootstrap` and this module only ever sees
+                a callable. Without it the engine has no credential
+                resolver and tenant-credentialed providers cannot run.
+            secret_putter: Optional `(secret_handle, tenant_id, plaintext)`
+                coroutine — in production `SecurityEngine.put_secret`.
+                Required only by `kortex.ai.provider.configure`, which fails
+                explicitly rather than silently dropping a credential when
+                it is absent.
 
         Returns:
             Fully assembled, production-wired AIOrchestrationEngine instance.
@@ -359,6 +375,13 @@ class KernelProductionBootstrap:
         )
 
         # 7. Core Facade Construction
+        # Tenant provider configuration (Phase B / B1d). Durable only --
+        # there is deliberately no in-memory fallback: a provider
+        # configuration that vanished on restart would silently un-configure
+        # a tenant's AI, and the credential handle it points at would be
+        # orphaned in SecretStore with nothing left to reference it.
+        provider_config_store = AIProviderConfigStore(data_store) if data_store is not None else None
+
         engine = AIOrchestrationEngine(
             provider_registry=provider_registry,
             model_router=model_router,
@@ -372,6 +395,9 @@ class KernelProductionBootstrap:
             throttler=throttler,
             governance_manager=governance_manager,
             default_generation_timeout_seconds=self._config.default_generation_timeout_seconds,
+            provider_config_store=provider_config_store,
+            secret_getter=secret_getter,
+            secret_putter=secret_putter,
         )
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")

@@ -34,6 +34,7 @@ class _KernelRuntime(Protocol):
         required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
     ) -> object: ...
 
     async def publish_event(
@@ -86,6 +87,7 @@ class KernelBridgeAdapter(IKernelBridge):
         required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
     ) -> object:
         """Register a canonical system capability with the Kernel Registry."""
         return self._kernel.register_capability(
@@ -98,6 +100,7 @@ class KernelBridgeAdapter(IKernelBridge):
             required_permissions=required_permissions,
             requires_authentication=requires_authentication,
             security_classification=security_classification,
+            requires_execution_context=requires_execution_context,
         )
 
     async def publish_event(

@@ -152,18 +152,24 @@ class IAIOrchestrationEngine(Protocol):
         request: LLMRequest,
         routing_context: RoutingContext | None = None,
         timeout_seconds: float | None = None,
-        principal: Any = None,
+        execution_context: Any = None,
     ) -> LLMResponse:
         """Generate an AI response for the given request.
 
-        `principal` is typed `Any`, not `SecurityPrincipal`, because
+        `execution_context` is the dispatcher-injected
+        `CapabilityExecutionContext` (Phase B replaced the M6.1-1 `principal`
+        parameter with it, moving these capabilities off the legacy
+        principal bridge). Typed `Any`, not the real class, because
         `kortex.engines.security` is a hard, AST-enforced forbidden import
-        for this module — see `engine.py::generate_response`.
+        for this module — see `engine.py::_principal_from`.
         """
         ...
 
     async def orchestrate_agent(
-        self, task: AgentTask, authorizer: ToolAuthorizer | None = None
+        self,
+        task: AgentTask,
+        authorizer: ToolAuthorizer | None = None,
+        execution_context: Any = None,
     ) -> AgentExecutionResult:
         """Orchestrate a bounded multi-step agent reasoning workflow."""
         ...
@@ -173,6 +179,7 @@ class IAIOrchestrationEngine(Protocol):
         tenant_id: str,
         tool_call: ToolCall,
         authorizer: ToolAuthorizer | None = None,
+        execution_context: Any = None,
     ) -> ToolResult:
         """Invoke a tool/capability call on behalf of an AI request.
 
@@ -250,6 +257,7 @@ class IKernelBridge(Protocol):
         required_permissions: list[str] | None = None,
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
+        requires_execution_context: bool = False,
     ) -> object:
         """Register a canonical system capability with the Kernel Registry."""
         ...
