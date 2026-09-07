@@ -45,7 +45,11 @@ from kortex.engines.ai.agent import (
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.cloud_authorization import TenantCloudRoutingAuthority
-from kortex.engines.ai.credentials import TenantCredentialResolver, provider_secret_handle
+from kortex.engines.ai.credentials import (
+    CredentialResolutionError,
+    TenantCredentialResolver,
+    provider_secret_handle,
+)
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.events import (
     AIBaseEvent,
@@ -236,13 +240,17 @@ class RouterLLMExecutionPort(ILLMExecutionPort):
     """Production adapter for `ILLMExecutionPort` using `ModelRouter` and `ProviderRegistry`.
 
     This is the *only* place the agent/orchestration path decides placement,
-    which is why B4.1's trusted cloud authorization belongs here and nowhere
-    else. `ILLMExecutionPort.generate_step` takes an `LLMRequest` and nothing
-    more — there is deliberately no routing-context parameter, so an agent
-    step has no channel through which a caller could ask for cloud egress.
-    Before B4.1 that meant cloud was simply unreachable from this path
-    (`self._default_context` was used unconditionally); now the decision is
-    derived per request from authoritative tenant state.
+    which is why B4.1's trusted cloud authorization — and B5.1's tenant
+    provider/model preference — belong here and nowhere else.
+    `ILLMExecutionPort.generate_step` takes an `LLMRequest` and nothing more
+    — there is deliberately no routing-context parameter, so an agent step
+    has no channel through which a caller could ask for cloud egress or name
+    a provider. Before B4.1 that meant cloud was simply unreachable from
+    this path (`self._default_context` was used unconditionally); B4.1 made
+    cloud reachable when authorized; B5.1 makes an authorized tenant's own
+    configured provider the one actually used, instead of ADR #001's
+    local-first ranking silently outranking it whenever a healthy local
+    provider happens to also be registered.
     """
 
     def __init__(
@@ -252,12 +260,14 @@ class RouterLLMExecutionPort(ILLMExecutionPort):
         default_routing_context: RoutingContext | None = None,
         telemetry: object | None = None,
         cloud_authority: TenantCloudRoutingAuthority | None = None,
+        credential_resolver: TenantCredentialResolver | None = None,
     ) -> None:
         self._router = router
         self._registry = registry
         self._default_context = default_routing_context or RoutingContext(allow_cloud=False)
         self._telemetry = telemetry
         self._cloud_authority = cloud_authority
+        self._credential_resolver = credential_resolver
 
     async def generate_step(self, request: LLMRequest) -> LLMResponse:
         """Route to eligible providers and execute a single reasoning step, with failover.
@@ -278,14 +288,154 @@ class RouterLLMExecutionPort(ILLMExecutionPort):
         B4.1, which is what keeps the in-memory/unit composition (no
         provider config store, hence no authoritative state to consult)
         working unchanged.
+
+        `allow_cloud` and the pin are now two **independent** authority
+        calls (B5 correction), not one: `is_cloud_permitted` answers "may
+        this tenant reach cloud at all" (true whenever at least one
+        qualifying configuration exists); `resolve_tenant_preference`
+        answers the narrower "is there exactly one unambiguous provider to
+        pin to" (`None` when zero *or more than one* configuration
+        qualifies — see `cloud_authorization.py`). A tenant with two
+        enabled cloud providers is still cloud-permitted via ordinary
+        `_discover`-mode ranking/fallback; they simply are not pinned to
+        either one, since pinning by an accident of database row order
+        would not be a real preference.
+
+        When a preference exists **and the request does not already name a
+        model** (`request.model_id is None`), it is applied two ways:
+
+        1. **`provider_id` is pinned to it.** This reuses `ModelRouter.
+           _resolve_pinned` exactly as an externally-supplied pin would
+           (B4's own `generate_response` path already does this for a
+           caller-supplied pin) — no router change, no second routing path.
+           A pin forecloses fallback to any other provider by design
+           (`_resolve_pinned` returns exactly one candidate); that is the
+           intended reading of "trusted tenant-level preference", not a
+           defect — silently falling back to local on a cloud outage would
+           contradict the tenant's own explicit choice. A tenant with *no*
+           configured preference is completely unaffected: `preference is
+           None` leaves `context`/`request` exactly as before B5.1, and
+           `_discover`'s local-first ranking still governs.
+        2. **`request.model_id` is set to the preference's `default_model`,
+           when present — but only after `_validate_configured_default_
+           model` confirms it against the provider's LIVE catalog** (B5
+           correction). `ModelRouter._resolve_pinned`'s static `model_id
+           not in metadata.supported_models` check alone proves only that
+           this KORTEX build recognizes the model's name — not that this
+           tenant's own credential can currently serve it (account tier,
+           vendor-side deprecation, etc.). `_validate_configured_default_
+           model` calls the pinned provider's own `discover_models`, the
+           exact mechanism `kortex.ai.provider.test` already uses for this
+           identical question, and raises `NoRoutableProviderError` — the
+           same typed failure the static check already used — for every
+           way that verification can fail, rather than proceeding with an
+           unverified pin.
+
+        The `request.model_id is None` guard on the pin itself (not just on
+        setting it) exists for the same D1 doctrine in the other direction:
+        a caller that already asserted a specific model is asserting
+        something a tenant *provider* preference must not override — the
+        pin is skipped entirely (and `resolve_tenant_preference` is not even
+        called), `allow_cloud` still reflects authorization, and `_discover`
+        mode finds whichever authorized provider actually serves the named
+        model, exactly as before B5.1. `build_step_context` never sets
+        `model_id` today, so this guard is presently defensive, not
+        load-bearing, on the real agent path — but it keeps this port's
+        behavior correct for any other caller.
         """
         context = self._default_context
         if self._cloud_authority is not None:
             permitted = await self._cloud_authority.is_cloud_permitted(request.tenant_id)
             context = context.model_copy(update={"allow_cloud": permitted})
+            if request.model_id is None:
+                preference = await self._cloud_authority.resolve_tenant_preference(request.tenant_id)
+                if preference is not None:
+                    if preference.default_model is not None:
+                        await self._validate_configured_default_model(preference)
+                        request = request.model_copy(update={"model_id": preference.default_model})
+                    context = context.model_copy(update={"provider_id": preference.provider_id})
         return await _generate_with_fallback(
             self._router, self._registry, request, context.model_dump(), telemetry=self._telemetry
         )
+
+    async def _validate_configured_default_model(self, preference: AIProviderConfig) -> None:
+        """Verify `preference.default_model` against the provider's LIVE catalog before pinning to it (B5 correction).
+
+        `preference` already comes from `TenantCloudRoutingAuthority.
+        resolve_tenant_preference` — enabled, credentialed, policy-permitted
+        — so everything checked here is specifically about the *model*, not
+        the provider or the tenant's authorization to reach it.
+
+        Deliberately reuses `discover_models`/`TenantCredentialResolver`
+        rather than adding any new mechanism: this is the identical pair of
+        calls `test_provider_connection` (`kortex.ai.provider.test`) already
+        makes to answer the identical question for a human clicking "Test
+        connection". No caching — the standing no-credential-caching rule
+        this shares with `credentials.py` and `cloud_authorization.py` means
+        this really does cost one extra vendor round trip per request that
+        reaches a pinned provider with a configured default model.
+
+        Raises:
+            NoRoutableProviderError: The model cannot be positively
+                confirmed as currently servable by this tenant's own
+                credential — for *any* reason: the provider vanished from
+                the registry between authorization and this call, no
+                credential resolver is wired, the credential itself no
+                longer resolves, the live discovery call itself fails
+                (`PermanentProviderError`/`TransientProviderError`/
+                `AIProviderTimeoutError`), or the model is genuinely absent
+                from the live result. Every one of these answers "do not
+                proceed with this pin" — never "fall through to try
+                something else instead", which is exactly the silent
+                unintended-provider selection this method exists to
+                prevent. The caller (`generate_step`) has already decided
+                pinning is otherwise appropriate; this method's only job is
+                to say yes or raise, never to pick a different placement.
+        """
+        assert preference.default_model is not None  # only ever called when true, by generate_step
+
+        try:
+            provider = self._registry.get(preference.provider_id)
+        except ProviderNotFoundError as exc:
+            raise NoRoutableProviderError(
+                f"Tenant's preferred provider '{preference.provider_id}' is not currently registered; "
+                "cannot verify its configured default model against a live catalog."
+            ) from exc
+
+        if self._credential_resolver is None:
+            raise NoRoutableProviderError(
+                f"Cannot verify the configured default model for provider '{preference.provider_id}': "
+                "no credential resolver is wired to reach its live catalog."
+            )
+
+        try:
+            resolved = await self._credential_resolver.resolve(preference.tenant_id, preference.provider_id)
+        except CredentialResolutionError as exc:
+            raise NoRoutableProviderError(
+                f"Tenant's credential for provider '{preference.provider_id}' could not be resolved "
+                "while verifying its configured default model."
+            ) from exc
+
+        if resolved is None:
+            raise NoRoutableProviderError(
+                f"Provider '{preference.provider_id}' is no longer credentialed for this tenant; "
+                "cannot verify its configured default model."
+            )
+
+        try:
+            discovered = await provider.discover_models(resolved.plaintext)
+        except (PermanentProviderError, TransientProviderError, AIProviderTimeoutError) as exc:
+            raise NoRoutableProviderError(
+                f"Could not reach the live model catalog for provider '{preference.provider_id}' to "
+                f"verify the configured default model '{preference.default_model}': {exc}"
+            ) from exc
+
+        if not any(model.model_id == preference.default_model for model in discovered):
+            raise NoRoutableProviderError(
+                f"Provider '{preference.provider_id}' does not currently list "
+                f"'{preference.default_model}' among the models this tenant's credential can serve; "
+                "refusing to route to it rather than silently using a different model or provider."
+            )
 
 
 class EngineAgentContextPort(IAgentContextPort):
@@ -570,6 +720,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 registry=self._provider_registry,
                 telemetry=self._telemetry,
                 cloud_authority=self._cloud_routing_authority,
+                credential_resolver=self._credential_resolver,
             )
             ctx_port = EngineAgentContextPort(
                 composer=self._context_composer,
@@ -912,11 +1063,57 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         return self._diagnostics.health()
 
     async def stop(self) -> None:
-        """Gracefully shut down active tasks and release resources."""
+        """Gracefully shut down active tasks and release resources.
+
+        `_close_providers` (Phase B / B5.2) closes every registered
+        provider's owned resources between STOPPING and STOPPED. Placed
+        inside the existing `stop()` this engine already implements to
+        satisfy `BaseEngine`'s abstract lifecycle contract, and reached
+        exactly once per graceful shutdown: `Kernel.shutdown()` ->
+        `BootEngine.shutdown_system()` calls `engine.stop()` for every
+        registered engine in reverse dependency order, already skipping any
+        engine already `STOPPED`/`STOPPING` and already containing any
+        exception one engine's `stop()` raises so it cannot block the
+        others — this method adds no second shutdown mechanism, it only
+        does more work inside the one that already exists.
+        """
         self.ensure_state(EngineState.RUNNING, EngineState.READY)
         self._set_state(EngineState.STOPPING)
+        await self._close_providers()
         self._set_state(EngineState.STOPPED)
         self.logger.info("AI Orchestration Engine stopped.")
+
+    async def _close_providers(self) -> None:
+        """Close every registered provider's owned resources (Phase B / B5.2).
+
+        Best-effort and per-provider: one provider's `aclose()` raising must
+        not prevent the others from closing, and must not prevent this
+        engine from reaching `STOPPED` — the same one-bad-engine-must-not-
+        block-the-rest discipline `BootEngine.shutdown_system` already
+        applies one level up, applied here one level down.
+
+        `aclose` is read via `getattr(..., None)` rather than assumed:
+        `BaseAIProvider` declares no such method (see
+        `ResilientAIProvider.aclose`'s docstring for why), so a bare
+        provider or a test double without one is a normal, safe case, not
+        an error. Re-fetches each provider by id rather than iterating
+        `list_providers()`'s metadata directly, because that call returns
+        `AIProviderMetadata`, not the live provider object `aclose()` lives
+        on; a provider unregistered between the snapshot and this call is
+        simply no longer this engine's to close.
+        """
+        for metadata in self._provider_registry.list_providers():
+            try:
+                provider = self._provider_registry.get(metadata.provider_id)
+            except ProviderNotFoundError:
+                continue
+            aclose = getattr(provider, "aclose", None)
+            if aclose is None:
+                continue
+            try:
+                await aclose()
+            except Exception:
+                self.logger.exception("Provider '%s' raised while closing during shutdown.", metadata.provider_id)
 
     # -- Diagnostics Delegation (IEngineDiagnostics Protocol) ----------------
 

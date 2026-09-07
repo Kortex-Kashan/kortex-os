@@ -490,6 +490,7 @@ class KernelProductionBootstrap:
             default_routing_context=RoutingContext(allow_cloud=self._config.enable_cloud_models),
             telemetry=telemetry,
             cloud_authority=cloud_routing_authority,
+            credential_resolver=credential_resolver,
         )
 
         approval_policy = governance_manager.create_approval_policy()

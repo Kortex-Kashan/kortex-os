@@ -459,6 +459,35 @@ class ResilientAIProvider(BaseAIProvider):
         """
         return await self._provider.discover_models(credential)
 
+    async def aclose(self) -> None:
+        """Release the wrapped provider's owned resources, if it has any (Phase B / B5.2).
+
+        Every provider `bootstrap.py` registers is wrapped in exactly one of
+        these, so this is the only place that can reach a provider's
+        `aclose()` in production — without this override, an operator-level
+        `getattr(wrapped_provider, "aclose", None)` performed on *this*
+        wrapper (as `AIOrchestrationEngine.stop()` does) would always find
+        nothing, since `BaseAIProvider` declares no such method and this
+        class defines none of its own methods by inheriting one.
+
+        Deliberately duck-typed via `getattr`, not declared on
+        `BaseAIProvider`: not every provider owns a closeable resource
+        (`MetadataOnlyAIProvider`, every provider-shaped test double in the
+        suite), and making `aclose` abstract there would force each of them
+        to grow a no-op override for no behavioral benefit — the exact
+        tradeoff `test_connection`/`discover_models` chose *against* when
+        B2 made those additive-concrete instead of abstract for the same
+        reason (see `base_provider.py`).
+
+        Not retried, not circuit-broken, not timed out: closing a client is
+        local, in-process cleanup, not a call to a remote endpoint — none of
+        this class's resilience machinery is about local operations, and
+        wrapping a close in a retry loop could itself hang shutdown.
+        """
+        aclose = getattr(self._provider, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
 
 class ProviderFallbackChain:
     """Executes requests across an ordered sequence of candidate providers with automatic failover."""

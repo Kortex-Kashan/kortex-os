@@ -1,4 +1,4 @@
-"""Server-derived cloud-routing authorization (Phase B / B4.1).
+"""Server-derived cloud-routing authorization (Phase B / B4.1, extended B5.1).
 
 **Why this module exists.** Before B4, cloud egress was gated by a single
 process-wide boolean (`AIEngineRuntimeConfig.enable_cloud_models`) that
@@ -49,6 +49,54 @@ configuration with no `secret_handle` cannot serve a request: routing to it
 guarantees a vendor 401 after the prompt has already been composed. Treating
 it as "not available for cloud routing" is both the safer and the more
 honest reading of "an enabled cloud provider".
+
+**B5.1 extension: `resolve_tenant_preference`.** B4 answered only "may this
+tenant reach cloud" (a bool). The agent/chat path (`agent.orchestrate`) needs
+one more fact to make that permission *observable* rather than merely
+*possible*: *which* cloud provider the tenant explicitly configured, so
+`RouterLLMExecutionPort` can prefer it over ADR #001's local-first default
+instead of a healthy Ollama silently outranking a tenant's own choice on
+every request (`router.py`'s `_ENDPOINT_RANK` ranks `local_host` before
+`cloud` unconditionally in discovery mode; nothing before B5.1 ever
+overrode that with a tenant-specific preference).
+
+**B5 correction: `is_cloud_permitted` and `resolve_tenant_preference` answer
+two genuinely different questions and must not collapse into one.** The
+first B5.1 pass made `is_cloud_permitted` a one-line wrapper over
+`resolve_tenant_preference`, which was correct only by coincidence — for a
+tenant with *at most one* qualifying cloud configuration, "cloud is
+permitted" and "this is the specific provider" happen to be the same fact.
+They stop agreeing the moment a tenant has **more than one** enabled,
+credentialed cloud configuration (the schema has always permitted this;
+nothing before B5 ever needed to distinguish the cases): cloud routing
+should still be *permitted* (B4's original definition — at least one
+qualifying configuration exists), but there is no longer a single,
+unambiguous *preference* to pin to. Silently picking the first row would
+make routing depend on `AIProviderConfigStore.list_for_tenant`'s `ORDER BY`
+clause — a persistence-layer implementation detail with no tenant-facing
+meaning — so `resolve_tenant_preference` instead answers `None` in that
+case, deliberately falling back to the same local-first/cloud-fallback
+`_discover` behavior B4 already had for every tenant, rather than
+manufacturing a preference nobody actually expressed. Both methods now
+share `_qualifying_cloud_configs` (every candidate) and `_policy_allows`
+(the strict_local_only gate) so the fail-closed rules cannot drift apart
+between them, without conflating "how many qualify" with "was exactly one
+of them chosen".
+
+**B5 correction: a configured `default_model` is verified against the
+provider's live catalog, not merely its static allow-list.** A model
+present in `AIProviderMetadata.supported_models` (a per-provider-instance,
+KORTEX-curated constant — e.g. `SUPPORTED_OPENAI_MODELS`) proves only that
+this KORTEX build knows how to route to a model with that name; it proves
+nothing about whether *this tenant's own credential* can actually serve it
+(model access varies by account, by API tier, by vendor-side deprecation).
+`RouterLLMExecutionPort` therefore calls the provider's own
+`discover_models(credential)` — the exact mechanism `kortex.ai.provider.test`
+already uses for the identical question — before trusting a configured
+`default_model` enough to pin to it. See that class's docstring for the
+full mechanism and the deliberate tradeoff (one extra vendor round trip per
+cloud-preference request; no caching, per the standing no-credential-
+caching rule this module and `credentials.py` already share).
 """
 
 from __future__ import annotations
@@ -155,23 +203,26 @@ class TenantCloudRoutingAuthority:
         """
         return provider_id in self.cloud_provider_ids()
 
-    async def is_cloud_permitted(self, tenant_id: str | None) -> bool:
-        """Whether `tenant_id` may route to a cloud provider right now.
+    async def _qualifying_cloud_configs(self, tenant_id: str | None) -> list[AIProviderConfig] | None:
+        """Every enabled, credentialed cloud configuration for `tenant_id`, or `None` if unresolvable.
 
-        Never raises. Returns `False` for every state it cannot positively
-        confirm as permitted, and logs the reason so "denied by policy" is
-        distinguishable from "denied because state was unavailable".
+        `None` (unresolvable: blank tenant, or the config store raised) is
+        deliberately distinct from `[]` (resolvable: the store answered,
+        this tenant simply has no qualifying configuration) — both callers
+        below treat an empty *or* unresolvable result as "no candidate", but
+        `None` is what makes the failure mode observable in logs, matching
+        every other fail-closed branch in this class.
         """
         if not tenant_id or not tenant_id.strip():
             # Not merely invalid input: an absent tenant means there is no
             # tenant whose configuration could authorize this, so there is
             # no authorization.
             logger.warning("Cloud routing denied: no tenant identity was available to authorize it.")
-            return False
+            return None
 
         cloud_ids = self.cloud_provider_ids()
         if not cloud_ids:
-            return False
+            return []
 
         try:
             configs = await self._provider_configs.list_for_tenant(tenant_id)
@@ -180,14 +231,34 @@ class TenantCloudRoutingAuthority:
                 "Cloud routing denied for tenant '%s': provider configuration could not be read.",
                 tenant_id,
             )
-            return False
+            return None
 
-        has_enabled_cloud_provider = any(
-            config.provider_id in cloud_ids and config.enabled and bool(config.secret_handle) for config in configs
-        )
-        if not has_enabled_cloud_provider:
-            return False
+        return [
+            config
+            for config in configs
+            if config.provider_id in cloud_ids and config.enabled and bool(config.secret_handle)
+        ]
 
+    async def _policy_allows_cloud(self, tenant_id: str | None) -> bool:
+        """Whether `tenant_id`'s governance policy permits cloud routing.
+
+        Isolated from `_qualifying_cloud_configs` because both
+        `is_cloud_permitted` and `resolve_tenant_preference` need the exact
+        same policy check applied to a different upstream result (any
+        qualifying config vs. exactly one) — sharing this keeps
+        `strict_local_only`'s fail-closed handling defined in one place.
+
+        Takes `tenant_id: str | None` (rather than requiring callers to
+        re-narrow it) purely so both call sites can pass the same value
+        `_qualifying_cloud_configs` already validated as non-blank without
+        a second, redundant guard; a `None` here is unreachable in
+        practice (both callers only reach this after a non-empty
+        qualifying list, which `_qualifying_cloud_configs` never returns
+        for a blank tenant) but is handled explicitly rather than assumed.
+        """
+        if not tenant_id:
+            logger.warning("Cloud routing denied: no tenant identity was available to authorize it.")
+            return False
         try:
             policy = await self._policy_reader.get_policy(tenant_id)
         except Exception:
@@ -225,6 +296,59 @@ class TenantCloudRoutingAuthority:
             return False
 
         return True
+
+    async def is_cloud_permitted(self, tenant_id: str | None) -> bool:
+        """Whether `tenant_id` may route to a cloud provider right now.
+
+        Never raises. Returns `False` for every state it cannot positively
+        confirm as permitted, and logs the reason so "denied by policy" is
+        distinguishable from "denied because state was unavailable".
+
+        `True` whenever **at least one** enabled, credentialed cloud
+        configuration exists and policy allows it — B4's original
+        definition, independent of how many configurations qualify. This is
+        deliberately *not* derived from `resolve_tenant_preference`: a
+        tenant with two or three qualifying cloud configurations is still
+        permitted to reach cloud (via ordinary `_discover`-mode ranking/
+        fallback) even though B5 correction makes such a tenant have no
+        single, unambiguous *preference* to pin to — see that method.
+        """
+        qualifying = await self._qualifying_cloud_configs(tenant_id)
+        if not qualifying:
+            return False
+        return await self._policy_allows_cloud(tenant_id)
+
+    async def resolve_tenant_preference(self, tenant_id: str | None) -> AIProviderConfig | None:
+        """The tenant's explicit, unambiguous cloud-provider preference, or `None` (Phase B / B5.1).
+
+        Returns the tenant's `AIProviderConfig` **only when exactly one**
+        enabled, credentialed cloud configuration qualifies and policy
+        allows cloud routing. Every other state — zero qualifying
+        configurations, an unresolvable config or policy store,
+        `strict_local_only=True` (an **absolute** deny — no configured
+        preference overrides it), and, since the B5 correction, **more than
+        one** qualifying configuration — resolves to `None`, never to a
+        guessed or first-row fallback.
+
+        The multi-configuration case is not an error: it means the tenant
+        has not expressed an unambiguous single preference, so this method
+        says so honestly (`None`) rather than picking one by an accident of
+        `AIProviderConfigStore.list_for_tenant`'s SQL ordering. `is_cloud_
+        permitted` is unaffected — cloud stays reachable via ordinary
+        discovery/fallback for such a tenant; only the *pin* is withheld.
+
+        Never raises, for the identical reason `is_cloud_permitted` never
+        raises: an unresolved state must read as "no preference", not as an
+        exception a caller might mishandle into a false positive.
+        """
+        qualifying = await self._qualifying_cloud_configs(tenant_id)
+        if not qualifying or len(qualifying) != 1:
+            return None
+
+        if not await self._policy_allows_cloud(tenant_id):
+            return None
+
+        return qualifying[0]
 
 
 __all__ = [

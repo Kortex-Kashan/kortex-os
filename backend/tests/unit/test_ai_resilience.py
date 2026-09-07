@@ -6,6 +6,7 @@ Tests adhere strictly to the ratified M9.2 specification:
 - Circuit breaker state machine (CLOSED -> OPEN -> HALF_OPEN -> CLOSED)
 - Multi-provider fallback chaining
 - AST import quarantine and protocol compatibility
+- Provider resource lifecycle: `aclose()` delegation (Phase B / B5.2)
 """
 
 from __future__ import annotations
@@ -535,3 +536,73 @@ async def test_test_connection_and_discover_models_bypass_the_circuit_breaker() 
     assert await resilient.test_connection("the-correct-credential") is True
     models = await resilient.discover_models("the-correct-credential")
     assert [m.model_id for m in models] == ["live-discovered-model"]
+
+
+# ---------------------------------------------------------------------------
+# §6 — B5.2: ResilientAIProvider.aclose() delegation
+# ---------------------------------------------------------------------------
+#
+# `MockProvider` (above) declares no `aclose` at all -- the common case for
+# the majority of test doubles in this suite, and structurally identical to
+# `MetadataOnlyAIProvider`. `_CloseableMockProvider` below is the one new
+# double this section needs: a provider that DOES own a closeable resource,
+# so "the wrapper reached my aclose" is observable the same way
+# `_CredentialAwareMockProvider` above makes `test_connection`/
+# `discover_models` delegation observable — never by asserting a mock was
+# called, always by asserting the resource's own state changed.
+
+
+class _CloseableMockProvider(MockProvider):
+    """A `MockProvider` that owns a resource with real closed/open state."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.closed = False
+        self.close_count = 0
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_resilient_provider_aclose_delegates_to_the_wrapped_providers_aclose() -> None:
+    inner = _CloseableMockProvider("mock-closeable")
+    resilient = ResilientAIProvider(provider=inner)
+
+    await resilient.aclose()
+
+    assert inner.closed is True
+
+
+@pytest.mark.asyncio
+async def test_resilient_provider_aclose_is_safe_when_the_wrapped_provider_has_none() -> None:
+    """Requirement: providers that do not own resources must remain safe.
+
+    `MockProvider` declares no `aclose` — the same shape as
+    `MetadataOnlyAIProvider` and every pre-B5.2 test double in this suite.
+    `ResilientAIProvider.aclose()` must not raise `AttributeError` here.
+    """
+    inner = MockProvider("mock-plain")
+    resilient = ResilientAIProvider(provider=inner)
+
+    await resilient.aclose()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_resilient_provider_aclose_does_not_touch_generate_text_state() -> None:
+    """Closing must not disturb the circuit breaker, retry policy, or call count.
+
+    `aclose()` is documented as bypassing this class's resilience machinery
+    entirely (no retry, no circuit breaker, no timeout) — this proves that
+    bypass rather than merely asserting the docstring's claim.
+    """
+    inner = _CloseableMockProvider("mock-closeable")
+    resilient = ResilientAIProvider(provider=inner, circuit_breaker=CircuitBreaker(failure_threshold=1))
+    resilient.circuit_breaker.record_failure(RuntimeError("unrelated"))
+    assert resilient.circuit_breaker.state == CircuitState.OPEN
+
+    await resilient.aclose()
+
+    assert resilient.circuit_breaker.state == CircuitState.OPEN
+    assert inner.call_count == 0

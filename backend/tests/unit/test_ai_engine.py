@@ -179,6 +179,23 @@ class DummyExecutingProvider(BaseAIProvider):
         return True
 
 
+class _CloseableProvider(DummyExecutingProvider):
+    """A `DummyExecutingProvider` that owns a resource with real closed state (Phase B / B5.2)."""
+
+    def __init__(self, provider_id: str = "closeable", raise_on_close: bool = False) -> None:
+        super().__init__(provider_id=provider_id)
+        self.closed = False
+        self.close_count = 0
+        self.raise_on_close = raise_on_close
+
+    async def aclose(self) -> None:
+        if self.raise_on_close:
+            self.close_count += 1
+            raise RuntimeError(f"'{self.provider_id}' failed to close its client.")
+        self.close_count += 1
+        self.closed = True
+
+
 def _make_engine(
     *,
     provider: BaseAIProvider | None = None,
@@ -286,6 +303,149 @@ async def test_engine_cannot_start_before_initialize() -> None:
     engine, _ = _make_engine()
     with pytest.raises(EngineStateError):
         await engine.start()
+
+
+# ---------------------------------------------------------------------------
+# §9 — B5.2: provider resource lifecycle on engine shutdown
+# ---------------------------------------------------------------------------
+#
+# Every assertion below observes a real closed-resource flag on a test
+# double, or a real error propagated/contained — never a mock's call count
+# on its own. `_make_engine` constructs the engine with its one required
+# provider; `engine.provider_registry.register(...)` adds the rest before
+# `start()`, mirroring how `bootstrap.py` populates the registry before the
+# engine ever reaches RUNNING.
+
+
+async def _running_engine_with(*providers: BaseAIProvider) -> AIOrchestrationEngine:
+    engine, kernel = _make_engine(provider=providers[0])
+    for extra in providers[1:]:
+        engine.provider_registry.register(extra)
+    await engine.initialize(kernel)
+    await engine.start()
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_a_provider_that_owns_a_resource() -> None:
+    """Requirements: aclose delegates, and the owned client actually closes."""
+    provider = _CloseableProvider("closeable-1")
+    engine = await _running_engine_with(provider)
+
+    await engine.stop()
+
+    assert provider.closed is True
+    assert provider.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_is_safe_for_a_provider_with_no_aclose() -> None:
+    """`DummyExecutingProvider` (like most test doubles and `MetadataOnlyAIProvider`)
+    declares no `aclose` at all -- shutdown must not raise for it."""
+    engine = await _running_engine_with(DummyExecutingProvider("plain"))
+
+    await engine.stop()  # must not raise
+
+    assert engine.state == EngineState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_every_registered_provider() -> None:
+    """Multiple providers all close -- not just the first or the last registered."""
+    a, b, c = _CloseableProvider("a"), _CloseableProvider("b"), _CloseableProvider("c")
+    engine = await _running_engine_with(a, b, c)
+
+    await engine.stop()
+
+    assert a.closed and b.closed and c.closed
+    assert [p.close_count for p in (a, b, c)] == [1, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_stop_on_an_empty_registry_is_safe() -> None:
+    """Requirement: empty-registry shutdown does not raise.
+
+    `_make_engine` always registers one provider, so this constructs the
+    engine directly to actually reach an empty `ProviderRegistry`.
+    """
+    kernel = InMemoryKernelBridge()
+    engine = AIOrchestrationEngine(provider_registry=ProviderRegistry())
+    await engine.initialize(kernel)
+    await engine.start()
+
+    await engine.stop()  # must not raise
+
+    assert engine.state == EngineState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_one_providers_close_failure_does_not_prevent_the_others_from_closing() -> None:
+    """A provider whose `aclose()` raises must not block sibling providers, or the engine, from stopping."""
+    failing = _CloseableProvider("failing", raise_on_close=True)
+    healthy = _CloseableProvider("healthy")
+    engine = await _running_engine_with(failing, healthy)
+
+    await engine.stop()  # must not raise despite `failing.aclose()` raising
+
+    assert failing.close_count == 1
+    assert healthy.closed is True
+    assert engine.state == EngineState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_stop_twice_still_leaves_every_provider_closed_exactly_once() -> None:
+    """Requirement 7: safe under the *existing* lifecycle semantics, which is
+    exactly as idempotent as `BaseEngine.stop()` already was before B5.2 --
+    a second call raises `EngineStateError` (pre-existing `ensure_state`
+    behavior, unchanged), and providers are closed on the one call that is
+    legitimate, not once per attempt.
+    """
+    provider = _CloseableProvider("once")
+    engine = await _running_engine_with(provider)
+
+    await engine.stop()
+    with pytest.raises(EngineStateError):
+        await engine.stop()
+
+    assert provider.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_no_provider_is_closed_before_the_engine_reaches_running() -> None:
+    """Requirement 8: construction and registration alone must never close anything.
+
+    `_running_engine_with` registers the extra provider, initializes, and
+    starts the engine -- none of that is `stop()` -- so `close_count` must
+    still be zero immediately before this test's own explicit call.
+    """
+    provider = _CloseableProvider("not-yet")
+    engine = await _running_engine_with(provider)
+
+    assert provider.close_count == 0
+
+    await engine.stop()
+
+    assert provider.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_closing_providers_makes_no_real_network_call() -> None:
+    """Requirement: no real-network behavior is introduced by shutdown.
+
+    `_CloseableProvider.aclose()` is pure in-process state -- it holds no
+    `httpx.AsyncClient` and performs no I/O -- so this test is really
+    asserting the *shape* of the contract shutdown relies on: `aclose()` is
+    documented and implemented as local cleanup only (see
+    `ResilientAIProvider.aclose`), and this suite's own AST import
+    quarantine (`test_m8_files_quarantine_forbidden_imports`) already keeps
+    `engine.py` free of any transport library that could make one.
+    """
+    provider = _CloseableProvider("no-network")
+    engine = await _running_engine_with(provider)
+
+    await engine.stop()  # the only meaningful assertion is that this doesn't hang or error
+
+    assert provider.closed is True
 
 
 # ---------------------------------------------------------------------------
