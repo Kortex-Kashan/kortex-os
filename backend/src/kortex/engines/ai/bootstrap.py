@@ -33,6 +33,7 @@ from kortex.engines.ai.anthropic_provider import (
     AnthropicProvider,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.cloud_authorization import TenantCloudRoutingAuthority
 from kortex.engines.ai.credentials import TenantCredentialResolver
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.engine import (
@@ -415,12 +416,6 @@ class KernelProductionBootstrap:
             )
             agent_task_store = InMemoryAgentTaskStore()
 
-        llm_port = RouterLLMExecutionPort(
-            router=model_router,
-            registry=provider_registry,
-            default_routing_context=RoutingContext(allow_cloud=self._config.enable_cloud_models),
-            telemetry=telemetry,
-        )
         context_port = EngineAgentContextPort(
             composer=context_composer,
             memory_manager=memory_manager,
@@ -452,6 +447,49 @@ class KernelProductionBootstrap:
             governance_store=gov_store,
             tool_registry=tool_registry,
             approval_manager=approval_bridge,
+        )
+
+        # 6.6. Trusted cloud-routing authority (Phase B / B4.1).
+        #
+        # Built here rather than earlier because it needs `governance_manager`
+        # (for `strict_local_only`) alongside `provider_config_store` and
+        # `provider_registry`; `RouterLLMExecutionPort` is therefore
+        # constructed below instead of at its former position above, so both
+        # it and the engine share this one instance and cannot drift into
+        # deciding differently.
+        #
+        # `governance_manager` is used as the policy reader rather than
+        # `gov_store` directly because it already applies the documented
+        # `AIGovernancePolicy` defaults for a tenant with no stored row --
+        # the same object, and therefore the same policy, that
+        # `generate_response` reads for guardrails and quota.
+        #
+        # `enable_cloud_models` is still honored as `default_routing_context`
+        # for the no-authority composition, but once an authority exists it
+        # is authoritative on this path: a process-wide flag cannot express a
+        # per-tenant decision, which is precisely why production bootstrap
+        # must NOT set it (`kernel_bootstrap.py` leaves it False) and cloud
+        # providers are nonetheless reachable by an authorized tenant.
+        cloud_routing_authority: TenantCloudRoutingAuthority | None = None
+        if provider_config_store is not None:
+            cloud_routing_authority = TenantCloudRoutingAuthority(
+                registry=provider_registry,
+                provider_configs=provider_config_store,
+                policy_reader=governance_manager,
+            )
+        else:
+            logger.warning(
+                "No provider_config_store supplied: cloud routing authorization is unavailable and "
+                "cloud providers will be routable only if enable_cloud_models is set. Tenant-scoped "
+                "cloud authorization requires a provider configuration store."
+            )
+
+        llm_port = RouterLLMExecutionPort(
+            router=model_router,
+            registry=provider_registry,
+            default_routing_context=RoutingContext(allow_cloud=self._config.enable_cloud_models),
+            telemetry=telemetry,
+            cloud_authority=cloud_routing_authority,
         )
 
         approval_policy = governance_manager.create_approval_policy()
@@ -487,6 +525,7 @@ class KernelProductionBootstrap:
             provider_config_store=provider_config_store,
             secret_getter=secret_getter,
             secret_putter=secret_putter,
+            cloud_routing_authority=cloud_routing_authority,
         )
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")

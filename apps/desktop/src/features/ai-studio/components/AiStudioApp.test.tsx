@@ -91,15 +91,22 @@ describe("AiStudioApp", () => {
     expect(await screen.findByText("No AI models are currently available.")).toBeInTheDocument();
   });
 
-  it("communicates that generation/orchestration/configuration are not available", async () => {
+  it("states where credentials live and who calls the provider", async () => {
+    // Replaces a B1-era assertion that provider configuration was "not
+    // available yet" -- B4 makes that copy false, so the test asserts the
+    // new claim rather than being deleted. What it checks is the part that
+    // must stay true no matter how the wording evolves: keys are held by
+    // the Security Engine, and the backend (never this window) calls the
+    // vendor.
     listAiProvidersMock.mockResolvedValueOnce([]);
     listAiModelsMock.mockResolvedValueOnce([]);
 
     renderAiStudioApp();
 
     expect(
-      await screen.findByText(/Generation, agent orchestration, and provider configuration are not available yet\./),
+      await screen.findByText(/API keys are held by the Security Engine and are never returned to this app/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/made by the KORTEX backend, never from this window/)).toBeInTheDocument();
   });
 
   it("renders real provider and model data, identifying each entry", async () => {

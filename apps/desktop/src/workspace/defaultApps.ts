@@ -29,7 +29,7 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
   {
     id: "ai-studio",
     name: "AI Studio",
-    description: "Browse the AI provider and model registry.",
+    description: "Configure AI providers, test credentials, and chat with your assistant.",
     icon: AiStudioIcon,
     route: "/ai-studio",
     component: AiStudioApp,

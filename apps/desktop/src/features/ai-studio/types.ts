@@ -33,3 +33,57 @@ export interface AiModel {
   providerId: string;
   providerDisplayName: string;
 }
+
+/**
+ * Mirrors what `kortex.ai.provider.config.list` and
+ * `kortex.ai.provider.configure` return — one tenant's configuration of one
+ * provider.
+ *
+ * `secret_handle` is absent here for the same reason it is absent from
+ * `AiProvider`, and now also absent from the backend response itself
+ * (B4.1): the frontend must never *receive* a secret handle, not merely
+ * decline to render one. `hasCredential` carries the entire signal this
+ * workspace needs — "is a credential stored for this provider?" — and
+ * carries nothing that could be used to request one.
+ *
+ * There is deliberately no field an API key could be assigned to. A key
+ * travels in exactly one direction (this workspace -> `provider.configure`)
+ * and never comes back.
+ */
+export interface AiProviderConfig {
+  tenantId: string;
+  providerId: string;
+  enabled: boolean;
+  hasCredential: boolean;
+  defaultModel: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/**
+ * Mirrors what `kortex.ai.provider.test` returns.
+ *
+ * `connected` and `models` are independent results of two separate provider
+ * round trips: the backend returns `connected: true` with an empty `models`
+ * and an explanatory `detail` when the credential is valid but discovery
+ * failed on its own. The UI must therefore treat `detail` as informational
+ * whenever `connected` is true, not as an error.
+ */
+export interface AiConnectionTestResult {
+  providerId: string;
+  connected: boolean;
+  detail: string | null;
+  models: AiModel[];
+}
+
+/** Input to `kortex.ai.provider.configure`. `tenantId` is deliberately
+ * absent: the backend derives the tenant from the verified execution
+ * context and ignores any caller-supplied value. */
+export interface AiProviderConfigureInput {
+  providerId: string;
+  /** Plaintext key, sent once. Omit to change other fields without
+   * replacing a stored credential. */
+  apiKey?: string;
+  defaultModel?: string;
+  enabled?: boolean;
+}

@@ -178,14 +178,22 @@ async def test_the_key_is_stored_in_secretstore_and_nowhere_else(kernel_env) -> 
         default_model="gpt-4o",
     )
 
-    # The response carries the handle, never the value.
+    # The response carries neither the value nor the handle. B1 returned the
+    # handle here (it is a SecretStore reference, not secret material); B4
+    # withdrew it, because B4 gives the response a real frontend consumer
+    # and the standing requirement is that the frontend never *receives* a
+    # secret handle rather than merely declining to display one. Asserted as
+    # an explicit absence, not by deleting the old assertion, so a later
+    # change that re-widens the wire view fails here.
     assert _API_KEY_A not in str(result)
     assert result["has_credential"] is True
-    assert result["secret_handle"] == provider_secret_handle("openai")
+    assert "secret_handle" not in result
 
-    # The persisted configuration row likewise.
+    # The persisted configuration row still records the handle -- it is the
+    # server-side pointer resolution depends on. Only the wire view narrowed.
     stored = await ai_engine._provider_config_store.get(_TENANT_A, "openai")
     assert stored is not None
+    assert stored.secret_handle == provider_secret_handle("openai")
     assert _API_KEY_A not in str(stored.model_dump())
 
     # ...and the real key really is retrievable from SecretStore under the

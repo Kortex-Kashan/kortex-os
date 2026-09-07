@@ -153,7 +153,9 @@ describe("routes/index provider composition", () => {
       await router.navigate(testApp.route);
     });
 
-    expect(await screen.findByText(/Provider and model registry — browse only\./)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/API keys are held by the Security Engine and are never returned to this app/),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: testApp.name })).toHaveAttribute(
       "aria-current",
       "page",

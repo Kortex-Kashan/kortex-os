@@ -30,6 +30,7 @@ from kortex.engines.ai.bootstrap import (
     KernelProductionBootstrap,
 )
 from kortex.engines.ai.bridge import KernelBridgeAdapter
+from kortex.engines.ai.cloud_authorization import TenantCloudRoutingAuthority
 from kortex.engines.ai.diagnostics import (
     CANONICAL_CAPABILITIES,
     AIDiagnostics,
@@ -378,6 +379,7 @@ __all__ = [
     "RoutingValidationError",
     "StorageAgentTaskStore",
     "StorageConversationStore",
+    "TenantCloudRoutingAuthority",
     "TenantConcurrencyThrottler",
     "TenantQuotaExceededError",
     "TenantQuotaManager",

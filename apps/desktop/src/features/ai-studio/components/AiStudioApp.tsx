@@ -12,10 +12,12 @@ import {
 } from "@kortex/design-system";
 import { AiStudioAccessDeniedError } from "../api";
 import { useAiModels } from "../hooks/useAiModels";
+import { useAiProviderConfigs } from "../hooks/useAiProviderConfigs";
 import { useAiProviders } from "../hooks/useAiProviders";
-import type { AiModel, AiProvider } from "../types";
+import type { AiModel } from "../types";
 import { AiGovernanceTab } from "./AiGovernanceTab";
 import { ChatPanel } from "./ChatPanel";
+import { ProviderConfigCard } from "./ProviderConfigCard";
 import { useAuth } from "@/auth/AuthProvider";
 
 type AiTab = "registry" | "governance" | "chat";
@@ -74,8 +76,10 @@ export function AiStudioApp() {
             <CardHeader>
               <CardTitle>AI Studio</CardTitle>
               <CardDescription>
-                Provider and model registry — browse only. Generation, agent orchestration, and
-                provider configuration are not available yet.
+                Configure AI providers for this workspace, test their credentials, and choose a
+                default model. API keys are held by the Security Engine and are never returned to
+                this app; requests to a provider are made by the KORTEX backend, never from this
+                window.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -113,6 +117,16 @@ function SectionShell({
 
 function ProvidersSection() {
   const { data, isPending, isError, error, refetch, isFetching } = useAiProviders();
+  const configs = useAiProviderConfigs();
+
+  // The two queries are deliberately not gated on each other. The registry
+  // is the list of providers that exist; configurations are which of them
+  // this tenant has set up. A tenant with `ai:read` but not `ai:manage`
+  // still sees the registry, so a configuration failure must degrade to
+  // "no configuration known" rather than blanking the section — the cards
+  // then render as unconfigured, and the first management action reports
+  // the real permission error from the backend.
+  const configByProviderId = new Map((configs.data ?? []).map((config) => [config.providerId, config]));
 
   if (isPending) {
     return (
@@ -135,14 +149,33 @@ function ProvidersSection() {
   return (
     <SectionShell
       title="Providers"
-      action={<RefreshButton onRefresh={() => void refetch()} isRefreshing={isFetching} />}
+      action={
+        <RefreshButton
+          onRefresh={() => {
+            void refetch();
+            void configs.refetch();
+          }}
+          // Deliberately the providers query's own `isFetching`, not
+          // `isFetching || configs.isFetching`. Refresh re-requests both,
+          // but disabling the control while the *configuration* query is in
+          // flight would lock the user out of refreshing the registry
+          // whenever that unrelated query is slow or retrying — including
+          // for a tenant lacking `ai:read` on configurations, whose retry
+          // would leave the button permanently disabled.
+          isRefreshing={isFetching}
+        />
+      }
     >
       {providers.length === 0 ? (
         <p className="text-body text-muted-foreground">No AI providers are currently registered.</p>
       ) : (
         <ul className="space-y-3">
           {providers.map((provider) => (
-            <ProviderCard key={provider.providerId} provider={provider} />
+            <ProviderConfigCard
+              key={provider.providerId}
+              provider={provider}
+              config={configByProviderId.get(provider.providerId)}
+            />
           ))}
         </ul>
       )}
@@ -225,24 +258,6 @@ function FailureState({ error, onRetry }: { error: Error; onRetry: () => void })
         Retry
       </Button>
     </div>
-  );
-}
-
-function ProviderCard({ provider }: { provider: AiProvider }) {
-  return (
-    <li className="rounded-md border border-border p-4" data-testid="ai-provider-card">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-body font-medium text-foreground">{provider.displayName}</span>
-        <Badge variant="secondary">{provider.endpointType}</Badge>
-      </div>
-      <p className="text-caption text-muted-foreground">
-        {provider.vendor} · {provider.providerId}
-        {provider.credentialRequirement !== "none" ? ` · requires ${provider.credentialRequirement}` : ""}
-      </p>
-      {provider.supportedModels.length > 0 && (
-        <p className="mt-2 text-body text-muted-foreground">Models: {provider.supportedModels.join(", ")}</p>
-      )}
-    </li>
   );
 }
 

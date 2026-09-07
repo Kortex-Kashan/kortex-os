@@ -44,6 +44,7 @@ from kortex.engines.ai.agent import (
     ResumeToken,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.cloud_authorization import TenantCloudRoutingAuthority
 from kortex.engines.ai.credentials import TenantCredentialResolver, provider_secret_handle
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.events import (
@@ -53,6 +54,7 @@ from kortex.engines.ai.exceptions import (
     AIEngineNotConfiguredError,
     AIGovernanceQuotaExceededError,
     AIProviderTimeoutError,
+    CloudRoutingNotPermittedError,
     ConversationStoreError,
     NoRoutableProviderError,
     PermanentProviderError,
@@ -143,16 +145,25 @@ def _provider_config_view(config: AIProviderConfig) -> dict[str, Any]:
     field to `AIProviderConfig` can never silently widen what crosses the
     capability boundary. `has_credential` answers the only question a UI
     actually has ("is this provider set up?") without exposing anything
-    about the credential itself; `secret_handle` is a `SecretStore`
-    reference, not secret material, and is what the tenant needs in order to
-    reason about their own configuration.
+    about the credential itself.
+
+    `secret_handle` is deliberately **not** here (B4.1, Chief Architect
+    decision). It is a `SecretStore` reference rather than secret material,
+    and B1 included it so a tenant could reason about their own
+    configuration — but B4 gives that handle a real consumer (AI Studio),
+    and the standing requirement is that the frontend never *receives* a
+    secret handle, not merely that it declines to display one. Omitting it
+    from the response is the only version of that guarantee which cannot be
+    undone by a later mapping change: `apps/desktop/src/features/ai-studio/
+    types.ts` already documents the same reasoning for why the field is
+    absent from its types rather than hidden in its UI. Nothing consumed
+    the field — `has_credential` carries the whole signal a caller needs.
     """
     return {
         "tenant_id": config.tenant_id,
         "provider_id": config.provider_id,
         "enabled": config.enabled,
         "has_credential": config.secret_handle is not None,
-        "secret_handle": config.secret_handle,
         "default_model": config.default_model,
         "created_at": config.created_at.isoformat() if config.created_at else None,
         "updated_at": config.updated_at.isoformat() if config.updated_at else None,
@@ -222,7 +233,17 @@ async def _generate_with_fallback(
 
 
 class RouterLLMExecutionPort(ILLMExecutionPort):
-    """Production adapter for `ILLMExecutionPort` using `ModelRouter` and `ProviderRegistry`."""
+    """Production adapter for `ILLMExecutionPort` using `ModelRouter` and `ProviderRegistry`.
+
+    This is the *only* place the agent/orchestration path decides placement,
+    which is why B4.1's trusted cloud authorization belongs here and nowhere
+    else. `ILLMExecutionPort.generate_step` takes an `LLMRequest` and nothing
+    more — there is deliberately no routing-context parameter, so an agent
+    step has no channel through which a caller could ask for cloud egress.
+    Before B4.1 that meant cloud was simply unreachable from this path
+    (`self._default_context` was used unconditionally); now the decision is
+    derived per request from authoritative tenant state.
+    """
 
     def __init__(
         self,
@@ -230,17 +251,40 @@ class RouterLLMExecutionPort(ILLMExecutionPort):
         registry: ProviderRegistry,
         default_routing_context: RoutingContext | None = None,
         telemetry: object | None = None,
+        cloud_authority: TenantCloudRoutingAuthority | None = None,
     ) -> None:
         self._router = router
         self._registry = registry
         self._default_context = default_routing_context or RoutingContext(allow_cloud=False)
         self._telemetry = telemetry
+        self._cloud_authority = cloud_authority
 
     async def generate_step(self, request: LLMRequest) -> LLMResponse:
-        """Route to eligible providers and execute a single reasoning step, with failover."""
-        context_dict = self._default_context.model_dump()
+        """Route to eligible providers and execute a single reasoning step, with failover.
+
+        `allow_cloud` is decided here, per request, from `request.tenant_id`
+        — which is server-stamped: `EngineAgentContextPort.
+        build_step_context` copies it from the persisted `AgentTask`, whose
+        tenant the dispatcher derived from the authenticated principal. No
+        caller-supplied value reaches this decision.
+
+        When a `cloud_authority` is wired it is **authoritative in both
+        directions**: it can permit cloud egress that `default_routing_
+        context` denies, and it denies egress that `default_routing_context`
+        would have allowed. This is the point — `enable_cloud_models` is a
+        process-wide flag that cannot express a per-tenant decision, so once
+        a real authority exists the flag must stop being the answer on this
+        path. With no authority wired, behavior is byte-identical to before
+        B4.1, which is what keeps the in-memory/unit composition (no
+        provider config store, hence no authoritative state to consult)
+        working unchanged.
+        """
+        context = self._default_context
+        if self._cloud_authority is not None:
+            permitted = await self._cloud_authority.is_cloud_permitted(request.tenant_id)
+            context = context.model_copy(update={"allow_cloud": permitted})
         return await _generate_with_fallback(
-            self._router, self._registry, request, context_dict, telemetry=self._telemetry
+            self._router, self._registry, request, context.model_dump(), telemetry=self._telemetry
         )
 
 
@@ -425,6 +469,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         provider_config_store: Any = None,
         secret_getter: Any = None,
         secret_putter: Any = None,
+        cloud_routing_authority: TenantCloudRoutingAuthority | None = None,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
 
@@ -490,6 +535,32 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             else AIGovernanceManager(tool_registry=self._tool_registry)
         )
 
+        # B4.1: the trusted cloud-routing authority. Built here — rather
+        # than only in `bootstrap.py` — because every input it needs is
+        # already an attribute of this engine, and because a shared instance
+        # keeps `generate_response` and the agent path deciding identically.
+        # `cloud_routing_authority` may be injected so `bootstrap.py` can
+        # hand the same instance to the `RouterLLMExecutionPort` it builds
+        # itself; absent an injection, one is constructed whenever there is
+        # authoritative state to consult.
+        #
+        # No provider config store means no authoritative per-tenant state
+        # exists, so no authority is built and pre-B4.1 behavior stands
+        # unchanged. That is the correct answer rather than a gap: with
+        # nowhere for a tenant to have enabled a cloud provider, the trusted
+        # rule's first clause could only ever evaluate false.
+        self._cloud_routing_authority: TenantCloudRoutingAuthority | None
+        if cloud_routing_authority is not None:
+            self._cloud_routing_authority = cloud_routing_authority
+        elif provider_config_store is not None:
+            self._cloud_routing_authority = TenantCloudRoutingAuthority(
+                registry=self._provider_registry,
+                provider_configs=provider_config_store,
+                policy_reader=self._governance_manager,
+            )
+        else:
+            self._cloud_routing_authority = None
+
         # Wire AgentOrchestrator with production adapters
         if agent_orchestrator is not None:
             self._agent_orchestrator = agent_orchestrator
@@ -498,6 +569,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 router=self._model_router,
                 registry=self._provider_registry,
                 telemetry=self._telemetry,
+                cloud_authority=self._cloud_routing_authority,
             )
             ctx_port = EngineAgentContextPort(
                 composer=self._context_composer,
@@ -874,6 +946,69 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
 
     # -- Facade Capability Handlers ------------------------------------------
 
+    @property
+    def cloud_routing_authority(self) -> TenantCloudRoutingAuthority | None:
+        """The trusted cloud-routing authority, or None when unwired (B4.1)."""
+        return self._cloud_routing_authority
+
+    async def _authorized_routing_context(
+        self,
+        tenant_id: str,
+        requested: RoutingContext | None,
+    ) -> RoutingContext:
+        """Derive the effective routing context server-side (Phase B / B4.1).
+
+        `requested` is caller-supplied and therefore untrusted with respect
+        to cloud egress. This method returns a context whose cloud
+        authorization is the trusted decision for `tenant_id`, and rejects
+        the two constraints that would otherwise reach a cloud provider
+        *around* that decision:
+
+        1. **`allow_cloud`** — replaced, never honored. A caller asking for
+           cloud egress it is not entitled to gets a local-only context,
+           not an error: `allow_cloud` is a preference the trusted decision
+           supersedes.
+        2. **`provider_id` pinned at a cloud provider** — rejected.
+           `ModelRouter._resolve_pinned` deliberately does not consult
+           `allow_cloud` (naming a provider is itself the explicit placement
+           decision the default exists to force), so a pin is an
+           unguarded route to the vendor unless it is stopped here.
+        3. **`endpoint_type="cloud"`** — rejected. In
+           `ModelRouter._discover` the `endpoint_type` filter and the
+           cloud gate are branches of one `if/elif`, so an explicit
+           `endpoint_type` **bypasses the `allow_cloud` check entirely**.
+           Left unhandled, `{"endpoint_type": "cloud"}` would reach every
+           registered cloud provider regardless of this decision.
+
+        Cases 2 and 3 raise rather than downgrade because both are caller
+        assertions about placement; see `CloudRoutingNotPermittedError`.
+
+        With no authority wired there is no authoritative state to consult,
+        and the caller's context stands as before B4.1 — the composition
+        used by in-memory and unit tests.
+        """
+        requested = requested if requested is not None else RoutingContext()
+        if self._cloud_routing_authority is None:
+            return requested
+
+        authority = self._cloud_routing_authority
+        permitted = await authority.is_cloud_permitted(tenant_id)
+
+        if not permitted:
+            if requested.provider_id is not None and authority.is_cloud_provider(requested.provider_id):
+                raise CloudRoutingNotPermittedError(
+                    tenant_id,
+                    f"provider '{requested.provider_id}' is a cloud provider and no enabled, credentialed "
+                    "cloud provider configuration permits cloud routing for this tenant.",
+                )
+            if requested.endpoint_type == "cloud":
+                raise CloudRoutingNotPermittedError(
+                    tenant_id,
+                    "endpoint_type='cloud' was requested but cloud routing is not permitted for this tenant.",
+                )
+
+        return requested.model_copy(update={"allow_cloud": permitted})
+
     async def generate_response(
         self,
         request: LLMRequest,
@@ -961,7 +1096,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 enriched_request = await self._context_composer.compose(request)
 
                 # 3-4. Model Routing, Provider Resolution & Execution (with failover)
-                effective_context = routing_context or RoutingContext(allow_cloud=False)
+                # B4.1: `routing_context` arrives from the caller, so it is
+                # untrusted with respect to cloud egress. The effective
+                # context is derived server-side from the authoritative
+                # tenant (`request.tenant_id`, already rebound to the
+                # verified principal above).
+                effective_context = await self._authorized_routing_context(request.tenant_id, routing_context)
                 response = await _generate_with_fallback(
                     self._model_router,
                     self._provider_registry,

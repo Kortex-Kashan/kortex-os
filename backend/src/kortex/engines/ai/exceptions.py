@@ -296,6 +296,29 @@ class AIGovernanceQuotaExceededError(AIGovernanceError):
         self.tenant_id = tenant_id
 
 
+class CloudRoutingNotPermittedError(AIGovernanceError):
+    """Raised when a caller asks for cloud routing a tenant is not authorized for.
+
+    A governance error, not a routing error, because the denial comes from
+    authoritative tenant state (`AIProviderConfig.enabled` plus
+    `AIGovernancePolicy.strict_local_only`) rather than from a malformed or
+    unsatisfiable routing constraint.
+
+    Raised rather than silently downgrading the request to local-only.
+    Naming a cloud provider, or asking for `endpoint_type="cloud"`, is a
+    caller assertion — the same reading `ModelRouter._resolve_pinned`
+    already applies to a violated pin — so answering it with a quietly
+    different placement decision would hide the denial from the caller who
+    needs to know about it. `allow_cloud` is the one exception: it is
+    overridden without error, because it is an untrusted *request* that the
+    trusted decision replaces, not an assertion about placement.
+    """
+
+    def __init__(self, tenant_id: str, message: str) -> None:
+        super().__init__(f"Cloud routing is not permitted for tenant '{tenant_id}': {message}")
+        self.tenant_id = tenant_id
+
+
 class AIGovernanceNotFoundError(AIGovernanceError):
     """Raised when an AI governance policy or audit record is not found."""
 
@@ -327,6 +350,7 @@ __all__ = [
     "BridgeExecutionError",
     "BridgeValidationError",
     "CircuitBreakerOpenError",
+    "CloudRoutingNotPermittedError",
     "ContextCompositionError",
     "ConversationStoreError",
     "KnowledgeRetrievalError",

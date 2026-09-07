@@ -1547,7 +1547,24 @@ FORBIDDEN_NAMESPACES = [
 ]
 
 
-@pytest.mark.parametrize("file_name", ["engine.py", "diagnostics.py", "interfaces.py", "identity.py"])
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "engine.py",
+        "diagnostics.py",
+        "interfaces.py",
+        "identity.py",
+        # B4.1. Added to the existing list rather than changing how the list
+        # works: `cloud_authorization.py` is the new authority on cloud
+        # egress, and it reaches both provider configuration and governance
+        # policy. It must do so through injected Protocols, never by
+        # importing persistence, `governance.py`, or Security Engine -- the
+        # same boundary this probe already guards for `engine.py`. Without
+        # an entry here, B4's most security-sensitive new module would be
+        # the one file in the package with no import quarantine.
+        "cloud_authorization.py",
+    ],
+)
 def test_m8_files_quarantine_forbidden_imports(file_name: str) -> None:
     target_path = Path(__file__).parent.parent.parent / "src" / "kortex" / "engines" / "ai" / file_name
     imports = _collect_imports(target_path)
