@@ -357,3 +357,57 @@ async def test_an_empty_stored_credential_is_rejected() -> None:
 
     with pytest.raises(CredentialResolutionError):
         await resolver.resolve("tenant-a", "openai")
+
+
+# ---------------------------------------------------------------------------
+# Phase B / B2 -- ResolvedCredential.default_model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolved_credential_carries_the_tenants_configured_default_model() -> None:
+    handle = provider_secret_handle("openai")
+    resolver, _getter = _resolver(
+        {
+            ("tenant-a", "openai"): AIProviderConfig(
+                tenant_id="tenant-a", provider_id="openai", secret_handle=handle, default_model="gpt-4.1"
+            )
+        },
+        {(handle, "tenant-a"): _KEY_A},
+    )
+
+    resolved = await resolver.resolve("tenant-a", "openai")
+
+    assert resolved is not None
+    assert resolved.default_model == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_resolved_credential_default_model_is_none_when_tenant_configured_none() -> None:
+    """A tenant that never set a default model gets `None`, not a fabricated
+    guess -- the provider itself decides what its own fallback should be."""
+    handle = provider_secret_handle("openai")
+    resolver, _getter = _resolver(
+        {("tenant-a", "openai"): AIProviderConfig(tenant_id="tenant-a", provider_id="openai", secret_handle=handle)},
+        {(handle, "tenant-a"): _KEY_A},
+    )
+
+    resolved = await resolver.resolve("tenant-a", "openai")
+
+    assert resolved is not None
+    assert resolved.default_model is None
+
+
+def test_resolved_credential_default_model_is_excluded_from_frozen_identity_by_nothing_special() -> None:
+    """Structural guard: `default_model` must never be mistaken for
+    credential material -- it is plain, non-sensitive config, so unlike
+    `plaintext` it is NOT excluded from `repr()`."""
+    resolved = ResolvedCredential(
+        provider_id="openai",
+        tenant_id="tenant-a",
+        secret_handle="kortex/ai/providers/openai",
+        plaintext=_KEY_A,
+        default_model="gpt-4o",
+    )
+    assert "gpt-4o" in repr(resolved)
+    assert _KEY_A not in repr(resolved)

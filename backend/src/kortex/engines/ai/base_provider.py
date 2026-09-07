@@ -9,13 +9,22 @@ to cloud providers.
 
 No concrete provider (dummy or real) is implemented here — that is
 Milestone 2 scope, once the provider registry exists to register one.
+
+`test_connection`/`discover_models` (Phase B / B2) are additive, concrete
+(non-abstract) members added when the OpenAI provider needed a
+tenant-credentialed validation/discovery hook that `health_check()`
+structurally cannot provide (`health_check()` takes no credential and is
+documented, below, as reachability-only). Every provider that predates
+this — `OllamaProvider`, every test double across the suite — inherits the
+default implementations unchanged; nothing was made abstract, so nothing
+that already satisfied this contract stops satisfying it.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from kortex.engines.ai.models import AIProviderMetadata, LLMRequest, LLMResponse
+from kortex.engines.ai.models import AIModelSummary, AIProviderMetadata, LLMRequest, LLMResponse
 
 
 class BaseAIProvider(ABC):
@@ -60,6 +69,54 @@ class BaseAIProvider(ABC):
         registry design demonstrates they are necessary, not built in
         advance of that need.
         """
+
+    async def test_connection(self, credential: str | None = None) -> bool:
+        """Validate that `credential` (if any) actually works against this provider.
+
+        The credential-aware counterpart to `health_check()`: reachability
+        without authentication state versus authentication state itself.
+        `credential` is a resolved plaintext value (never a handle) supplied
+        by the caller for exactly this one check and is never retained —
+        see `kortex.engines.ai.credentials`, whose no-caching rule this
+        method must not violate by holding onto it.
+
+        Default: delegates to `health_check()` and ignores `credential`,
+        preserving today's behavior for every credential-less provider
+        (`local_host`/`network` endpoints such as Ollama, and every
+        pre-B2 test double). A provider whose `credential_requirement`
+        is not `"none"` should override this to perform the cheapest real
+        authenticated call its API offers, and raise a
+        `PermanentProviderError`/`TransientProviderError` describing *why*
+        on failure rather than returning `False` — the caller can then
+        report an actionable reason instead of a bare boolean.
+        """
+        return await self.health_check()
+
+    async def discover_models(self, credential: str | None = None) -> list[AIModelSummary]:
+        """Report the models this provider can currently serve.
+
+        Default: reflects this provider's own static
+        `AIProviderMetadata.supported_models` — identical to what
+        `AIOrchestrationEngine.list_models()` already computes today by
+        flattening every registered provider's metadata, just scoped to
+        one provider and ignoring `credential`. This keeps every existing
+        provider's behavior byte-for-byte unchanged.
+
+        A provider backed by a real catalog API should override this to
+        call it with `credential` and return the live result instead of
+        the static default — the live result is the source of truth for a
+        connection test; the static default exists so `ModelRouter`'s
+        existing `supported_models`-gated routing keeps working for a
+        provider that has not (or cannot) implement live discovery.
+        """
+        return [
+            AIModelSummary(
+                model_id=model_id,
+                provider_id=self.provider_id,
+                provider_display_name=self.metadata.display_name,
+            )
+            for model_id in self.supported_models
+        ]
 
 
 __all__ = ["BaseAIProvider"]

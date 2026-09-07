@@ -55,7 +55,10 @@ from kortex.engines.ai.exceptions import (
     AIProviderTimeoutError,
     ConversationStoreError,
     NoRoutableProviderError,
+    PermanentProviderError,
+    ProviderNotFoundError,
     TenantQuotaExceededError,
+    TransientProviderError,
 )
 from kortex.engines.ai.governance import (
     AIGovernanceManager,
@@ -725,6 +728,20 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 description="Remove one of the calling tenant's AI provider configurations",
                 provider=self.name,
                 handler=self.remove_provider_config,
+                requires_execution_context=True,
+                required_permissions=["ai:manage"],
+                security_classification="RESTRICTED",
+            )
+            # Phase B / B2: the generic connection-test capability every
+            # credentialed cloud provider (OpenAI now; Gemini/Anthropic in
+            # B3) shares. RESTRICTED/`ai:manage` like `configure`, not
+            # `ai:read` like the read-only `config.list` -- it makes a real
+            # outbound network call using the tenant's live credential.
+            kernel.register_capability(
+                name="kortex.ai.provider.test",
+                description="Validate the calling tenant's configured credential against a registered provider",
+                provider=self.name,
+                handler=self.test_provider_connection,
                 requires_execution_context=True,
                 required_permissions=["ai:manage"],
                 security_classification="RESTRICTED",
@@ -1518,6 +1535,89 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         require_identifier(provider_id, "provider_id")
         removed = await store.delete(tenant_id, provider_id)
         return {"provider_id": provider_id, "tenant_id": tenant_id, "removed": removed}
+
+    async def test_provider_connection(self, provider_id: str, execution_context: Any = None) -> dict[str, Any]:
+        """Capability handler for `kortex.ai.provider.test` (Phase B / B2).
+
+        Generic across every provider: resolves the registered provider and
+        the calling tenant's own credential (never a caller-supplied one --
+        tenant scope comes from the verified execution context, same as
+        every other provider-configuration handler), then delegates the
+        actual validation to `BaseAIProvider.test_connection`, which each
+        provider implements on its own terms. This method contains no
+        provider-specific logic and never will -- see
+        `OpenAIProvider.test_connection`/`discover_models` for where that
+        lives.
+
+        Never raises on a provider-side failure: `PermanentProviderError`/
+        `TransientProviderError`/`AIProviderTimeoutError` are caught and
+        normalized into `{"connected": False, "detail": "..."}` so a bad
+        credential is an ordinary, actionable result rather than a thrown
+        exception the caller must specially handle. An unexpected exception
+        type is NOT caught here and propagates -- "do not swallow provider
+        errors" applies to failures this handler cannot already explain.
+
+        Discovered models (when the provider's `test_connection` succeeds)
+        are included as `models` -- live, tenant-scoped, and exactly what
+        `discover_models` returns; a live source of truth alongside the
+        pass/fail signal without inventing a second new capability for it.
+
+        `discover_models` is a SECOND, independent provider call and can
+        fail on its own even when `test_connection` just succeeded (a
+        transient blip between the two round trips, a rate limit hit on the
+        second call). That failure must not undo the connection result:
+        the credential IS valid, so `connected` stays `True`, `models` is
+        empty, and `detail` reports the discovery failure -- this is a
+        successful connection with an incomplete discovery, not a failed
+        connection.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, "")
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        try:
+            provider = self._provider_registry.get(provider_id)
+        except ProviderNotFoundError:
+            return {
+                "provider_id": provider_id,
+                "tenant_id": tenant_id,
+                "connected": False,
+                "detail": f"Provider '{provider_id}' is not registered.",
+                "models": [],
+            }
+
+        credential: str | None = None
+        if self._credential_resolver is not None:
+            resolved = await self._credential_resolver.resolve(tenant_id, provider_id)
+            credential = resolved.plaintext if resolved is not None else None
+
+        try:
+            connected = await provider.test_connection(credential)
+        except (PermanentProviderError, TransientProviderError, AIProviderTimeoutError) as exc:
+            return {
+                "provider_id": provider_id,
+                "tenant_id": tenant_id,
+                "connected": False,
+                "detail": str(exc),
+                "models": [],
+            }
+
+        models: list[dict[str, Any]] = []
+        discovery_detail: str | None = None
+        if connected:
+            try:
+                discovered = await provider.discover_models(credential)
+                models = [m.model_dump(mode="json") for m in discovered]
+            except (PermanentProviderError, TransientProviderError, AIProviderTimeoutError) as exc:
+                discovery_detail = str(exc)
+
+        return {
+            "provider_id": provider_id,
+            "tenant_id": tenant_id,
+            "connected": bool(connected),
+            "detail": discovery_detail if connected else "Connection check did not succeed.",
+            "models": models,
+        }
 
     # -- AI Governance Capability Handlers (M5.5) ----------------------------
 

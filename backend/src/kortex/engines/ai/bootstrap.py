@@ -27,6 +27,7 @@ from kortex.engines.ai.agent import (
     InMemoryAgentTaskStore,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.credentials import TenantCredentialResolver
 from kortex.engines.ai.diagnostics import AIDiagnostics
 from kortex.engines.ai.engine import (
     AIOrchestrationEngine,
@@ -43,6 +44,7 @@ from kortex.engines.ai.memory import (
     IConversationStore,
     InMemoryConversationStore,
 )
+from kortex.engines.ai.openai_provider import DEFAULT_OPENAI_MODEL, OpenAIProvider
 from kortex.engines.ai.persistence import (
     AIGovernanceStore,
     AIProviderConfigStore,
@@ -88,6 +90,7 @@ class AIEngineRuntimeConfig:
     storage_backend: Literal["sqlite", "postgres"] = "sqlite"
     default_provider: str | None = None
     enable_cloud_models: bool = False
+    openai_default_model: str = DEFAULT_OPENAI_MODEL
     max_context_tokens: int = 8192
     max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES
     default_generation_timeout_seconds: float = 60.0
@@ -268,22 +271,82 @@ class KernelProductionBootstrap:
             exporter=exporter,
         )
 
-        # Register custom providers with resilience and telemetry wrapping
-        if custom_providers:
-            for p in custom_providers:
-                if not isinstance(p, ResilientAIProvider):
-                    resilient_p = ResilientAIProvider(
-                        provider=p,
-                        retry_policy=RetryPolicy(max_attempts=self._config.retry_max_attempts),
-                        circuit_breaker=CircuitBreaker(
-                            failure_threshold=self._config.circuit_breaker_failure_threshold,
-                            recovery_timeout=self._config.circuit_breaker_recovery_timeout,
-                        ),
-                        telemetry=telemetry,
-                    )
-                    provider_registry.register(resilient_p)
-                else:
-                    provider_registry.register(p)
+        # Tenant provider configuration (Phase B / B1d). Durable only --
+        # there is deliberately no in-memory fallback: a provider
+        # configuration that vanished on restart would silently un-configure
+        # a tenant's AI, and the credential handle it points at would be
+        # orphaned in SecretStore with nothing left to reference it.
+        #
+        # Built here, BEFORE provider registration (moved up from its
+        # original position further below -- Phase B / B2), because the
+        # credential resolver it enables must exist before OpenAI (or any
+        # future credentialed cloud provider) can be constructed and
+        # registered by this same method, a few lines down. The engine
+        # facade still receives this exact instance, not a second one.
+        provider_config_store = AIProviderConfigStore(data_store) if data_store is not None else None
+
+        # Phase B / B2: OpenAI is registered here, INSIDE bootstrap.py,
+        # rather than constructed by the caller and passed in via
+        # `custom_providers` the way Ollama is. Ollama needs only plain
+        # config (base_url/model_name) that `kortex.api.kernel_bootstrap`
+        # already has; OpenAI additionally needs a `TenantCredentialResolver`
+        # -- an `kortex.engines.ai`-internal concept built from
+        # `provider_config_store` (just constructed above) and
+        # `secret_getter` (already a parameter of this method, for the same
+        # AST-import-quarantine reason `ai_identity` and `secret_getter`
+        # itself are). Assembling it here, rather than handing
+        # `TenantCredentialResolver` machinery out to the caller, keeps
+        # every AI-internal wiring decision in one place.
+        #
+        # Registered only when a resolver can actually be built (both
+        # `provider_config_store` and `secret_getter` present) -- a
+        # provider that could NEVER resolve a credential would sit in
+        # `list_providers()`/model discovery as a permanently-dead entry,
+        # which is worse than simply not registering it. Every environment
+        # that omits either (most unit tests; any dev bootstrap without a
+        # real `data_store`) is completely unaffected: this is the same
+        # opt-in-by-wiring pattern `kernel_bridge`/`data_store` already use
+        # for `KernelToolExecutionPort`/`StorageConversationStore` above.
+        credential_resolver: TenantCredentialResolver | None = None
+        if provider_config_store is not None and secret_getter is not None:
+            credential_resolver = TenantCredentialResolver(provider_config_store, secret_getter)
+        else:
+            logger.info(
+                "No provider_config_store/secret_getter supplied: OpenAI provider will not be registered. "
+                "Tenant-credentialed cloud providers require both."
+            )
+
+        providers_to_register: list[BaseAIProvider] = list(custom_providers) if custom_providers else []
+        # A caller-supplied "openai" provider (e.g. a test injecting a mock
+        # transport, or an operator supplying a custom-configured instance)
+        # takes precedence over auto-construction -- `ProviderRegistry`
+        # rejects a duplicate `provider_id` outright, so silently building a
+        # second one here would crash assembly rather than defer to the
+        # caller's.
+        already_supplied_openai = any(p.provider_id == "openai" for p in providers_to_register)
+        if credential_resolver is not None and not already_supplied_openai:
+            providers_to_register.append(
+                OpenAIProvider(
+                    credential_resolver=credential_resolver,
+                    default_model=self._config.openai_default_model,
+                )
+            )
+
+        # Register providers with resilience and telemetry wrapping
+        for p in providers_to_register:
+            if not isinstance(p, ResilientAIProvider):
+                resilient_p = ResilientAIProvider(
+                    provider=p,
+                    retry_policy=RetryPolicy(max_attempts=self._config.retry_max_attempts),
+                    circuit_breaker=CircuitBreaker(
+                        failure_threshold=self._config.circuit_breaker_failure_threshold,
+                        recovery_timeout=self._config.circuit_breaker_recovery_timeout,
+                    ),
+                    telemetry=telemetry,
+                )
+                provider_registry.register(resilient_p)
+            else:
+                provider_registry.register(p)
 
         # 5. Tool Registry & Tool Invoker
         tool_registry = ToolRegistry()
@@ -374,14 +437,8 @@ class KernelProductionBootstrap:
             max_concurrent_agents=self._config.max_concurrent_agents_per_tenant,
         )
 
-        # 7. Core Facade Construction
-        # Tenant provider configuration (Phase B / B1d). Durable only --
-        # there is deliberately no in-memory fallback: a provider
-        # configuration that vanished on restart would silently un-configure
-        # a tenant's AI, and the credential handle it points at would be
-        # orphaned in SecretStore with nothing left to reference it.
-        provider_config_store = AIProviderConfigStore(data_store) if data_store is not None else None
-
+        # 7. Core Facade Construction (`provider_config_store` already built
+        # above, before provider registration -- Phase B / B2)
         engine = AIOrchestrationEngine(
             provider_registry=provider_registry,
             model_router=model_router,

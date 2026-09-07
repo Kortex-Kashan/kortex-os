@@ -44,6 +44,7 @@ CANONICAL_CAPABILITIES: list[str] = [
     "kortex.ai.provider.configure",
     "kortex.ai.provider.config.list",
     "kortex.ai.provider.config.remove",
+    "kortex.ai.provider.test",
     "kortex.ai.governance.policy.evaluate",
     "kortex.ai.governance.policy.upsert",
     "kortex.ai.governance.policy.get",

@@ -28,7 +28,7 @@ from kortex.engines.ai.exceptions import (
     ProviderFallbackExhaustedError,
     TransientProviderError,
 )
-from kortex.engines.ai.models import AIProviderMetadata, LLMRequest, LLMResponse
+from kortex.engines.ai.models import AIModelSummary, AIProviderMetadata, LLMRequest, LLMResponse
 
 logger = logging.getLogger("kortex.engines.ai.resilience")
 
@@ -423,6 +423,41 @@ class ResilientAIProvider(BaseAIProvider):
             return await self._provider.health_check()
         except Exception:
             return False
+
+    async def test_connection(self, credential: str | None = None) -> bool:
+        """Delegate to the wrapped provider's own credential validation (Phase B / B2).
+
+        Deliberately bypasses the circuit breaker and retry policy: without
+        an explicit override here, this method would resolve to
+        `BaseAIProvider.test_connection`'s *default* implementation (Python
+        finds it on `type(self)` before ever considering `self._provider`),
+        which delegates to `self.health_check()` -- silently ignoring
+        `credential` and never reaching a provider's real, credential-aware
+        override. Every other method on this class exists precisely to add
+        resilience around the wrapped provider's calls; this one instead
+        exists to make sure the wrapped provider's own implementation is
+        reached at all.
+
+        Not retried and not gated by the circuit breaker on purpose: a
+        connection test is a single, deliberate probe -- typically run
+        right after a tenant enters a new or corrected credential -- so it
+        must report success/failure immediately rather than being delayed
+        by backoff or blocked by a breaker tripped from unrelated
+        `generate_text` failures.
+        """
+        return await self._provider.test_connection(credential)
+
+    async def discover_models(self, credential: str | None = None) -> list[AIModelSummary]:
+        """Delegate to the wrapped provider's own model discovery (Phase B / B2).
+
+        Same reasoning as `test_connection`: without this override,
+        `BaseAIProvider.discover_models`'s default would run against `self`
+        (this wrapper) rather than the wrapped provider, silently reporting
+        the wrapper's own metadata-flatten instead of the real provider's
+        live catalog. Not retried/circuit-broken for the same reason as
+        `test_connection` — the caller wants one direct answer.
+        """
+        return await self._provider.discover_models(credential)
 
 
 class ProviderFallbackChain:

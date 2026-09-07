@@ -27,6 +27,7 @@ from kortex.engines.ai.exceptions import (
 )
 from kortex.engines.ai.interfaces import IBaseAIProvider
 from kortex.engines.ai.models import (
+    AIModelSummary,
     AIProviderMetadata,
     LLMRequest,
     LLMResponse,
@@ -426,3 +427,111 @@ def test_resilience_py_quarantine_forbidden_imports() -> None:
     for forbidden in FORBIDDEN_NAMESPACES:
         violations = [imp for imp in imports if imp == forbidden or imp.startswith(forbidden + ".")]
         assert violations == [], f"resilience.py illegally imports {forbidden!r}: {violations}"
+
+
+# ---------------------------------------------------------------------------
+# Phase B / B2 -- ResilientAIProvider.test_connection/discover_models delegation
+#
+# Both methods are new, CONCRETE (non-abstract) members of `BaseAIProvider`
+# (Phase B / B2) with a default implementation that operates on `self`. Left
+# undeclared on `ResilientAIProvider`, Python's method resolution would find
+# that default on the wrapper itself and never reach the wrapped provider's
+# real, credential-aware override -- a bug that unit tests against a
+# fake/mock provider with NO override would never catch, since the fake's
+# behavior and the wrapper's inherited default would coincidentally agree.
+# `_CredentialAwareMockProvider` below exists specifically to make that
+# divergence observable.
+# ---------------------------------------------------------------------------
+
+
+class _CredentialAwareMockProvider(MockProvider):
+    """A `MockProvider` whose `test_connection`/`discover_models` behavior is
+    intentionally DIFFERENT from `BaseAIProvider`'s inherited default, so a
+    test can distinguish "the wrapper reached my override" from "the wrapper
+    silently ran its own inherited default instead."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.test_connection_calls: list[str | None] = []
+        self.discover_models_calls: list[str | None] = []
+
+    async def test_connection(self, credential: str | None = None) -> bool:
+        self.test_connection_calls.append(credential)
+        return credential == "the-correct-credential"
+
+    async def discover_models(self, credential: str | None = None) -> list[AIModelSummary]:
+        self.discover_models_calls.append(credential)
+        return [
+            AIModelSummary(
+                model_id="live-discovered-model",
+                provider_id=self.provider_id,
+                provider_display_name="x",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_test_connection_reaches_the_wrapped_providers_own_override() -> None:
+    inner = _CredentialAwareMockProvider("mock-credentialed")
+    resilient = ResilientAIProvider(provider=inner)
+
+    assert await resilient.test_connection("the-correct-credential") is True
+    assert await resilient.test_connection("wrong-credential") is False
+    assert inner.test_connection_calls == ["the-correct-credential", "wrong-credential"]
+
+
+@pytest.mark.asyncio
+async def test_test_connection_default_still_works_for_a_provider_without_an_override() -> None:
+    """Regression guard: a provider that does NOT override `test_connection`
+    (every pre-B2 provider/test-double) must still get `BaseAIProvider`'s
+    default (delegating to `health_check`) through the wrapper, unchanged."""
+    inner = MockProvider("mock-plain")
+    inner.is_healthy = True
+    resilient = ResilientAIProvider(provider=inner)
+    assert await resilient.test_connection("anything") is True
+
+    inner.is_healthy = False
+    assert await resilient.test_connection("anything") is False
+
+
+@pytest.mark.asyncio
+async def test_discover_models_reaches_the_wrapped_providers_own_override() -> None:
+    inner = _CredentialAwareMockProvider("mock-credentialed")
+    resilient = ResilientAIProvider(provider=inner)
+
+    models = await resilient.discover_models("some-credential")
+
+    assert [m.model_id for m in models] == ["live-discovered-model"]
+    assert inner.discover_models_calls == ["some-credential"]
+
+
+@pytest.mark.asyncio
+async def test_discover_models_default_still_works_for_a_provider_without_an_override() -> None:
+    """Regression guard: the static-metadata-flatten default must still be
+    reachable through the wrapper for a provider with no live discovery."""
+    inner = MockProvider("mock-plain", supported_models=["model-a", "model-b"])
+    resilient = ResilientAIProvider(provider=inner)
+
+    models = await resilient.discover_models(None)
+
+    assert {m.model_id for m in models} == {"model-a", "model-b"}
+    assert all(m.provider_id == "mock-plain" for m in models)
+
+
+@pytest.mark.asyncio
+async def test_test_connection_and_discover_models_bypass_the_circuit_breaker() -> None:
+    """A connection test must report the real, current state even while the
+    circuit is OPEN from unrelated `generate_text` failures -- otherwise a
+    tenant fixing a bad credential right after it tripped would be told the
+    test failed for a reason that has nothing to do with their new key."""
+    inner = _CredentialAwareMockProvider("mock-credentialed")
+    resilient = ResilientAIProvider(
+        provider=inner,
+        circuit_breaker=CircuitBreaker(failure_threshold=1),
+    )
+    resilient.circuit_breaker.record_failure(RuntimeError("unrelated generate_text failure"))
+    assert resilient.circuit_breaker.state == CircuitState.OPEN
+
+    assert await resilient.test_connection("the-correct-credential") is True
+    models = await resilient.discover_models("the-correct-credential")
+    assert [m.model_id for m in models] == ["live-discovered-model"]

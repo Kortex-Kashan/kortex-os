@@ -225,11 +225,16 @@ async def test_authenticated_with_permission_returns_200_and_real_registry(
     kernel: Kernel, client: httpx.AsyncClient, capability_name: str
 ) -> None:
     """M6.1-2: the production boot path now registers one real `OllamaProvider`
-    unconditionally, so this registry is no longer empty -- see
+    unconditionally, so this registry is no longer empty. Phase B / B2: the
+    same boot path also now registers a real `OpenAIProvider` unconditionally
+    (see `bootstrap.py`'s `already_supplied_openai` gate and
     `test_kernel_bootstrap.py::test_ai_provider_registry_has_real_ollama_provider_on_production_boot_path`
-    for the direct, non-HTTP assertion of its exact contents. This test's own
-    job is unchanged: prove the real HTTP path returns 200/SUCCESS for an
-    authorized caller, whatever the registry currently holds."""
+    for the direct, non-HTTP assertion of exactly which two providers and
+    which five models that registry now holds). This test's own job is
+    unchanged: prove the real HTTP path returns 200/SUCCESS for an authorized
+    caller and a genuinely non-empty result -- an exact count here would
+    just re-assert what the kernel_bootstrap test already pins down more
+    precisely, and would need updating every time a provider is added."""
     storage = kernel.get_engine("storage")
     assert isinstance(storage, StorageEngine)
     tenant_id = _tenant()
@@ -242,7 +247,7 @@ async def test_authenticated_with_permission_returns_200_and_real_registry(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "SUCCESS"
-    assert len(body["payload"]["result"]) == 1
+    assert len(body["payload"]["result"]) > 0
 
 
 # -- M7.2: kortex.ai.response.generate real-HTTP coverage --------------------

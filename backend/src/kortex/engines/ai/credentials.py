@@ -100,12 +100,21 @@ class ResolvedCredential:
     cannot reach a log line, traceback frame summary, or debugger dump
     through the ordinary act of printing the object. Treat every instance as
     request-scoped: use it, let it go out of scope, never store it.
+
+    `default_model` (Phase B / B2) carries the SAME tenant's configured
+    `AIProviderConfig.default_model` forward, so a provider that needs both
+    "this tenant's credential" and "this tenant's preferred model when the
+    request didn't pin one" gets both from the one call it already has to
+    make — resolving credential and default model through two different
+    reads would risk them disagreeing if a config changed between the two,
+    and would mean two places reading the same config row instead of one.
     """
 
     provider_id: str
     tenant_id: str
     secret_handle: str
     plaintext: str = field(repr=False)
+    default_model: str | None = None
 
 
 class TenantCredentialResolver:
@@ -161,6 +170,7 @@ class TenantCredentialResolver:
             tenant_id=tenant_id,
             secret_handle=config.secret_handle,
             plaintext=plaintext,
+            default_model=config.default_model,
         )
 
 

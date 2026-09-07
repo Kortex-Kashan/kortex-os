@@ -455,24 +455,44 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
     fabricated demo data, it is the production boot path's own real,
     unconditional wiring (whether or not an actual Ollama instance is
     reachable at boot time; reachability is a `health_check()`/circuit-
-    breaker concern, not a registration-time one)."""
+    breaker concern, not a registration-time one).
+
+    Phase B / B2: the production boot path also now registers a real
+    `OpenAIProvider` unconditionally, for the identical reason -- this
+    module already wires `secret_getter=security_engine.get_secret` and a
+    real `data_store` into `create_ai_engine`, which is exactly the
+    condition `KernelProductionBootstrap.create_ai_engine` uses to decide
+    whether OpenAI can be registered (see `bootstrap.py`). Registering it
+    is the entire point of B2: KORTEX must resolve OpenAI through the same
+    architectural contracts Ollama already goes through on this path.
+    Reachability of the real OpenAI API, and whether any tenant has
+    actually configured a credential for it, are unrelated to whether it
+    is *registered* -- exactly the same distinction this test already
+    draws for Ollama's own unconditional registration above.
+    """
     kernel = await build_and_boot_kernel()
     try:
         ai_engine = kernel.get_engine("ai")
         assert isinstance(ai_engine, AIOrchestrationEngine)
 
-        providers = ai_engine.list_providers()
-        assert len(providers) == 1
-        assert providers[0].provider_id == "ollama-llama3"
-        assert providers[0].vendor == "ollama"
-        assert providers[0].endpoint_type == "local_host"
-        assert providers[0].url == "http://localhost:11434"
-        assert providers[0].credential_requirement == "none"
+        providers = {p.provider_id: p for p in ai_engine.list_providers()}
+        assert set(providers) == {"ollama-llama3", "openai"}
 
-        models = ai_engine.list_models()
-        assert len(models) == 1
-        assert models[0].model_id == "llama3"
-        assert models[0].provider_id == "ollama-llama3"
+        ollama = providers["ollama-llama3"]
+        assert ollama.vendor == "ollama"
+        assert ollama.endpoint_type == "local_host"
+        assert ollama.url == "http://localhost:11434"
+        assert ollama.credential_requirement == "none"
+
+        openai = providers["openai"]
+        assert openai.vendor == "openai"
+        assert openai.endpoint_type == "cloud"
+        assert openai.credential_requirement == "api_key"
+        assert openai.secret_handle == "kortex/ai/providers/openai"
+
+        models = {m.model_id: m.provider_id for m in ai_engine.list_models()}
+        assert models["llama3"] == "ollama-llama3"
+        assert models["gpt-4o"] == "openai"
     finally:
         await kernel.shutdown()
 
