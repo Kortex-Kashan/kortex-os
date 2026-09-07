@@ -1,6 +1,7 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AuthProvider } from "@/auth/AuthProvider";
 import { WorkspaceProvider } from "@/workspace/WorkspaceProvider";
@@ -15,19 +16,43 @@ import { WorkspaceEmptyState } from "./Workspace";
 // `app/App.test.tsx` mocks it.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(false) }));
 
+// Mini Chat (mounted inside DesktopShell) fetches durable conversation
+// history via `useConversation` on mount -- mocked the same way
+// `ChatPanel.test.tsx`/`MiniChatHost.test.tsx` already mock this exact,
+// real, existing module, so DesktopShell's own tests never depend on an
+// unmocked Tauri IPC round trip.
+const { getConversationHistoryMock } = vi.hoisted(() => ({ getConversationHistoryMock: vi.fn() }));
+vi.mock("@/features/ai-studio/chat-api", async () => {
+  const actual = await vi.importActual<typeof import("@/features/ai-studio/chat-api")>(
+    "@/features/ai-studio/chat-api",
+  );
+  return { ...actual, getConversationHistory: getConversationHistoryMock };
+});
+
+beforeEach(() => {
+  getConversationHistoryMock.mockReset();
+  getConversationHistoryMock.mockResolvedValue([]);
+});
+
 // AppSidebar (M2.3) reads useWorkspace(), so the shell needs the same
 // WorkspaceProvider wrapping it gets in the real router (routes/index.tsx).
+// QueryClientProvider mirrors `app/App.tsx`'s real root position (above the
+// router) -- DesktopShell itself never needed one until Mini Chat, mounted
+// inside it, started using `useConversation`'s `useQuery`.
 function renderShell() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter(
     [
       {
         path: "/",
         element: (
-          <AuthProvider>
-            <WorkspaceProvider>
-              <DesktopShell />
-            </WorkspaceProvider>
-          </AuthProvider>
+          <QueryClientProvider client={client}>
+            <AuthProvider>
+              <WorkspaceProvider>
+                <DesktopShell />
+              </WorkspaceProvider>
+            </AuthProvider>
+          </QueryClientProvider>
         ),
         children: [{ index: true, element: <WorkspaceEmptyState /> }],
       },
