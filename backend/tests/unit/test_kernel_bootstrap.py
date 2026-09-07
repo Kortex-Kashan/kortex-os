@@ -469,6 +469,12 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
     actually configured a credential for it, are unrelated to whether it
     is *registered* -- exactly the same distinction this test already
     draws for Ollama's own unconditional registration above.
+
+    Phase B / B3: Gemini and Anthropic join on the same terms and for the
+    same reason. All three cloud providers are registered by one generalized
+    factory loop in `bootstrap.py`, so this assertion is now the single
+    place that pins down exactly which providers the real production boot
+    path ends up with.
     """
     kernel = await build_and_boot_kernel()
     try:
@@ -476,7 +482,7 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
         assert isinstance(ai_engine, AIOrchestrationEngine)
 
         providers = {p.provider_id: p for p in ai_engine.list_providers()}
-        assert set(providers) == {"ollama-llama3", "openai"}
+        assert set(providers) == {"ollama-llama3", "openai", "gemini", "anthropic"}
 
         ollama = providers["ollama-llama3"]
         assert ollama.vendor == "ollama"
@@ -484,15 +490,20 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
         assert ollama.url == "http://localhost:11434"
         assert ollama.credential_requirement == "none"
 
-        openai = providers["openai"]
-        assert openai.vendor == "openai"
-        assert openai.endpoint_type == "cloud"
-        assert openai.credential_requirement == "api_key"
-        assert openai.secret_handle == "kortex/ai/providers/openai"
+        # Every cloud provider is credentialed, tenant-resolved and carries
+        # its own SecretStore handle naming convention.
+        for provider_id, vendor in (("openai", "openai"), ("gemini", "google"), ("anthropic", "anthropic")):
+            cloud = providers[provider_id]
+            assert cloud.vendor == vendor
+            assert cloud.endpoint_type == "cloud"
+            assert cloud.credential_requirement == "api_key"
+            assert cloud.secret_handle == f"kortex/ai/providers/{provider_id}"
 
         models = {m.model_id: m.provider_id for m in ai_engine.list_models()}
         assert models["llama3"] == "ollama-llama3"
         assert models["gpt-4o"] == "openai"
+        assert models["gemini-2.5-flash"] == "gemini"
+        assert models["claude-opus-5"] == "anthropic"
     finally:
         await kernel.shutdown()
 

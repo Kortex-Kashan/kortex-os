@@ -18,6 +18,7 @@ Implements:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -25,6 +26,11 @@ from kortex.engines.ai.agent import (
     AgentOrchestrator,
     IAgentTaskStore,
     InMemoryAgentTaskStore,
+)
+from kortex.engines.ai.anthropic_provider import (
+    ANTHROPIC_PROVIDER_ID,
+    DEFAULT_ANTHROPIC_MODEL,
+    AnthropicProvider,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
 from kortex.engines.ai.credentials import TenantCredentialResolver
@@ -36,6 +42,11 @@ from kortex.engines.ai.engine import (
     RouterLLMExecutionPort,
 )
 from kortex.engines.ai.exceptions import AIBootstrapError
+from kortex.engines.ai.gemini_provider import (
+    DEFAULT_GEMINI_MODEL,
+    GEMINI_PROVIDER_ID,
+    GeminiProvider,
+)
 from kortex.engines.ai.governance import AIGovernanceManager, KernelDurableApprovalBridge
 from kortex.engines.ai.identity import AISystemIdentity
 from kortex.engines.ai.interfaces import IKernelBridge
@@ -91,6 +102,8 @@ class AIEngineRuntimeConfig:
     default_provider: str | None = None
     enable_cloud_models: bool = False
     openai_default_model: str = DEFAULT_OPENAI_MODEL
+    gemini_default_model: str = DEFAULT_GEMINI_MODEL
+    anthropic_default_model: str = DEFAULT_ANTHROPIC_MODEL
     max_context_tokens: int = 8192
     max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES
     default_generation_timeout_seconds: float = 60.0
@@ -285,12 +298,13 @@ class KernelProductionBootstrap:
         # facade still receives this exact instance, not a second one.
         provider_config_store = AIProviderConfigStore(data_store) if data_store is not None else None
 
-        # Phase B / B2: OpenAI is registered here, INSIDE bootstrap.py,
-        # rather than constructed by the caller and passed in via
-        # `custom_providers` the way Ollama is. Ollama needs only plain
-        # config (base_url/model_name) that `kortex.api.kernel_bootstrap`
-        # already has; OpenAI additionally needs a `TenantCredentialResolver`
-        # -- an `kortex.engines.ai`-internal concept built from
+        # Phase B / B2-B3: the credentialed cloud providers (OpenAI, Gemini,
+        # Anthropic) are constructed here, INSIDE bootstrap.py, rather than by
+        # the caller and passed in via `custom_providers` the way Ollama is.
+        # Ollama needs only plain config (base_url/model_name) that
+        # `kortex.api.kernel_bootstrap` already has; a cloud provider
+        # additionally needs a `TenantCredentialResolver` -- an
+        # `kortex.engines.ai`-internal concept built from
         # `provider_config_store` (just constructed above) and
         # `secret_getter` (already a parameter of this method, for the same
         # AST-import-quarantine reason `ai_identity` and `secret_getter`
@@ -312,25 +326,43 @@ class KernelProductionBootstrap:
             credential_resolver = TenantCredentialResolver(provider_config_store, secret_getter)
         else:
             logger.info(
-                "No provider_config_store/secret_getter supplied: OpenAI provider will not be registered. "
-                "Tenant-credentialed cloud providers require both."
+                "No provider_config_store/secret_getter supplied: cloud providers (OpenAI, Gemini, "
+                "Anthropic) will not be registered. Tenant-credentialed cloud providers require both."
             )
 
         providers_to_register: list[BaseAIProvider] = list(custom_providers) if custom_providers else []
-        # A caller-supplied "openai" provider (e.g. a test injecting a mock
-        # transport, or an operator supplying a custom-configured instance)
-        # takes precedence over auto-construction -- `ProviderRegistry`
-        # rejects a duplicate `provider_id` outright, so silently building a
-        # second one here would crash assembly rather than defer to the
-        # caller's.
-        already_supplied_openai = any(p.provider_id == "openai" for p in providers_to_register)
-        if credential_resolver is not None and not already_supplied_openai:
-            providers_to_register.append(
-                OpenAIProvider(
-                    credential_resolver=credential_resolver,
+        if credential_resolver is not None:
+            # Bound to a non-Optional local so the closures below type-check:
+            # mypy's narrowing of `credential_resolver` does not propagate
+            # into a lambda body.
+            resolver = credential_resolver
+            # One factory per provider id, rather than three near-identical
+            # `already_supplied_<name>` booleans (Phase B / B3). A
+            # caller-supplied provider with the same `provider_id` (a test
+            # injecting a mock transport, or an operator supplying a
+            # custom-configured instance) always takes precedence:
+            # `ProviderRegistry` rejects a duplicate `provider_id` outright,
+            # so silently building a second one here would crash assembly
+            # rather than defer to the caller's. Factories are lambdas so a
+            # deferred-to provider is never even constructed.
+            cloud_provider_factories: dict[str, Callable[[], BaseAIProvider]] = {
+                "openai": lambda: OpenAIProvider(
+                    credential_resolver=resolver,
                     default_model=self._config.openai_default_model,
-                )
-            )
+                ),
+                GEMINI_PROVIDER_ID: lambda: GeminiProvider(
+                    credential_resolver=resolver,
+                    default_model=self._config.gemini_default_model,
+                ),
+                ANTHROPIC_PROVIDER_ID: lambda: AnthropicProvider(
+                    credential_resolver=resolver,
+                    default_model=self._config.anthropic_default_model,
+                ),
+            }
+            already_supplied = {p.provider_id for p in providers_to_register}
+            for provider_id, factory in cloud_provider_factories.items():
+                if provider_id not in already_supplied:
+                    providers_to_register.append(factory())
 
         # Register providers with resilience and telemetry wrapping
         for p in providers_to_register:
