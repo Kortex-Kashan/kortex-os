@@ -104,6 +104,7 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
     ),
     ("4c99c2ff7376", frozenset({"ops_vehicles", "ops_vehicle_tracking_records", "ops_incidents"})),
     ("e1a2b3c4d5f6", frozenset()),
+    ("4d094027c916", frozenset({"workflow_definition_versions"})),
 )
 
 # Column-level counterpart to `_REVISION_CHAIN` for a revision that adds a

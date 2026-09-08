@@ -411,11 +411,90 @@ class WorkflowDefinition(BaseModel):
             "Milestone F2 — the optional canonical structural Workflow Graph representation of this "
             "definition. Additive and inert: None (the default) preserves every pre-F2 definition's "
             "exact behavior — the executor (engine.py/evaluator.py/state_machine.py) reads `steps` "
-            "exclusively and never this field. Not yet durably persisted (see graph_compat.py module "
-            "docstring for why); populated only in-memory/by tests and future callers until a later "
-            "milestone adds real persistence."
+            "exclusively and never this field. Milestone F4 persists this durably on "
+            "`WorkflowDefinitionVersion.graph` (see `persistence.py`'s `WorkflowDefinitionVersionModel."
+            "graph_json`); this in-memory field itself is unchanged and still read by nothing in the "
+            "executor."
         ),
     )
+
+
+# ============================================================================
+# Milestone F4 — Workflow Definition Lifecycle & Authoring Foundation
+#
+# A WorkflowDefinition (above) is the executable *content* shape, unchanged by
+# F4. What F4 adds is identity/version separation around it: a stable
+# definition identity may have many WorkflowDefinitionVersion snapshots, of
+# which at most one is the mutable DRAFT (or its terminal ARCHIVED state) and
+# any number are immutable PUBLISHED history. See `lifecycle.py` for the
+# manager that enforces these rules; this module stays pure data shape,
+# mirroring F2/F3's own models/validation separation.
+# ============================================================================
+
+
+class WorkflowDefinitionStatus(enum.StrEnum):
+    """Lifecycle status of one `WorkflowDefinitionVersion` row.
+
+    `DRAFT` and `ARCHIVED` are mutually exclusive *control* states: at most one row per
+    `(tenant_id, definition_id)` may hold either of them at a time — the single mutable authoring
+    surface for that definition. `PUBLISHED` rows are immutable snapshots; any number may exist per
+    definition, and a `PUBLISHED` row never transitions to any other status (F4 discovery §14/D6).
+    """
+
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    ARCHIVED = "ARCHIVED"
+
+
+class WorkflowDefinitionVersion(BaseModel):
+    """Milestone F4 — one version snapshot of a `WorkflowDefinition`'s content.
+
+    Represents either the single mutable control row for a definition (`status=DRAFT` or, once
+    archived, `status=ARCHIVED`) or one immutable published snapshot (`status=PUBLISHED`). The
+    content fields (`steps`/`graph`) are a direct, additive echo of `WorkflowDefinition`'s own
+    content shape — no new content model is invented; F2's graph and F3's mapping/expression
+    objects nested inside `steps`/`graph` are reused completely unmodified.
+
+    `lock_version` is the identical optimistic-locking pattern already proven by
+    `WorkflowInstance.version` — meaningful only for the mutable DRAFT row (a PUBLISHED row is never
+    written again after creation, so it never needs conflict detection).
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()), description="Unique version-row identifier")
+    definition_id: str = Field(..., description="The stable WorkflowDefinition identity this version belongs to")
+    tenant_id: str = Field(default="default", description="Tenant owning this definition")
+    version: str = Field(
+        default="0.0.0-draft",
+        description="SemVer string. The DRAFT/ARCHIVED control row always reads '0.0.0-draft' — it "
+        "is never itself an addressable, instance-bindable version.",
+    )
+    status: WorkflowDefinitionStatus = Field(default=WorkflowDefinitionStatus.DRAFT)
+    name: str = Field(default="", description="Definition title, editable on the draft")
+    description: str = Field(default="", description="Detailed description, editable on the draft")
+    trigger: WorkflowTrigger = Field(default=WorkflowTrigger.MANUAL)
+    priority: WorkflowPriority = Field(default=WorkflowPriority.NORMAL)
+    timeout_seconds: int = Field(default=3600, ge=1)
+    steps: list[WorkflowStep] = Field(default_factory=list, description="Legacy flat execution content")
+    graph: WorkflowGraph | None = Field(
+        default=None, description="F2 canonical graph content — the authored source of truth for new definitions"
+    )
+    created_by: str = Field(default="SYSTEM", description="Principal ID that created this version row")
+    lock_version: int = Field(default=1, ge=1, description="Optimistic locking counter for the DRAFT row")
+    created_at: datetime | None = Field(default=None)
+    updated_at: datetime | None = Field(default=None)
+    published_at: datetime | None = Field(default=None, description="Set exactly once, when status becomes PUBLISHED")
+
+
+class WorkflowDefinitionValidationReport(BaseModel):
+    """Milestone F4 — the result of validating a `WorkflowDefinitionVersion`'s content.
+
+    Reuses F2's `graph_validation` and F3's `mapping_validation` errors verbatim as `errors`
+    entries — no new validation logic is introduced here; this is purely an aggregation shape.
+    """
+
+    is_valid: bool = Field(...)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class WorkflowInstance(BaseModel):

@@ -93,3 +93,31 @@ class ExternalExecutionError(WorkflowError):
 
 class ExternalExecutionTimeoutError(ExternalExecutionError):
     """Raised when an external operation exceeds its allocated timeout."""
+
+
+class WorkflowDefinitionLifecycleError(WorkflowError):
+    """Milestone F4 — base exception for all workflow definition lifecycle (draft/publish/archive/
+    clone) errors. Distinct from `WorkflowError` subclasses tied to instance execution."""
+
+
+class WorkflowDefinitionNotFoundError(WorkflowDefinitionLifecycleError):
+    """Milestone F4 — raised when a referenced `WorkflowDefinition`/`WorkflowDefinitionVersion` does
+    not exist, or does not exist within the caller's tenant (tenant isolation is enforced by simply
+    never distinguishing "wrong tenant" from "does not exist" in this error)."""
+
+
+class WorkflowDefinitionConflictError(WorkflowDefinitionLifecycleError):
+    """Milestone F4 — raised on an optimistic-lock conflict updating the mutable DRAFT row (D14):
+    the caller's `lock_version` no longer matches the persisted row's current `lock_version`."""
+
+
+class WorkflowDefinitionStateError(WorkflowDefinitionLifecycleError):
+    """Milestone F4 — raised on an illegal lifecycle state transition: mutating a PUBLISHED or
+    ARCHIVED version, publishing/archiving a definition with no DRAFT, or any other transition not
+    in the explicit DRAFT/PUBLISHED/ARCHIVED state model (D9)."""
+
+
+class WorkflowDefinitionAuthorizationError(WorkflowDefinitionLifecycleError):
+    """Milestone F4 — raised when the publishing principal is not authorized to invoke one or more
+    capabilities referenced by the definition being published (D11), or a referenced capability does
+    not exist in the Registry (D10)."""

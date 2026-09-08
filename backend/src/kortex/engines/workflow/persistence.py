@@ -42,6 +42,9 @@ from kortex.engines.workflow.exceptions import (
     ApprovalConflictError,
     ScheduleConflictError,
     WorkflowApprovalError,
+    WorkflowDefinitionConflictError,
+    WorkflowDefinitionNotFoundError,
+    WorkflowDefinitionStateError,
     WorkflowPersistenceError,
     WorkflowStateConflictError,
 )
@@ -57,6 +60,9 @@ from kortex.engines.workflow.models import (
     ScheduleType,
     WorkflowContext,
     WorkflowDefinition,
+    WorkflowDefinitionStatus,
+    WorkflowDefinitionVersion,
+    WorkflowGraph,
     WorkflowInstance,
     WorkflowPriority,
     WorkflowSchedule,
@@ -98,6 +104,47 @@ class WorkflowDefinitionModel(BaseModel):
     priority: Mapped[str] = mapped_column(String(32), nullable=False, default="NORMAL")
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=3600)
     steps_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class WorkflowDefinitionVersionModel(BaseModel):
+    """Milestone F4 — SQLAlchemy ORM model for `WorkflowDefinitionVersion` rows.
+
+    One additive table backs the entire F4 lifecycle (D2/D20): at most one row per
+    `(tenant_id, definition_id)` holds `version="0.0.0-draft"` — the single mutable control row,
+    whose `status` is `DRAFT` or, once archived, `ARCHIVED` — and any number of rows hold a real
+    SemVer `version` with `status=PUBLISHED`, each an immutable snapshot.
+
+    Deliberately has NO foreign key to `workflow_definitions.id`: a brand-new F4-authored definition
+    exists here as a DRAFT with zero corresponding `workflow_definitions` row until its first
+    `publish` call materializes one there (see `WorkflowStore.publish_draft`). `workflow_definitions`
+    itself is unmodified by F4 and continues to serve exactly its pre-F4 role — the flat projection
+    the existing, unmodified executor reads — now additionally understood as "latest published
+    content", kept in sync transactionally on publish rather than freely writable (D6).
+    """
+
+    __tablename__ = "workflow_definition_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "definition_id", "version", name="uq_workflow_definition_version_tenant_def_version"
+        ),
+        Index("ix_workflow_definition_versions_lookup", "tenant_id", "definition_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    definition_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    version: Mapped[str] = mapped_column(String(32), nullable=False, default="0.0.0-draft")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="DRAFT", index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False, default="MANUAL")
+    priority: Mapped[str] = mapped_column(String(32), nullable=False, default="NORMAL")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=3600)
+    steps_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    graph_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False, default="SYSTEM")
+    lock_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    published_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class WorkflowInstanceModel(BaseModel):
@@ -370,6 +417,75 @@ def _model_to_definition(row: WorkflowDefinitionModel) -> WorkflowDefinition:
         trigger=trigger,
         priority=priority,
         timeout_seconds=row.timeout_seconds,
+    )
+
+
+def _definition_version_to_model(dv: WorkflowDefinitionVersion) -> WorkflowDefinitionVersionModel:
+    """Milestone F4 — convert a `WorkflowDefinitionVersion` domain model to its ORM row."""
+    steps_data = [step.model_dump(mode="json") for step in dv.steps]
+    return WorkflowDefinitionVersionModel(
+        id=dv.id,
+        definition_id=dv.definition_id,
+        tenant_id=dv.tenant_id,
+        version=dv.version,
+        status=dv.status.value if isinstance(dv.status, WorkflowDefinitionStatus) else str(dv.status),
+        name=dv.name,
+        description=dv.description,
+        trigger_type=dv.trigger.value if isinstance(dv.trigger, WorkflowTrigger) else str(dv.trigger),
+        priority=dv.priority.value if isinstance(dv.priority, WorkflowPriority) else str(dv.priority),
+        timeout_seconds=dv.timeout_seconds,
+        steps_json=json.dumps(steps_data),
+        graph_json=dv.graph.model_dump_json() if dv.graph is not None else None,
+        created_by=dv.created_by,
+        lock_version=dv.lock_version,
+        published_at=dv.published_at,
+    )
+
+
+def _model_to_definition_version(row: WorkflowDefinitionVersionModel) -> WorkflowDefinitionVersion:
+    """Milestone F4 — convert an ORM `WorkflowDefinitionVersionModel` row to its domain model."""
+    raw_steps = json.loads(row.steps_json)
+    steps = [WorkflowStep(**step_data) for step_data in raw_steps]
+    trigger = (
+        WorkflowTrigger(row.trigger_type)
+        if row.trigger_type in WorkflowTrigger._value2member_map_
+        else WorkflowTrigger.MANUAL
+    )
+    priority = (
+        WorkflowPriority(row.priority)
+        if row.priority in WorkflowPriority._value2member_map_
+        else WorkflowPriority.NORMAL
+    )
+    status = (
+        WorkflowDefinitionStatus(row.status)
+        if row.status in WorkflowDefinitionStatus._value2member_map_
+        else WorkflowDefinitionStatus.DRAFT
+    )
+    graph = WorkflowGraph.model_validate_json(row.graph_json) if row.graph_json else None
+
+    def _utc(dt: datetime.datetime | None) -> datetime.datetime | None:
+        if dt is not None and dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.UTC)
+        return dt
+
+    return WorkflowDefinitionVersion(
+        id=row.id,
+        definition_id=row.definition_id,
+        tenant_id=row.tenant_id,
+        version=row.version,
+        status=status,
+        name=row.name,
+        description=row.description,
+        trigger=trigger,
+        priority=priority,
+        timeout_seconds=row.timeout_seconds,
+        steps=steps,
+        graph=graph,
+        created_by=row.created_by,
+        lock_version=row.lock_version,
+        created_at=_utc(row.created_at),
+        updated_at=_utc(row.updated_at),
+        published_at=_utc(row.published_at),
     )
 
 
@@ -756,8 +872,19 @@ class WorkflowStore:
             logger.error("Failed to save workflow definition '%s': %s", definition.id, e)
             raise WorkflowPersistenceError(f"Failed to save workflow definition '{definition.id}': {e}") from e
 
-    async def get_definition(self, definition_id: str, tenant_id: str | None = None) -> WorkflowDefinition | None:
-        """Retrieve a WorkflowDefinition by ID, optionally filtered by tenant."""
+    async def get_definition(
+        self, definition_id: str, tenant_id: str | None = None, version: str | None = None
+    ) -> WorkflowDefinition | None:
+        """Retrieve a WorkflowDefinition by ID, optionally filtered by tenant.
+
+        Milestone F4 (D7/D8) — `version`, when given, resolves the EXACT immutable published
+        content for that version string: never "latest", never a silent substitute. `version=None`
+        (the default, unchanged from pre-F4 behavior) resolves the latest published content via the
+        `workflow_definitions` projection row, exactly as before F4 — this is what `start_workflow`
+        and scheduler triggers rely on for "float to latest published" (D13).
+        """
+        if version is not None:
+            return await self._get_definition_at_version(definition_id, version, tenant_id=tenant_id)
 
         async def _action(session: AsyncSession) -> WorkflowDefinitionModel | None:
             stmt = select(WorkflowDefinitionModel).where(WorkflowDefinitionModel.id == definition_id)
@@ -774,6 +901,382 @@ class WorkflowStore:
         except Exception as e:
             logger.error("Failed to retrieve workflow definition '%s': %s", definition_id, e)
             raise WorkflowPersistenceError(f"Failed to retrieve workflow definition '{definition_id}': {e}") from e
+
+    async def _get_definition_at_version(
+        self, definition_id: str, version: str, tenant_id: str | None = None
+    ) -> WorkflowDefinition | None:
+        """Milestone F4 (D7/D8) — resolve the EXACT immutable content for `(definition_id, version)`.
+
+        Checked first against `workflow_definition_versions` (any definition ever touched by the F4
+        lifecycle); falls back to the legacy `workflow_definitions` row only when its own `.version`
+        equals the requested `version` — the "implicit already-published v1" for a definition never
+        touched by F4 (no data migration; see module docstring in `models.py`'s
+        `WorkflowDefinitionVersion`). An exact miss returns `None` in both cases — never a "latest"
+        fallback — so every caller must treat a `None` as a hard failure.
+        """
+
+        async def _action(session: AsyncSession) -> WorkflowDefinitionVersionModel | WorkflowDefinitionModel | None:
+            stmt = select(WorkflowDefinitionVersionModel).where(
+                WorkflowDefinitionVersionModel.definition_id == definition_id,
+                WorkflowDefinitionVersionModel.version == version,
+                WorkflowDefinitionVersionModel.status == WorkflowDefinitionStatus.PUBLISHED.value,
+            )
+            if tenant_id:
+                stmt = stmt.where(WorkflowDefinitionVersionModel.tenant_id == tenant_id)
+            version_row = await session.scalar(stmt)
+            if version_row is not None:
+                return version_row
+
+            legacy_stmt = select(WorkflowDefinitionModel).where(
+                WorkflowDefinitionModel.id == definition_id, WorkflowDefinitionModel.version == version
+            )
+            if tenant_id:
+                legacy_stmt = legacy_stmt.where(WorkflowDefinitionModel.tenant_id == tenant_id)
+            legacy_row: WorkflowDefinitionModel | None = await session.scalar(legacy_stmt)
+            return legacy_row
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except Exception as e:
+            logger.error("Failed to retrieve workflow definition '%s' at version '%s': %s", definition_id, version, e)
+            raise WorkflowPersistenceError(
+                f"Failed to retrieve workflow definition '{definition_id}' at version '{version}': {e}"
+            ) from e
+
+        if row is None:
+            return None
+        if isinstance(row, WorkflowDefinitionVersionModel):
+            dv = _model_to_definition_version(row)
+            return WorkflowDefinition(
+                id=dv.definition_id,
+                name=dv.name,
+                version=dv.version,
+                description=dv.description,
+                tenant_id=dv.tenant_id,
+                steps=dv.steps,
+                trigger=dv.trigger,
+                priority=dv.priority,
+                timeout_seconds=dv.timeout_seconds,
+                graph=dv.graph,
+            )
+        return _model_to_definition(row)
+
+    # -- Milestone F4: Definition Lifecycle (Draft / Publish / Archive) -----
+
+    async def create_draft(
+        self, definition_id: str, tenant_id: str, created_by: str, **content: Any
+    ) -> WorkflowDefinitionVersion:
+        """Create the single mutable DRAFT control row for a new definition identity.
+
+        Raises `WorkflowDefinitionConflictError` if a control row already exists for
+        `(tenant_id, definition_id)` — the unique constraint on `(tenant_id, definition_id, version)`
+        makes a second `version="0.0.0-draft"` row physically impossible, so a duplicate create is
+        rejected rather than silently overwriting an existing draft.
+        """
+        dv = WorkflowDefinitionVersion(
+            definition_id=definition_id,
+            tenant_id=tenant_id,
+            status=WorkflowDefinitionStatus.DRAFT,
+            created_by=created_by,
+            **content,
+        )
+        model = _definition_version_to_model(dv)
+
+        async def _action(session: AsyncSession) -> None:
+            session.add(model)
+
+        try:
+            await self._data_store.execute_in_transaction(_action)
+        except IntegrityError as e:
+            raise WorkflowDefinitionConflictError(
+                f"A draft or archived control row already exists for definition '{definition_id}'."
+            ) from e
+        except Exception as e:
+            logger.error("Failed to create draft for definition '%s': %s", definition_id, e)
+            raise WorkflowPersistenceError(f"Failed to create draft for definition '{definition_id}': {e}") from e
+        return dv
+
+    async def get_control_row(self, definition_id: str, tenant_id: str) -> WorkflowDefinitionVersion | None:
+        """Fetch the single mutable-or-archived control row (`version="0.0.0-draft"`) for a
+        definition, or `None` if it has never been touched by the F4 lifecycle."""
+
+        async def _action(session: AsyncSession) -> WorkflowDefinitionVersionModel | None:
+            stmt = select(WorkflowDefinitionVersionModel).where(
+                WorkflowDefinitionVersionModel.definition_id == definition_id,
+                WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                WorkflowDefinitionVersionModel.version == "0.0.0-draft",
+            )
+            control_row: WorkflowDefinitionVersionModel | None = await session.scalar(stmt)
+            return control_row
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except Exception as e:
+            logger.error("Failed to retrieve control row for definition '%s': %s", definition_id, e)
+            raise WorkflowPersistenceError(
+                f"Failed to retrieve control row for definition '{definition_id}': {e}"
+            ) from e
+        return _model_to_definition_version(row) if row is not None else None
+
+    async def update_draft(
+        self, definition_id: str, tenant_id: str, expected_lock_version: int, **content: Any
+    ) -> WorkflowDefinitionVersion:
+        """Apply an optimistic-lock-guarded update to the mutable DRAFT control row (D14): mirrors
+        `WorkflowInstance.version`'s existing atomic `UPDATE ... WHERE version = :expected` pattern
+        exactly. A `lock_version` mismatch — someone else updated the draft since the caller last
+        read it — raises `WorkflowDefinitionConflictError` rather than silently overwriting.
+        """
+        values: dict[str, Any] = {"lock_version": expected_lock_version + 1}
+        for field, value in content.items():
+            if field == "steps":
+                values["steps_json"] = json.dumps([step.model_dump(mode="json") for step in value])
+            elif field == "graph":
+                values["graph_json"] = value.model_dump_json() if value is not None else None
+            elif field == "trigger":
+                values["trigger_type"] = value.value if isinstance(value, WorkflowTrigger) else str(value)
+            elif field == "priority":
+                values["priority"] = value.value if isinstance(value, WorkflowPriority) else str(value)
+            elif field in ("name", "description", "timeout_seconds"):
+                values[field] = value
+
+        async def _action(session: AsyncSession) -> WorkflowDefinitionVersionModel:
+            stmt = (
+                update(WorkflowDefinitionVersionModel)
+                .where(
+                    WorkflowDefinitionVersionModel.definition_id == definition_id,
+                    WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                    WorkflowDefinitionVersionModel.version == "0.0.0-draft",
+                    WorkflowDefinitionVersionModel.lock_version == expected_lock_version,
+                    WorkflowDefinitionVersionModel.status == WorkflowDefinitionStatus.DRAFT.value,
+                )
+                .values(**values)
+            )
+            result = await session.execute(stmt)
+            cursor_res = cast(CursorResult[Any], result)
+            control_stmt = select(WorkflowDefinitionVersionModel).where(
+                WorkflowDefinitionVersionModel.definition_id == definition_id,
+                WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                WorkflowDefinitionVersionModel.version == "0.0.0-draft",
+            )
+            if cursor_res.rowcount == 0:
+                existing = await session.scalar(control_stmt)
+                if existing is None:
+                    raise WorkflowDefinitionNotFoundError(f"No draft exists for definition '{definition_id}'.")
+                if existing.status != WorkflowDefinitionStatus.DRAFT.value:
+                    raise WorkflowDefinitionStateError(
+                        f"Definition '{definition_id}' control row is '{existing.status}', not DRAFT; cannot update."
+                    )
+                raise WorkflowDefinitionConflictError(
+                    f"Draft for definition '{definition_id}' was modified concurrently "
+                    f"(expected lock_version {expected_lock_version}, found {existing.lock_version})."
+                )
+            row = await session.scalar(control_stmt)
+            if row is None:
+                raise WorkflowPersistenceError(f"Draft for definition '{definition_id}' vanished mid-transaction.")
+            return row
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except (WorkflowDefinitionNotFoundError, WorkflowDefinitionStateError, WorkflowDefinitionConflictError):
+            raise
+        except Exception as e:
+            logger.error("Failed to update draft for definition '%s': %s", definition_id, e)
+            raise WorkflowPersistenceError(f"Failed to update draft for definition '{definition_id}': {e}") from e
+        return _model_to_definition_version(row)
+
+    async def publish_draft(
+        self, definition_id: str, tenant_id: str, expected_lock_version: int, version: str
+    ) -> WorkflowDefinitionVersion:
+        """Atomically publish the current DRAFT content as an immutable new version, and refresh the
+        `workflow_definitions` projection row the unmodified executor reads (D1/D3/D6). The DRAFT
+        control row is left in place afterward (only its `lock_version` is bumped) — publishing does
+        not reset in-progress authoring, mirroring a commit that leaves the working tree intact.
+        """
+
+        async def _action(session: AsyncSession) -> WorkflowDefinitionVersionModel:
+            draft = await session.scalar(
+                select(WorkflowDefinitionVersionModel).where(
+                    WorkflowDefinitionVersionModel.definition_id == definition_id,
+                    WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                    WorkflowDefinitionVersionModel.version == "0.0.0-draft",
+                )
+            )
+            if draft is None:
+                raise WorkflowDefinitionNotFoundError(f"No draft exists for definition '{definition_id}'.")
+            if draft.status != WorkflowDefinitionStatus.DRAFT.value:
+                raise WorkflowDefinitionStateError(
+                    f"Definition '{definition_id}' control row is '{draft.status}', not DRAFT; cannot publish."
+                )
+            if draft.lock_version != expected_lock_version:
+                raise WorkflowDefinitionConflictError(
+                    f"Draft for definition '{definition_id}' was modified concurrently "
+                    f"(expected lock_version {expected_lock_version}, found {draft.lock_version})."
+                )
+
+            published = WorkflowDefinitionVersionModel(
+                id=str(uuid.uuid4()),
+                definition_id=definition_id,
+                tenant_id=tenant_id,
+                version=version,
+                status=WorkflowDefinitionStatus.PUBLISHED.value,
+                name=draft.name,
+                description=draft.description,
+                trigger_type=draft.trigger_type,
+                priority=draft.priority,
+                timeout_seconds=draft.timeout_seconds,
+                steps_json=draft.steps_json,
+                graph_json=draft.graph_json,
+                created_by=draft.created_by,
+                lock_version=1,
+                published_at=datetime.datetime.now(datetime.UTC),
+            )
+            session.add(published)
+            draft.lock_version = expected_lock_version + 1
+
+            projection = await session.scalar(
+                select(WorkflowDefinitionModel).where(
+                    WorkflowDefinitionModel.id == definition_id, WorkflowDefinitionModel.tenant_id == tenant_id
+                )
+            )
+            if projection is None:
+                session.add(
+                    WorkflowDefinitionModel(
+                        id=definition_id,
+                        tenant_id=tenant_id,
+                        name=draft.name,
+                        version=version,
+                        description=draft.description,
+                        trigger_type=draft.trigger_type,
+                        priority=draft.priority,
+                        timeout_seconds=draft.timeout_seconds,
+                        steps_json=draft.steps_json,
+                    )
+                )
+            else:
+                projection.name = draft.name
+                projection.version = version
+                projection.description = draft.description
+                projection.trigger_type = draft.trigger_type
+                projection.priority = draft.priority
+                projection.timeout_seconds = draft.timeout_seconds
+                projection.steps_json = draft.steps_json
+
+            return published
+
+        try:
+            published = await self._data_store.execute_in_transaction(_action)
+        except (WorkflowDefinitionNotFoundError, WorkflowDefinitionStateError, WorkflowDefinitionConflictError):
+            raise
+        except IntegrityError as e:
+            raise WorkflowDefinitionConflictError(
+                f"Version '{version}' already exists for definition '{definition_id}'."
+            ) from e
+        except Exception as e:
+            logger.error("Failed to publish definition '%s': %s", definition_id, e)
+            raise WorkflowPersistenceError(f"Failed to publish definition '{definition_id}': {e}") from e
+        return _model_to_definition_version(published)
+
+    async def archive_control_row(
+        self, definition_id: str, tenant_id: str, expected_lock_version: int
+    ) -> WorkflowDefinitionVersion:
+        """Soft-archive a definition (D15): flips the control row DRAFT -> ARCHIVED. Never touches
+        published version rows or the `workflow_definitions` projection row — archived definitions
+        retain all published history and any already-running instances are unaffected; archiving
+        only blocks *new* instance creation (enforced in `WorkflowEngine.start_workflow`)."""
+
+        async def _action(session: AsyncSession) -> WorkflowDefinitionVersionModel:
+            stmt = (
+                update(WorkflowDefinitionVersionModel)
+                .where(
+                    WorkflowDefinitionVersionModel.definition_id == definition_id,
+                    WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                    WorkflowDefinitionVersionModel.version == "0.0.0-draft",
+                    WorkflowDefinitionVersionModel.lock_version == expected_lock_version,
+                    WorkflowDefinitionVersionModel.status == WorkflowDefinitionStatus.DRAFT.value,
+                )
+                .values(status=WorkflowDefinitionStatus.ARCHIVED.value, lock_version=expected_lock_version + 1)
+            )
+            result = await session.execute(stmt)
+            cursor_res = cast(CursorResult[Any], result)
+            control_stmt = select(WorkflowDefinitionVersionModel).where(
+                WorkflowDefinitionVersionModel.definition_id == definition_id,
+                WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                WorkflowDefinitionVersionModel.version == "0.0.0-draft",
+            )
+            if cursor_res.rowcount == 0:
+                existing = await session.scalar(control_stmt)
+                if existing is None:
+                    raise WorkflowDefinitionNotFoundError(f"No control row exists for definition '{definition_id}'.")
+                if existing.status != WorkflowDefinitionStatus.DRAFT.value:
+                    raise WorkflowDefinitionStateError(
+                        f"Definition '{definition_id}' control row is already '{existing.status}'."
+                    )
+                raise WorkflowDefinitionConflictError(
+                    f"Control row for definition '{definition_id}' was modified concurrently "
+                    f"(expected lock_version {expected_lock_version}, found {existing.lock_version})."
+                )
+            row = await session.scalar(control_stmt)
+            if row is None:
+                raise WorkflowPersistenceError(
+                    f"Control row for definition '{definition_id}' vanished mid-transaction."
+                )
+            return row
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except (WorkflowDefinitionNotFoundError, WorkflowDefinitionStateError, WorkflowDefinitionConflictError):
+            raise
+        except Exception as e:
+            logger.error("Failed to archive definition '%s': %s", definition_id, e)
+            raise WorkflowPersistenceError(f"Failed to archive definition '{definition_id}': {e}") from e
+        return _model_to_definition_version(row)
+
+    async def get_published_version(
+        self, definition_id: str, tenant_id: str, version: str
+    ) -> WorkflowDefinitionVersion | None:
+        """Fetch one exact immutable published version row."""
+
+        async def _action(session: AsyncSession) -> WorkflowDefinitionVersionModel | None:
+            stmt = select(WorkflowDefinitionVersionModel).where(
+                WorkflowDefinitionVersionModel.definition_id == definition_id,
+                WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                WorkflowDefinitionVersionModel.version == version,
+                WorkflowDefinitionVersionModel.status == WorkflowDefinitionStatus.PUBLISHED.value,
+            )
+            published_row: WorkflowDefinitionVersionModel | None = await session.scalar(stmt)
+            return published_row
+
+        try:
+            row = await self._data_store.execute_in_transaction(_action)
+        except Exception as e:
+            logger.error("Failed to retrieve published version '%s' of '%s': %s", version, definition_id, e)
+            raise WorkflowPersistenceError(
+                f"Failed to retrieve published version '{version}' of '{definition_id}': {e}"
+            ) from e
+        return _model_to_definition_version(row) if row is not None else None
+
+    async def list_definition_versions(self, definition_id: str, tenant_id: str) -> list[WorkflowDefinitionVersion]:
+        """List every version row (the DRAFT/ARCHIVED control row plus every immutable PUBLISHED
+        snapshot) for one definition, ordered oldest first."""
+
+        async def _action(session: AsyncSession) -> list[WorkflowDefinitionVersionModel]:
+            stmt = (
+                select(WorkflowDefinitionVersionModel)
+                .where(
+                    WorkflowDefinitionVersionModel.definition_id == definition_id,
+                    WorkflowDefinitionVersionModel.tenant_id == tenant_id,
+                )
+                .order_by(WorkflowDefinitionVersionModel.created_at)
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+        try:
+            rows = await self._data_store.execute_in_transaction(_action)
+        except Exception as e:
+            logger.error("Failed to list versions for definition '%s': %s", definition_id, e)
+            raise WorkflowPersistenceError(f"Failed to list versions for definition '{definition_id}': {e}") from e
+        return [_model_to_definition_version(row) for row in rows]
 
     async def list_definitions(self, tenant_id: str | None = None) -> list[WorkflowDefinition]:
         """List all WorkflowDefinitions, optionally filtered by tenant."""

@@ -31,6 +31,7 @@ from kortex.engines.workflow.evaluator import StepEvaluator
 from kortex.engines.workflow.exceptions import (
     ScheduleNotFoundError,
     WorkflowApprovalError,
+    WorkflowDefinitionStateError,
     WorkflowExecutionError,
     WorkflowScheduleError,
     WorkflowStateError,
@@ -38,6 +39,7 @@ from kortex.engines.workflow.exceptions import (
 )
 from kortex.engines.workflow.executor import ExternalExecutionManager
 from kortex.engines.workflow.interfaces import IWorkflowExecutor
+from kortex.engines.workflow.lifecycle import WorkflowDefinitionLifecycleManager
 from kortex.engines.workflow.models import (
     ApprovalDecision,
     ApprovalRequest,
@@ -47,6 +49,7 @@ from kortex.engines.workflow.models import (
     RetryPolicy,
     WorkflowContext,
     WorkflowDefinition,
+    WorkflowDefinitionStatus,
     WorkflowInstance,
     WorkflowResult,
     WorkflowSettings,
@@ -84,6 +87,7 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         self._workflow_store: WorkflowStore | None = None
         self._scheduler: DurableWorkflowScheduler | None = None
         self._external_executor: ExternalExecutionManager | None = None
+        self._definition_lifecycle_manager: WorkflowDefinitionLifecycleManager | None = None
         self._recovery_lock = asyncio.Lock()
         self._kernel: Kernel | None = None
         self._running_tasks: dict[UUID, asyncio.Task[Any]] = {}
@@ -127,6 +131,13 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             "kortex.workflow.external.get",
             "kortex.workflow.external.list",
             "kortex.workflow.external.cancel",
+            "kortex.workflow.definition.create",
+            "kortex.workflow.definition.get",
+            "kortex.workflow.definition.update",
+            "kortex.workflow.definition.validate",
+            "kortex.workflow.definition.publish",
+            "kortex.workflow.definition.archive",
+            "kortex.workflow.definition.clone",
         ]
 
     @property
@@ -237,6 +248,14 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 )
                 self.logger.info("WorkflowEngine wired to ExternalExecutionManager backed by StorageEngine.data.")
 
+                self._definition_lifecycle_manager = WorkflowDefinitionLifecycleManager(
+                    workflow_store=self._workflow_store,
+                    kernel=kernel,
+                    security_engine=sec_engine,
+                    outbox_store=outbox_store,
+                )
+                self.logger.info("WorkflowEngine wired to WorkflowDefinitionLifecycleManager (Milestone F4).")
+
                 # M6.3-3: react to durable approval decisions for external-
                 # execution tickets so an approved/rejected/expired decision
                 # actually resumes or cancels the paused execution -- mirrors
@@ -343,6 +362,65 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 handler=self.list_definitions,
                 required_permissions=["workflow:read"],
             )
+            # Milestone F4 — Workflow Definition Lifecycle & Authoring Foundation
+            if self._definition_lifecycle_manager is not None:
+                mgr = self._definition_lifecycle_manager
+                kernel.register_capability(
+                    name="kortex.workflow.definition.create",
+                    description="Create a new workflow definition identity with a mutable draft",
+                    provider=self.name,
+                    handler=mgr.create,
+                    required_permissions=["workflow:write"],
+                    requires_execution_context=True,
+                )
+                kernel.register_capability(
+                    name="kortex.workflow.definition.get",
+                    description="Get a workflow definition's draft and/or published version history",
+                    provider=self.name,
+                    handler=mgr.get,
+                    required_permissions=["workflow:read"],
+                    requires_execution_context=True,
+                )
+                kernel.register_capability(
+                    name="kortex.workflow.definition.update",
+                    description="Update a workflow definition's mutable draft content",
+                    provider=self.name,
+                    handler=mgr.update,
+                    required_permissions=["workflow:write"],
+                    requires_execution_context=True,
+                )
+                kernel.register_capability(
+                    name="kortex.workflow.definition.validate",
+                    description="Validate a workflow definition's draft content (informational)",
+                    provider=self.name,
+                    handler=mgr.validate,
+                    required_permissions=["workflow:read"],
+                    requires_execution_context=True,
+                )
+                kernel.register_capability(
+                    name="kortex.workflow.definition.publish",
+                    description="Publish a workflow definition's draft as a new immutable version",
+                    provider=self.name,
+                    handler=mgr.publish,
+                    required_permissions=["workflow:write"],
+                    requires_execution_context=True,
+                )
+                kernel.register_capability(
+                    name="kortex.workflow.definition.archive",
+                    description="Soft-archive a workflow definition, blocking new instance creation",
+                    provider=self.name,
+                    handler=mgr.archive,
+                    required_permissions=["workflow:write"],
+                    requires_execution_context=True,
+                )
+                kernel.register_capability(
+                    name="kortex.workflow.definition.clone",
+                    description="Clone a workflow definition's content into a new definition identity",
+                    provider=self.name,
+                    handler=mgr.clone,
+                    required_permissions=["workflow:write"],
+                    requires_execution_context=True,
+                )
             # M5.4 Scheduling Capabilities
             kernel.register_capability(
                 name="kortex.workflow.schedule.create",
@@ -527,22 +605,25 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
                 # Cache instance in memory
                 self._instances[instance.id] = instance
 
-                # Ensure definition is available
-                definition: WorkflowDefinition | None = self._definitions.get(instance.definition_id)
-                if definition is None:
-                    try:
-                        definition = await self._workflow_store.get_definition(
-                            instance.definition_id, tenant_id=instance.tenant_id
-                        )
-                        if definition is not None:
-                            self._definitions[definition.id] = definition
-                    except Exception as e:
-                        self.logger.warning(
-                            "Could not load definition '%s' for instance '%s': %s",
-                            instance.definition_id,
-                            instance.id,
-                            e,
-                        )
+                # Ensure the definition is available. Milestone F4 (D7/D8): a recovering instance
+                # must re-enter the EXACT immutable version it was created against, so this always
+                # resolves via `instance.definition_version` and deliberately never consults or
+                # populates the unversioned `self._definitions` cache — that cache has no notion of
+                # version and would either return stale content or silently poison future
+                # latest-published lookups with one instance's pinned historical content.
+                definition: WorkflowDefinition | None = None
+                try:
+                    definition = await self._workflow_store.get_definition(
+                        instance.definition_id, tenant_id=instance.tenant_id, version=instance.definition_version
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        "Could not load definition '%s' at version '%s' for instance '%s': %s",
+                        instance.definition_id,
+                        instance.definition_version,
+                        instance.id,
+                        e,
+                    )
 
                 if definition is None:
                     self.logger.error(
@@ -719,8 +800,35 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             raise ResourceNotFoundError(f"Workflow definition '{definition_id}' not found.")
         return self._definitions[definition_id]
 
-    async def get_definition_async(self, definition_id: str, tenant_id: str | None = None) -> WorkflowDefinition:
-        """Retrieve a WorkflowDefinition by ID, reading through to persistent store if necessary."""
+    async def get_definition_async(
+        self, definition_id: str, tenant_id: str | None = None, version: str | None = None
+    ) -> WorkflowDefinition:
+        """Retrieve a WorkflowDefinition by ID, reading through to persistent store if necessary.
+
+        Milestone F4 (D7/D8) — `version`, when given, resolves the EXACT immutable published
+        content for that version string and NEVER consults or populates `self._definitions` (that
+        cache holds only "the currently known content for this ID" with no notion of version, so it
+        can never safely answer an exact-version request — see `WorkflowStore._get_definition_at_
+        version`'s docstring). `version=None` (the default) preserves the exact pre-F4 behavior,
+        including the in-memory cache — this is what `start_workflow` and scheduler triggers rely on
+        for "float to latest published" (D13).
+        """
+        if version is not None:
+            if self._workflow_store:
+                loaded = await self._workflow_store.get_definition(definition_id, tenant_id=tenant_id, version=version)
+                if loaded:
+                    return loaded
+            # No durable store, or the store has no record of this exact version (e.g. a
+            # definition registered only in-memory via `register_definition`, never persisted —
+            # a legitimate, long-standing pattern this fix must not break). Falling back to the
+            # cache is safe ONLY because it is still an exact-version check, never "give me
+            # whatever is cached": a cached definition answers this request exclusively when its
+            # own `.version` equals the one requested.
+            cached = self._definitions.get(definition_id)
+            if cached is not None and cached.version == version:
+                return cached
+            raise ResourceNotFoundError(f"Workflow definition '{definition_id}' at version '{version}' not found.")
+
         if definition_id in self._definitions:
             return self._definitions[definition_id]
 
@@ -805,6 +913,16 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
         tid = tid or "default"
 
         definition = await self.get_definition_async(definition_id, tenant_id=tid)
+
+        # Milestone F4 (D15): an archived definition may not create new instances. Floats to
+        # latest-published otherwise (D13) — this check is purely additive and does not change
+        # resolution for any non-archived definition, legacy or F4-authored.
+        if self._workflow_store is not None:
+            control_row = await self._workflow_store.get_control_row(definition_id, tenant_id=tid)
+            if control_row is not None and control_row.status == WorkflowDefinitionStatus.ARCHIVED:
+                raise WorkflowDefinitionStateError(
+                    f"Workflow definition '{definition_id}' is archived and cannot start new instances."
+                )
 
         # Create instance domain model
         context = WorkflowContext(variables=initial_context or {}, session_token=session_token)
@@ -1047,7 +1165,12 @@ class WorkflowEngine(BaseEngine, IWorkflowExecutor):
             WorkflowStateMachine.transition(instance, WorkflowState.APPROVED)
 
         instance.status = WorkflowStatus.RUNNING
-        definition = await self.get_definition_async(instance.definition_id, tenant_id=instance.tenant_id)
+        # Milestone F4 (D7/D8): resume MUST re-enter the exact immutable version the instance was
+        # created against, never whatever is latest-published now — a definition published after
+        # this instance started must never silently change what a resumed instance executes.
+        definition = await self.get_definition_async(
+            instance.definition_id, tenant_id=instance.tenant_id, version=instance.definition_version
+        )
 
         if self._workflow_store:
             await self._workflow_store.update_instance(instance)

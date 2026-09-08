@@ -97,6 +97,7 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "security_role_permissions",
         "security_secrets",
         "workflow_definitions",
+        "workflow_definition_versions",
         "workflow_instances",
         "workflow_schedules",
         "workflow_step_runs",
