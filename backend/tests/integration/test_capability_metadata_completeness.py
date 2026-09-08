@@ -80,6 +80,8 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.connector.action.execute": (False, False),
     "kortex.connector.driver.list": (True, True),
     "kortex.connector.driver.register": (False, False),
+    "kortex.connector.notification.webhook.send": (False, False),
+    "kortex.connector.notification.webhook.status": (True, True),
     "kortex.connector.profile.delete": (False, False),
     "kortex.connector.profile.get": (True, True),
     "kortex.connector.profile.list": (True, True),

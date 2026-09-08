@@ -23,6 +23,10 @@ import os
 import secrets
 from typing import Any, cast
 
+from kortex.api.capability_tool_bridge import (
+    CapabilityToolBridgeError,
+    generate_tool_definition_from_capability,
+)
 from kortex.core.kernel import Kernel
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter
@@ -31,8 +35,10 @@ from kortex.engines.ai.ollama_provider import OllamaProvider
 from kortex.engines.ai.tools import ToolDefinition, ToolRegistry
 from kortex.engines.backup.engine import BackupEngine
 from kortex.engines.configuration.engine import SystemSettings
+from kortex.engines.connector.actions import ConnectorActionBootstrapEngine, ConnectorActionDescriptor
 from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
+from kortex.engines.connector.reference_actions import REFERENCE_ACTION_DESCRIPTORS
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document_intelligence.engine import DocumentIntelligenceEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
@@ -279,6 +285,15 @@ async def build_and_boot_kernel() -> Kernel:
     # Phase 7 — Production Hardening — Backup Engine: Snapshot capture, packaging, encryption, validation, retention.
     kernel.register_engine(BackupEngine())
 
+    # F5: register the semantic connector action reference capabilities. Must
+    # be registered here, before `kernel.boot()`, not after like the driver/AI
+    # tool registrations below -- `Kernel.register_capability` rejects new
+    # capability registration once boot has completed (state=RUNNING), unlike
+    # `ConnectorEngine.register_driver`, which requires the opposite. See
+    # `ConnectorActionBootstrapEngine`'s own docstring for why this is a
+    # dedicated engine rather than a change to `ConnectorEngine` itself.
+    kernel.register_engine(ConnectorActionBootstrapEngine(REFERENCE_ACTION_DESCRIPTORS))
+
     await kernel.boot()
 
     # M7.3-W1: register the production connector drivers now that the engine
@@ -295,6 +310,13 @@ async def build_and_boot_kernel() -> Kernel:
 
     # M7.5-W3: register the Knowledge Engine AI tool.
     register_knowledge_ai_tools(ai_engine.tool_registry)
+
+    # F5: generate + register AI tool definitions for the connector action
+    # capabilities (already registered pre-boot by ConnectorActionBootstrapEngine
+    # above) from their own real, now-live CapabilityDescriptor.parameters_schema
+    # (kortex.engines.ai.capability_tool_bridge) -- additive to, and independent
+    # of, the M7.3 hand-authored connector tools registered just above.
+    register_connector_action_ai_tools(kernel, ai_engine.tool_registry, REFERENCE_ACTION_DESCRIPTORS)
 
     return kernel
 
@@ -448,6 +470,28 @@ def register_connector_ai_tools(tool_registry: ToolRegistry) -> None:
             timeout_seconds=30.0,
         ),
     )
+
+
+def register_connector_action_ai_tools(
+    kernel: Kernel, tool_registry: ToolRegistry, descriptors: list[ConnectorActionDescriptor]
+) -> None:
+    """F5: generate and register an AI tool for each connector-action capability descriptor.
+
+    Unlike `register_connector_ai_tools` above (hand-authored schemas for the M7.3 generic
+    execute capability), this reads each already-registered capability's own real
+    `parameters_schema` back from the Kernel Registry via `generate_tool_definition_from_capability`
+    -- no schema is re-typed by hand. Requires the capability to already be registered (i.e. this
+    must run after `register_action_capabilities`). Idempotent via the same
+    `_register_tool_if_absent` guard every other `register_*_ai_tools` function uses.
+    """
+    for descriptor in descriptors:
+        capability = kernel.get_capability(descriptor.capability_name)
+        try:
+            tool = generate_tool_definition_from_capability(capability)
+        except CapabilityToolBridgeError as exc:
+            logger.warning("Skipping AI tool generation for '%s': %s", descriptor.capability_name, exc)
+            continue
+        _register_tool_if_absent(tool_registry, tool)
 
 
 def register_document_ai_tools(tool_registry: ToolRegistry) -> None:
