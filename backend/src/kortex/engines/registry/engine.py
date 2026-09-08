@@ -13,7 +13,7 @@ import inspect
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.exceptions import CapabilityNotFoundError, ResourceAlreadyExistsError, ResourceNotFoundError
@@ -64,6 +64,209 @@ _BOOTSTRAP_EXEMPT_CAPABILITIES = frozenset(
 """Capabilities permitted to register with `requires_authentication=False` —
 each must be reachable before any session token exists. Enforced in
 `RegistryEngine.register_capability`, not merely documented as a convention."""
+
+
+# KORTEX OS — Automation + Integration Fabric, Milestone F1 (Capability Model
+# Completion): one-time, explicit risk classification for every capability
+# that existed before this milestone, keyed by canonical name so a future
+# accidental change to any engine's registration call is caught as a real
+# test failure rather than silently drifting (mirrors
+# `test_production_capability_permissions.py`'s `_EXPECTED_PERMISSIONS`
+# convention exactly).
+#
+# Each value is `(is_read_only, is_idempotent)`. Every entry was derived by
+# reading the actual handler implementation, never guessed from the
+# capability's name or its HTTP-verb-shaped suffix alone — see the F1
+# implementation report for the specific evidence behind every non-obvious
+# entry (e.g. `connector.profile.delete` and `workflow.instance.cancel` are
+# NOT idempotent because their handlers fetch-then-verify the target and
+# raise on an already-absent/already-terminal one, while
+# `security.oauth.unlink` and `ai.agent.cancel` ARE idempotent because their
+# handlers return a safe `False`/no-op instead).
+#
+# This table is consulted by `register_capability()` ONLY as a fallback for
+# a capability that registers without explicitly passing
+# `is_read_only`/`is_idempotent` itself — any newly authored capability is
+# expected to declare its own classification at its call site instead of
+# growing this table. A capability found in neither place registers with the
+# same fail-closed default `CapabilityDescriptor` itself declares (mutating,
+# non-idempotent) rather than raising — existing capability registrations
+# (production and test) must keep working unconditionally; the real guard
+# against a *production* capability ever shipping with no real classification
+# is `test_capability_metadata_completeness.py`'s expected-value comparison
+# against the live-booted Kernel, not a runtime exception here.
+_CAPABILITY_RISK_CLASSIFICATION: dict[str, tuple[bool, bool]] = {
+    # -- AI --------------------------------------------------------------
+    "kortex.ai.agent.cancel": (False, True),
+    "kortex.ai.agent.list": (True, True),
+    "kortex.ai.agent.orchestrate": (False, False),
+    "kortex.ai.agent.resume": (False, False),
+    "kortex.ai.agent.status": (True, True),
+    "kortex.ai.conversation.history.get": (True, True),
+    "kortex.ai.governance.approval.create": (False, False),
+    "kortex.ai.governance.audit.query": (True, True),
+    "kortex.ai.governance.guardrail.check": (True, True),
+    "kortex.ai.governance.policy.evaluate": (True, True),
+    "kortex.ai.governance.policy.get": (True, True),
+    "kortex.ai.governance.policy.upsert": (False, True),
+    "kortex.ai.governance.quota.get": (True, True),
+    "kortex.ai.governance.quota.update": (False, True),
+    "kortex.ai.model.list": (True, True),
+    "kortex.ai.provider.config.list": (True, True),
+    "kortex.ai.provider.config.remove": (False, True),
+    "kortex.ai.provider.configure": (False, True),
+    "kortex.ai.provider.list": (True, True),
+    "kortex.ai.provider.register": (False, False),
+    "kortex.ai.provider.test": (True, True),
+    "kortex.ai.response.generate": (False, False),
+    "kortex.ai.tool.invoke": (False, False),
+    # -- Backup ------------------------------------------------------------
+    "kortex.backup.create": (False, False),
+    "kortex.backup.delete": (False, False),
+    "kortex.backup.diagnostics.get": (True, True),
+    "kortex.backup.get": (True, True),
+    "kortex.backup.list": (True, True),
+    "kortex.backup.verify": (True, True),
+    # -- Connector -----------------------------------------------------------
+    "kortex.connector.action.execute": (False, False),
+    "kortex.connector.driver.list": (True, True),
+    "kortex.connector.driver.register": (False, False),
+    "kortex.connector.profile.delete": (False, False),
+    "kortex.connector.profile.get": (True, True),
+    "kortex.connector.profile.list": (True, True),
+    "kortex.connector.profile.register": (False, True),
+    # -- Document ------------------------------------------------------------
+    "kortex.document.adapter.list": (True, True),
+    "kortex.document.adapter.register": (False, False),
+    "kortex.document.intelligence.analyze": (True, True),
+    "kortex.document.lifecycle.transition": (False, False),
+    "kortex.document.operation.execute": (False, False),
+    "kortex.document.preview.generate": (True, True),
+    "kortex.document.profile.list": (True, True),
+    "kortex.document.recommendation.get": (True, True),
+    "kortex.document.template.bind": (True, True),
+    "kortex.document.template.list": (True, True),
+    # -- Document Intelligence ------------------------------------------------
+    "kortex.document_intelligence.ocr.extract": (True, True),
+    "kortex.document_intelligence.pdf.parse": (True, True),
+    "kortex.document_intelligence.structure.analyze": (True, True),
+    # -- Finance ---------------------------------------------------------------
+    "kortex.finance.invoice.create": (False, False),
+    "kortex.finance.invoice.get": (True, True),
+    # -- HR & Payroll ------------------------------------------------------------
+    "kortex.hr_payroll.attendance.check_in": (False, False),
+    "kortex.hr_payroll.attendance.check_out": (False, False),
+    "kortex.hr_payroll.attendance.list": (True, True),
+    "kortex.hr_payroll.employee.create": (False, False),
+    "kortex.hr_payroll.employee.get": (True, True),
+    "kortex.hr_payroll.employee.list": (True, True),
+    "kortex.hr_payroll.leave.balance_get": (True, True),
+    "kortex.hr_payroll.leave.decide": (False, False),
+    "kortex.hr_payroll.leave.request": (False, False),
+    "kortex.hr_payroll.payroll.calculate": (False, False),
+    "kortex.hr_payroll.payroll.run_get": (True, True),
+    "kortex.hr_payroll.payslip.get": (True, True),
+    # -- Knowledge -----------------------------------------------------------
+    "kortex.knowledge.graph.list": (True, True),
+    "kortex.knowledge.graph.traverse": (True, True),
+    "kortex.knowledge.pack.load": (False, False),
+    "kortex.knowledge.query.search": (True, True),
+    "kortex.knowledge.source.index": (False, False),
+    # -- License -------------------------------------------------------------
+    "kortex.license.activation.apply": (False, True),
+    "kortex.license.activation.revoke": (False, True),
+    "kortex.license.status.get": (True, True),
+    "kortex.license.token.verify": (True, True),
+    # -- Marketplace ---------------------------------------------------------
+    "kortex.marketplace.listing.list": (True, True),
+    # -- Monitoring ------------------------------------------------------------
+    "kortex.monitoring.dashboard.get": (True, True),
+    "kortex.monitoring.diagnostics.get": (True, True),
+    "kortex.monitoring.metrics.get": (True, True),
+    "kortex.monitoring.timeseries.get": (True, True),
+    # -- Operations ------------------------------------------------------------
+    "kortex.operations.incident.close": (False, False),
+    "kortex.operations.incident.get": (True, True),
+    "kortex.operations.incident.list": (True, True),
+    "kortex.operations.incident.report": (False, False),
+    "kortex.operations.incident.resolve": (False, False),
+    "kortex.operations.incident.status_update": (False, False),
+    "kortex.operations.vehicle.assign": (False, False),
+    "kortex.operations.vehicle.create": (False, False),
+    "kortex.operations.vehicle.get": (True, True),
+    "kortex.operations.vehicle.list": (True, True),
+    "kortex.operations.vehicle.status_update": (False, False),
+    "kortex.operations.vehicle.tracking_history": (True, True),
+    "kortex.operations.vehicle.tracking_record": (False, False),
+    "kortex.operations.vehicle.unassign": (False, False),
+    # -- Security --------------------------------------------------------------
+    "kortex.security.access.authorize": (True, True),
+    "kortex.security.auth.authenticate": (False, False),
+    "kortex.security.auth.change_password": (False, True),
+    "kortex.security.auth.request_password_reset": (False, False),
+    "kortex.security.auth.reset_password": (False, False),
+    "kortex.security.bootstrap.create_admin": (False, False),
+    "kortex.security.oauth.get_config": (True, True),
+    "kortex.security.oauth.link_begin": (False, False),
+    "kortex.security.oauth.link_complete": (False, False),
+    "kortex.security.oauth.list_links": (True, True),
+    "kortex.security.oauth.login_begin": (False, False),
+    "kortex.security.oauth.login_complete": (False, False),
+    "kortex.security.oauth.unlink": (False, True),
+    "kortex.security.principal.register": (False, False),
+    "kortex.security.principal.set_email": (False, True),
+    "kortex.security.secret.get": (True, True),
+    "kortex.security.secret.put": (False, True),
+    "kortex.security.signature.verify": (True, True),
+    # -- Sentinel --------------------------------------------------------------
+    "kortex.sentinel.diagnostics.get": (True, True),
+    "kortex.sentinel.health.get": (True, True),
+    "kortex.sentinel.status.get": (True, True),
+    # -- Storage ---------------------------------------------------------------
+    "kortex.storage.cache.set": (False, True),
+    "kortex.storage.data.session": (True, True),
+    "kortex.storage.file.store": (False, True),
+    "kortex.storage.object.put": (False, True),
+    # -- Workflow --------------------------------------------------------------
+    "kortex.workflow.approval.create": (False, False),
+    "kortex.workflow.approval.decide": (False, False),
+    "kortex.workflow.approval.delegate": (False, False),
+    "kortex.workflow.approval.get": (True, True),
+    "kortex.workflow.approval.list": (True, True),
+    "kortex.workflow.definition.list": (True, True),
+    "kortex.workflow.external.cancel": (False, False),
+    "kortex.workflow.external.execute": (False, False),
+    "kortex.workflow.external.get": (True, True),
+    "kortex.workflow.external.list": (True, True),
+    "kortex.workflow.instance.approve": (False, False),
+    "kortex.workflow.instance.cancel": (False, False),
+    "kortex.workflow.instance.get": (True, True),
+    "kortex.workflow.instance.list": (True, True),
+    "kortex.workflow.instance.resume": (False, False),
+    "kortex.workflow.instance.start": (False, False),
+    "kortex.workflow.schedule.cancel": (False, True),
+    "kortex.workflow.schedule.create": (False, False),
+    "kortex.workflow.schedule.get": (True, True),
+    "kortex.workflow.schedule.list": (True, True),
+    "kortex.workflow.schedule.pause": (False, True),
+    "kortex.workflow.schedule.resume": (False, True),
+    "kortex.workflow.schedule.trigger": (False, False),
+    "kortex.workflow.state.get": (True, True),
+    # -- Recipe (registered by RecipeEngine; not currently wired into the
+    # production boot path — see the F1 report's scope note — classified
+    # here anyway for accuracy wherever RecipeEngine is booted independently,
+    # e.g. in its own unit/integration tests) --------------------------------
+    "kortex.recipe.compile": (True, True),
+    "kortex.recipe.info": (True, True),
+    "kortex.recipe.install": (False, False),
+    "kortex.recipe.list": (True, True),
+    "kortex.recipe.load": (True, True),
+    "kortex.recipe.package": (True, True),
+    "kortex.recipe.remove": (False, False),
+    "kortex.recipe.search": (True, True),
+    "kortex.recipe.upgrade": (False, False),
+    "kortex.recipe.validate": (True, True),
+}
 
 
 class RegistryCategory(str, enum.Enum):
@@ -155,6 +358,95 @@ class CapabilityDescriptor(BaseModel):
             "`principal` key in `parameters` is rejected outright, not overridden."
         ),
     )
+    is_read_only: bool = Field(
+        default=False,
+        description=(
+            "KORTEX OS — Automation + Integration Fabric, Milestone F1 (Capability Model "
+            "Completion): True iff a successful invocation never changes the authoritative state "
+            "this capability represents. Authoritative registry data set exclusively at "
+            "registration time by `register_capability()` — never caller-suppliable via "
+            "`CapabilityRequest.parameters` or any other request-shaped input, so a caller can never "
+            "make a mutating capability report itself as read-only. Defaults to False (fail-closed): "
+            "a capability that does not explicitly classify itself is treated as mutating until "
+            "proven otherwise, exactly mirroring `required_permissions=None`'s existing "
+            "fail-closed-elsewhere convention on this same model."
+        ),
+    )
+    is_idempotent: bool = Field(
+        default=False,
+        description=(
+            "KORTEX OS — Automation + Integration Fabric, Milestone F1: True iff invoking this "
+            "capability twice with the same parameters converges to the same authoritative end "
+            "state without accumulating additional effects beyond the first call. Not implied by "
+            "`is_read_only=True` being False, and not implied by the presence of a caller-supplied "
+            "idempotency key elsewhere in the platform (`CapabilityRequest.idempotency_key` is an "
+            "orthogonal, opt-in duplicate-suppression mechanism a caller may or may not use — it "
+            "does not make the underlying capability's own contract idempotent). Authoritative "
+            "registry data, same non-caller-suppliable guarantee as `is_read_only`. Defaults to "
+            "False (fail-closed) for the identical reason."
+        ),
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def owner_domain(self) -> str:
+        """The `<domain>` segment of this capability's canonical `kortex.<domain>...` name.
+
+        Derived, never independently settable — deriving from `name` (which is itself immutable
+        once registered) means this can never drift out of sync with the capability it describes,
+        unlike a second, separately-populated field would. See `capability_registry.md` §1's
+        canonical naming convention, which this only reads back, not reinterprets.
+        """
+        return _capability_name_segments(self.name)[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def resource_type(self) -> str:
+        """The resource segment(s) of this capability's canonical name, between `owner_domain` and
+        `action` — dot-joined verbatim when more than one segment exists (e.g. `governance.approval`
+        for `kortex.ai.governance.approval.create`), and equal to `owner_domain` itself when the
+        name carries no separate resource segment at all (e.g. `kortex.recipe.compile`, where the
+        recipe engine's own catalog is the operated-on resource). Never fabricated: this is exactly
+        the structure `capability_registry.md` §1's naming convention already encodes in `name`."""
+        return _capability_name_segments(self.name)[1]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def action(self) -> str:
+        """The final `<action>` segment of this capability's canonical name, verbatim."""
+        return _capability_name_segments(self.name)[2]
+
+
+def _capability_name_segments(name: str) -> tuple[str, str, str]:
+    """Deterministically split a capability name into `(owner_domain, resource_type, action)`.
+
+    For a canonical `kortex.<domain>.<resource>.<action>` name (`capability_registry.md` §1) — true
+    of every one of the 140 capabilities registered by the production boot path
+    (`kernel_bootstrap.build_and_boot_kernel`), verified directly against a live-booted
+    `Kernel.list_capabilities()` during F1's implementation — this is a readback of a naming
+    convention the platform already enforces, not a new inference: the leading `kortex` segment is
+    dropped, the next segment is `owner_domain`, the last is `action`, and anything in between
+    (dot-joined verbatim when more than one segment, or repeating `owner_domain` when there is none)
+    is `resource_type`.
+
+    Deliberately never raises: a capability registered under a non-canonical name (many pre-F1 unit
+    tests register synthetic names like `"dispatch.test.allowed"`, with no `kortex.` prefix at all,
+    and F1 must not break a single one of them — see `register_capability`'s own "existing
+    registrations must continue to work" requirement) instead gets the same best-effort split
+    applied to its own segments, with no leading-segment drop — an honest, degraded-but-non-crashing
+    decomposition, never a fabricated one.
+    """
+    segments = name.split(".")
+    if len(segments) > 1 and segments[0] == "kortex":
+        segments = segments[1:]
+    if not segments:
+        return "", "", ""
+    if len(segments) == 1:
+        return segments[0], segments[0], segments[0]
+    domain = segments[0]
+    if len(segments) == 2:
+        return domain, domain, segments[1]
+    return domain, ".".join(segments[1:-1]), segments[-1]
 
 
 class RegistryEngine(BaseEngine):
@@ -316,6 +608,8 @@ class RegistryEngine(BaseEngine):
         security_classification: str = "INTERNAL",
         requires_execution_context: bool = False,
         legacy_principal_bridge: bool = False,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
     ) -> CapabilityDescriptor:
         """Register an AI-discoverable capability.
 
@@ -338,6 +632,29 @@ class RegistryEngine(BaseEngine):
         would fail silently, under attacker-influenced timing, in
         production. A mis-declaration here instead fails loudly, once, at
         boot, in a fully trusted context — see `_validate_execution_context_binding`.
+
+        KORTEX OS — Automation + Integration Fabric, Milestone F1 (Capability
+        Model Completion): `is_read_only`/`is_idempotent` are the two risk
+        fields a capability cannot safely default to a name-derived guess
+        (unlike `owner_domain`/`resource_type`/`action`, which
+        `CapabilityDescriptor` derives from `name` itself). A caller passing
+        either explicitly always wins — this is how every production
+        capability's own registration call declares its real classification,
+        and is the intended path for every future one. A caller passing
+        neither (true of every pre-F1 call site, production and test alike —
+        F1 must not force an edit onto every one of them just to keep
+        registering) falls back to `_CAPABILITY_RISK_CLASSIFICATION`'s
+        one-time, evidence-derived entry for `name` when one exists, and
+        otherwise to the same fail-closed default `CapabilityDescriptor`
+        itself declares (`False`, `False` — mutating, non-idempotent, until
+        proven otherwise): never a raise, and never a silently *permissive*
+        guess in either direction. The real enforcement that every
+        production capability actually carries a *correct*, non-default
+        classification is a test-level guard
+        (`test_capability_metadata_completeness.py`), exactly mirroring how
+        `test_production_capability_permissions.py` already enforces the
+        production `required_permissions` mapping — not a runtime exception
+        inside this shared, test-and-production-both method.
         """
         if name in self._capabilities:
             raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
@@ -347,6 +664,13 @@ class RegistryEngine(BaseEngine):
                 f"Capability '{name}' cannot register with requires_authentication=False; "
                 f"only {sorted(_BOOTSTRAP_EXEMPT_CAPABILITIES)} may bypass authentication."
             )
+
+        if is_read_only is None or is_idempotent is None:
+            fallback_read_only, fallback_idempotent = _CAPABILITY_RISK_CLASSIFICATION.get(name, (False, False))
+            if is_read_only is None:
+                is_read_only = fallback_read_only
+            if is_idempotent is None:
+                is_idempotent = fallback_idempotent
 
         if handler is not None:
             try:
@@ -378,6 +702,8 @@ class RegistryEngine(BaseEngine):
             security_classification=security_classification,
             requires_execution_context=requires_execution_context,
             legacy_principal_bridge=legacy_principal_bridge,
+            is_read_only=is_read_only,
+            is_idempotent=is_idempotent,
         )
         self._capabilities[name] = descriptor
         self._capability_handlers[name] = handler
@@ -439,6 +765,44 @@ class RegistryEngine(BaseEngine):
     def list_capabilities(self) -> list[CapabilityDescriptor]:
         """List all discoverable capabilities."""
         return list(self._capabilities.values())
+
+    def search_capabilities(
+        self,
+        *,
+        owner_domain: str | None = None,
+        resource_type: str | None = None,
+        action: str | None = None,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
+        keyword: str | None = None,
+    ) -> list[CapabilityDescriptor]:
+        """Filter discoverable capabilities by canonical metadata (F1, `capability_registry.md` §3/§13).
+
+        Pure in-memory filtering over the same catalog `list_capabilities()` already returns — no
+        additional store, no database query, and therefore no scan cost beyond what a caller's own
+        filter predicates require. Every parameter is optional and additive (AND-combined); omitting
+        all of them is equivalent to `list_capabilities()`.
+
+        `keyword` matches case-insensitively against `name` or `description` — deliberately not
+        stemmed/fuzzy, since the intended near-term consumers (a future capability catalog, an AI
+        tool-schema generator, a workflow node library) need deterministic, explainable results, not
+        best-effort ranking.
+        """
+        results = list(self._capabilities.values())
+        if owner_domain is not None:
+            results = [c for c in results if c.owner_domain == owner_domain]
+        if resource_type is not None:
+            results = [c for c in results if c.resource_type == resource_type]
+        if action is not None:
+            results = [c for c in results if c.action == action]
+        if is_read_only is not None:
+            results = [c for c in results if c.is_read_only == is_read_only]
+        if is_idempotent is not None:
+            results = [c for c in results if c.is_idempotent == is_idempotent]
+        if keyword:
+            needle = keyword.lower()
+            results = [c for c in results if needle in c.name.lower() or needle in c.description.lower()]
+        return results
 
     def _resolve_handler(self, name: str) -> Callable[..., Any] | None:
         """Internal, dispatcher-only handler resolution (Milestone M8).

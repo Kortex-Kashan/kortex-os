@@ -280,6 +280,8 @@ class Kernel:
         security_classification: str = "INTERNAL",
         requires_execution_context: bool = False,
         legacy_principal_bridge: bool = False,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
     ) -> CapabilityDescriptor:
         """Register a capability with the Registry Engine.
 
@@ -289,6 +291,13 @@ class Kernel:
         — so this gate must allow both states, unlike `register_engine`,
         which only ever runs before `boot()` starts and therefore only
         needs to allow `CREATED`.
+
+        `is_read_only`/`is_idempotent` (F1, Automation + Integration Fabric
+        Capability Model Completion): pure passthrough to
+        `RegistryEngine.register_capability`, which resolves an omitted
+        value against its own one-time risk-classification table, falling
+        back to a safe fail-closed default (mutating, non-idempotent) for
+        any capability in neither place — see that method's docstring.
         """
         if self._state not in (KernelState.CREATED, KernelState.BOOTING):
             raise KernelStateError(
@@ -307,6 +316,8 @@ class Kernel:
             security_classification=security_classification,
             requires_execution_context=requires_execution_context,
             legacy_principal_bridge=legacy_principal_bridge,
+            is_read_only=is_read_only,
+            is_idempotent=is_idempotent,
         )
 
     def get_capability(self, name: str) -> CapabilityDescriptor:
@@ -330,6 +341,27 @@ class Kernel:
     def list_capabilities(self) -> list[CapabilityDescriptor]:
         """List all registered capabilities."""
         return self._registry_engine.list_capabilities()
+
+    def search_capabilities(
+        self,
+        *,
+        owner_domain: str | None = None,
+        resource_type: str | None = None,
+        action: str | None = None,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
+        keyword: str | None = None,
+    ) -> list[CapabilityDescriptor]:
+        """Filter registered capabilities by canonical metadata (F1). Pure passthrough to
+        `RegistryEngine.search_capabilities` — see that method's docstring."""
+        return self._registry_engine.search_capabilities(
+            owner_domain=owner_domain,
+            resource_type=resource_type,
+            action=action,
+            is_read_only=is_read_only,
+            is_idempotent=is_idempotent,
+            keyword=keyword,
+        )
 
     def register_module(self, name: str, instance: Any, description: str = "") -> ResourceMetadata:
         """Register a business module."""
