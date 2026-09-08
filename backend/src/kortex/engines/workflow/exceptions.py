@@ -22,6 +22,17 @@ class WorkflowValidationError(WorkflowError):
     """Raised when a workflow definition or step schema fails validation."""
 
 
+class WorkflowGraphValidationError(WorkflowValidationError):
+    """Milestone F2 — raised when a `WorkflowGraph` fails structural validation (duplicate node/edge
+    IDs, a dangling node/port reference, a missing/invalid entry node, or a directed cycle)."""
+
+
+class WorkflowGraphConversionError(WorkflowValidationError):
+    """Milestone F2 — raised when a `WorkflowGraph` cannot be losslessly converted to the legacy flat
+    `list[WorkflowStep]` shape (e.g. it branches or joins) — never silently flattened by an arbitrary
+    traversal, and never has an edge discarded to force a fit."""
+
+
 class WorkflowExecutionError(WorkflowError):
     """Raised when a workflow step or runtime execution encounters a fatal failure."""
 

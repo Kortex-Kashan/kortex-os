@@ -125,6 +125,81 @@ class WorkflowContext(BaseModel):
     )
 
 
+class WorkflowGraphNode(BaseModel):
+    """Milestone F2 — a single structural node in a `WorkflowGraph` (Workflow Graph Model).
+
+    Purely structural: what is connected, not how data flows through it (F3) or how it executes
+    (a later execution milestone). `capability_name` is the same canonical Kernel dispatch key
+    `WorkflowStep.capability_name` already uses — never a second capability-identity scheme.
+    Deliberately does not carry `is_read_only`/`is_idempotent`/`owner_domain`/`resource_type`/
+    `action`/`parameters_schema`/`returns_schema`: those remain authoritative exclusively on the
+    Registry's own `CapabilityDescriptor` (resolved dynamically via `Kernel.get_capability()` when
+    needed), never copied here — copying would recreate the exact duplicated-authoritative-metadata
+    risk the Automation + Integration Fabric capability model (F1) was built to close.
+    """
+
+    node_id: str = Field(..., description="Unique node identifier within the graph")
+    node_type: str = Field(..., description="Structural node kind, e.g. 'capability', 'approval'")
+    capability_name: str | None = Field(
+        default=None, description="Kernel capability name to invoke — a reference, never a copy of Registry metadata"
+    )
+    config: dict[str, Any] = Field(default_factory=dict, description="Static, author-supplied node configuration")
+    input_ports: list[str] = Field(
+        default_factory=list,
+        description="Named input connection points — structural only, never a bound value or expression (F3)",
+    )
+    output_ports: list[str] = Field(
+        default_factory=list, description="Named output connection points — structural only"
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, description="Opaque node metadata, e.g. future canvas position"
+    )
+
+
+class WorkflowGraphEdge(BaseModel):
+    """Milestone F2 — a directed structural relationship between two `WorkflowGraphNode`s.
+
+    Structural only: which node follows which, through which named ports. Carries no condition,
+    expression, or data-mapping content (F3) and no `edge_kind` discriminator (deliberately deferred
+    — see `graph_validation.py`'s cycle-policy docstring for why introducing one now, with no
+    executor and no second edge semantic to distinguish, would add surface area with no present use).
+    """
+
+    edge_id: str = Field(..., description="Unique edge identifier within the graph")
+    source_node_id: str = Field(..., description="Node this edge originates from")
+    source_port: str | None = Field(
+        default=None, description="Named output port on the source node, or None for an unported edge"
+    )
+    target_node_id: str = Field(..., description="Node this edge terminates at")
+    target_port: str | None = Field(
+        default=None, description="Named input port on the target node, or None for an unported edge"
+    )
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Opaque edge metadata")
+
+
+class WorkflowGraph(BaseModel):
+    """Milestone F2 — the canonical structural Workflow Graph artifact.
+
+    `schema_version` versions this artifact's own structural shape and is deliberately independent
+    of `WorkflowDefinition.version` (that field versions the *definition*, e.g. for a future
+    draft/publish lifecycle — F4's concern; this one versions the *graph schema itself*, e.g. if a
+    future milestone adds an `edge_kind` field). Conflating the two would make a graph-schema change
+    look like a definition content change to every existing consumer of `WorkflowDefinition.version`.
+
+    Structural only: no execution status, no runtime position, no approval/retry/compensation
+    policy of its own. Those remain exactly where they already are today — `WorkflowInstance`,
+    `WorkflowStepRun`, and `WorkflowStep`'s own existing fields — none of which this milestone
+    touches. See `graph_compat.py` for the deterministic, lossless conversion to/from the existing
+    flat `WorkflowStep` list this graph coexists with.
+    """
+
+    schema_version: str = Field(default="1.0.0", description="Version of this graph artifact's own structural schema")
+    entry_node_id: str = Field(..., description="The single node execution/authoring begins from")
+    nodes: list[WorkflowGraphNode] = Field(default_factory=list, description="Every node in the graph")
+    edges: list[WorkflowGraphEdge] = Field(default_factory=list, description="Every directed edge in the graph")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Opaque graph-level metadata")
+
+
 class WorkflowDefinition(BaseModel):
     """Declarative workflow definition specification."""
 
@@ -137,6 +212,17 @@ class WorkflowDefinition(BaseModel):
     trigger: WorkflowTrigger = Field(default=WorkflowTrigger.MANUAL, description="Default trigger source")
     priority: WorkflowPriority = Field(default=WorkflowPriority.NORMAL, description="Workflow execution priority")
     timeout_seconds: int = Field(default=3600, ge=1, description="Execution timeout in seconds")
+    graph: WorkflowGraph | None = Field(
+        default=None,
+        description=(
+            "Milestone F2 — the optional canonical structural Workflow Graph representation of this "
+            "definition. Additive and inert: None (the default) preserves every pre-F2 definition's "
+            "exact behavior — the executor (engine.py/evaluator.py/state_machine.py) reads `steps` "
+            "exclusively and never this field. Not yet durably persisted (see graph_compat.py module "
+            "docstring for why); populated only in-memory/by tests and future callers until a later "
+            "milestone adds real persistence."
+        ),
+    )
 
 
 class WorkflowInstance(BaseModel):
