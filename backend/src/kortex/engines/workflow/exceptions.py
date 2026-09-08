@@ -33,6 +33,28 @@ class WorkflowGraphConversionError(WorkflowValidationError):
     traversal, and never has an edge discarded to force a fit."""
 
 
+class WorkflowReferenceError(WorkflowValidationError):
+    """Milestone F3 — raised when a `WorkflowReference` is invalid or fails to resolve: an unknown
+    source node, an undeclared source_port, a self-reference, a reference to a non-ancestor node
+    (a sibling branch, a descendant, or a disconnected node), or a missing path segment encountered
+    at resolution time. Never carries the resolved value itself in its message (see
+    `mapping.py`/`mapping_validation.py`'s own no-leakage discipline)."""
+
+
+class WorkflowMappingValidationError(WorkflowValidationError):
+    """Milestone F3 — raised when a `WorkflowMapping` fails structural validation: a resource limit
+    exceeded (path depth, mapping value count, expression nesting depth, expression operand count),
+    a type mismatch against a declared schema, or an otherwise malformed mapping. Distinct from
+    `WorkflowReferenceError`, which is specific to one reference's own validity."""
+
+
+class WorkflowExpressionError(WorkflowValidationError):
+    """Milestone F3 — raised when a `WorkflowExpression` cannot be evaluated: an unsupported
+    operator, a wrong operand count, or an operand of the wrong type for its operator (e.g. a
+    non-numeric operand to SUM/SUBTRACT). Never raised for anything resembling code execution —
+    every operator is a fixed, reviewed pure function (`expression.py`)."""
+
+
 class WorkflowExecutionError(WorkflowError):
     """Raised when a workflow step or runtime execution encounters a fatal failure."""
 

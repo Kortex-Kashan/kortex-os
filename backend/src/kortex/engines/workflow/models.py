@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import enum
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -198,6 +198,199 @@ class WorkflowGraph(BaseModel):
     nodes: list[WorkflowGraphNode] = Field(default_factory=list, description="Every node in the graph")
     edges: list[WorkflowGraphEdge] = Field(default_factory=list, description="Every directed edge in the graph")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Opaque graph-level metadata")
+
+
+# ============================================================================
+# Milestone F3 — Workflow Data Mapping & Expression Foundation
+#
+# Structural-only, exactly like WorkflowGraph itself: describes what value a
+# node input should receive (a literal, a reference to another node's output,
+# or a small deterministic computation over such values), never how or when
+# it is actually resolved (mapping.py), never whether it is structurally
+# well-formed (mapping_validation.py), and never anything about execution
+# state, retries, approval, or capability risk — those remain exactly where
+# they already are (WorkflowInstance, WorkflowStepRun, CapabilityDescriptor).
+# ============================================================================
+
+# Chief-Architect-ratified structural resource limits (F3 decision D4). Centralized here — the one
+# module every F3 file already imports from — rather than scattered as magic numbers across
+# mapping.py/expression.py/mapping_validation.py. These are defensive ceilings on the *shape* of a
+# mapping, checked structurally (mapping_validation.py) and re-checked defensively at the point of
+# use (mapping.py's resolver, expression.py's evaluator) — never a wall-clock timeout, which belongs
+# to a future execution-boundary milestone, not this pure domain layer.
+MAX_REFERENCE_PATH_DEPTH: int = 32
+"""Maximum number of segments in a single `WorkflowReference.path`."""
+
+MAX_MAPPING_VALUES_PER_NODE: int = 128
+"""Maximum number of entries in a single `WorkflowMapping.values`."""
+
+MAX_EXPRESSION_NESTING_DEPTH: int = 16
+"""Maximum depth of a `WorkflowExpression` tree (an expression whose operand is itself an
+expression, recursively)."""
+
+MAX_EXPRESSION_OPERANDS: int = 64
+"""Maximum number of operands in a single `WorkflowExpression.operands` list."""
+
+MAX_TRAVERSAL_DEPTH: int = 32
+"""Maximum recursion depth the resolver (`mapping.py`) will descend while walking a resolved
+value's own nested structure beneath a reference's path — a distinct, independently-enforced
+ceiling from `MAX_REFERENCE_PATH_DEPTH` (which bounds the *declared* path length), defending
+against relying on Python's own `RecursionError` as the safety mechanism."""
+
+
+class WorkflowOperator(str, enum.Enum):
+    """Milestone F3 — the complete, closed set of deterministic expression operators.
+
+    Mirrors the Document Engine's `InvariantOperator` precedent (`engines/document/ontology.py`)
+    exactly: a fixed, reviewed enum of pure named operations, never a parsed grammar, never
+    `eval`/`exec`, never an extensible plugin/callable-injection mechanism. Every operator here is
+    directly justified by the F3 architecture discovery's own named examples ("concatenate two
+    fields", "extract array length", arithmetic) — no operator is invented beyond that evidence.
+    Adding a new operator later means adding one new enum member and one new pure function in
+    `expression.py`, never loosening this closed-set guarantee.
+    """
+
+    CONCAT = "CONCAT"
+    """String-concatenates every operand, coerced to str() in order. Requires >= 1 operand."""
+
+    SUM = "SUM"
+    """Numeric sum of every operand. Requires >= 1 numeric (int/float) operand; non-numeric
+    operands are a WorkflowExpressionError, never silently coerced."""
+
+    SUBTRACT = "SUBTRACT"
+    """operands[0] - sum(operands[1:]). Requires >= 1 numeric operand, mirroring
+    InvariantOperator.DIFFERENCE_EQUALS's own operand-count and typing contract exactly."""
+
+    LENGTH = "LENGTH"
+    """len() of exactly one operand, which must resolve to a str, list, or dict. Any other
+    operand type or count is a WorkflowExpressionError."""
+
+
+class WorkflowReference(BaseModel):
+    """Milestone F3 — a structured reference to another node's output.
+
+    Deliberately a structured object, never a bare string: a string like
+    `"GetCustomer.output.body.email"` requires its own parser (and its own parser bugs) before
+    anything can validate it; this shape is trivially validated by Pydantic alone and trivially
+    constructed by an LLM's structured-output mode or a canvas's own UI state (F3 architecture
+    discovery §8/§18/§19).
+
+    `source_node_id` is always explicit — never inferred from graph position, never "the previous
+    node." A reference to the *same* node it appears on, or to a node that is not a topological
+    ancestor of the consuming node (a sibling branch, a descendant, or a disconnected node), is
+    rejected by `mapping_validation.validate_reference` — never by this model itself, which stays
+    pure shape, mirroring `WorkflowGraphNode`/`WorkflowGraphEdge`'s own model/validation split.
+
+    `source_port`, when set, is resolved as the first path segment beneath the source node's raw
+    output (see `mapping.py`'s resolver) — there is no separate "port-keyed" runtime data shape,
+    since F2's ports carry no schema of their own (F3 discovery §9) and a capability's actual
+    output today is one opaque value (`WorkflowContext.step_outputs[step_id]`), not a dict of
+    named ports. `path` then continues descending from there. No wildcard traversal, no implicit
+    "current node" reference, no reference to graph-level metadata.
+    """
+
+    source_node_id: str = Field(..., description="The node this reference reads from — always explicit")
+    source_port: str | None = Field(
+        default=None,
+        description="Named output port on the source node, resolved as the first path segment beneath its raw output",
+    )
+    path: list[str | int] = Field(
+        default_factory=list,
+        description="Dotted/indexed traversal beneath source_port (or the raw output, if source_port is None) — "
+        "string keys for dict/object access, integers for list/array indexing, applied in order",
+    )
+
+
+class WorkflowExpression(BaseModel):
+    """Milestone F3 — a single deterministic computation over already-resolved operands.
+
+    `operands` are themselves `WorkflowValue`s — each may be a literal, a reference, or another
+    nested expression — so composition is possible (e.g. CONCAT of two SUM results) up to
+    `mapping_validation.MAX_EXPRESSION_NESTING_DEPTH`. Every operand is resolved to a plain value
+    *before* the operator ever runs (`expression.py`): the operator itself never sees a
+    `WorkflowReference` or an unresolved nested expression, only the values they resolved to. This
+    is what makes evaluation deterministic and side-effect-free — the operator is a pure function
+    of already-resolved data, exactly matching `InvariantOperator.compute_invariant_target`'s own
+    determinism guarantee.
+    """
+
+    operator: WorkflowOperator = Field(..., description="The one deterministic operation to apply")
+    operands: list[WorkflowValue] = Field(
+        default_factory=list, description="Already-resolvable operand values, evaluated left to right"
+    )
+
+
+class WorkflowLiteralValue(BaseModel):
+    """Milestone F3 — a `WorkflowValue` variant: a plain, author-supplied constant."""
+
+    kind: Literal["literal"] = "literal"
+    value: Any = Field(default=None, description="The literal value verbatim — never resolved, never referenced")
+
+
+class WorkflowReferenceValue(BaseModel):
+    """Milestone F3 — a `WorkflowValue` variant: a reference to another node's output."""
+
+    kind: Literal["reference"] = "reference"
+    reference: WorkflowReference
+
+
+class WorkflowExpressionValue(BaseModel):
+    """Milestone F3 — a `WorkflowValue` variant: a deterministic computation over other values."""
+
+    kind: Literal["expression"] = "expression"
+    expression: WorkflowExpression
+
+
+WorkflowValue = Annotated[
+    WorkflowLiteralValue | WorkflowReferenceValue | WorkflowExpressionValue,
+    Field(discriminator="kind"),
+]
+"""Milestone F3 — a discriminated union: a value is *exactly one* of literal/reference/expression,
+never an ambiguous combination of optional fields. The `kind` tag makes this true by construction —
+there is no representable state with zero or two sources active, unlike a single model with three
+optional fields would allow. This is deliberately a type alias, not a class: `WorkflowMapping.values`
+and `WorkflowExpression.operands` use it directly, and Pydantic resolves the correct variant purely
+from the serialized `kind` key, both for `model_validate()` and for JSON Schema generation an AI
+authoring surface would consume (F3 architecture discovery §18)."""
+
+WorkflowExpression.model_rebuild()
+"""Resolves the `"WorkflowValue"` forward reference now that the type alias exists in this module's
+namespace — the standard Pydantic v2 fix-up for a model that refers to a name defined after it,
+required here because `WorkflowExpression` and `WorkflowValue` are mutually recursive
+(an expression's operands can themselves be expressions)."""
+
+
+class WorkflowMapping(BaseModel):
+    """Milestone F3 — the complete set of resolved-value bindings for one node's input.
+
+    `values` maps a field name (e.g. a capability parameter name, or a declared input port) to the
+    `WorkflowValue` that should supply it. This is the top-level object a future execution
+    integration point, an AI workflow builder, or a visual canvas would all construct identically —
+    one shared representation, never three separate per-surface formats (F3 architecture discovery
+    §20). Deliberately not a field on `WorkflowGraphNode` in this milestone: F3 delivers the data
+    model and its validator as reusable, standalone components — wiring a mapping onto a specific
+    node field is an integration decision left to whichever future milestone actually executes one.
+    """
+
+    values: dict[str, WorkflowValue] = Field(
+        default_factory=dict, description="Field name -> the value source that should supply it"
+    )
+
+
+class WorkflowRuntimeContext(BaseModel):
+    """Milestone F3 — the explicit runtime data a pure resolver is handed; never accessed ambiently.
+
+    `node_outputs` mirrors `WorkflowContext.step_outputs` exactly (node/step id -> that node's raw
+    output value) — this is deliberately the same shape, so a future execution integration point
+    can construct one directly from the other with no translation. This model is not read or
+    written by the executor in this milestone; it exists solely as the documented contract
+    `mapping.py`'s resolver accepts, so a future milestone knows exactly what to build and hand in
+    (F3 architecture discovery §16).
+    """
+
+    node_outputs: dict[str, Any] = Field(
+        default_factory=dict, description="node_id -> that node's raw resolved output, once it has executed"
+    )
 
 
 class WorkflowDefinition(BaseModel):

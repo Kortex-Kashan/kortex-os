@@ -86,6 +86,39 @@ def find_unreachable_nodes(graph: WorkflowGraph) -> list[str]:
     return [node.node_id for node in graph.nodes if node.node_id not in visited]
 
 
+def compute_ancestors(graph: WorkflowGraph, node_id: str) -> set[str]:
+    """Return every `node_id` that can reach `node_id` by following outgoing edges forward —
+    i.e. every topological ancestor of `node_id`, never including `node_id` itself.
+
+    Milestone F3 — Workflow Data Mapping & Expression Foundation: this is the one graph-topology
+    primitive `mapping_validation.validate_reference` needs to decide whether a `WorkflowReference`
+    is valid. A source node that is not in this set is either a sibling branch, a descendant, or
+    disconnected from `node_id` entirely — none of which has a defined execution-order relationship
+    to `node_id` in a future (possibly parallel-branch) executor, so none is a safe reference target.
+
+    Implemented as a plain reverse-reachability BFS over the same `graph.edges` list
+    `find_unreachable_nodes` already walks forward — no new graph primitive, no third-party graph
+    library, consistent with this module's own dependency-free precedent (see module docstring).
+
+    Assumes `graph` already passed `validate_graph` (so it is guaranteed acyclic) — callers should
+    validate first. Runs in linear time in the number of edges regardless.
+    """
+    incoming: dict[str, list[str]] = {}
+    for edge in graph.edges:
+        incoming.setdefault(edge.target_node_id, []).append(edge.source_node_id)
+
+    ancestors: set[str] = set()
+    frontier = list(incoming.get(node_id, []))
+    while frontier:
+        current = frontier.pop()
+        if current in ancestors:
+            continue
+        ancestors.add(current)
+        frontier.extend(incoming.get(current, []))
+
+    return ancestors
+
+
 def _validate_unique_node_ids(graph: WorkflowGraph) -> dict[str, object]:
     seen: dict[str, object] = {}
     for node in graph.nodes:
