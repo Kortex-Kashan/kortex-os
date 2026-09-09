@@ -13,6 +13,11 @@ Covers the 8 required regression cases:
 6. invalid mapping cannot reach capability dispatch (a spy dispatcher proves zero invocations).
 7. the resolver's runtime data surface is exactly `instance.context.step_outputs` — nothing else.
 8. existing workflows with no mapping behave exactly as before (regression).
+
+Plus the post-CI-regression lock (remediation master prompt §6, tests A/B/C): a `BaseModel`
+capability output (e.g. connector's `ActionResult`) is preserved as the original live object in
+`step_outputs` (never converted to a `dict`), while F3 mapping resolution still traverses it
+correctly via a derived, JSON-safe projection built only for that purpose.
 """
 
 from __future__ import annotations
@@ -220,17 +225,40 @@ class _FakeInvoiceOutput(BaseModel):
 
 
 @pytest.mark.asyncio
-async def test_pydantic_model_output_normalized_to_json_safe_before_storage() -> None:
-    """A capability handler returning a Pydantic `BaseModel` instance directly (as
-    `kortex.finance.invoice.get` does) is normalized to a plain dict before being stored into
-    `step_outputs`, so a later step's `WorkflowReference` path traversal can actually reach its
-    fields (`resolve_path` requires `isinstance(current, dict)`)."""
+async def test_pydantic_model_output_preserved_as_original_object_in_step_outputs() -> None:
+    """TEST A (post-CI-regression lock): a capability handler returning a Pydantic `BaseModel`
+    instance directly (as `kortex.finance.invoice.get` does, and as connector dispatch's
+    `ActionResult` does) is stored in `step_outputs` as the exact same live object it returned --
+    never converted to a plain dict. This is the authoritative-storage half of the invariant that
+    a CI regression (evaluator.py::_json_safe_output being applied at storage time, breaking every
+    `ActionResult`-typed consumer) violated; it must never regress again."""
+    instance = WorkflowInstance(definition_id="def_1")
+    step1 = WorkflowStep(id="s1", name="producer", capability_name="cap.get_invoice", parameters={})
+    original_output = _FakeInvoiceOutput(customer_name="Acme Co", amount=100.0)
+    dispatcher = _SpyDispatcher(result=original_output)
+
+    res1 = await _evaluator().execute_step(instance, step1, capability_dispatcher=dispatcher)
+
+    assert res1.success is True
+    stored = instance.context.step_outputs["s1"]
+    assert stored is original_output
+    assert isinstance(stored, _FakeInvoiceOutput)
+    assert stored.customer_name == "Acme Co"
+    assert stored.model_dump() == {"customer_name": "Acme Co", "amount": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_mapping_still_traverses_a_base_model_output_via_derived_projection() -> None:
+    """TEST B: F3 mapping resolution still traverses a prior step's `BaseModel` output correctly,
+    even though `step_outputs` itself now holds the live object rather than a dict -- the resolver
+    reads a derived, JSON-safe *projection* of that object (`_mapping_read_view`), never the
+    authoritative stored value itself."""
     instance = WorkflowInstance(definition_id="def_1")
     step1 = WorkflowStep(id="s1", name="producer", capability_name="cap.get_invoice", parameters={})
     dispatcher = _SpyDispatcher(result=_FakeInvoiceOutput(customer_name="Acme Co", amount=100.0))
     res1 = await _evaluator().execute_step(instance, step1, capability_dispatcher=dispatcher)
     assert res1.success is True
-    assert instance.context.step_outputs["s1"] == {"customer_name": "Acme Co", "amount": 100.0}
+    assert isinstance(instance.context.step_outputs["s1"], _FakeInvoiceOutput)
 
     step2 = WorkflowStep(
         id="s2",
@@ -250,6 +278,46 @@ async def test_pydantic_model_output_normalized_to_json_safe_before_storage() ->
     res2 = await _evaluator().execute_step(instance, step2, capability_dispatcher=dispatcher2)
     assert res2.success is True
     assert dispatcher2.calls[0][1] == {"name": "Acme Co"}
+    # And the producer's stored output is still untouched by the consumer's mapping resolution.
+    assert isinstance(instance.context.step_outputs["s1"], _FakeInvoiceOutput)
+
+
+@pytest.mark.asyncio
+async def test_base_model_output_preserved_and_mapped_in_one_flow() -> None:
+    """TEST C: the full invariant in one scenario -- a `BaseModel` capability output is (1)
+    preserved in `step_outputs` as the original object, while (2) a downstream mapped step still
+    receives the correct field value, proving neither half of the fix was dropped in favor of the
+    other."""
+    instance = WorkflowInstance(definition_id="def_1")
+    step1 = WorkflowStep(id="s1", name="producer", capability_name="cap.get_invoice", parameters={})
+    original_output = _FakeInvoiceOutput(customer_name="Acme Co", amount=100.0)
+    dispatcher = _SpyDispatcher(result=original_output)
+    await _evaluator().execute_step(instance, step1, capability_dispatcher=dispatcher)
+
+    step2 = WorkflowStep(
+        id="s2",
+        name="consumer",
+        capability_name="cap.consume",
+        parameters={},
+        mapping={
+            "values": {
+                "customer": {
+                    "kind": "reference",
+                    "reference": {"source_node_id": "s1", "source_port": None, "path": ["customer_name"]},
+                },
+                "total": {
+                    "kind": "reference",
+                    "reference": {"source_node_id": "s1", "source_port": None, "path": ["amount"]},
+                },
+            }
+        },
+    )
+    dispatcher2 = _SpyDispatcher(result="ok")
+    res2 = await _evaluator().execute_step(instance, step2, capability_dispatcher=dispatcher2)
+
+    assert res2.success is True
+    assert dispatcher2.calls[0][1] == {"customer": "Acme Co", "total": 100.0}
+    assert instance.context.step_outputs["s1"] is original_output
 
 
 @pytest.mark.asyncio

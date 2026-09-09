@@ -34,16 +34,27 @@ logger = logging.getLogger("kortex.engines.workflow.evaluator")
 
 
 def _json_safe_output(output: Any) -> Any:
-    """Normalize a raw capability handler return value into the JSON-safe shape F3's mapping
+    """Project a raw capability handler return value into the JSON-safe shape F3's mapping
     resolver (`mapping.py::resolve_path`) requires to traverse it (dict/list/scalar, never a
-    Pydantic model instance holding e.g. `Decimal`/`date` fields `isinstance(current, dict)` would
-    never match). A handler may legitimately return a `BaseModel` (e.g. `FinanceInvoice`) directly —
-    dispatch performs no serialization of its own — so this is the single, deterministic point
-    `step_outputs` storage normalizes it, once, before any later step's `WorkflowReference` can ever
-    read it. Never mutates or reinterprets `output`'s value, only its container shape."""
+    Pydantic model instance, since `isinstance(current, dict)` would never match one). A handler
+    may legitimately return a `BaseModel` (e.g. `FinanceInvoice`, connector's `ActionResult`)
+    directly — dispatch performs no serialization of its own.
+
+    This is a read-only *projection* used solely to build the mapping resolver's traversal view
+    (`_resolve_step_mapping`, below). It must never be applied to the value stored in
+    `instance.context.step_outputs` — every other workflow consumer (compensation, durability
+    replay, connector-result assertions) depends on that stored value remaining the exact object
+    the capability returned (e.g. a live `ActionResult`, not a `dict`)."""
     if isinstance(output, BaseModel):
         return output.model_dump(mode="json")
     return output
+
+
+def _mapping_read_view(step_outputs: dict[str, Any]) -> dict[str, Any]:
+    """Build the JSON-safe projection of every prior step's stored output, for the mapping
+    resolver to traverse. Deliberately separate from `step_outputs` itself: the resolver only
+    ever sees this derived view, never mutating or replacing the authoritative stored value."""
+    return {step_id: _json_safe_output(value) for step_id, value in step_outputs.items()}
 
 
 def _resolve_step_mapping(step: WorkflowStep, instance: WorkflowInstance) -> dict[str, Any]:
@@ -57,7 +68,7 @@ def _resolve_step_mapping(step: WorkflowStep, instance: WorkflowInstance) -> dic
             never silently substituted with null/empty, and the capability is never dispatched.
     """
     mapping = WorkflowMapping.model_validate(step.mapping)
-    runtime_context = WorkflowRuntimeContext(node_outputs=dict(instance.context.step_outputs))
+    runtime_context = WorkflowRuntimeContext(node_outputs=_mapping_read_view(instance.context.step_outputs))
     resolved, missing = resolve_mapping(mapping, runtime_context)
     if missing:
         raise WorkflowExecutionError(
@@ -149,9 +160,11 @@ class StepEvaluator:
                 else:
                     output = f"Step {step.id} executed successfully"
 
-                # Store output in step context (JSON-safe, so a later step's WorkflowReference
-                # can traverse it — see `_json_safe_output`).
-                instance.context.step_outputs[step.id] = _json_safe_output(output)
+                # Store the original output object exactly as the capability/inline step produced
+                # it (e.g. a live connector `ActionResult`, not a dict) — existing consumers rely
+                # on this identity. A later step's mapping traversal reads a derived, JSON-safe
+                # projection instead (see `_mapping_read_view`), never this stored value.
+                instance.context.step_outputs[step.id] = output
 
                 # Register compensation action if specified
                 if step.compensation_action:
