@@ -166,6 +166,8 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.storage.data.session": (True, True),
     "kortex.storage.file.store": (False, True),
     "kortex.storage.object.put": (False, True),
+    "kortex.system.capability.get": (True, True),
+    "kortex.system.capability.project": (True, True),
     "kortex.workflow.approval.create": (False, False),
     "kortex.workflow.approval.decide": (False, False),
     "kortex.workflow.approval.delegate": (False, False),

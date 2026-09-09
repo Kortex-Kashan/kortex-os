@@ -23,6 +23,7 @@ import os
 import secrets
 from typing import Any, cast
 
+from kortex.api.capability_projection import register_projection_capabilities
 from kortex.api.capability_tool_bridge import (
     CapabilityToolBridgeError,
     generate_tool_definition_from_capability,
@@ -293,6 +294,10 @@ async def build_and_boot_kernel() -> Kernel:
     # `ConnectorActionBootstrapEngine`'s own docstring for why this is a
     # dedicated engine rather than a change to `ConnectorEngine` itself.
     kernel.register_engine(ConnectorActionBootstrapEngine(REFERENCE_ACTION_DESCRIPTORS))
+
+    # F6: register tenant-scoped capability projection capabilities before boot
+    # while Kernel state is CREATED.
+    register_projection_capabilities(kernel)
 
     await kernel.boot()
 

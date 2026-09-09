@@ -15,7 +15,9 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
+    from kortex.core.dispatch import CapabilityExecutionContext
     from kortex.core.outbox import OutboxStore
+    from kortex.engines.security.models import SecurityPrincipal
 
 from kortex.core.base_engine import BaseEngine
 from kortex.core.container import Container
@@ -362,6 +364,50 @@ class Kernel:
             is_idempotent=is_idempotent,
             keyword=keyword,
         )
+
+    async def project_capabilities(
+        self,
+        execution_context: CapabilityExecutionContext | SecurityPrincipal,
+        *,
+        owner_domain: str | None = None,
+        resource_type: str | None = None,
+        action: str | None = None,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
+        keyword: str | None = None,
+    ) -> list[CapabilityDescriptor]:
+        """Project registered capabilities authorized for the caller's tenant (F6).
+
+        Stateless read-only projection filtering global capabilities through
+        SecurityEngine authorization. Caller-supplied tenant_id is never trusted.
+        """
+        from kortex.core.projection import CapabilityProjection
+
+        projection = CapabilityProjection(self)
+        return await projection.project_capabilities(
+            execution_context,
+            owner_domain=owner_domain,
+            resource_type=resource_type,
+            action=action,
+            is_read_only=is_read_only,
+            is_idempotent=is_idempotent,
+            keyword=keyword,
+        )
+
+    async def get_projected_capability(
+        self,
+        capability_name: str,
+        execution_context: CapabilityExecutionContext | SecurityPrincipal,
+    ) -> CapabilityDescriptor:
+        """Look up a single capability descriptor projected for the caller's tenant (F6).
+
+        Raises CapabilityNotFoundError if unauthorized or absent, preventing
+        sensitive metadata disclosure.
+        """
+        from kortex.core.projection import CapabilityProjection
+
+        projection = CapabilityProjection(self)
+        return await projection.get_projected_capability(capability_name, execution_context)
 
     def register_module(self, name: str, instance: Any, description: str = "") -> ResourceMetadata:
         """Register a business module."""
