@@ -1704,6 +1704,13 @@ FORBIDDEN_NAMESPACES = [
     "kortex.engines.security",
     "kortex.engines.knowledge.engine",
     "sqlalchemy",
+    # AI Workflow Builder milestone: closes the gap the architecture discovery flagged — this
+    # guard previously did not name Workflow/Connector, so nothing structurally prevented AI-layer
+    # code from importing engine internals directly instead of going through
+    # `kortex.workflow.definition.*`/connector-action capabilities via Kernel dispatch. Mirrors the
+    # exact precedent already set for Security/Knowledge/Kernel/Container above.
+    "kortex.engines.workflow",
+    "kortex.engines.connector",
 ]
 
 

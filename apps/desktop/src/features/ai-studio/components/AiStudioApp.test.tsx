@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { listAiProvidersMock, listAiModelsMock, getConversationHistoryMock } = vi.hoisted(() => ({
@@ -39,11 +40,13 @@ beforeEach(() => {
   window.localStorage.clear();
 });
 
-function renderAiStudioApp() {
+function renderAiStudioApp(initialEntries: string[] = ["/ai-studio"]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <AiStudioApp />
+      <MemoryRouter initialEntries={initialEntries}>
+        <AiStudioApp />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -201,5 +204,20 @@ describe("AiStudioApp", () => {
 
     expect(await screen.findByText("No messages yet. Say hello to get started.")).toBeInTheDocument();
     expect(screen.getByLabelText("Message")).toBeInTheDocument();
+  });
+
+  // Proves the receiving end of Mini Chat's Workflow Builder entry point
+  // (`MiniChatHost.test.tsx`'s own tests prove the *call*; this proves the
+  // *destination* actually honors it): a `?tab=workflowBuilder` deep link
+  // lands directly on the Workflow Builder tab, with no extra click needed,
+  // mirroring `WorkflowApp.tsx`'s own `?tab=approvals` precedent exactly.
+  it("honors a ?tab=workflowBuilder deep link by landing directly on the Workflow Builder tab", async () => {
+    listAiProvidersMock.mockResolvedValueOnce([]);
+    listAiModelsMock.mockResolvedValueOnce([]);
+
+    renderAiStudioApp(["/ai-studio?tab=workflowBuilder"]);
+
+    expect(screen.getByRole("tab", { name: "Workflow Builder", selected: true })).toBeInTheDocument();
+    expect(await screen.findByTestId("ai-workflow-builder-panel")).toBeInTheDocument();
   });
 });

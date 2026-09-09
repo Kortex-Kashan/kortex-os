@@ -542,7 +542,18 @@ class WorkflowDefinitionLifecycleManager:
                     required_permissions=list(descriptor.required_permissions or []),
                     security_classification=_safe_classification(descriptor.security_classification),
                 )
-                decision = await self._security_engine.authorize(principal, requirement, {"tenant_id": tid})
+                # `resource_tenant_id` (not `tenant_id`) is the key `ABACEvaluator` reads for its
+                # unconditional tenant-match rule (`abac.py`) -- every other authorize() call site
+                # in the codebase (dispatch.py, projection.py, connector actions) uses this exact
+                # key. Pre-existing defect discovered by the AI Workflow Builder milestone's
+                # vertical-slice test: with the wrong key, ABAC's "missing resource_tenant_id
+                # denies by default" rule fired unconditionally for every capability referenced by
+                # a publish() call, for every tenant, regardless of actual authorization -- masked
+                # until now because no prior test published a definition referencing a real,
+                # authenticated-by-default capability (only a bare capability-less step, or a
+                # deliberately-unauthorized case whose expected DENIED outcome coincided with this
+                # bug's own unconditional denial).
+                decision = await self._security_engine.authorize(principal, requirement, {"resource_tenant_id": tid})
                 if not decision.is_allowed:
                     raise WorkflowDefinitionAuthorizationError(
                         f"Publishing principal is not authorized to invoke capability '{capability_name}' "

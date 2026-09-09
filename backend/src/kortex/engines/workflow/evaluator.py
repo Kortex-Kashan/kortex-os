@@ -13,18 +13,58 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import BaseModel
+
 from kortex.engines.workflow.approval import ApprovalProvider, MemoryApprovalManager
+from kortex.engines.workflow.exceptions import WorkflowExecutionError
+from kortex.engines.workflow.mapping import resolve_mapping
 from kortex.engines.workflow.models import (
     CompensationAction,
     ExecutionResult,
     RetryPolicy,
     WorkflowInstance,
+    WorkflowMapping,
+    WorkflowRuntimeContext,
     WorkflowState,
     WorkflowStep,
 )
 from kortex.engines.workflow.state_machine import WorkflowStateMachine
 
 logger = logging.getLogger("kortex.engines.workflow.evaluator")
+
+
+def _json_safe_output(output: Any) -> Any:
+    """Normalize a raw capability handler return value into the JSON-safe shape F3's mapping
+    resolver (`mapping.py::resolve_path`) requires to traverse it (dict/list/scalar, never a
+    Pydantic model instance holding e.g. `Decimal`/`date` fields `isinstance(current, dict)` would
+    never match). A handler may legitimately return a `BaseModel` (e.g. `FinanceInvoice`) directly —
+    dispatch performs no serialization of its own — so this is the single, deterministic point
+    `step_outputs` storage normalizes it, once, before any later step's `WorkflowReference` can ever
+    read it. Never mutates or reinterprets `output`'s value, only its container shape."""
+    if isinstance(output, BaseModel):
+        return output.model_dump(mode="json")
+    return output
+
+
+def _resolve_step_mapping(step: WorkflowStep, instance: WorkflowInstance) -> dict[str, Any]:
+    """Resolve `step.mapping` (F3 runtime wiring) against prior step outputs.
+
+    Returns the resolved field->value dict to merge into the step's dispatched parameters.
+
+    Raises:
+        WorkflowExecutionError: any mapping field fails to resolve (a referenced node has not
+            executed, a path segment is absent, or an expression's operands do not resolve) —
+            never silently substituted with null/empty, and the capability is never dispatched.
+    """
+    mapping = WorkflowMapping.model_validate(step.mapping)
+    runtime_context = WorkflowRuntimeContext(node_outputs=dict(instance.context.step_outputs))
+    resolved, missing = resolve_mapping(mapping, runtime_context)
+    if missing:
+        raise WorkflowExecutionError(
+            f"Step '{step.id}' mapping could not resolve field(s) {missing}: a referenced node has "
+            f"not yet produced output, or a referenced path/expression operand is absent."
+        )
+    return resolved
 
 
 class StepEvaluator:
@@ -99,12 +139,19 @@ class StepEvaluator:
                 if step.capability_name and capability_dispatcher:
                     call_parameters = dict(step.parameters)
                     authz_context = call_parameters.pop("_authz_context", {})
+                    if step.mapping is not None:
+                        # F3 runtime wiring: mapping-resolved fields supply/override the
+                        # literal `parameters` dict entries of the same name. Resolution
+                        # happens fresh on every attempt, immediately before dispatch, and
+                        # never on a stale/cached value.
+                        call_parameters.update(_resolve_step_mapping(step, instance))
                     output = await capability_dispatcher(step.capability_name, call_parameters, authz_context)
                 else:
                     output = f"Step {step.id} executed successfully"
 
-                # Store output in step context
-                instance.context.step_outputs[step.id] = output
+                # Store output in step context (JSON-safe, so a later step's WorkflowReference
+                # can traverse it — see `_json_safe_output`).
+                instance.context.step_outputs[step.id] = _json_safe_output(output)
 
                 # Register compensation action if specified
                 if step.compensation_action:

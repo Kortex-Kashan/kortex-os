@@ -116,6 +116,64 @@ class FinanceModule(BaseModule):
                 required_permissions=["finance:invoice:read"],
                 requires_execution_context=True,
                 legacy_principal_bridge=True,
+                is_read_only=True,
+                is_idempotent=True,
+                # AI Workflow Builder curated node-set schema (F5 reference-action authoring
+                # precedent, see `connector/reference_actions.py`): reflects `get_invoice`'s real
+                # signature and `FinanceInvoice`'s real field shape verbatim -- never fabricated,
+                # never re-derived. `tenant_id` is never caller-supplied for this capability (it is
+                # `principal.tenant_id`-authoritative, see `get_invoice`'s own docstring), so it does
+                # not appear as an input property here, only as an echoed output field.
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "invoice_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "The invoice's own identifier, as returned by "
+                            "kortex.finance.invoice.create.",
+                        },
+                    },
+                    "required": ["invoice_id"],
+                },
+                returns_schema={
+                    "type": "object",
+                    "properties": {
+                        "invoice_id": {"type": "string", "description": "The invoice's own identifier."},
+                        "tenant_id": {
+                            "type": "string",
+                            "description": "Owning tenant (echoed, never authoritative input).",
+                        },
+                        "customer_name": {"type": "string", "description": "Name of the customer being billed."},
+                        "amount": {
+                            "type": "string",
+                            "description": "Invoice total (decimal string), strictly positive.",
+                        },
+                        "currency": {
+                            "type": "string",
+                            "description": "3-letter ISO 4217 currency code, e.g. 'USD'.",
+                        },
+                        "due_date": {
+                            "type": ["string", "null"],
+                            "description": "Optional ISO-8601 payment due date.",
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["DRAFT", "PUBLISHED"],
+                            "description": "Invoice lifecycle status.",
+                        },
+                        "created_at": {"type": "string", "description": "ISO-8601 creation timestamp."},
+                    },
+                    "required": [
+                        "invoice_id",
+                        "tenant_id",
+                        "customer_name",
+                        "amount",
+                        "currency",
+                        "status",
+                        "created_at",
+                    ],
+                },
             )
 
             self._set_state(ModuleState.ACTIVE)

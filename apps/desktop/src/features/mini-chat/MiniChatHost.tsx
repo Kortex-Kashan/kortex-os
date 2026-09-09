@@ -8,7 +8,8 @@ import { MessageList } from "@/features/ai-studio/components/MessageList";
 import { TERMINAL_AGENT_STATUSES } from "@/features/ai-studio/chat-types";
 import { useAgentStatus } from "@/features/ai-studio/hooks/useAgentStatus";
 import { useConversation } from "@/features/ai-studio/hooks/useConversation";
-import { AiStudioIcon } from "@/workspace/icons";
+import { useApplicationNavigation } from "@/navigation/navigationBridge";
+import { AiStudioIcon, WorkflowIcon } from "@/workspace/icons";
 
 function CollapseIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -67,6 +68,17 @@ function CollapseIcon(props: React.SVGProps<SVGSVGElement>) {
  * namespaced by `(tenantId, userId)`, so even that survives an identity
  * change safely -- a new identity resolves a different key, never the
  * previous user's.
+ *
+ * Workflow Builder entry point (AI Workflow Builder milestone): one compact
+ * header button deep-links to AI Studio's own `workflowBuilder` tab via
+ * `navigateToApplication({ applicationId: "ai-studio", search:
+ * "?tab=workflowBuilder" })` -- the exact same `?tab=` deep-link convention
+ * `ToolCallCard.tsx` already uses to jump into the Workflow Approval Queue.
+ * This is a pure navigation action: Mini Chat renders no Workflow Builder UI
+ * of its own, holds no builder state, and calls no builder API. The single
+ * `WorkflowBuilderPanel` instance AI Studio already renders is what the user
+ * lands on -- there is no second builder implementation here to keep in
+ * sync with the first.
  */
 export function MiniChatHost() {
   const { state } = useAuth();
@@ -74,6 +86,7 @@ export function MiniChatHost() {
   const userId = state.status === "AUTHENTICATED" && state.identity ? state.identity.principalId : "";
 
   const [open, setOpen] = React.useState(false);
+  const { navigateToApplication } = useApplicationNavigation();
 
   const { messages, isLoadingHistory, historyError, isSending, pendingTaskId, sendMessage, resolvePendingApproval } =
     useConversation({ tenantId, userId });
@@ -114,15 +127,29 @@ export function MiniChatHost() {
                   <AiStudioIcon className="size-4" aria-hidden="true" />
                   KORTEX AI
                 </CardTitle>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setOpen(false)}
-                  aria-label="Collapse KORTEX AI assistant"
-                >
-                  <CollapseIcon className="size-4" />
-                </Button>
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      navigateToApplication({ applicationId: "ai-studio", search: "?tab=workflowBuilder" })
+                    }
+                    aria-label="Open AI Workflow Builder"
+                    title="AI Workflow Builder"
+                  >
+                    <WorkflowIcon className="size-4" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setOpen(false)}
+                    aria-label="Collapse KORTEX AI assistant"
+                  >
+                    <CollapseIcon className="size-4" />
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="flex flex-1 flex-col gap-3 overflow-hidden pt-4">
                 <div className="flex-1 overflow-y-auto" aria-live="polite">

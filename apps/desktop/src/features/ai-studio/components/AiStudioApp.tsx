@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -15,24 +16,43 @@ import { useAiModels } from "../hooks/useAiModels";
 import { useAiProviderConfigs } from "../hooks/useAiProviderConfigs";
 import { useAiProviders } from "../hooks/useAiProviders";
 import type { AiModel } from "../types";
+import { WorkflowBuilderPanel } from "@/features/ai-workflow-builder/components/WorkflowBuilderPanel";
 import { AiGovernanceTab } from "./AiGovernanceTab";
 import { ChatPanel } from "./ChatPanel";
 import { ProviderConfigCard } from "./ProviderConfigCard";
 import { useAuth } from "@/auth/AuthProvider";
 
-type AiTab = "registry" | "governance" | "chat";
+type AiTab = "registry" | "governance" | "chat" | "workflowBuilder";
+
+const TAB_IDS: readonly AiTab[] = ["registry", "governance", "chat", "workflowBuilder"];
+
+function isAiTab(value: string | null): value is AiTab {
+  return TAB_IDS.includes(value as AiTab);
+}
 
 const TAB_LABEL: Record<AiTab, string> = {
   registry: "Providers & Models",
   governance: "Governance",
   chat: "Chat",
+  workflowBuilder: "Workflow Builder",
 };
 
 /** The AI Studio workspace: tabbed between the provider/model registry
- * (read-only), the AI Governance dashboard (M5.6), and Chat (M7.2).
- * Each tab independently manages its own loading/error states. */
+ * (read-only), the AI Governance dashboard (M5.6), Chat (M7.2), and the
+ * Workflow Builder. Each tab independently manages its own loading/error
+ * states.
+ *
+ * The initial tab honors a `?tab=` search param (the same
+ * `navigateToApplication({ applicationId, search })` deep-link convention
+ * `WorkflowApp.tsx`'s own `?tab=approvals` already establishes, used by
+ * `ToolCallCard.tsx` to jump straight into the Workflow Approval Queue) so
+ * another surface — Mini Chat's Workflow Builder entry point — can deep-link
+ * directly onto the `workflowBuilder` tab without the user having to click
+ * into AI Studio and then select it manually. */
 export function AiStudioApp() {
-  const [activeTab, setActiveTab] = useState<AiTab>("registry");
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const [activeTab, setActiveTab] = useState<AiTab>(isAiTab(requestedTab) ? requestedTab : "registry");
   const { state } = useAuth();
   const tenantId =
     state.status === "AUTHENTICATED" && state.identity ? state.identity.tenantId : "";
@@ -46,7 +66,7 @@ export function AiStudioApp() {
         aria-label="AI Studio tabs"
         className="flex gap-1 border-b border-border pb-1"
       >
-        {(["registry", "governance", "chat"] as AiTab[]).map((tab) => (
+        {(["registry", "governance", "chat", "workflowBuilder"] as AiTab[]).map((tab) => (
           <button
             key={tab}
             role="tab"
@@ -90,6 +110,7 @@ export function AiStudioApp() {
         )}
         {activeTab === "governance" && <AiGovernanceTab tenantId={tenantId} />}
         {activeTab === "chat" && <ChatPanel tenantId={tenantId} userId={userId} />}
+        {activeTab === "workflowBuilder" && <WorkflowBuilderPanel />}
       </div>
     </div>
   );

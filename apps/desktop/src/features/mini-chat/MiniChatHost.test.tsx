@@ -317,6 +317,75 @@ describe("MiniChatHost route persistence", () => {
 });
 
 // ---------------------------------------------------------------------------
+// K. AI Workflow Builder entry point (AI Workflow Builder milestone)
+//
+// Mini Chat renders no Workflow Builder UI of its own and calls no builder
+// API -- it is a pure navigation trigger onto AI Studio's own, single
+// `workflowBuilder` tab (the same `WorkflowBuilderPanel`/`useWorkflowBuilder`
+// AI Studio already renders). These tests prove exactly that: the button
+// exists, is reachable once the panel is open, and its only effect is one
+// call to the existing `navigateToApplication` bridge with the deep-link
+// AiStudioApp.tsx's own `?tab=` reader consumes -- never a second builder
+// implementation, never a draft/publish call of its own.
+// ---------------------------------------------------------------------------
+
+describe("MiniChatHost Workflow Builder entry point", () => {
+  beforeEach(() => {
+    mockAuthenticated(USER_A);
+  });
+
+  it("renders a Workflow Builder entry point once the panel is open", async () => {
+    getConversationHistoryMock.mockResolvedValue([]);
+
+    renderMiniChat();
+    expect(screen.queryByRole("button", { name: "Open AI Workflow Builder" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+
+    expect(await screen.findByRole("button", { name: "Open AI Workflow Builder" })).toBeInTheDocument();
+  });
+
+  it("activating the entry point deep-links to AI Studio's existing workflowBuilder tab, and nothing else", async () => {
+    getConversationHistoryMock.mockResolvedValue([]);
+
+    renderMiniChat();
+    fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open AI Workflow Builder" }));
+
+    expect(navigateToApplicationMock).toHaveBeenCalledTimes(1);
+    expect(navigateToApplicationMock).toHaveBeenCalledWith({
+      applicationId: "ai-studio",
+      search: "?tab=workflowBuilder",
+    });
+    // Reuse, not duplication: Mini Chat never renders builder content of its own
+    // (no node list, no "Create Draft"/"Approve & Publish" controls here).
+    expect(screen.queryByTestId("ai-workflow-builder-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-create-draft-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-approve-publish-button")).not.toBeInTheDocument();
+  });
+
+  it("MiniChatHost.tsx source never imports the builder hook/API/panel -- navigation only, never a second implementation", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const source = fs.readFileSync(path.resolve(__dirname, "MiniChatHost.tsx"), "utf-8");
+
+    for (const forbidden of [
+      "ai-workflow-builder/hooks/useWorkflowBuilder",
+      "ai-workflow-builder/api",
+      "ai-workflow-builder/components/WorkflowBuilderPanel",
+      "generateWorkflowProposal",
+      "createWorkflowDraft",
+      "publishWorkflowDraft",
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+    // The only Workflow-Builder-adjacent thing this file may reference is the
+    // navigation deep-link itself.
+    expect(source).toContain("navigateToApplication");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // J. Identity transition -- the security-critical regression
 // ---------------------------------------------------------------------------
 //

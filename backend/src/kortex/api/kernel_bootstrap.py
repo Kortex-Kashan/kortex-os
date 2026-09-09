@@ -28,6 +28,7 @@ from kortex.api.capability_tool_bridge import (
     CapabilityToolBridgeError,
     generate_tool_definition_from_capability,
 )
+from kortex.api.workflow_builder import register_workflow_builder_capabilities
 from kortex.core.kernel import Kernel
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter
@@ -298,6 +299,12 @@ async def build_and_boot_kernel() -> Kernel:
     # F6: register tenant-scoped capability projection capabilities before boot
     # while Kernel state is CREATED.
     register_projection_capabilities(kernel)
+
+    # AI Workflow Builder: register the natural-language -> WorkflowGraph/WorkflowMapping
+    # proposal capability. Same pre-boot placement as F5/F6 above -- the handler resolves
+    # everything it needs (F6 projection, `kortex.ai.response.generate`) at call time via the
+    # Kernel it closes over, so it has no engine-readiness dependency at registration time.
+    register_workflow_builder_capabilities(kernel)
 
     await kernel.boot()
 

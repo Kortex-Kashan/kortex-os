@@ -7,9 +7,15 @@ structural representation (`workflow/models.py`). This is the mechanism that mak
 rather than a breaking change: every existing persisted `WorkflowDefinition` — which has `graph =
 None` and always will until some later caller populates it — is still one `steps_to_graph()` call
 away from a graph, and a linear graph is still one `graph_to_steps()` call away from the exact flat
-shape the unmodified production executor (`engine.py`/`evaluator.py`/`state_machine.py`) already
-runs today. Neither direction is wired into that executor by this milestone — it remains an
-in-memory conversion utility, not a persistence or execution path.
+shape the production executor (`engine.py`/`evaluator.py`/`state_machine.py`) runs today. This
+remains an in-memory conversion utility, not a persistence path.
+
+F3 runtime wiring (AI Workflow Builder milestone): a node's reserved `config["mapping"]` key (the
+same key `lifecycle.py::_validate_content` already structurally validates) is round-tripped through
+`WorkflowStep.mapping` rather than left inside `parameters` — see `_MAPPING_CONFIG_KEY` and
+`WorkflowStep.mapping`'s own docstring. `StepEvaluator.execute_step` resolves it at dispatch time;
+this module itself performs no resolution, only the same verbatim, lossless field carry-through it
+already does for every other non-structural step field.
 
 Scope discipline:
 - `graph_to_steps` supports only a *linear* graph — a single unbranching chain from the entry node
@@ -132,6 +138,13 @@ def graph_to_steps(graph: WorkflowGraph) -> list[WorkflowStep]:
     return [_node_to_step(nodes_by_id[node_id]) for node_id in ordered_ids]
 
 
+_MAPPING_CONFIG_KEY = "mapping"
+"""Reserved `WorkflowGraphNode.config` key holding a raw `WorkflowMapping`-shaped dict — the exact
+same key `lifecycle.py::_validate_content` already reads (`node.config.get("mapping")`). Extracted
+here rather than left in `config` so it never rides along as a literal capability parameter (see
+`WorkflowStep.mapping`'s own docstring for the F3 runtime-wiring rationale)."""
+
+
 def _step_to_node(step: WorkflowStep) -> WorkflowGraphNode:
     step_metadata: dict[str, Any] = {
         "name": step.name,
@@ -143,11 +156,14 @@ def _step_to_node(step: WorkflowStep) -> WorkflowGraphNode:
         ),
         "on_failure_continue": step.on_failure_continue,
     }
+    config = dict(step.parameters)
+    if step.mapping is not None:
+        config[_MAPPING_CONFIG_KEY] = step.mapping
     return WorkflowGraphNode(
         node_id=step.id,
         node_type="capability",
         capability_name=step.capability_name,
-        config=dict(step.parameters),
+        config=config,
         metadata={_STEP_METADATA_KEY: step_metadata},
     )
 
@@ -156,11 +172,14 @@ def _node_to_step(node: WorkflowGraphNode) -> WorkflowStep:
     step_metadata = node.metadata.get(_STEP_METADATA_KEY, {})
     retry_policy_data = step_metadata.get("retry_policy")
     compensation_action_data = step_metadata.get("compensation_action")
+    parameters = dict(node.config)
+    mapping = parameters.pop(_MAPPING_CONFIG_KEY, None)
     return WorkflowStep(
         id=node.node_id,
         name=step_metadata.get("name", node.node_id),
         capability_name=node.capability_name,
-        parameters=dict(node.config),
+        parameters=parameters,
+        mapping=mapping,
         is_approval_step=step_metadata.get("is_approval_step", False),
         required_approval_role=step_metadata.get("required_approval_role"),
         retry_policy=RetryPolicy(**retry_policy_data) if retry_policy_data is not None else None,

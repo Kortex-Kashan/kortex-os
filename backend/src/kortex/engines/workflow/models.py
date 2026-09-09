@@ -100,6 +100,20 @@ class WorkflowStep(BaseModel):
     retry_policy: RetryPolicy | None = Field(default=None, description="Custom retry policy for this step")
     compensation_action: CompensationAction | None = Field(default=None, description="Rollback compensation action")
     on_failure_continue: bool = Field(default=False, description="If True, step failure does not abort workflow")
+    mapping: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Milestone F3 runtime wiring — a raw `WorkflowMapping`-shaped dict (see "
+            "`workflow/models.py::WorkflowMapping`). When present, resolved by `StepEvaluator."
+            "execute_step` against prior step outputs immediately before capability dispatch, and "
+            "merged into `parameters` (mapping-resolved fields take precedence over a literal "
+            "`parameters` value of the same name). `None` (the default) reproduces pre-F3-wiring "
+            "behavior exactly — `parameters` alone is dispatched, unchanged. This is deliberately a "
+            "raw dict, not a `WorkflowMapping` field directly, so an unpopulated/legacy step never "
+            "carries a value requiring `WorkflowMapping` to be importable at model-definition time, "
+            "matching `WorkflowDefinition.graph`'s own additive-`None`-default precedent."
+        ),
+    )
 
 
 class WorkflowContext(BaseModel):

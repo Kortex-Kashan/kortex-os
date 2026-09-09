@@ -509,7 +509,14 @@ async def test_publish_rejects_unauthorized_referenced_capability(kernel: Kernel
         token,
         name="RestrictedCapability",
         # A real, registered capability this principal's role was never granted permission for.
-        steps=[{"id": "s1", "name": "s1", "capability_name": "kortex.workflow.schedule.trigger"}],
+        # (Not "kortex.workflow.schedule.trigger": it requires only "workflow:start", which this
+        # fixture's _ROLE already grants -- a pre-existing test-design gap that a since-fixed ABAC
+        # defect in lifecycle.py's publish() had been masking: that defect denied every publish
+        # unconditionally regardless of RBAC, so this test's expected DENIED outcome coincided with
+        # a bug rather than proving the RBAC-authorization property its own docstring claims.
+        # "kortex.workflow.instance.approve" requires "workflow:approve", which _ROLE genuinely
+        # lacks, making this a real unauthorized-capability case.)
+        steps=[{"id": "s1", "name": "s1", "capability_name": "kortex.workflow.instance.approve"}],
     )
     with pytest.raises(WorkflowDefinitionAuthorizationError):
         await _invoke(

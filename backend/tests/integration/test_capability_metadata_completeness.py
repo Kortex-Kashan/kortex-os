@@ -71,6 +71,7 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.ai.provider.test": (True, True),
     "kortex.ai.response.generate": (False, False),
     "kortex.ai.tool.invoke": (False, False),
+    "kortex.ai.workflow_builder.generate": (True, False),
     "kortex.backup.create": (False, False),
     "kortex.backup.delete": (False, False),
     "kortex.backup.diagnostics.get": (True, True),
