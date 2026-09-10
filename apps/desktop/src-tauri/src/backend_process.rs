@@ -54,8 +54,12 @@ fn backend_source_dir() -> Result<PathBuf, String> {
         .join("..")
         .join("..")
         .join("backend");
-    dir.canonicalize()
-        .map_err(|e| format!("backend source directory not found at {}: {e}", dir.display()))
+    dir.canonicalize().map_err(|e| {
+        format!(
+            "backend source directory not found at {}: {e}",
+            dir.display()
+        )
+    })
 }
 
 fn resolve_python_executable(backend_dir: &Path) -> String {
@@ -202,7 +206,10 @@ fn resolve_backend_sidecar_config_production_path_with_keys(
         let db_path = data_dir.join("storage_data").join("kortex_local.db");
         env_vars.push((
             "KORTEX_DATABASE_URL".to_string(),
-            format!("sqlite+aiosqlite:///{}", db_path.to_string_lossy().replace('\\', "/")),
+            format!(
+                "sqlite+aiosqlite:///{}",
+                db_path.to_string_lossy().replace('\\', "/")
+            ),
         ));
     }
     config.env_vars = env_vars;
@@ -219,7 +226,11 @@ fn resolve_backend_sidecar_config_production_path(
     app_data_dir: &Path,
 ) -> Result<SidecarConfig, String> {
     let env_vars = secure_keys::load_or_generate_backend_keys(key_store)?;
-    resolve_backend_sidecar_config_production_path_with_keys(bundled_dir, Some(app_data_dir), env_vars)
+    resolve_backend_sidecar_config_production_path_with_keys(
+        bundled_dir,
+        Some(app_data_dir),
+        env_vars,
+    )
 }
 
 /// Directory containing the frozen backend's `--onedir` bundle, once
@@ -306,7 +317,11 @@ pub fn spawn_and_monitor(app: AppHandle) {
         eprintln!("KORTEX: failed to spawn the backend process: {err}");
         return;
     }
-    eprintln!("KORTEX: backend sidecar spawned.");
+    let pid_info = manager
+        .child_pid()
+        .map(|pid| format!(" (PID: {pid})"))
+        .unwrap_or_default();
+    eprintln!("KORTEX: backend sidecar spawned{pid_info}.");
 
     if let Some(state) = app.try_state::<Mutex<SidecarSupervision>>() {
         if let Ok(mut supervision) = state.lock() {
@@ -369,7 +384,16 @@ async fn monitor_loop(app: AppHandle) {
             };
             match manager.is_running() {
                 Ok(true) => None,
-                Ok(false) => Some(manager.handle_unexpected_exit()),
+                Ok(false) => {
+                    let recent_logs = manager.recent_logs();
+                    if !recent_logs.is_empty() {
+                        eprintln!(
+                            "KORTEX: backend exited unexpectedly; recent backend output:\n{}",
+                            recent_logs.join("\n")
+                        );
+                    }
+                    Some(manager.handle_unexpected_exit())
+                }
                 // A transient OS-level liveness-check error is not itself
                 // evidence of a crash — try again next tick rather than
                 // triggering a restart on a spurious read failure.
@@ -398,6 +422,11 @@ async fn monitor_loop(app: AppHandle) {
                                 eprintln!("KORTEX: failed to restart backend sidecar: {err}");
                                 return;
                             }
+                            let pid_info = manager
+                                .child_pid()
+                                .map(|pid| format!(" (PID: {pid})"))
+                                .unwrap_or_default();
+                            eprintln!("KORTEX: backend sidecar restarted{pid_info}.");
                         }
                     }
                 }
@@ -434,7 +463,10 @@ mod tests {
         }
 
         fn store(&self, user: &str, value: &str) {
-            self.values.lock().unwrap().insert(user.to_string(), value.to_string());
+            self.values
+                .lock()
+                .unwrap()
+                .insert(user.to_string(), value.to_string());
         }
     }
 
@@ -469,8 +501,14 @@ mod tests {
         assert_eq!(config.program, "my-frozen-backend");
         assert_eq!(config.args, vec!["--flag".to_string(), "value".to_string()]);
         // The override path must still carry the persistent keys.
-        assert!(config.env_vars.iter().any(|(k, _)| k == secure_keys::MASTER_KEY_ENV_VAR));
-        assert!(config.env_vars.iter().any(|(k, _)| k == secure_keys::SIGNING_KEY_ENV_VAR));
+        assert!(config
+            .env_vars
+            .iter()
+            .any(|(k, _)| k == secure_keys::MASTER_KEY_ENV_VAR));
+        assert!(config
+            .env_vars
+            .iter()
+            .any(|(k, _)| k == secure_keys::SIGNING_KEY_ENV_VAR));
     }
 
     #[test]
@@ -493,7 +531,10 @@ mod tests {
         assert!(config.args.contains(&"uvicorn".to_string()));
         assert!(config.working_directory.is_some());
         assert!(config.env_vars.iter().any(|(k, _)| k == "PYTHONPATH"));
-        assert!(config.env_vars.iter().any(|(k, _)| k == secure_keys::MASTER_KEY_ENV_VAR));
+        assert!(config
+            .env_vars
+            .iter()
+            .any(|(k, _)| k == secure_keys::MASTER_KEY_ENV_VAR));
     }
 
     #[test]
@@ -514,7 +555,10 @@ mod tests {
 
         assert!(config.program.ends_with(frozen_backend_exe_name()));
         assert!(config.program.contains("kortex-backend"));
-        assert_eq!(config.working_directory.as_deref(), Some(app_data_dir.as_path()));
+        assert_eq!(
+            config.working_directory.as_deref(),
+            Some(app_data_dir.as_path())
+        );
         assert!(
             config
                 .env_vars
@@ -531,6 +575,9 @@ mod tests {
             "the database must be unified under the SAME app-data root as storage_data, not a \
              separately-computed default (a real divergence found during installed-artifact testing)"
         );
-        assert!(config.env_vars.iter().any(|(k, _)| k == secure_keys::MASTER_KEY_ENV_VAR));
+        assert!(config
+            .env_vars
+            .iter()
+            .any(|(k, _)| k == secure_keys::MASTER_KEY_ENV_VAR));
     }
 }

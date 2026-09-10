@@ -18,10 +18,175 @@
 //! scope for this module and for M7.1 generally; see `backend_process.rs`'s
 //! own module docs for exactly what is and isn't decided here.
 
-use std::io::Write;
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(target_os = "windows")]
+mod job_object {
+    use std::io;
+    use std::os::windows::io::RawHandle;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// Safe RAII wrapper around a Win32 Job Object configured with
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+    ///
+    /// When the parent process terminates (gracefully, via crash, or via abort),
+    /// the kernel closes the job object handle, terminating all assigned child
+    /// processes immediately and preventing orphaned processes.
+    pub struct WindowsJobObject {
+        handle: HANDLE,
+    }
+
+    unsafe impl Send for WindowsJobObject {}
+    unsafe impl Sync for WindowsJobObject {}
+
+    impl WindowsJobObject {
+        pub fn create_kill_on_close() -> io::Result<Self> {
+            let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            let ret = unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+
+            if ret == 0 {
+                let err = io::Error::last_os_error();
+                unsafe {
+                    CloseHandle(handle);
+                }
+                return Err(err);
+            }
+
+            Ok(Self { handle })
+        }
+
+        pub fn assign_process(&self, process_handle: RawHandle) -> io::Result<()> {
+            let ret = unsafe { AssignProcessToJobObject(self.handle, process_handle as _) };
+            if ret == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for WindowsJobObject {
+        fn drop(&mut self) {
+            if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
+                unsafe {
+                    CloseHandle(self.handle);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+use job_object::WindowsJobObject;
+
+const MAX_DRAIN_LOG_LINES: usize = 100;
+
+/// Background reader draining stdout/stderr to prevent OS pipe-buffer deadlock.
+struct StdioDrain {
+    logs: Arc<Mutex<VecDeque<String>>>,
+    _stdout_thread: Option<JoinHandle<()>>,
+    _stderr_thread: Option<JoinHandle<()>>,
+}
+
+impl StdioDrain {
+    fn new(
+        stdout: Option<std::process::ChildStdout>,
+        stderr: Option<std::process::ChildStderr>,
+    ) -> Self {
+        let logs = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_DRAIN_LOG_LINES)));
+
+        let stdout_thread = stdout.map(|out| {
+            let logs_clone = Arc::clone(&logs);
+            std::thread::Builder::new()
+                .name("kortex-sidecar-stdout-drain".to_string())
+                .spawn(move || {
+                    let reader = BufReader::new(out);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(l) => {
+                                if let Ok(mut guard) = logs_clone.lock() {
+                                    if guard.len() >= MAX_DRAIN_LOG_LINES {
+                                        guard.pop_front();
+                                    }
+                                    guard.push_back(l);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("failed to spawn stdout reader thread")
+        });
+
+        let stderr_thread = stderr.map(|err| {
+            let logs_clone = Arc::clone(&logs);
+            std::thread::Builder::new()
+                .name("kortex-sidecar-stderr-drain".to_string())
+                .spawn(move || {
+                    let reader = BufReader::new(err);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(l) => {
+                                if let Ok(mut guard) = logs_clone.lock() {
+                                    if guard.len() >= MAX_DRAIN_LOG_LINES {
+                                        guard.pop_front();
+                                    }
+                                    guard.push_back(format!("[STDERR] {}", l));
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("failed to spawn stderr reader thread")
+        });
+
+        Self {
+            logs,
+            _stdout_thread: stdout_thread,
+            _stderr_thread: stderr_thread,
+        }
+    }
+
+    fn recent_logs(&self) -> Vec<String> {
+        if let Ok(guard) = self.logs.lock() {
+            guard.iter().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
 
 /// Restart policy: bounded retry attempts with exponential backoff,
 /// applied when the supervised child exits unexpectedly.
@@ -172,6 +337,9 @@ pub struct SidecarManager {
     child: Option<Child>,
     state: SidecarState,
     restart_count: u32,
+    drain: Option<StdioDrain>,
+    #[cfg(target_os = "windows")]
+    job: Option<WindowsJobObject>,
 }
 
 impl SidecarManager {
@@ -181,6 +349,9 @@ impl SidecarManager {
             child: None,
             state: SidecarState::NotStarted,
             restart_count: 0,
+            drain: None,
+            #[cfg(target_os = "windows")]
+            job: None,
         }
     }
 
@@ -193,18 +364,62 @@ impl SidecarManager {
         let mut command = Command::new(&self.config.program);
         command
             .args(&self.config.args)
-            .envs(self.config.env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .envs(
+                self.config
+                    .env_vars
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str())),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(dir) = &self.config.working_directory {
             command.current_dir(dir);
         }
-        let child = command.spawn()?;
+        #[cfg(target_os = "windows")]
+        {
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn()?;
+
+        #[cfg(target_os = "windows")]
+        {
+            match WindowsJobObject::create_kill_on_close() {
+                Ok(job) => {
+                    use std::os::windows::io::AsRawHandle;
+                    if let Err(e) = job.assign_process(child.as_raw_handle()) {
+                        eprintln!("KORTEX: warning: failed to assign child to JobObject: {e}");
+                    } else {
+                        self.job = Some(job);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("KORTEX: warning: failed to create JobObject: {e}");
+                }
+            }
+        }
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        self.drain = Some(StdioDrain::new(stdout, stderr));
 
         self.child = Some(child);
         self.state = self.state.after_spawn_succeeded();
         Ok(())
+    }
+
+    /// Returns the OS process ID of the supervised child, if currently running.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
+    }
+
+    /// Returns a snapshot of the most recent lines drained from the child's
+    /// stdout and stderr streams (up to 100 lines).
+    pub fn recent_logs(&self) -> Vec<String> {
+        self.drain
+            .as_ref()
+            .map(|d| d.recent_logs())
+            .unwrap_or_default()
     }
 
     /// Returns true if the child is still running. Reaps the child handle
@@ -578,19 +793,30 @@ mod tests {
     #[test]
     fn spawn_passes_configured_env_vars_to_the_child_process() {
         let (program, args) = if cfg!(windows) {
-            ("cmd".to_string(), vec!["/C".to_string(), "echo %KORTEX_TEST_VAR%".to_string()])
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "echo %KORTEX_TEST_VAR%".to_string()],
+            )
         } else {
-            ("sh".to_string(), vec!["-c".to_string(), "echo $KORTEX_TEST_VAR".to_string()])
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "echo $KORTEX_TEST_VAR".to_string()],
+            )
         };
         let mut config = SidecarConfig::new(program, args);
-        config.env_vars = vec![("KORTEX_TEST_VAR".to_string(), "kortex-value-123".to_string())];
+        config.env_vars = vec![(
+            "KORTEX_TEST_VAR".to_string(),
+            "kortex-value-123".to_string(),
+        )];
         let mut manager = SidecarManager::new(config);
         manager.spawn().expect("failed to spawn test process");
 
-        let child = manager.child.take().expect("child should exist after spawn");
-        let output = child.wait_with_output().expect("failed to wait for child");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("kortex-value-123"), "stdout was: {stdout:?}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_running().unwrap_or(false) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let logs = manager.recent_logs().join("\n");
+        assert!(logs.contains("kortex-value-123"), "stdout was: {logs:?}");
     }
 
     #[test]
@@ -606,13 +832,50 @@ mod tests {
         let mut manager = SidecarManager::new(config);
         manager.spawn().expect("failed to spawn test process");
 
-        let child = manager.child.take().expect("child should exist after spawn");
-        let output = child.wait_with_output().expect("failed to wait for child");
-        let printed_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_running().unwrap_or(false) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let logs = manager.recent_logs().join("\n");
+        let printed_dir = PathBuf::from(logs.trim());
 
         assert_eq!(
-            printed_dir.canonicalize().expect("printed dir should exist"),
+            printed_dir
+                .canonicalize()
+                .expect("printed dir should exist"),
             target_dir.canonicalize().expect("target dir should exist"),
+        );
+    }
+
+    #[test]
+    fn continuous_stdio_draining_captures_child_output() {
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "echo line1 & echo line2".to_string()],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "echo line1; echo line2".to_string()],
+            )
+        };
+        let mut manager = SidecarManager::new(SidecarConfig::new(program, args));
+        manager.spawn().expect("failed to spawn test process");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_running().unwrap_or(false) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let logs = manager.recent_logs();
+        assert!(
+            logs.iter().any(|l| l.contains("line1")),
+            "logs were: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l.contains("line2")),
+            "logs were: {logs:?}"
         );
     }
 

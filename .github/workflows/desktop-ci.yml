@@ -205,22 +205,31 @@ jobs:
           }
           Write-Output "Packaged backend resource confirmed at $bundled"
 
-      # Silent install -> launch -> poll /health -> uninstall, using
-      # freshly-generated, throwaway keys (never committed, never reused) --
-      # mirrors the Docker CI job's own throwaway-secret pattern (Part 1 §18).
-      #
-      # Distinct assertion messages, redirected stdout/stderr, and failure-
-      # path diagnostics were added here to make a future failure
-      # diagnosable from CI evidence alone. The installed app is a
-      # `windows_subsystem = "windows"` release build with no file logger
-      # (see backend_process.rs / Cargo.toml) -- redirecting Start-Process's
-      # own stdout/stderr is the only diagnostic channel this workflow can
-      # add without touching product source. It captures the Tauri process's
-      # own output only: the frozen backend child's stdout/stderr are piped
-      # by sidecar.rs but never drained by production code, so backend-side
-      # output is not, and cannot be made, visible here without a source
-      # change -- deliberately out of scope for this commit.
-      - name: Installer smoke test (install, launch, health, uninstall)
+      # Windows PE Subsystem assertion: proves that kortex-backend.exe was
+      # packaged with console=False (IMAGE_SUBSYSTEM_WINDOWS_GUI = 2), preventing
+      # Windows kernel from allocating a visible CMD console window on launch.
+      - name: Verify frozen backend Windows PE subsystem is GUI (no console)
+        shell: pwsh
+        run: |
+          $backendExe = "apps/desktop/src-tauri/target/release/kortex-backend/kortex-backend.exe"
+          if (-not (Test-Path $backendExe)) {
+            throw "Backend executable not found at $backendExe"
+          }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $backendExe))
+          $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+          # In 64-bit PE32+ (Magic 0x20B), Subsystem is at OptionalHeader + 68 (PE header + 24 + 68)
+          $subsystemOffset = $peOffset + 24 + 68
+          $subsystem = [System.BitConverter]::ToUInt16($bytes, $subsystemOffset)
+          Write-Output "PE Subsystem value: $subsystem"
+          # 2 = IMAGE_SUBSYSTEM_WINDOWS_GUI, 3 = IMAGE_SUBSYSTEM_WINDOWS_CUI
+          if ($subsystem -ne 2) {
+            throw "ASSERTION [PE Subsystem]: expected IMAGE_SUBSYSTEM_WINDOWS_GUI (2), found $subsystem -- backend was built with console=True"
+          }
+          Write-Output "Verified: kortex-backend.exe is marked with IMAGE_SUBSYSTEM_WINDOWS_GUI (subsystem 2, no console window)"
+
+      # Silent install -> launch -> poll /health -> sustained 10s liveness ->
+      # stop desktop -> verify backend reaped (no orphan) -> uninstall.
+      - name: Installer smoke test (install, launch, health, sustained liveness, orphan prevention, uninstall)
         shell: pwsh
         run: |
           $installer = Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
@@ -228,6 +237,9 @@ jobs:
 
           $exe = "$env:LOCALAPPDATA\KORTEX Desktop\kortex-desktop.exe"
           if (-not (Test-Path $exe)) { throw "ASSERTION [installed executable missing]: not found at $exe" }
+
+          $backendExe = "$env:LOCALAPPDATA\KORTEX Desktop\kortex-backend\kortex-backend.exe"
+          if (-not (Test-Path $backendExe)) { throw "ASSERTION [bundled backend missing]: not found at $backendExe" }
 
           $masterBytes = New-Object byte[] 32
           [System.Security.Cryptography.RandomNumberGenerator]::Fill($masterBytes)
@@ -238,36 +250,74 @@ jobs:
 
           $stdoutLog = "$env:RUNNER_TEMP\kortex-desktop-stdout.log"
           $stderrLog = "$env:RUNNER_TEMP\kortex-desktop-stderr.log"
-          $proc = Start-Process -FilePath $exe -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
 
-          $healthy = $false
-          $lastErr = "(no attempt made)"
-          for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 1
-            if ($proc.HasExited) {
-              throw "ASSERTION [desktop process exited early]: kortex-desktop.exe exited with code $($proc.ExitCode) before becoming healthy"
+          try {
+            $proc = Start-Process -FilePath $exe -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+
+            $healthy = $false
+            $lastErr = "(no attempt made)"
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) {
+                throw "ASSERTION [desktop process exited early]: kortex-desktop.exe exited with code $($proc.ExitCode) before becoming healthy"
+              }
+              try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 2 -UseBasicParsing
+                if ($resp.StatusCode -lt 400) { $healthy = $true; break }
+                $lastErr = "HTTP $($resp.StatusCode)"
+              } catch {
+                $lastErr = $_.Exception.Message
+              }
             }
-            try {
-              $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 2 -UseBasicParsing
-              if ($resp.StatusCode -lt 400) { $healthy = $true; break }
-              $lastErr = "HTTP $($resp.StatusCode)"
-            } catch {
-              $lastErr = $_.Exception.Message
+
+            if (-not $healthy) {
+              $desktopProc = Get-Process kortex-desktop -ErrorAction SilentlyContinue
+              $backendProc = Get-Process kortex-backend -ErrorAction SilentlyContinue
+              $portState = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
+              Write-Output "DIAGNOSTIC: desktop process present=$($null -ne $desktopProc); backend process present=$($null -ne $backendProc); port 8000 listeners=$($portState.Count); last health-check error=$lastErr"
+              throw "ASSERTION [health endpoint unreachable]: /health did not become reachable within 30s"
             }
-          }
+            Write-Output "Installed application healthy after $($i + 1)s. Beginning 10s sustained liveness validation..."
 
-          if (-not $healthy) {
-            $desktopProc = Get-Process kortex-desktop -ErrorAction SilentlyContinue
-            $backendProc = Get-Process kortex-backend -ErrorAction SilentlyContinue
-            $portState = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
-            Write-Output "DIAGNOSTIC: desktop process present=$($null -ne $desktopProc); backend process present=$($null -ne $backendProc); port 8000 listeners=$($portState.Count); last health-check error=$lastErr"
-            throw "ASSERTION [health endpoint unreachable]: /health did not become reachable within 30s"
-          }
-          Write-Output "Installed application healthy after $($i + 1)s"
+            # Sustained liveness validation: verify desktop and backend processes remain alive and healthy
+            for ($s = 1; $s -le 10; $s++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) {
+                throw "ASSERTION [sustained liveness failure]: kortex-desktop.exe exited prematurely during sustained check (second $s/10) with code $($proc.ExitCode)"
+              }
+              $backendProc = Get-Process kortex-backend -ErrorAction SilentlyContinue
+              if (-not $backendProc) {
+                throw "ASSERTION [sustained liveness failure]: kortex-backend process disappeared during sustained check (second $s/10)"
+              }
+              try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 2 -UseBasicParsing
+                if ($resp.StatusCode -ge 400) {
+                  throw "ASSERTION [sustained liveness failure]: /health returned HTTP $($resp.StatusCode) during sustained check (second $s/10)"
+                }
+              } catch {
+                throw "ASSERTION [sustained liveness failure]: /health check failed during sustained check (second $s/10): $($_.Exception.Message)"
+              }
+            }
+            Write-Output "Sustained liveness verified: desktop and backend remained alive and responsive for 10 continuous seconds."
 
-          Get-Process kortex-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
-          Get-Process kortex-backend -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep -Seconds 2
+            # Terminate desktop process to test Win32 Job Object lifecycle binding
+            Stop-Process -Id $proc.Id -Force
+            Start-Sleep -Seconds 2
+
+            # Verify that backend was terminated by Job Object and did not remain orphaned
+            $orphanBackend = Get-Process kortex-backend -ErrorAction SilentlyContinue
+            if ($orphanBackend) {
+              Stop-Process -Name kortex-backend -Force -ErrorAction SilentlyContinue
+              throw "ASSERTION [orphan backend leak]: kortex-backend survived desktop process termination (Job Object lifecycle binding failed)"
+            }
+            Write-Output "Verified: backend process terminated with desktop host (no orphaned child processes)."
+
+          } finally {
+            # Guaranteed cleanup even if assertions throw
+            Get-Process kortex-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
+            Get-Process kortex-backend -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+          }
 
           $uninstaller = "$env:LOCALAPPDATA\KORTEX Desktop\uninstall.exe"
           if (-not (Test-Path $uninstaller)) {
@@ -294,6 +344,7 @@ jobs:
           path: |
             ${{ runner.temp }}\kortex-desktop-stdout.log
             ${{ runner.temp }}\kortex-desktop-stderr.log
+            ${{ runner.temp }}\kortex-desktop-crash.log
           retention-days: 7
           if-no-files-found: ignore
 

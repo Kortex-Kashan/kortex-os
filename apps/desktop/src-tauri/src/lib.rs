@@ -38,6 +38,37 @@ type ShutdownIntentFlag = Arc<AtomicBool>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &**s,
+                None => "Box<dyn Any>",
+            },
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        eprintln!("KORTEX PANIC: '{msg}' at {location}");
+
+        let crash_log_path = std::env::temp_dir().join("kortex-desktop-crash.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&crash_log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                file,
+                "[{:?}] KORTEX PANIC: '{}' at {}",
+                std::time::SystemTime::now(),
+                msg,
+                location
+            );
+        }
+    }));
+
     let mut builder = tauri::Builder::default();
 
     // Phase A: must be the first plugin registered (per

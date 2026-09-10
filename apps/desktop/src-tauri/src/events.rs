@@ -66,7 +66,13 @@ pub fn start_event_relay(
         return false;
     };
 
-    tokio::spawn(async move {
+    // Spawns onto Tauri's managed async runtime rather than `tokio::spawn`:
+    // `start_event_relay` is called from synchronous contexts (such as the
+    // `connect_event_stream` Tauri command running on a worker thread), where
+    // no ambient Tokio runtime exists and `tokio::spawn` panics at runtime
+    // with "there is no reactor running, must be called from the context of a
+    // Tokio 1.x runtime" (matching backend_process.rs's own precedent).
+    tauri::async_runtime::spawn(async move {
         run_relay_loop(app, ipc_state.base_url().to_string(), token, topic).await;
         relay_state.running.store(false, Ordering::SeqCst);
     });
@@ -215,7 +221,8 @@ mod tests {
                         == Some(expected);
                     if !ok {
                         let mut rejection = ErrorResponse::new(None);
-                        *rejection.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+                        *rejection.status_mut() =
+                            tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
                         return Err(rejection);
                     }
                 }
@@ -297,5 +304,32 @@ mod tests {
         // this function that can regress independently of Tauri wiring.
         let relay_state = Arc::new(EventRelayState::default());
         assert!(!relay_state.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn async_runtime_spawn_succeeds_outside_ambient_tokio_context() {
+        // Regresses the exact production failure: invoking `tokio::spawn` from a
+        // synchronous worker thread (such as the thread running `connect_event_stream`)
+        // panics with "there is no reactor running". `tauri::async_runtime::spawn`
+        // must succeed without panicking.
+        let handle = std::thread::spawn(|| {
+            let tokio_panics = std::panic::catch_unwind(|| {
+                tokio::spawn(async {});
+            })
+            .is_err();
+            assert!(
+                tokio_panics,
+                "tokio::spawn must panic outside a Tokio runtime"
+            );
+
+            let tauri_result = std::panic::catch_unwind(|| {
+                tauri::async_runtime::spawn(async {});
+            });
+            assert!(
+                tauri_result.is_ok(),
+                "tauri::async_runtime::spawn must succeed outside a Tokio runtime"
+            );
+        });
+        handle.join().expect("worker thread join failed");
     }
 }

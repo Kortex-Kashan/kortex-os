@@ -51,6 +51,16 @@ tauri-plugin-shell = "2"
 # implicitly, since this crate now calls it itself.
 getrandom = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# Win32 Job Object support for sidecar child process lifecycle binding
+# (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE). Already present in Cargo.lock via tauri.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+
 [dev-dependencies]
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
