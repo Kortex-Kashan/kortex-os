@@ -263,9 +263,8 @@ class WorkflowDefinitionLifecycleManager:
                             )
 
             for node in dv.graph.nodes:
-                is_approval = (
-                    node.node_type == "approval"
-                    or bool(node.metadata.get(_STEP_METADATA_KEY, {}).get("is_approval_step", False))
+                is_approval = node.node_type == "approval" or bool(
+                    node.metadata.get(_STEP_METADATA_KEY, {}).get("is_approval_step", False)
                 )
                 if is_approval and node.capability_name is not None:
                     errors.append(
