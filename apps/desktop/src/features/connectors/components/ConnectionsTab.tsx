@@ -45,11 +45,13 @@ import {
   useDeleteConnectorProfile,
   useRegisterConnectorProfile,
 } from "../hooks/useConnectorProfiles";
+import { McpConnectionForm } from "./McpConnectionForm";
 import type { ConnectorProfile, CreateConnectionPayload } from "../types";
 
 export function ConnectionsTab() {
   const { data, isPending, isError, error, refetch, isFetching } = useConnectorProfiles();
   const [createOpen, setCreateOpen] = useState(false);
+  const [formMode, setFormMode] = useState<"standard" | "mcp">("standard");
 
   if (isPending) {
     return <LoadingState />;
@@ -101,10 +103,33 @@ export function ConnectionsTab() {
           <DialogHeader>
             <DialogTitle>New Connection</DialogTitle>
             <DialogDescription>
-              Register a connection using one of the drivers already installed on this system.
+              Register a connection using an installed driver or remote Model Context Protocol (MCP) server.
             </DialogDescription>
           </DialogHeader>
-          <CreateConnectionForm onSuccess={() => setCreateOpen(false)} onCancel={() => setCreateOpen(false)} />
+          <div className="flex gap-2 border-b border-border pb-2">
+            <Button
+              type="button"
+              variant={formMode === "standard" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setFormMode("standard")}
+            >
+              Standard Driver
+            </Button>
+            <Button
+              type="button"
+              variant={formMode === "mcp" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setFormMode("mcp")}
+              data-testid="mcp-mode-button"
+            >
+              MCP (Streamable HTTP)
+            </Button>
+          </div>
+          {formMode === "mcp" ? (
+            <McpConnectionForm onSuccess={() => setCreateOpen(false)} onCancel={() => setCreateOpen(false)} />
+          ) : (
+            <CreateConnectionForm onSuccess={() => setCreateOpen(false)} onCancel={() => setCreateOpen(false)} />
+          )}
         </DialogContent>
       </Dialog>
     </Card>

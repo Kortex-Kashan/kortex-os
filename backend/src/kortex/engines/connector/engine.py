@@ -8,6 +8,7 @@ TokenBucketRateLimiter, ConnectorPipeline, ConnectorDiagnostics, and system even
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.container import Container
 from kortex.engines.connector.diagnostics import ConnectorDiagnostics
+from kortex.engines.connector.drivers.mcp_driver import McpConnectorDriver
 from kortex.engines.connector.events import (
     ConnectorActionCompletedEvent,
     ConnectorActionFailedEvent,
@@ -51,6 +53,7 @@ from kortex.engines.storage.interfaces import IDataStore
 if TYPE_CHECKING:
     from kortex.core.kernel import Kernel
     from kortex.engines.connector.base_driver import BaseConnectorDriver
+    from kortex.engines.registry.engine import RegistryEngine
 
 logger = logging.getLogger("kortex.engines.connector")
 
@@ -114,6 +117,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         )
         self._kernel: Kernel | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._mcp_driver: McpConnectorDriver | None = None
 
     @property
     def name(self) -> str:
@@ -156,6 +160,11 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
     def pipeline(self) -> ConnectorPipeline:
         """Access the connector execution pipeline."""
         return self._pipeline
+
+    @property
+    def mcp_driver(self) -> McpConnectorDriver | None:
+        """Access the wired MCP connector driver instance."""
+        return self._mcp_driver
 
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
@@ -207,6 +216,26 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                             "connector actions with a secret_handle will fail "
                             "authentication until a secret_resolver is wired."
                         )
+
+            # Wire and register the production McpConnectorDriver (Integration Hub M1)
+            registry_engine = None
+            if kernel is not None:
+                if hasattr(kernel, "get_engine"):
+                    with contextlib.suppress(Exception):
+                        registry_engine = kernel.get_engine("registry")
+                if (
+                    registry_engine is None
+                    and isinstance(getattr(kernel, "container", None), Container)
+                    and kernel.container.has("engine.registry")
+                ):
+                    with contextlib.suppress(Exception):
+                        registry_engine = kernel.container.resolve("engine.registry")
+
+            self._mcp_driver = McpConnectorDriver(
+                registry_engine=cast("RegistryEngine | None", registry_engine),
+                secret_resolver=self._secret_resolver,
+            )
+            self._mcp_driver.set_profile_manager(self._profile_manager)
 
             # Register canonical Kernel capabilities
             kernel.register_capability(
@@ -563,8 +592,23 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             profile = profile.model_copy(update={"tenant_id": principal.tenant_id})
 
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        if (
+            profile.driver_id in ("connector-mcp", "kortex.mcp")
+            and "connector-mcp" not in self._registry._drivers
+            and self._mcp_driver is not None
+        ):
+            self._registry.register_driver(self._mcp_driver)
         self._registry.get_driver_by_id(profile.driver_id)
         await self._profile_manager.register_profile(profile)
+
+        # Integration Hub M1: if deactivating an MCP profile, unregister capabilities immediately
+        if (
+            not profile.is_active
+            and profile.driver_id in ("connector-mcp", "kortex.mcp")
+            and self._mcp_driver is not None
+        ):
+            await self._mcp_driver.teardown_profile(profile.profile_id, tenant_id=profile.tenant_id)
+
         return profile
 
     async def list_profiles(
@@ -601,8 +645,11 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         """
         self.ensure_state(EngineState.READY, EngineState.RUNNING)
         tid = principal.tenant_id if principal is not None else None
-        await self._profile_manager.get_profile(profile_id, tenant_id=tid)
-        return await self._profile_manager.delete_profile(profile_id)
+        profile = await self._profile_manager.get_profile(profile_id, tenant_id=tid)
+        deleted = await self._profile_manager.delete_profile(profile_id)
+        if deleted and profile.driver_id in ("connector-mcp", "kortex.mcp") and self._mcp_driver is not None:
+            await self._mcp_driver.teardown_profile(profile_id, tenant_id=tid)
+        return deleted
 
     # -- Internal Helper Methods --------------------------------------------
 

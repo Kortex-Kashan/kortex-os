@@ -18,3 +18,4 @@ tzdata>=2024.1
 pdfplumber>=0.11.0
 rapidocr-onnxruntime>=1.4.0
 opencv-python-headless>=4.5.1.48
+mcp==1.24.0

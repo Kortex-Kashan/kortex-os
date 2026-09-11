@@ -393,6 +393,14 @@ class CapabilityDescriptor(BaseModel):
             "False (fail-closed) for the identical reason."
         ),
     )
+    owner_id: str | None = Field(
+        default=None,
+        description=(
+            "Integration Hub M1: Unique identifier of the owning integration profile "
+            "(e.g. ConnectorProfile.profile_id) for dynamically registered capabilities. "
+            "When set, capability updates and unregistration require matching ownership."
+        ),
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -617,6 +625,7 @@ class RegistryEngine(BaseEngine):
         legacy_principal_bridge: bool = False,
         is_read_only: bool | None = None,
         is_idempotent: bool | None = None,
+        owner_id: str | None = None,
     ) -> CapabilityDescriptor:
         """Register an AI-discoverable capability.
 
@@ -663,8 +672,13 @@ class RegistryEngine(BaseEngine):
         production `required_permissions` mapping — not a runtime exception
         inside this shared, test-and-production-both method.
         """
+        is_update = False
         if name in self._capabilities:
-            raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
+            existing_desc = self._capabilities[name]
+            if owner_id is not None and getattr(existing_desc, "owner_id", None) == owner_id:
+                is_update = True
+            else:
+                raise ResourceAlreadyExistsError(f"Capability '{name}' is already registered.")
 
         if not requires_authentication and name not in _BOOTSTRAP_EXEMPT_CAPABILITIES:
             raise ValueError(
@@ -711,12 +725,42 @@ class RegistryEngine(BaseEngine):
             legacy_principal_bridge=legacy_principal_bridge,
             is_read_only=is_read_only,
             is_idempotent=is_idempotent,
+            owner_id=owner_id,
         )
         self._capabilities[name] = descriptor
         self._capability_handlers[name] = handler
-        self.register_resource(name, RegistryCategory.CAPABILITY, handler, description=description, provider=provider)
-        self.logger.info("Registered Capability: '%s' (Provider: %s)", name, provider)
+        self.register_resource(
+            name,
+            RegistryCategory.CAPABILITY,
+            handler,
+            description=description,
+            provider=provider,
+            allow_overwrite=is_update,
+        )
+        self.logger.info("Registered Capability: '%s' (Provider: %s, Owner: %s)", name, provider, owner_id)
         return descriptor
+
+    def unregister_capability(self, name: str, owner_id: str) -> bool:
+        """Unregister a capability owned by a specific integration profile.
+
+        Verifies that the capability exists and is owned by `owner_id`.
+        Removes the descriptor, handler, and registry resource.
+        """
+        if name not in self._capabilities:
+            return False
+
+        descriptor = self._capabilities[name]
+        if descriptor.owner_id != owner_id:
+            raise PermissionError(
+                f"Cannot unregister capability '{name}': owned by '{descriptor.owner_id}', not '{owner_id}'."
+            )
+
+        del self._capabilities[name]
+        self._capability_handlers.pop(name, None)
+        self._stores[RegistryCategory.CAPABILITY].pop(name, None)
+        self._handlers.pop(f"{RegistryCategory.CAPABILITY.value}:{name}", None)
+        self.logger.info("Unregistered Capability: '%s' (Owner: %s)", name, owner_id)
+        return True
 
     @staticmethod
     def _validate_execution_context_binding(

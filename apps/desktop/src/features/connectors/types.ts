@@ -60,4 +60,6 @@ export interface CreateConnectionPayload {
   name: string;
   driverId: string;
   credential?: string;
+  options?: Record<string, unknown>;
 }
+

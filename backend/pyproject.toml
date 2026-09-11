@@ -29,6 +29,8 @@ dependencies = [
     # runtime network access, no subprocess, no system package).
     "rapidocr-onnxruntime>=1.4.0",
     "opencv-python-headless>=4.5.1.48",
+    # Integration Hub M1: Model Context Protocol (MCP) Foundation
+    "mcp==1.24.0",
 ]
 
 [project.optional-dependencies]

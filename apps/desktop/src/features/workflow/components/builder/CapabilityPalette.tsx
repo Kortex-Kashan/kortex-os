@@ -34,8 +34,10 @@ export function CapabilityPalette({
     projectCapabilities()
       .then((allCaps) => {
         if (!mounted) return;
-        // Curate down to schema-complete platform capabilities
-        const curated = allCaps.filter((cap) => CURATED_CAPABILITY_NAMES.has(cap.name));
+        // Curate down to schema-complete platform capabilities and projected MCP capabilities
+        const curated = allCaps.filter(
+          (cap) => CURATED_CAPABILITY_NAMES.has(cap.name) || cap.name.startsWith("kortex.mcp.")
+        );
         // If projection returned none (e.g. mock/test environment), provide fallback definitions for curated set
         if (curated.length === 0) {
           setCapabilities([

@@ -346,7 +346,10 @@ def register_production_connector_drivers(connector_engine: ConnectorEngine) -> 
     an already-registered driver id.
     """
     already_registered = {d.driver_id for d in connector_engine.list_drivers()}
-    for driver in (DummyConnectorDriver(), HttpRestConnectorDriver()):
+    drivers: list[Any] = [DummyConnectorDriver(), HttpRestConnectorDriver()]
+    if connector_engine.mcp_driver is not None:
+        drivers.append(connector_engine.mcp_driver)
+    for driver in drivers:
         if driver.metadata.driver_id not in already_registered:
             connector_engine.register_driver(driver)
 

@@ -178,6 +178,7 @@ export async function registerConnectorProfile(payload: CreateConnectionPayload)
         name: payload.name,
         driver_id: payload.driverId,
         secret_handle: payload.credential ? secretHandle : null,
+        options: payload.options ?? {},
       },
     },
   });
@@ -217,3 +218,31 @@ export async function deleteConnectorProfile(profileId: string): Promise<void> {
     throwForFailure(envelope, "Failed to delete the connection.");
   }
 }
+
+const ACTION_EXECUTE_CAPABILITY = "kortex.connector.action.execute";
+
+/**
+ * Tests an MCP Streamable HTTP endpoint using a temporary verification session.
+ */
+export async function testMcpConnection(endpointUrl: string, credential?: string): Promise<boolean> {
+  const envelope = await invokeCapability({
+    requestId: crypto.randomUUID(),
+    capabilityName: ACTION_EXECUTE_CAPABILITY,
+    parameters: {
+      request: {
+        request_id: crypto.randomUUID(),
+        profile_id: "test-temp-mcp",
+        action_type: "VERIFY",
+        payload: { endpoint_url: endpointUrl },
+        options: { endpoint_url: endpointUrl, secret_token: credential },
+      },
+    },
+  });
+
+  if (envelope.status === "SUCCESS") {
+    const payload = envelope.payload?.result as { verified?: boolean; response_payload?: { verified?: boolean } } | undefined;
+    return payload?.verified ?? payload?.response_payload?.verified ?? true;
+  }
+  throwForFailure(envelope, "Connection test failed.");
+}
+
