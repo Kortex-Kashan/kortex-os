@@ -202,7 +202,7 @@ async def test_connector_drivers_register_on_production_boot_path() -> None:
         connector_engine = kernel.get_engine("connector")
         assert isinstance(connector_engine, ConnectorEngine)
         driver_ids = {d.driver_id for d in connector_engine.list_drivers()}
-        assert driver_ids == {"connector-dummy", "connector-http-rest"}
+        assert driver_ids == {"connector-dummy", "connector-http-rest", "connector-mcp"}
     finally:
         await kernel.shutdown()
 
@@ -223,7 +223,7 @@ async def test_connector_driver_registration_is_idempotent() -> None:
         register_production_connector_drivers(connector_engine)
 
         driver_ids_after = {d.driver_id for d in connector_engine.list_drivers()}
-        assert driver_ids_after == driver_ids_before == {"connector-dummy", "connector-http-rest"}
+        assert driver_ids_after == driver_ids_before == {"connector-dummy", "connector-http-rest", "connector-mcp"}
     finally:
         await kernel.shutdown()
 

@@ -182,4 +182,4 @@ async def test_authenticated_with_permission_returns_200_and_registered_drivers(
     body = response.json()
     assert body["status"] == "SUCCESS"
     driver_ids = {d["driver_id"] for d in body["payload"]["result"]}
-    assert driver_ids == {"connector-dummy", "connector-http-rest"}
+    assert driver_ids == {"connector-dummy", "connector-http-rest", "connector-mcp"}
