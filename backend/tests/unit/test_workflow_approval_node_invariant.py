@@ -7,18 +7,19 @@ Enforced by WorkflowDefinitionLifecycleManager._validate_content and blocking on
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+
 import pytest
 
 from kortex.core.db import DatabaseEngineManager
 from kortex.engines.storage.stores.data_store import RelationalDataStore
 from kortex.engines.workflow.exceptions import WorkflowDefinitionStateError
+from kortex.engines.workflow.graph_compat import _STEP_METADATA_KEY
 from kortex.engines.workflow.lifecycle import WorkflowDefinitionLifecycleManager
 from kortex.engines.workflow.models import (
     WorkflowGraph,
     WorkflowGraphNode,
 )
 from kortex.engines.workflow.persistence import WorkflowStore
-from kortex.engines.workflow.graph_compat import _STEP_METADATA_KEY
 
 
 @pytest.fixture
