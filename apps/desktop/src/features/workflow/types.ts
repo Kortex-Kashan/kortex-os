@@ -259,3 +259,144 @@ export interface ExternalExecution {
   approvalRequestId: string | null;
   tenantId: string;
 }
+
+// ---------------------------------------------------------------------------
+// Milestone F2 — Canonical Workflow Graph Models
+// ---------------------------------------------------------------------------
+
+export interface WorkflowGraphEdge {
+  edgeId: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  sourcePort?: string | null;
+  targetPort?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkflowGraphNode {
+  nodeId: string;
+  nodeType: string;
+  capabilityName: string | null;
+  config: Record<string, unknown>;
+  inputPorts?: string[];
+  outputPorts?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkflowGraph {
+  schemaVersion?: string;
+  entryNodeId: string;
+  nodes: WorkflowGraphNode[];
+  edges: WorkflowGraphEdge[];
+  metadata?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Milestone F3 — Workflow Data Mapping & Expression Models
+// ---------------------------------------------------------------------------
+
+export type WorkflowOperator = "CONCAT" | "SUM" | "SUBTRACT" | "LENGTH";
+
+export interface WorkflowReference {
+  sourceNodeId: string;
+  sourcePort?: string | null;
+  path: (string | number)[];
+}
+
+export interface WorkflowLiteralValue {
+  kind: "literal";
+  value: unknown;
+}
+
+export interface WorkflowReferenceValue {
+  kind: "reference";
+  reference: WorkflowReference;
+}
+
+export interface WorkflowExpressionValue {
+  kind: "expression";
+  expression: {
+    operator: WorkflowOperator;
+    operands: WorkflowValue[];
+  };
+}
+
+export type WorkflowValue =
+  | WorkflowLiteralValue
+  | WorkflowReferenceValue
+  | WorkflowExpressionValue;
+
+export interface WorkflowMapping {
+  values: Record<string, WorkflowValue>;
+}
+
+// ---------------------------------------------------------------------------
+// Milestone F4 — Workflow Definition Lifecycle & Draft Models
+// ---------------------------------------------------------------------------
+
+export interface WorkflowDraftDetail {
+  id: string;
+  definitionId: string;
+  tenantId: string;
+  version: string;
+  status: string;
+  name: string;
+  description: string;
+  trigger: WorkflowTrigger;
+  priority: WorkflowPriority;
+  timeoutSeconds: number;
+  steps: WorkflowStepSummary[];
+  graph: WorkflowGraph | null;
+  lockVersion: number;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkflowValidationReport {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface CreateWorkflowDraftPayload {
+  name: string;
+  description?: string;
+  trigger?: WorkflowTrigger;
+  priority?: WorkflowPriority;
+  timeoutSeconds?: number;
+  graph?: WorkflowGraph;
+  steps?: WorkflowStepSummary[];
+}
+
+export interface UpdateWorkflowDraftPayload {
+  definitionId: string;
+  expectedLockVersion: number;
+  name?: string;
+  description?: string;
+  trigger?: WorkflowTrigger;
+  priority?: WorkflowPriority;
+  timeoutSeconds?: number;
+  graph?: WorkflowGraph;
+  steps?: WorkflowStepSummary[];
+}
+
+// ---------------------------------------------------------------------------
+// Milestone F6 — Capability Projection Models
+// ---------------------------------------------------------------------------
+
+export interface ProjectedCapability {
+  name: string;
+  description: string;
+  provider: string;
+  parametersSchema: Record<string, unknown>;
+  returnsSchema?: Record<string, unknown>;
+  requiredPermissions?: string[] | null;
+  requiresAuthentication?: boolean;
+  securityClassification?: string;
+  isReadOnly?: boolean;
+  isIdempotent?: boolean;
+  ownerDomain?: string;
+  resourceType?: string;
+  action?: string;
+}
+

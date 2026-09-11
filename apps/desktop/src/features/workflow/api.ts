@@ -37,6 +37,10 @@ import type {
   WorkflowState,
   WorkflowStatus,
   WorkflowTrigger,
+  ProjectedCapability,
+  WorkflowDraftDetail,
+  WorkflowGraph,
+  WorkflowValidationReport,
 } from "./types";
 import type { IpcResultEnvelope } from "@/ipc/client";
 
@@ -436,9 +440,215 @@ export async function getExternalExecution(executionId: string): Promise<Externa
   return toExternalExecution(raw as RawExternalExecution);
 }
 
-/** `kortex.workflow.external.cancel` — fully implemented server-side
- * (`cancel_external_execution`) but the M5.6 UI never exposed a control for
- * it at all (M5-A7). */
 export async function cancelExternalExecution(executionId: string): Promise<void> {
   await invoke("kortex.workflow.external.cancel", { execution_id: executionId });
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle & Draft API (Milestone F4)
+// ---------------------------------------------------------------------------
+
+function toGraphFromWire(raw: Record<string, unknown> | null | undefined): WorkflowGraph | null {
+  if (!raw) return null;
+  const rawNodes = Array.isArray(raw.nodes) ? (raw.nodes as Array<Record<string, unknown>>) : [];
+  const rawEdges = Array.isArray(raw.edges) ? (raw.edges as Array<Record<string, unknown>>) : [];
+  return {
+    schemaVersion: (raw.schema_version as string) ?? "1.0.0",
+    entryNodeId: String(raw.entry_node_id ?? ""),
+    nodes: rawNodes.map((node) => ({
+      nodeId: String(node.node_id ?? ""),
+      nodeType: String(node.node_type ?? "capability"),
+      capabilityName: (node.capability_name as string | null) ?? null,
+      config: (node.config as Record<string, unknown>) ?? {},
+      inputPorts: Array.isArray(node.input_ports) ? (node.input_ports as string[]) : [],
+      outputPorts: Array.isArray(node.output_ports) ? (node.output_ports as string[]) : [],
+      metadata: (node.metadata as Record<string, unknown>) ?? {},
+    })),
+    edges: rawEdges.map((edge) => ({
+      edgeId: String(edge.edge_id ?? ""),
+      sourceNodeId: String(edge.source_node_id ?? ""),
+      targetNodeId: String(edge.target_node_id ?? ""),
+      sourcePort: (edge.source_port as string | null) ?? null,
+      targetPort: (edge.target_port as string | null) ?? null,
+      metadata: (edge.metadata as Record<string, unknown>) ?? {},
+    })),
+    metadata: (raw.metadata as Record<string, unknown>) ?? {},
+  };
+}
+
+export function toWireGraph(graph: WorkflowGraph | null | undefined): Record<string, unknown> | null {
+  if (!graph) return null;
+  return {
+    schema_version: graph.schemaVersion ?? "1.0.0",
+    entry_node_id: graph.entryNodeId,
+    nodes: graph.nodes.map((node) => ({
+      node_id: node.nodeId,
+      node_type: node.nodeType,
+      capability_name: node.capabilityName,
+      config: node.config,
+      input_ports: node.inputPorts ?? [],
+      output_ports: node.outputPorts ?? [],
+      metadata: node.metadata ?? {},
+    })),
+    edges: graph.edges.map((edge) => ({
+      edge_id: edge.edgeId,
+      source_node_id: edge.sourceNodeId,
+      target_node_id: edge.targetNodeId,
+      source_port: edge.sourcePort ?? null,
+      target_port: edge.targetPort ?? null,
+      metadata: edge.metadata ?? {},
+    })),
+    metadata: graph.metadata ?? {},
+  };
+}
+
+function toDraftDetail(raw: Record<string, unknown>): WorkflowDraftDetail {
+  return {
+    id: String(raw.id ?? ""),
+    definitionId: String(raw.definition_id ?? ""),
+    tenantId: String(raw.tenant_id ?? ""),
+    version: String(raw.version ?? "0.1.0"),
+    status: String(raw.status ?? "DRAFT"),
+    name: String(raw.name ?? ""),
+    description: String(raw.description ?? ""),
+    trigger: (raw.trigger as WorkflowTrigger) ?? "MANUAL",
+    priority: (raw.priority as WorkflowPriority) ?? "NORMAL",
+    timeoutSeconds: Number(raw.timeout_seconds ?? 3600),
+    steps: Array.isArray(raw.steps) ? (raw.steps as RawWorkflowStep[]).map(toDefinitionStep) : [],
+    graph: toGraphFromWire(raw.graph as Record<string, unknown> | null | undefined),
+    lockVersion: Number(raw.lock_version ?? 1),
+    createdAt: (raw.created_at as string | null) ?? null,
+    updatedAt: (raw.updated_at as string | null) ?? null,
+  };
+}
+
+export async function getWorkflowDefinitionDraft(definitionId: string): Promise<WorkflowDraftDetail | null> {
+  const raw = (await invoke("kortex.workflow.definition.get", {
+    definition_id: definitionId,
+  })) as Record<string, unknown>;
+  if (!raw) return null;
+  if (raw.draft) {
+    return toDraftDetail(raw.draft as Record<string, unknown>);
+  }
+  return toDraftDetail(raw);
+}
+
+export async function createWorkflowDraft(payload: {
+  name: string;
+  description?: string;
+  trigger?: WorkflowTrigger;
+  priority?: WorkflowPriority;
+  timeoutSeconds?: number;
+  graph?: WorkflowGraph;
+}): Promise<WorkflowDraftDetail> {
+  const raw = (await invoke("kortex.workflow.definition.create", {
+    name: payload.name,
+    description: payload.description ?? "",
+    trigger: payload.trigger ?? "MANUAL",
+    priority: payload.priority ?? "NORMAL",
+    timeout_seconds: payload.timeoutSeconds ?? 3600,
+    graph: toWireGraph(payload.graph),
+  })) as Record<string, unknown>;
+  return toDraftDetail(raw);
+}
+
+export async function updateWorkflowDraft(payload: {
+  definitionId: string;
+  expectedLockVersion: number;
+  name?: string;
+  description?: string;
+  trigger?: WorkflowTrigger;
+  priority?: WorkflowPriority;
+  timeoutSeconds?: number;
+  graph?: WorkflowGraph;
+}): Promise<WorkflowDraftDetail> {
+  const wireParams: Record<string, unknown> = {
+    definition_id: payload.definitionId,
+    expected_lock_version: payload.expectedLockVersion,
+  };
+  if (payload.name !== undefined) wireParams.name = payload.name;
+  if (payload.description !== undefined) wireParams.description = payload.description;
+  if (payload.trigger !== undefined) wireParams.trigger = payload.trigger;
+  if (payload.priority !== undefined) wireParams.priority = payload.priority;
+  if (payload.timeoutSeconds !== undefined) wireParams.timeout_seconds = payload.timeoutSeconds;
+  if (payload.graph !== undefined) wireParams.graph = toWireGraph(payload.graph);
+
+  const raw = (await invoke("kortex.workflow.definition.update", wireParams)) as Record<string, unknown>;
+  return toDraftDetail(raw);
+}
+
+export async function validateWorkflowDraft(definitionId: string): Promise<WorkflowValidationReport> {
+  const raw = (await invoke("kortex.workflow.definition.validate", {
+    definition_id: definitionId,
+  })) as Record<string, unknown>;
+  return {
+    isValid: Boolean(raw.is_valid),
+    errors: Array.isArray(raw.errors) ? (raw.errors as string[]) : [],
+    warnings: Array.isArray(raw.warnings) ? (raw.warnings as string[]) : [],
+  };
+}
+
+export async function publishWorkflowDraft(
+  definitionId: string,
+  expectedLockVersion: number,
+  version?: string,
+): Promise<WorkflowDraftDetail> {
+  const raw = (await invoke("kortex.workflow.definition.publish", {
+    definition_id: definitionId,
+    expected_lock_version: expectedLockVersion,
+    version: version ?? null,
+  })) as Record<string, unknown>;
+  return toDraftDetail(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Capability Projection API (Milestone F6)
+// ---------------------------------------------------------------------------
+
+function toProjectedCapability(raw: Record<string, unknown>): ProjectedCapability {
+  return {
+    name: String(raw.name ?? ""),
+    description: String(raw.description ?? ""),
+    provider: String(raw.provider ?? ""),
+    parametersSchema: (raw.parameters_schema as Record<string, unknown>) ?? { type: "object", properties: {} },
+    returnsSchema: raw.returns_schema as Record<string, unknown> | undefined,
+    requiredPermissions: (raw.required_permissions as string[] | null) ?? null,
+    requiresAuthentication: Boolean(raw.requires_authentication),
+    securityClassification: (raw.security_classification as string) ?? "RESTRICTED",
+    isReadOnly: Boolean(raw.is_read_only),
+    isIdempotent: Boolean(raw.is_idempotent),
+    ownerDomain: (raw.owner_domain as string) ?? undefined,
+    resourceType: (raw.resource_type as string) ?? undefined,
+    action: (raw.action as string) ?? undefined,
+  };
+}
+
+export async function projectCapabilities(filters?: {
+  keyword?: string;
+  ownerDomain?: string;
+  resourceType?: string;
+  action?: string;
+  isReadOnly?: boolean;
+  isIdempotent?: boolean;
+}): Promise<ProjectedCapability[]> {
+  const wireParams: Record<string, unknown> = {};
+  if (filters?.keyword !== undefined) wireParams.keyword = filters.keyword;
+  if (filters?.ownerDomain !== undefined) wireParams.owner_domain = filters.ownerDomain;
+  if (filters?.resourceType !== undefined) wireParams.resource_type = filters.resourceType;
+  if (filters?.action !== undefined) wireParams.action = filters.action;
+  if (filters?.isReadOnly !== undefined) wireParams.is_read_only = filters.isReadOnly;
+  if (filters?.isIdempotent !== undefined) wireParams.is_idempotent = filters.isIdempotent;
+
+  const raw = await invoke("kortex.system.capability.project", wireParams);
+  const arr = Array.isArray(raw) ? raw : [];
+  return (arr as Array<Record<string, unknown>>).map(toProjectedCapability);
+}
+
+export async function getProjectedCapability(capabilityName: string): Promise<ProjectedCapability | null> {
+  const raw = (await invoke("kortex.system.capability.get", {
+    capability_name: capabilityName,
+  })) as Record<string, unknown> | null;
+  if (!raw) return null;
+  return toProjectedCapability(raw);
+}
+

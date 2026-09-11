@@ -44,7 +44,7 @@ from kortex.engines.workflow.exceptions import (
     WorkflowGraphConversionError,
     WorkflowGraphValidationError,
 )
-from kortex.engines.workflow.graph_compat import graph_to_steps
+from kortex.engines.workflow.graph_compat import _STEP_METADATA_KEY, graph_to_steps
 from kortex.engines.workflow.graph_validation import validate_graph
 from kortex.engines.workflow.mapping_validation import validate_mapping
 from kortex.engines.workflow.models import (
@@ -262,15 +262,33 @@ class WorkflowDefinitionLifecycleManager:
                                 f"Node '{node.node_id}' references unknown capability '{node.capability_name}'."
                             )
 
+            for node in dv.graph.nodes:
+                is_approval = (
+                    node.node_type == "approval"
+                    or bool(node.metadata.get(_STEP_METADATA_KEY, {}).get("is_approval_step", False))
+                )
+                if is_approval and node.capability_name is not None:
+                    errors.append(
+                        f"Approval node '{node.node_id}' cannot specify capability_name "
+                        f"'{node.capability_name}' (approval steps must be pure wait gates)."
+                    )
+
         if not dv.steps and dv.graph is None:
             warnings.append("Definition has no steps and no graph — it is not yet runnable.")
-        elif self._kernel is not None:
+        else:
             for step in dv.steps:
-                if step.capability_name:
-                    try:
-                        self._kernel.get_capability(step.capability_name)
-                    except CapabilityNotFoundError:
-                        warnings.append(f"Step '{step.id}' references unknown capability '{step.capability_name}'.")
+                if step.is_approval_step and step.capability_name is not None:
+                    errors.append(
+                        f"Approval step '{step.id}' cannot specify capability_name "
+                        f"'{step.capability_name}' (approval steps must be pure wait gates)."
+                    )
+            if self._kernel is not None:
+                for step in dv.steps:
+                    if step.capability_name:
+                        try:
+                            self._kernel.get_capability(step.capability_name)
+                        except CapabilityNotFoundError:
+                            warnings.append(f"Step '{step.id}' references unknown capability '{step.capability_name}'.")
 
         return WorkflowDefinitionValidationReport(is_valid=not errors, errors=errors, warnings=warnings)
 

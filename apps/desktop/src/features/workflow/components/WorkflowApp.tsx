@@ -31,15 +31,17 @@ import { InstanceTimeline } from "./InstanceTimeline";
 import { ApprovalQueue } from "./ApprovalQueue";
 import { ScheduleManager } from "./ScheduleManager";
 import { ExternalExecutionInspector } from "./ExternalExecutionInspector";
+import { WorkflowBuilderTab } from "./builder/WorkflowBuilderTab";
 
 // ---------------------------------------------------------------------------
 // Tab definition
 // ---------------------------------------------------------------------------
 
-type TabId = "definitions" | "instances" | "approvals" | "schedules" | "executions";
+type TabId = "definitions" | "builder" | "instances" | "approvals" | "schedules" | "executions";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "definitions", label: "Definitions" },
+  { id: "builder", label: "Builder" },
   { id: "instances", label: "Instances" },
   { id: "approvals", label: "Approvals" },
   { id: "schedules", label: "Schedules" },
@@ -50,7 +52,7 @@ const TABS: { id: TabId; label: string }[] = [
 // Main shell
 // ---------------------------------------------------------------------------
 
-const TAB_IDS: readonly TabId[] = ["definitions", "instances", "approvals", "schedules", "executions"];
+const TAB_IDS: readonly TabId[] = ["definitions", "builder", "instances", "approvals", "schedules", "executions"];
 
 function isTabId(value: string | null): value is TabId {
   return TAB_IDS.includes(value as TabId);
@@ -95,7 +97,8 @@ export function WorkflowApp() {
         id={`workflow-panel-${activeTab}`}
         aria-labelledby={`workflow-tab-${activeTab}`}
       >
-        {activeTab === "definitions" && <DefinitionsTab />}
+        {activeTab === "definitions" && <DefinitionsTab onOpenBuilder={() => setActiveTab("builder")} />}
+        {activeTab === "builder" && <WorkflowBuilderTab />}
         {activeTab === "instances" && <InstanceTimeline />}
         {activeTab === "approvals" && <ApprovalQueue />}
         {activeTab === "schedules" && <ScheduleManager />}
@@ -109,7 +112,7 @@ export function WorkflowApp() {
 // Definitions Tab (existing behavior fully preserved, all tests continue to pass)
 // ---------------------------------------------------------------------------
 
-function DefinitionsTab() {
+function DefinitionsTab({ onOpenBuilder }: { onOpenBuilder?: () => void } = {}) {
   const { data, isPending, isError, error, refetch, isFetching } = useWorkflows();
 
   if (isPending) {
@@ -126,10 +129,17 @@ function DefinitionsTab() {
   const definitions = data ?? [];
 
   if (definitions.length === 0) {
-    return <EmptyState onRefresh={() => void refetch()} isRefreshing={isFetching} />;
+    return <EmptyState onRefresh={() => void refetch()} isRefreshing={isFetching} onOpenBuilder={onOpenBuilder} />;
   }
 
-  return <PopulatedState definitions={definitions} onRefresh={() => void refetch()} isRefreshing={isFetching} />;
+  return (
+    <PopulatedState
+      definitions={definitions}
+      onRefresh={() => void refetch()}
+      isRefreshing={isFetching}
+      onOpenBuilder={onOpenBuilder}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -173,15 +183,30 @@ function LoadingState() {
   );
 }
 
-function EmptyState({ onRefresh, isRefreshing }: { onRefresh: () => void; isRefreshing: boolean }) {
+function EmptyState({
+  onRefresh,
+  isRefreshing,
+  onOpenBuilder,
+}: {
+  onRefresh: () => void;
+  isRefreshing: boolean;
+  onOpenBuilder?: () => void;
+}) {
   return (
     <WorkspaceCard
       title="Workflows"
       description="Workflow definition registry."
       action={
-        <Button variant="outline" size="sm" onClick={onRefresh} disabled={isRefreshing}>
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          {onOpenBuilder && (
+            <Button size="sm" onClick={onOpenBuilder} data-testid="definitions-new-workflow-button">
+              New Workflow
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={onRefresh} disabled={isRefreshing}>
+            Refresh
+          </Button>
+        </div>
       }
     >
       <p className="text-body text-muted-foreground">No workflows are currently registered.</p>
@@ -223,19 +248,28 @@ function PopulatedState({
   definitions,
   onRefresh,
   isRefreshing,
+  onOpenBuilder,
 }: {
   definitions: WorkflowDefinition[];
   onRefresh: () => void;
   isRefreshing: boolean;
+  onOpenBuilder?: () => void;
 }) {
   return (
     <WorkspaceCard
       title="Workflows"
       description={`Workflow definition registry — ${definitions.length} registered.`}
       action={
-        <Button variant="outline" size="sm" onClick={onRefresh} disabled={isRefreshing}>
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          {onOpenBuilder && (
+            <Button size="sm" onClick={onOpenBuilder} data-testid="definitions-new-workflow-button">
+              New Workflow
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={onRefresh} disabled={isRefreshing}>
+            Refresh
+          </Button>
+        </div>
       }
     >
       <ul className="space-y-3">
