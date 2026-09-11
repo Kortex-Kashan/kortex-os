@@ -2,7 +2,7 @@
 
 **Status of this document**: Permanent, living project-execution-control document for the Production Hardening / Production-Ready phase. It is not a one-time report — it must be reviewed first and updated with evidence by every future Production Hardening implementation pass. See §0 for the governance rules that apply to it.
 
-**Last updated**: Final RC Ambiguity Resolution & Baseline Freeze pass, against HEAD `86469c97820713ff9774973319d28331a51b55b7` at the start of the pass. That pass resolved every remaining ambiguous status to exactly one definitive value (OD-2, code signing, fresh-machine validation, macOS/Linux desktop, roadmap synchronization), separated **technical RC readiness** from **public production release readiness** in §8, and synchronized `.kortex/roadmap.md` under that file's own acceptance convention. The immediately preceding pass (Final Production Reconciliation) recorded formal acceptance of Recovery Engine, Update Engine, CI/CD, Desktop Installers, and Production Secret Storage / Native Windows Keyring. Consolidated release view: `docs/release/RELEASE_CANDIDATE_READINESS.md`.
+**Last updated**: Integration Hub M1 Acceptance & CI Defect Reconciliation pass, against HEAD `79040e9270cdf87b0bc616b6f84f2cd8679d0f72`. This pass formally records acceptance of Integration Hub M1 (MCP Foundation + Capability Projection Bridge) by Chief Architect KASHAN, classifies the remaining Backend CI failure (`tests/unit/test_workflow_durability.py::test_restart_recovery_ready_and_approved_workflows`) as a pre-existing baseline defect (reproduced on baseline `63460cb792222ab2796615afbb9498dd6f389ed` and M1 commit `79040e9270cdf87b0bc616b6f84f2cd8679d0f72`), defers it for separate workflow durability investigation, and updates M1 status to `M1 — ACCEPTED / COMPLETE (PRE-EXISTING CI DEFECT DEFERRED)`. Immutable RC tag `v1.0.0-rc.1` (`9d68ec7c262c4b0085bf7adf056855082e4759fe`) preserved untouched. Prior passes: Final RC Ambiguity Resolution & Baseline Freeze pass (`86469c97820713ff9774973319d28331a51b55b7`); Final Production Reconciliation (`98d94b4c4da9cbec0b3c50af6894af88f8796aae`). Consolidated release view: `docs/release/RELEASE_CANDIDATE_READINESS.md`. Defect tracking: `docs/release/rc-testing/KNOWN_FINDINGS.md`.
 
 ---
 
@@ -69,6 +69,7 @@ The roadmap defines **no acceptance criteria, no dependency statement, and no el
 | Fresh-Machine Validation — Windows desktop | **PASS** | Desktop Installers | §5.10 A | Continuously exercised by CI on fresh runners |
 | Fresh-Machine Validation — Docker | **PASS** | Docker Production Builds | §5.10 B | Continuously exercised by CI on fresh runners |
 | Fresh-Machine Validation — bare/server | **DEFERRED / POST-RC** | — | §5.10 C | Outside the RC distribution topology |
+| Integration Hub M1 (MCP Foundation + Capability Projection Bridge) | **M1 — ACCEPTED / COMPLETE** (PRE-EXISTING CI DEFECT DEFERRED) | Baseline 63460cb | §5.12 | Formally accepted by Chief Architect; pre-existing workflow durability defect deferred (§5.12, DEFECT-002) |
 
 **Database Migration Wiring is DONE** (formally accepted, §5.1). **Phase 7 — Production Hardening — Sentinel Engine is DONE** (formally accepted, §5.2) — verified across 41 targeted tests, 50 cross-engine tests, 0 full-suite regressions, and clean Graphify/ruff/mypy validation. **Monitoring Engine is DONE** (formally accepted, §5.3) — verified across 42 targeted monitoring tests, 54 net new repo tests, 3,016 full-suite passed tests, 0 regressions, and clean CI/Graphify/ruff/mypy validation. **Backup Engine is DONE** (formally accepted, §5.4) — verified across 47 targeted backup tests, 243 capability identity tests, 3,078 total backend test nodes, 0 regressions, zero migrations, and clean Graphify/ruff/mypy validation. **Recovery Engine is DONE** (formally accepted this pass, §5.5) — implementation and verification unchanged from the prior "IMPLEMENTED — AWAITING REVIEW" record (74 net new tests, 3,150 passed full-suite, 0 regressions); this pass supplies the formal owner acceptance the governance rule in §0 requires before advancing past that status. **Update Engine is DONE** (formally accepted this pass, §5.6) — implementation and verification unchanged from the prior record (85 targeted tests, 3,250 passed full-suite, one genuine defect found and fixed during its own implementation pass, 0 regressions attributable to it); formally accepted this pass. **Docker Production Builds is DONE** (formally accepted, §5.7) — implementation commit `b4b5ffdc734bd339c97710532eb4c91bf1502ba9`, verified via GitHub Actions Backend CI (`33967913057`) and Desktop CI (`33967913065`), and reconfirmed still green at this pass's HEAD via Backend CI run `33992464212` (Docker build and smoke test: success). **Desktop Installers is DONE** (formally accepted this pass, §5.8) — real, not a stub: `tauri build` produces both MSI and NSIS, CI builds and installs both, the frozen Python backend is bundled and boots, and the full install/launch/health/crash-restart/reinstall-data-preservation/uninstall-data-preservation lifecycle is verified both locally and in CI. **CI/CD is DONE** (formally accepted this pass, §5.9) — the prior record's "Not executed" gap (no GitHub Actions run had occurred) is closed: both `backend-ci.yml` and `desktop-ci.yml` have now executed dozens of times across the Docker, Desktop Installer, and Native Keyring work, including genuine failures found and fixed through real CI evidence (Desktop CI #41/#42), not merely local dry-runs. **Production Secret Storage / Native Windows Keyring is DONE** (formally accepted this pass, §5.11) — a genuine pre-existing defect (the `keyring` dependency resolved to an in-memory mock on Windows, never touching real OS storage) was found, fixed, and proven via a real, CI-executed, `#[ignore]`-gated cross-process integration test against the actual Windows Credential Manager. **Fresh-Machine Validation** is no longer a single ambiguous `PENDING`: the Final RC Ambiguity Resolution pass split it by topology (§5.10) — Windows desktop **PASS** and Docker **PASS** (both continuously exercised by CI on fresh runners), with only the bare/server case **DEFERRED / POST-RC**, since that topology is not part of the RC distribution scope. Every owner decision is now recorded with exactly one definitive status in §3; none remains "open".
 
@@ -390,6 +391,45 @@ No changes were made to the workflows' scope, triggers, or non-goals as part of 
 **Scope boundaries of this work package** (each now carries exactly one definitive status):
 - **macOS/Linux native credential-store parity** — **DEFERRED / FUTURE PLATFORM EXPANSION**, tracked with OD-DI-3 (§5.8). Only Windows is a released desktop target; `apple-native`/`linux-native` keyring features are deliberately not enabled, so no unsupported platform claim is made.
 - **OD-2 (Docker secret-persistence parity)** — **DEFERRED / POST-RC**, definitively resolved in §3. A container has no user-session credential store to bind to; Docker's accepted fail-closed operator-supplied-secret model is the appropriate v1 mechanism. This is a different question from the desktop-side defect this work package fixed.
+
+### 5.12 Integration Hub M1 — MCP Foundation + Capability Projection Bridge — ACCEPTED / COMPLETE (PRE-EXISTING CI DEFECT DEFERRED)
+
+**Status**: **M1 — ACCEPTED / COMPLETE (PRE-EXISTING CI DEFECT DEFERRED)**
+
+**Formal acceptance record**:
+- **Chief Architect decision**: Integration Hub M1 is formally **ACCEPTED** by Chief Architect KASHAN.
+- **Accepted implementation commits**:
+  - `da93c646aae182e2278b5ad8b82c8cce1e896048` (`feat(connector): implement Integration Hub M1 MCP foundation and capability projection bridge`)
+  - `79040e9270cdf87b0bc616b6f84f2cd8679d0f72` (`test(connector): include connector-mcp in production driver set assertions`)
+- **Parent baseline commit**: `63460cb792222ab2796615afbb9498dd6f389ed` (completed Visual Workflow Canvas + Manual Builder milestone).
+- **Immutable Release Candidate tag**: `v1.0.0-rc.1` (`9d68ec7c262c4b0085bf7adf056855082e4759fe`) preserved untouched.
+- **Components Delivered & Accepted**:
+  - `McpConnectorDriver` (`backend/src/kortex/engines/connector/drivers/mcp_driver.py`): Official Python MCP SDK client transport (`mcp>=1.2.0`), tenant-scoped connection pooling, Streamable HTTP primary transport, Bearer authentication injection via `SecretStore`, dynamic schema translation from `tools/list` to `parameters_schema`.
+  - `RegistryEngine` capability metadata projection (`backend/src/kortex/engines/registry/engine.py`): Dynamic registration of `kortex.mcp.<profile_id>.<tool_name>` capabilities with `provider="mcp.<profile_id>"` and `profile_id` tracking.
+  - `CapabilityProjection` bridge: Strict tenant isolation ensuring dynamically projected MCP capabilities are discovered and invokable only by the owning tenant.
+  - Desktop Connections UI (`apps/desktop/src/features/connectors/components/McpConnectionForm.tsx`): Streamable HTTP connection modal, token credentials, and profile lifecycle integration.
+  - Visual Builder Palette (`apps/desktop/src/features/workflows/components/builder/CapabilityPalette.tsx`): Discovered `kortex.mcp.*` capabilities unlocked for visual workflow authoring.
+
+**Verification & CI Status**:
+- **M1 implementation**: **COMPLETE**
+- **M1 acceptance**: **ACCEPTED**
+- **Desktop CI**: **GREEN** (`pnpm test` 575/575 passed, `cargo check` clean, Vitest passed)
+- **M1-specific tests**: **PASS** (32/32 tests passed: 24 unit tests in `test_mcp_driver.py`, 8 integration tests in `test_mcp_integration_slice.py`, plus frontend component tests in `McpConnectionForm.test.tsx` and `CapabilityPalette.test.tsx`)
+- **Backend full suite**: **1 pre-existing failure** (3,989 passed, 2 skipped, 1 failed out of 3,992 tests)
+- **Overall repository CI**: **NOT GREEN** due to pre-existing workflow durability defect (`DEFECT-002`)
+
+**Pre-Existing Baseline Defect Classification & Deferred Status**:
+1. **Defect**: An optimistic-lock concurrency race condition exists in the workflow durability restart recovery mechanism:
+   - **Exact test**: `tests/unit/test_workflow_durability.py::test_restart_recovery_ready_and_approved_workflows`
+   - **Observed failure**: `WorkflowStateConflictError` followed by `assert engine.get_instance(inst_ready.id).state == WorkflowState.COMPLETED` (observed actual: `WorkflowState.RUNNING`)
+2. **Baseline Reproduction**: Reproduces on the M1 parent baseline commit `63460cb792222ab2796615afbb9498dd6f389ed`.
+3. **Current Commit Reproduction**: Also reproduces on current M1 commit `79040e9270cdf87b0bc616b6f84f2cd8679d0f72`.
+4. **Classification**: **PRE-EXISTING BASELINE DEFECT**. It is definitively **NOT an M1 regression**.
+5. **Scope Ownership**: Owned exclusively by Workflow Engine (`kortex.engines.workflow`), Durability and StorageEngine persistence layer. It is outside Integration Hub M1 architectural scope. M1 touched zero lines of workflow or durability code.
+6. **Deferred Status**: Deferred for a separate, dedicated workflow-engine durability investigation.
+7. **Integrity Rule**: It must **NOT** be silently treated as an M1 failure, nor can M1 acceptance be withheld due to it.
+8. **Resolution Rule**: It must **NOT** be silently treated as resolved or suppressed.
+9. **CI State**: It remains a known CI failure (tracked as `DEFECT-002` in `docs/release/rc-testing/KNOWN_FINDINGS.md`) until separately corrected and verified by workflow-engine owners.
 
 ## 6. Critical Path (PROPOSED SEQUENCING — not roadmap text)
 

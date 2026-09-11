@@ -159,3 +159,21 @@ Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatch
 - [x] Closed a telemetry asymmetry: a successful AI tool invocation now publishes a domain event (`AIToolCompletedEvent`) and increments an exporter counter, matching `emit_tool_failed`/`emit_tool_denied`'s existing behavior — previously a successful completion's already-computed latency was recorded only into internal diagnostics, invisible to telemetry subscribers/exporters.
 - [x] No new throttling mechanism, no AI tool consolidation, no desktop change, no Marketplace/business-module/RecipeEngine work — the existing `TenantConcurrencyThrottler` remains the sole, unmodified, authoritative tenant-concurrency mechanism, now applied uniformly.
 - See `docs/architecture/m7.6_ai_execution_control_plane_hardening_implementation_report.md` for the full certification report.
+
+## Integration Hub track — M1: MCP Foundation + Capability Projection Bridge
+
+**Status**: M1 — ACCEPTED / COMPLETE (PRE-EXISTING CI DEFECT DEFERRED)
+
+- [x] Streamable HTTP MCP Client Transport (`kortex.engines.connector.drivers.mcp_driver.McpConnectorDriver`) — official Python MCP SDK integration (`mcp>=1.2.0`), tenant-scoped connection lifecycle and connection pool, persistent streamable HTTP transport sessions, Bearer token credential resolution via `SecretStore` without credential leakage across tenants.
+- [x] Dynamic Capability Registration & Schema Mapping — maps MCP `tools/list` response to KORTEX `CapabilityDescriptor` records (`kortex.mcp.<profile_id>.<tool_name>`), registered dynamically into `RegistryEngine`.
+- [x] Tenant-Scoped Capability Projection Bridge — `CapabilityProjection` filters dynamically registered MCP capabilities strictly by owning `tenant_id`, ensuring tenant isolation across discovery and invocation.
+- [x] Desktop Connections UI Integration — "Add MCP Server" modal form (`McpConnectionForm.tsx`) in Desktop Connectors tab, supporting Streamable HTTP endpoint configuration and write-only credential entry.
+- [x] Visual Workflow Canvas Palette Integration — `CapabilityPalette.tsx` updated to allow dynamically discovered `kortex.mcp.*` capabilities for visual workflow authoring.
+- [x] Acceptance & CI Reconciliation:
+  - **M1 implementation**: COMPLETE (`da93c64`, `79040e9`)
+  - **M1 acceptance**: ACCEPTED by Chief Architect
+  - **Desktop CI**: GREEN (`pnpm test`, `cargo check`, Vitest all passing)
+  - **M1-specific tests**: PASS (32/32 tests: 24 unit in `test_mcp_driver.py`, 8 integration in `test_mcp_integration_slice.py`, plus frontend component tests)
+  - **Backend full suite**: 1 pre-existing failure (`test_restart_recovery_ready_and_approved_workflows`)
+  - **Overall repository CI**: NOT GREEN due to pre-existing workflow durability defect (`DEFECT-002`, optimistic-lock race condition on durability restart recovery). Classified as PRE-EXISTING BASELINE DEFECT, reproduced on baseline `63460cb`, deferred for separate workflow durability investigation. See `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md` §5.12 and `docs/release/rc-testing/KNOWN_FINDINGS.md` DEFECT-002.
+

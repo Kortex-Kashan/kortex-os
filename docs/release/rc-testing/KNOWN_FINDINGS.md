@@ -124,3 +124,56 @@ Deliberately. Which parser is authoritative — and therefore whether the fix be
 | **Classification** | PRE-EXISTING |
 
 Importing `kortex.engines.security.models` as the first KORTEX import raises `ImportError: cannot import name 'AccessDecision' ... (most likely due to a circular import)`. Importing `kortex.core` first resolves it. The repository's own tests never hit this because they import the app/kernel first. `seed_rc_dataset.py` documents and works around it. No product impact — the running application is unaffected. Not corrected here.
+
+---
+
+## DEFECT-002 — Workflow durability restart recovery optimistic-lock race condition
+
+| Field | Value |
+|---|---|
+| **ID** | DEFECT-002 |
+| **Severity** | **P2 — Medium** (deterministic CI blocker for backend full suite) |
+| **Classification** | **PRE-EXISTING BASELINE DEFECT** (not an M1 regression) |
+| **Type** | Concurrency / Optimistic-Lock Race / State Machine Recovery Conflict |
+| **Exact Test** | `tests/unit/test_workflow_durability.py::test_restart_recovery_ready_and_approved_workflows` |
+| **Exact Failure** | `WorkflowStateConflictError` followed by assertion failure `assert WorkflowState.RUNNING == WorkflowState.COMPLETED` |
+| **Baseline Commit** | `63460cb792222ab2796615afbb9498dd6f389ed` (reproduced on M1 parent baseline) |
+| **M1 Commit** | `79040e9270cdf87b0bc616b6f84f2cd8679d0f72` (also reproduces on current M1 commit) |
+| **Scope Ownership** | Workflow Engine (`kortex.engines.workflow`) / Durability & Persistence layer |
+| **Status** | **DEFERRED** (deferred for separate workflow-engine durability investigation; outside Integration Hub M1 scope) |
+
+### Summary
+
+During execution of the backend test suite, `tests/unit/test_workflow_durability.py::test_restart_recovery_ready_and_approved_workflows` fails when attempting restart recovery of ready and approved workflows. An optimistic-lock concurrency conflict (`WorkflowStateConflictError`) occurs in the workflow engine durability recovery path, leaving the instance in state `RUNNING` rather than transitioning cleanly to `COMPLETED`.
+
+### Observed Behavior
+
+```
+WorkflowStateConflictError: Workflow instance <id> version conflict: expected version X, found version Y
+...
+assert engine.get_instance(inst_ready.id).state == WorkflowState.COMPLETED
+where WorkflowState.RUNNING = <WorkflowInstance ...>.state
+```
+
+### Root Cause / Race Analysis
+
+An optimistic-locking race condition exists in the workflow durability recovery mechanism (`kortex.engines.workflow.persistence` and `WorkflowEngine.recover_workflows_on_boot` / execution state transitions). When ready and approved workflows are swept during engine restart recovery, concurrent or interleaved updates to workflow instance state cause a version mismatch / optimistic lock conflict (`WorkflowStateConflictError`). As a consequence, the workflow instance does not complete its lifecycle transition, and its persisted state remains `RUNNING` instead of reaching `COMPLETED`.
+
+### Baseline Reproduction Evidence
+
+This defect is formally classified as a **PRE-EXISTING BASELINE DEFECT**:
+1. **M1 Parent Baseline (`63460cb792222ab2796615afbb9498dd6f389ed`)**: The exact failure reproduces deterministically on the baseline commit prior to any Integration Hub M1 changes.
+2. **Current M1 Commit (`79040e9270cdf87b0bc616b6f84f2cd8679d0f72`)**: The failure reproduces identically on GitHub Actions CI and local testing.
+3. **Not an M1 Regression**: Integration Hub M1 scope was strictly additive (`connector-mcp` driver, MCP client transport, tenant-scoped capability projection metadata in `RegistryEngine`, and desktop Connections UI / Palette). Zero lines of code in `WorkflowEngine`, `StorageEngine`, `persistence.py`, `executor.py`, or `test_workflow_durability.py` were modified.
+4. **Scope Ownership**: Owned exclusively by the Workflow Engine infrastructure team. It is outside the architectural boundary of Integration Hub M1.
+
+### Governance & Acceptance Rules
+
+Per Chief Architect decision:
+- **Do NOT fix this defect under Integration Hub M1.**
+- This defect is **DEFERRED** for a separate, dedicated workflow-engine durability investigation.
+- It must **NOT** be silently treated as an M1 failure.
+- It must **NOT** be silently treated as resolved.
+- It remains an active, known CI failure until separately corrected and verified.
+- Integration Hub M1 milestone status is formally: **M1 — ACCEPTED / COMPLETE with PRE-EXISTING CI DEFECT DEFERRED**.
+- Overall repository CI status: **NOT GREEN** due to this pre-existing workflow durability defect (Desktop CI: GREEN, M1 tests: PASS, Backend full suite: 1 pre-existing failure).
