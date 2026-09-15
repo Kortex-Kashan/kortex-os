@@ -42,9 +42,10 @@ import logging
 import secrets as secrets_module
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kortex.engines.security.exceptions import (
@@ -283,7 +284,7 @@ class IntegrationOAuthManager:
             )
             result = await session.execute(stmt)
             await session.flush()
-            return result.rowcount or 0
+            return cast(CursorResult[Any], result).rowcount or 0
 
         consumed_count = await self._data_store.execute_in_transaction(_consume_nonce)
         if consumed_count != 1:
@@ -451,7 +452,7 @@ class IntegrationOAuthManager:
                 )
                 result = await session.execute(stmt)
                 await session.flush()
-                return result.rowcount or 0
+                return cast(CursorResult[Any], result).rowcount or 0
 
             rows_updated = await self._data_store.execute_in_transaction(_persist_rotation)
             if rows_updated == 1:
@@ -480,9 +481,7 @@ class IntegrationOAuthManager:
     async def get_status(self, provider: str, tenant_id: str, profile_id: str) -> dict[str, Any]:
         record = await self._load_record(tenant_id, profile_id)
         if record is None or record.provider != provider:
-            raise IntegrationCredentialNotFoundError(
-                f"No '{provider}' integration is connected for this profile."
-            )
+            raise IntegrationCredentialNotFoundError(f"No '{provider}' integration is connected for this profile.")
         return {
             "connected": record.status == IntegrationCredentialStatus.CONNECTED,
             "status": record.status,

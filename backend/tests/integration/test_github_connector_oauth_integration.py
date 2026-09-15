@@ -84,7 +84,9 @@ class _MockStreamResponse:
 
 
 @pytest.fixture
-async def github_kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, ConnectorEngine, FakeIntegrationOAuthProvider]]:
+async def github_kernel_env(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[Kernel, ConnectorEngine, FakeIntegrationOAuthProvider]]:
     db_path = (tmp_path / f"kortex_m2_github_{uuid4().hex[:8]}.db").as_posix()
     db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_path}")
     await db_manager.connect()
@@ -198,7 +200,7 @@ async def _connect_github_profile(kernel: Kernel, tenant_id: str, profile_id: st
 async def test_full_connect_dispatch_disconnect_chain(
     github_kernel_env: tuple[Kernel, ConnectorEngine, FakeIntegrationOAuthProvider],
 ) -> None:
-    kernel, connector_engine, provider = github_kernel_env
+    kernel, _connector_engine, _provider = github_kernel_env
     await _connect_github_profile(kernel, _TENANT_A, "gh-prof-1")
 
     # The dynamically-registered capability exists and is dispatchable.

@@ -95,13 +95,12 @@ ISSUES_LIST_ACTION = ConnectorActionDescriptor(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "The complete GitHub API issues-list URL, "
-                    "e.g. 'https://api.github.com/repos/owner/repo/issues'."
+                    "The complete GitHub API issues-list URL, e.g. 'https://api.github.com/repos/owner/repo/issues'."
                 ),
             },
             "params": {
                 "type": "object",
-                "description": "Optional query parameters, e.g. {\"state\": \"open\"}.",
+                "description": 'Optional query parameters, e.g. {"state": "open"}.',
             },
         },
         "required": ["url"],
@@ -130,7 +129,7 @@ ISSUE_CREATE_ACTION = ConnectorActionDescriptor(
             },
             "body": {
                 "type": "object",
-                "description": "The issue payload, e.g. {\"title\": \"...\", \"body\": \"...\"}.",
+                "description": 'The issue payload, e.g. {"title": "...", "body": "..."}.',
             },
         },
         "required": ["url", "body"],

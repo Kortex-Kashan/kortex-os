@@ -60,13 +60,13 @@ class IIntegrationOAuthProvider(Protocol):
         """Build the provider's authorization redirect URL for `state`/`redirect_uri`."""
         ...
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> "IntegrationTokenSet":
+    async def exchange_code(self, code: str, redirect_uri: str) -> IntegrationTokenSet:
         """Exchange an authorization `code` for a full token set. Raises
         `OAuthExchangeError` on any exchange failure — never returns a
         partially-populated or guessed token set."""
         ...
 
-    async def refresh(self, refresh_token: str) -> "IntegrationTokenSet":
+    async def refresh(self, refresh_token: str) -> IntegrationTokenSet:
         """Exchange a `refresh_token` for a new token set.
 
         Raises `OAuthRefreshInvalidError` specifically when the provider

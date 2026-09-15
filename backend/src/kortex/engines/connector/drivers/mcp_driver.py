@@ -106,7 +106,7 @@ class McpConnectorDriver(BaseConnectorDriver):
     def __init__(
         self,
         registry_engine: RegistryEngine | None = None,
-        secret_resolver: Callable[[str, str], Any] | None = None,
+        secret_resolver: Callable[[str, str, str], Any] | None = None,
     ) -> None:
         self._registry_engine = registry_engine
         self._secret_resolver = secret_resolver
@@ -119,7 +119,7 @@ class McpConnectorDriver(BaseConnectorDriver):
         """Set or update the global RegistryEngine reference."""
         self._registry_engine = registry_engine
 
-    def set_secret_resolver(self, secret_resolver: Callable[[str, str], Any]) -> None:
+    def set_secret_resolver(self, secret_resolver: Callable[[str, str, str], Any]) -> None:
         """Set or update the tenant-scoped secret resolver callback."""
         self._secret_resolver = secret_resolver
 
@@ -553,7 +553,14 @@ class McpConnectorDriver(BaseConnectorDriver):
 
         secret_token: str | None = None
         if profile.secret_handle and self._secret_resolver:
-            secret_token = await self._secret_resolver(profile.secret_handle, tenant_id)
+            # Integration Hub M2: third `profile_id` argument, mirroring
+            # `ConnectorPipeline.execute()`'s identical fix — the production
+            # resolver (`IntegrationOAuthManager.resolve_access_token`) binds
+            # resolution to the exact profile; a plain MCP secret is
+            # unaffected (the parameter is ignored for a non-OAuth-managed
+            # handle), but the resolver must still receive it, or GitHub-style
+            # binding checks upstream would break this call outright.
+            secret_token = await self._secret_resolver(profile.secret_handle, tenant_id, profile.profile_id)
 
         max_retries = 3
         initial_delay = 1.0

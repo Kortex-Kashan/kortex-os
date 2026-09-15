@@ -25,11 +25,8 @@ implementation of the `ISecurityEngine` protocol.
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from kortex.core.base_engine import BaseEngine, EngineState
@@ -56,6 +53,7 @@ from kortex.engines.security.exceptions import (
     SecurityEngineError,
     SigningKeyError,
 )
+from kortex.engines.security.integration_oauth_manager import IntegrationOAuthManager
 from kortex.engines.security.interfaces import (
     ICryptoProvider,
     IEngineDiagnostics,
@@ -69,7 +67,6 @@ from kortex.engines.security.models import (
     SecretEntry,
     SecurityPrincipal,
 )
-from kortex.engines.security.integration_oauth_manager import IntegrationOAuthManager
 from kortex.engines.security.oauth.base import IIntegrationOAuthProvider, IOAuthProvider
 from kortex.engines.security.oauth.github_provider import GitHubIntegrationOAuthProvider
 from kortex.engines.security.oauth.google_provider import GoogleOAuthProvider

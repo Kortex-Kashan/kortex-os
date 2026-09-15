@@ -21,10 +21,6 @@ from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.container import Container
 from kortex.engines.connector.diagnostics import ConnectorDiagnostics
 from kortex.engines.connector.drivers.mcp_driver import McpConnectorDriver
-from kortex.engines.connector.github_actions import (
-    register_github_profile_capabilities,
-    unregister_github_profile_capabilities,
-)
 from kortex.engines.connector.events import (
     ConnectorActionCompletedEvent,
     ConnectorActionFailedEvent,
@@ -35,6 +31,10 @@ from kortex.engines.connector.events import (
 from kortex.engines.connector.exceptions import (
     ConnectorProfileNotFoundError,
     ConnectorSecurityError,
+)
+from kortex.engines.connector.github_actions import (
+    register_github_profile_capabilities,
+    unregister_github_profile_capabilities,
 )
 from kortex.engines.connector.interfaces import (
     IBaseConnectorDriver,
