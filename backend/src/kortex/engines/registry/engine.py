@@ -131,6 +131,10 @@ _CAPABILITY_RISK_CLASSIFICATION: dict[str, tuple[bool, bool]] = {
     "kortex.connector.action.execute": (False, False),
     "kortex.connector.driver.list": (True, True),
     "kortex.connector.driver.register": (False, False),
+    # Deliberately idempotent (Integration Hub M2): calling disconnect twice,
+    # or on a profile whose integration was never fully connected, is a
+    # no-op success, not an error — see `ConnectorEngine.disconnect_integration`.
+    "kortex.connector.integration.disconnect": (False, True),
     "kortex.connector.profile.delete": (False, False),
     "kortex.connector.profile.get": (True, True),
     "kortex.connector.profile.list": (True, True),
@@ -206,6 +210,9 @@ _CAPABILITY_RISK_CLASSIFICATION: dict[str, tuple[bool, bool]] = {
     "kortex.security.auth.request_password_reset": (False, False),
     "kortex.security.auth.reset_password": (False, False),
     "kortex.security.bootstrap.create_admin": (False, False),
+    "kortex.security.integration_oauth.begin": (False, False),
+    "kortex.security.integration_oauth.complete": (False, False),
+    "kortex.security.integration_oauth.status": (True, True),
     "kortex.security.oauth.get_config": (True, True),
     "kortex.security.oauth.link_begin": (False, False),
     "kortex.security.oauth.link_complete": (False, False),

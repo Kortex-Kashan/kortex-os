@@ -201,3 +201,45 @@ class CryptoProviderError(SecurityEngineError):
 
 class AuditError(SecurityEngineError):
     """Raised when an audit log recording, persistence, or querying operation fails."""
+
+
+# -- Integration OAuth (Integration Hub M2) ----------------------------------
+#
+# Distinct from Phase A's SSO `OAuthStateError`/`OAuthExchangeError` above:
+# those authenticate a *sign-in*; these authorize linking a third-party API
+# integration (e.g. GitHub) to an already-authenticated tenant/profile.
+# `IntegrationOAuthManager` still reuses `AuthenticationManager.issue_oauth_state`/
+# `verify_oauth_state` for the underlying signature/expiry check (raising the
+# existing `OAuthStateError` for a tampered/expired `state`) — the exceptions
+# below cover only what is genuinely new: single-use replay, credential
+# binding, and GitHub's own refresh-token lifecycle.
+
+
+class IntegrationOAuthReplayError(AuthenticationError):
+    """Raised when a `state` parameter presented to `complete_authorization`
+    has already been consumed (or was never issued) — the atomic single-use
+    ledger (`OAuthStateNonceRecord`) rejected it. Deliberately worded
+    identically regardless of "already used" vs. "never existed", matching
+    this module's existing enumeration-resistance precedent
+    (`PasswordResetError`)."""
+
+
+class IntegrationCredentialNotFoundError(SecurityEngineError):
+    """Raised when no `OAuthIntegrationCredentialRecord` exists for the
+    requested `(tenant_id, profile_id[, provider])`."""
+
+
+class IntegrationCredentialBindingError(SecurityEngineError):
+    """Raised internally when a `ConnectorProfile.secret_handle` does not
+    match the authoritative handle on file for that profile's
+    `OAuthIntegrationCredentialRecord` — never surfaced with details that
+    would help an attacker distinguish "wrong handle" from "no such
+    profile"."""
+
+
+class OAuthRefreshInvalidError(SecurityEngineError):
+    """Raised by an `IIntegrationOAuthProvider.refresh()` implementation when
+    the provider rejects the refresh token itself (e.g. GitHub's
+    `bad_refresh_token`) — distinguishes "reauthorization is required" from a
+    transient network/provider failure. Never includes the refresh token in
+    its message."""

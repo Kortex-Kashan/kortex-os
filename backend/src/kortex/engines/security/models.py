@@ -167,6 +167,12 @@ class OAuthStatePayload(BaseModel):
     tenant_id: str | None = None
     principal_id: str | None = None
     principal_type: str | None = None
+    # Integration Hub M2 (`intent="connector_link"` only): the `ConnectorProfile`
+    # this flow is linking credentials for. `None` for every pre-existing
+    # intent ("login"/"link"), which never set it and are unaffected —
+    # included in the signed payload (see `_build_oauth_state_signing_payload`)
+    # so a captured state cannot be replayed against a different profile.
+    profile_id: str | None = None
     issued_at_utc: datetime
     expires_at_utc: datetime
     signature: bytes | None = Field(default=None, description="Detached Ed25519 signature. Never trusted unread.")
@@ -394,6 +400,98 @@ class UniversalAuditEntry(BaseModel):
     new_state_hash: str | None = Field(default=None, description="SHA256 content hash of resource after action.")
     client_ip: str | None = Field(default=None, description="Optional client IP or node location.")
     context: dict[str, Any] = Field(default_factory=dict, description="Structured execution context data.")
+
+
+class IntegrationTokenSet(BaseModel):
+    """The full token response from an `IIntegrationOAuthProvider` — a code
+    exchange or a refresh (Integration Hub M2).
+
+    Unlike SSO's `OAuthUserInfo` (identity only), this carries everything
+    needed to make later authenticated API calls on the tenant's behalf and
+    to manage the token's own lifecycle. Every field GitHub's token endpoint
+    may omit maps to `None` here — never defaulted or guessed (e.g. a
+    classic, non-expiring GitHub OAuth App token legitimately has
+    `access_token_expires_at=None` and `refresh_token=None`).
+    """
+
+    access_token: str = Field(min_length=1)
+    refresh_token: str | None = None
+    access_token_expires_at: datetime | None = None
+    refresh_token_expires_at: datetime | None = None
+    scope: str | None = None
+    token_type: str | None = None
+
+
+class IntegrationCredentialStatus(str, Enum):
+    """Lifecycle status of an `OAuthIntegrationCredentialRecord`."""
+
+    CONNECTED = "CONNECTED"
+    REAUTHORIZATION_REQUIRED = "REAUTHORIZATION_REQUIRED"
+    REVOKED = "REVOKED"
+
+
+class OAuthIntegrationCredentialRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for one connected third-party integration's OAuth
+    credential (Integration Hub M2).
+
+    `(tenant_id, profile_id)` is the authoritative identity boundary — never
+    `secret_handle` alone (see `IntegrationOAuthManager.resolve_access_token`,
+    which looks up this record by `(tenant_id, profile_id)` first and only
+    trusts a caller-supplied `secret_handle` if it matches what is recorded
+    here). `secret_handle` is opaque (`secrets.token_urlsafe`-derived) and
+    never encodes `tenant_id`/`profile_id` itself — it exists solely as the
+    `SecretStore` lookup key for the encrypted `IntegrationTokenSet` JSON
+    blob.
+
+    Expiry metadata is duplicated here (alongside the encrypted blob) so it
+    can be read — e.g. by the `.status` capability — without a decrypt.
+    """
+
+    __tablename__ = "security_integration_oauth_credentials"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "profile_id", name="uq_integration_oauth_credential_tenant_profile"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    secret_handle: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=IntegrationCredentialStatus.CONNECTED)
+    scope: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    connected_at: Mapped[datetime] = mapped_column(nullable=False)
+    access_token_expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    refresh_token_expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # A short, non-secret fingerprint (sha256 hex) of the refresh token this
+    # record currently holds — used only for the optimistic compare-and-swap
+    # on rotation (`IntegrationOAuthManager`'s multi-process defense-in-depth
+    # alongside its primary in-process `asyncio.Lock`), never for
+    # authentication and never reversible to the token itself.
+    refresh_token_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class OAuthStateNonceRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for one issued, single-use Integration OAuth
+    `state` nonce (Integration Hub M2).
+
+    Existence of a row + `consumed_at IS NULL` is what makes a `state`
+    single-use — `OAuthStatePayload`'s own signature/expiry (verified via the
+    existing, unmodified `AuthenticationManager.verify_oauth_state`) proves
+    the claims are authentic and fresh, but says nothing about whether this
+    exact token has already been redeemed. Consumption
+    (`IntegrationOAuthManager.complete_authorization`) is a single atomic
+    `UPDATE ... SET consumed_at = :now WHERE nonce = :nonce AND consumed_at
+    IS NULL` — see that method's docstring for why this is replay-proof under
+    concurrent delivery, not merely "usually correct".
+    """
+
+    __tablename__ = "security_integration_oauth_state_nonces"
+
+    nonce: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class AuditRecord(SQLAlchemyBaseModel):

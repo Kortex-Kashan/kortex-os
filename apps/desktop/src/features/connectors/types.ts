@@ -48,6 +48,12 @@ export interface ConnectorProfile {
   isActive: boolean;
   rateLimitPerSec: number;
   maxRetries: number;
+  /** Integration Hub M2: set to a provider id (e.g. `"github"`) for a
+   * profile connected via `IntegrationOAuthManager` — `null` for every
+   * other connection (manual credential, MCP). Determines whether the UI
+   * offers "Disconnect" (revokes the OAuth credential too) or plain
+   * "Delete" (no credential of this kind to revoke). */
+  integrationProvider: string | null;
 }
 
 /** Payload for `registerConnectorProfile` — creates or updates a profile.

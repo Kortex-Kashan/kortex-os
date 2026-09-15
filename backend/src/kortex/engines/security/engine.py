@@ -69,9 +69,12 @@ from kortex.engines.security.models import (
     SecretEntry,
     SecurityPrincipal,
 )
-from kortex.engines.security.oauth.base import IOAuthProvider
+from kortex.engines.security.integration_oauth_manager import IntegrationOAuthManager
+from kortex.engines.security.oauth.base import IIntegrationOAuthProvider, IOAuthProvider
+from kortex.engines.security.oauth.github_provider import GitHubIntegrationOAuthProvider
 from kortex.engines.security.oauth.google_provider import GoogleOAuthProvider
 from kortex.engines.security.oauth.microsoft_provider import MicrosoftOAuthProvider
+from kortex.engines.security.oauth_state_codec import OAuthStateDecodeError, decode_oauth_state, encode_oauth_state
 from kortex.engines.security.providers.local_crypto import LocalCrypto
 from kortex.engines.security.secrets import SecretStore
 from kortex.engines.storage.interfaces import ICacheStore, IDataStore, IFileStore
@@ -113,6 +116,19 @@ _OAUTH_LINK_COMPLETE_CAPABILITY = "kortex.security.oauth.link_complete"
 _OAUTH_UNLINK_CAPABILITY = "kortex.security.oauth.unlink"
 _OAUTH_LIST_LINKS_CAPABILITY = "kortex.security.oauth.list_links"
 
+# Integration Hub M2: connecting a third-party API integration (GitHub) to a
+# `ConnectorProfile` — distinct from the Phase A `oauth.*` capabilities
+# above, which authenticate a KORTEX sign-in. Provider is a parameter here
+# (matching `oauth.login_begin/complete(provider, ...)`'s own convention),
+# never baked into the capability name — the M2 architecture correction
+# requires that discipline for these SecurityEngine-owned capabilities,
+# distinct from the connector-runtime capabilities in `ConnectorEngine`
+# (`kortex.connector.<profile_id>.<action>`), which are correctly
+# profile-scoped instead.
+_INTEGRATION_OAUTH_BEGIN_CAPABILITY = "kortex.security.integration_oauth.begin"
+_INTEGRATION_OAUTH_COMPLETE_CAPABILITY = "kortex.security.integration_oauth.complete"
+_INTEGRATION_OAUTH_STATUS_CAPABILITY = "kortex.security.integration_oauth.status"
+
 # Fixed, custom URL scheme the desktop app registers for the OAuth
 # authorization-code callback (Tauri deep link, `apps/desktop/src-tauri/`).
 # A single constant shared by every provider's `authorization_url()`/
@@ -150,6 +166,9 @@ _CANONICAL_CAPABILITIES: list[tuple[str, str]] = [
     (_OAUTH_LINK_COMPLETE_CAPABILITY, "Complete linking an OAuth identity to the caller's own account."),
     (_OAUTH_UNLINK_CAPABILITY, "Remove the caller's own linked OAuth identity for a provider."),
     (_OAUTH_LIST_LINKS_CAPABILITY, "List the caller's own linked OAuth providers."),
+    (_INTEGRATION_OAUTH_BEGIN_CAPABILITY, "Begin linking a third-party API integration to a connector profile."),
+    (_INTEGRATION_OAUTH_COMPLETE_CAPABILITY, "Complete linking a third-party API integration to a connector profile."),
+    (_INTEGRATION_OAUTH_STATUS_CAPABILITY, "Report a connector profile's third-party integration credential status."),
 ]
 
 # RBAC permission requirements per capability. `kortex.security.auth.authenticate`
@@ -189,6 +208,9 @@ _EXECUTION_CONTEXT_REQUIRED_CAPABILITIES = frozenset(
         _OAUTH_LINK_COMPLETE_CAPABILITY,
         _OAUTH_UNLINK_CAPABILITY,
         _OAUTH_LIST_LINKS_CAPABILITY,
+        _INTEGRATION_OAUTH_BEGIN_CAPABILITY,
+        _INTEGRATION_OAUTH_COMPLETE_CAPABILITY,
+        _INTEGRATION_OAUTH_STATUS_CAPABILITY,
     }
 )
 
@@ -245,6 +267,7 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         event_engine: EventEngine | None = None,
         email_provider: IEmailProvider | None = None,
         oauth_providers: dict[str, IOAuthProvider] | None = None,
+        integration_oauth_providers: dict[str, IIntegrationOAuthProvider] | None = None,
     ) -> None:
         """Initialize SecurityEngine instance.
 
@@ -274,6 +297,12 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                 `MICROSOFT_OAUTH_CLIENT_ID`/`_SECRET` during `initialize()`.
                 A provider is present in the resulting dict only when both
                 its client ID and secret are configured.
+            integration_oauth_providers: Optional explicit
+                `{provider_id: IIntegrationOAuthProvider}` injection
+                (Integration Hub M2), for deterministic tests — if omitted,
+                resolved from `GITHUB_OAUTH_CLIENT_ID`/`_SECRET` during
+                `initialize()`. Distinct from `oauth_providers` above (Phase
+                A sign-in identities vs. M2 third-party API integrations).
         """
         super().__init__()
         self._crypto_provider: ICryptoProvider = crypto_provider if crypto_provider is not None else LocalCrypto()
@@ -283,12 +312,16 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         self._event_engine_override: EventEngine | None = event_engine
         self._email_provider_override: IEmailProvider | None = email_provider
         self._oauth_providers_override: dict[str, IOAuthProvider] | None = oauth_providers
+        self._integration_oauth_providers_override: dict[str, IIntegrationOAuthProvider] | None = (
+            integration_oauth_providers
+        )
         self._secret_store: SecretStore | None = None
         self._authentication_manager: AuthenticationManager | None = None
         self._authorization_engine: AuthorizationEngine | None = None
         self._audit_manager: AuditManager | None = None
         self._email_provider: IEmailProvider | None = None
         self._oauth_providers: dict[str, IOAuthProvider] = {}
+        self._integration_oauth_manager: IntegrationOAuthManager | None = None
         # M7.1: bound `Kernel.list_capabilities` method only (never the full
         # `Kernel` instance) — the narrowest capture that lets
         # `bootstrap_create_admin` discover the union of every currently
@@ -349,6 +382,17 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         return self._secret_store
 
     @property
+    def integration_oauth_manager(self) -> IntegrationOAuthManager:
+        """Return the initialized `IntegrationOAuthManager` (Integration Hub M2).
+
+        Raises `SecurityEngineError` if accessed before `initialize()` has
+        completed.
+        """
+        if self._integration_oauth_manager is None:
+            raise SecurityEngineError("IntegrationOAuthManager is not initialized.")
+        return self._integration_oauth_manager
+
+    @property
     def audit_manager(self) -> AuditManager:
         """Return the initialized `AuditManager` (Milestone M6).
 
@@ -381,6 +425,12 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
             self._audit_manager = self._build_audit_manager(kernel)
             self._email_provider = self._build_email_provider(kernel)
             self._oauth_providers = self._build_oauth_providers(kernel)
+            self._integration_oauth_manager = IntegrationOAuthManager(
+                data_store=self._resolve_data_store(kernel),
+                secret_store=self._secret_store,
+                auth_manager=self._authentication_manager,
+                providers=self._build_integration_oauth_providers(kernel),
+            )
             self._list_capabilities = kernel.list_capabilities
 
             for capability_name, description in _CANONICAL_CAPABILITIES:
@@ -465,6 +515,15 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                 elif capability_name == _OAUTH_LIST_LINKS_CAPABILITY:
                     handler = self.oauth_list_links_capability
                     capability_description = f"{description} Self-service (Phase A)."
+                elif capability_name == _INTEGRATION_OAUTH_BEGIN_CAPABILITY:
+                    handler = self.integration_oauth_begin_capability
+                    capability_description = f"{description} Self-service (Integration Hub M2)."
+                elif capability_name == _INTEGRATION_OAUTH_COMPLETE_CAPABILITY:
+                    handler = self.integration_oauth_complete_capability
+                    capability_description = f"{description} Self-service (Integration Hub M2)."
+                elif capability_name == _INTEGRATION_OAUTH_STATUS_CAPABILITY:
+                    handler = self.integration_oauth_status_capability
+                    capability_description = f"{description} Self-service (Integration Hub M2)."
                 else:
                     handler = self._make_not_implemented_handler(capability_name)
                     capability_description = f"{description} NOT IMPLEMENTED."
@@ -595,6 +654,27 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         if microsoft_client_id and microsoft_client_secret:
             providers["microsoft"] = MicrosoftOAuthProvider(
                 client_id=microsoft_client_id, client_secret=microsoft_client_secret
+            )
+
+        return providers
+
+    def _build_integration_oauth_providers(self, kernel: Kernel) -> dict[str, IIntegrationOAuthProvider]:
+        """Resolve configured Integration OAuth providers (Integration Hub
+        M2) — same "present only when both client ID and secret are
+        configured" contract as `_build_oauth_providers` above, and a
+        distinct dict/config-key namespace from it (Phase A sign-in
+        identities vs. M2 third-party API integrations are never conflated).
+        """
+        if self._integration_oauth_providers_override is not None:
+            return self._integration_oauth_providers_override
+
+        providers: dict[str, IIntegrationOAuthProvider] = {}
+
+        github_client_id = kernel.get_config("GITHUB_OAUTH_CLIENT_ID")
+        github_client_secret = kernel.get_config("GITHUB_OAUTH_CLIENT_SECRET")
+        if github_client_id and github_client_secret:
+            providers["github"] = GitHubIntegrationOAuthProvider(
+                client_id=github_client_id, client_secret=github_client_secret
             )
 
         return providers
@@ -1265,38 +1345,20 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
         """Encode a signed `OAuthStatePayload` into the opaque string carried
         through the provider's `state` query parameter. Not itself a secret
         — its integrity comes entirely from the embedded Ed25519 signature,
-        verified on the way back in (`_decode_oauth_state` -> `verify_oauth_state`)."""
-        payload = {
-            "nonce": state.nonce,
-            "provider": state.provider,
-            "intent": state.intent,
-            "tenant_id": state.tenant_id,
-            "principal_id": state.principal_id,
-            "principal_type": state.principal_type,
-            "issued_at_utc": state.issued_at_utc.isoformat(),
-            "expires_at_utc": state.expires_at_utc.isoformat(),
-            "signature": state.signature.hex() if state.signature else None,
-        }
-        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        return base64.urlsafe_b64encode(raw).decode("ascii")
+        verified on the way back in (`_decode_oauth_state` -> `verify_oauth_state`).
+
+        Delegates to the shared `oauth_state_codec` module (Integration Hub
+        M2) so `IntegrationOAuthManager` round-trips the identical wire
+        format — including `profile_id`, which no Phase A intent sets —
+        without a second copy of this encoding.
+        """
+        return encode_oauth_state(state)
 
     @staticmethod
     def _decode_oauth_state(encoded: str) -> OAuthStatePayload:
         try:
-            raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
-            payload = json.loads(raw)
-            return OAuthStatePayload(
-                nonce=payload["nonce"],
-                provider=payload["provider"],
-                intent=payload["intent"],
-                tenant_id=payload.get("tenant_id"),
-                principal_id=payload.get("principal_id"),
-                principal_type=payload.get("principal_type"),
-                issued_at_utc=datetime.fromisoformat(payload["issued_at_utc"]),
-                expires_at_utc=datetime.fromisoformat(payload["expires_at_utc"]),
-                signature=bytes.fromhex(payload["signature"]) if payload.get("signature") else None,
-            )
-        except Exception as exc:
+            return decode_oauth_state(encoded)
+        except OAuthStateDecodeError as exc:
             raise OAuthStateError("This sign-in attempt is invalid or has expired.") from exc
 
     async def oauth_get_config_capability(self, **_extra: Any) -> dict[str, Any]:
@@ -1494,6 +1556,83 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
             tenant_id=caller.tenant_id, principal_id=caller.principal_id, principal_type=caller.principal_type.value
         )
         return {"providers": providers}
+
+    # -- Integration OAuth (Integration Hub M2: connecting a third-party API
+    # integration, e.g. GitHub, to a ConnectorProfile) — distinct from the
+    # Phase A `oauth.*` sign-in capabilities above. See
+    # `IntegrationOAuthManager` for the actual flow logic; these handlers
+    # only extract the caller's verified identity from `execution_context`
+    # and delegate, exactly like `oauth_link_begin/complete_capability`.
+
+    async def integration_oauth_begin_capability(
+        self,
+        provider: str,
+        profile_id: str,
+        redirect_uri: str,
+        execution_context: CapabilityExecutionContext | None = None,
+        **_extra: Any,
+    ) -> dict[str, Any]:
+        """Capability handler for `kortex.security.integration_oauth.begin`
+        (Integration Hub M2)."""
+        caller = execution_context.principal if execution_context is not None else None
+        if caller is None:
+            raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+
+        return await self.integration_oauth_manager.begin_authorization(
+            provider=provider,
+            tenant_id=caller.tenant_id,
+            profile_id=profile_id,
+            redirect_uri=redirect_uri,
+            principal_id=caller.principal_id,
+            principal_type=caller.principal_type.value,
+        )
+
+    async def integration_oauth_complete_capability(
+        self,
+        provider: str,
+        profile_id: str,
+        code: str,
+        state: str,
+        redirect_uri: str,
+        execution_context: CapabilityExecutionContext | None = None,
+        **_extra: Any,
+    ) -> dict[str, Any]:
+        """Capability handler for `kortex.security.integration_oauth.complete`
+        (Integration Hub M2). Identity comes exclusively from
+        `execution_context` — the signed `state`'s own embedded identity
+        must match it exactly (see `IntegrationOAuthManager.complete_authorization`'s
+        docstring for why this is a hard requirement here)."""
+        caller = execution_context.principal if execution_context is not None else None
+        if caller is None:
+            raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+
+        return await self.integration_oauth_manager.complete_authorization(
+            provider=provider,
+            profile_id=profile_id,
+            code=code,
+            state=state,
+            redirect_uri=redirect_uri,
+            tenant_id=caller.tenant_id,
+            principal_id=caller.principal_id,
+            principal_type=caller.principal_type.value,
+        )
+
+    async def integration_oauth_status_capability(
+        self,
+        provider: str,
+        profile_id: str,
+        execution_context: CapabilityExecutionContext | None = None,
+        **_extra: Any,
+    ) -> dict[str, Any]:
+        """Capability handler for `kortex.security.integration_oauth.status`
+        (Integration Hub M2)."""
+        caller = execution_context.principal if execution_context is not None else None
+        if caller is None:
+            raise AuthenticationError(_GENERIC_AUTH_FAILURE_MESSAGE)
+
+        return await self.integration_oauth_manager.get_status(
+            provider=provider, tenant_id=caller.tenant_id, profile_id=profile_id
+        )
 
     async def delete_secret(self, secret_handle: str, tenant_id: str) -> bool:
         """Delete a secret entry."""

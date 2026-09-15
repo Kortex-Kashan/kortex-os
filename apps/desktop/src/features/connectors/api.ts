@@ -112,9 +112,11 @@ interface RawConnectorProfile {
   is_active?: boolean;
   rate_limit_per_sec?: number;
   max_retries?: number;
+  options?: Record<string, unknown>;
 }
 
 function toConnectorProfile(raw: RawConnectorProfile): ConnectorProfile {
+  const integrationProvider = raw.options?.integration_provider;
   return {
     profileId: raw.profile_id,
     name: raw.name,
@@ -122,6 +124,7 @@ function toConnectorProfile(raw: RawConnectorProfile): ConnectorProfile {
     isActive: raw.is_active ?? true,
     rateLimitPerSec: raw.rate_limit_per_sec ?? 10.0,
     maxRetries: raw.max_retries ?? 3,
+    integrationProvider: typeof integrationProvider === "string" ? integrationProvider : null,
   };
 }
 
@@ -216,6 +219,61 @@ export async function deleteConnectorProfile(profileId: string): Promise<void> {
 
   if (envelope.status !== "SUCCESS") {
     throwForFailure(envelope, "Failed to delete the connection.");
+  }
+}
+
+const INTEGRATION_DISCONNECT_CAPABILITY = "kortex.connector.integration.disconnect";
+
+/**
+ * Registers a connector profile whose credential was already written by a
+ * completed Integration Hub M2 OAuth flow (`completeGitHubOAuth`) — unlike
+ * `registerConnectorProfile` above, `secretHandle` is the backend-issued
+ * opaque handle returned from that flow, passed straight through, never a
+ * client-derived string and never accompanied by a separate
+ * `kortex.security.secret.put` call (the secret is already written).
+ */
+export async function registerIntegrationConnectorProfile(
+  profileId: string,
+  name: string,
+  driverId: string,
+  secretHandle: string,
+  integrationProvider: string,
+  options?: Record<string, unknown>,
+): Promise<ConnectorProfile> {
+  const envelope = await invokeCapability({
+    requestId: crypto.randomUUID(),
+    capabilityName: PROFILE_REGISTER_CAPABILITY,
+    parameters: {
+      profile: {
+        profile_id: profileId,
+        name,
+        driver_id: driverId,
+        secret_handle: secretHandle,
+        options: { ...options, integration_provider: integrationProvider },
+      },
+    },
+  });
+
+  if (envelope.status !== "SUCCESS") {
+    throwForFailure(envelope, "Failed to create the connection.");
+  }
+  return toConnectorProfile(envelope.payload?.result as RawConnectorProfile);
+}
+
+/** Calls `kortex.connector.integration.disconnect` (Integration Hub M2) —
+ * the single, backend-authoritative operation that unregisters a profile's
+ * capabilities and revokes its credential together. Never call
+ * `deleteConnectorProfile` as a second, separate step for this purpose: the
+ * backend already deactivates the profile as part of this one call. */
+export async function disconnectIntegration(profileId: string): Promise<void> {
+  const envelope = await invokeCapability({
+    requestId: crypto.randomUUID(),
+    capabilityName: INTEGRATION_DISCONNECT_CAPABILITY,
+    parameters: { profile_id: profileId },
+  });
+
+  if (envelope.status !== "SUCCESS") {
+    throwForFailure(envelope, "Failed to disconnect the integration.");
   }
 }
 

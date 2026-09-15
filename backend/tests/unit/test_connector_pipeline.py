@@ -41,7 +41,7 @@ async def test_pipeline_execution_success() -> None:
 
     limiter = TokenBucketRateLimiter(default_capacity=10.0, default_refill_rate=10.0)
 
-    async def mock_secret_resolver(handle: str, tenant_id: str) -> str:
+    async def mock_secret_resolver(handle: str, tenant_id: str, profile_id: str) -> str:
         return f"resolved-secret-for-{handle}"
 
     pipeline = ConnectorPipeline(registry=reg, rate_limiter=limiter, secret_resolver=mock_secret_resolver)
@@ -97,7 +97,7 @@ async def test_pipeline_complete_credential_flow() -> None:
     secret_handle = "sec-vault-handle-1001"
     expected_resolved_token = "token_super_secret_xyz_777"
 
-    async def mock_secret_resolver(handle: str, tenant_id: str) -> str:
+    async def mock_secret_resolver(handle: str, tenant_id: str, profile_id: str) -> str:
         resolved_handles.append(handle)
         if handle == secret_handle:
             return expected_resolved_token
@@ -227,7 +227,7 @@ async def test_pipeline_secret_resolver_exception() -> None:
 
     raw_exception_text = "Internal vault secret_key_admin_super_secret_99"
 
-    async def broken_secret_resolver(handle: str, tenant_id: str) -> str:
+    async def broken_secret_resolver(handle: str, tenant_id: str, profile_id: str) -> str:
         raise RuntimeError(raw_exception_text)
 
     pipeline = ConnectorPipeline(registry=reg, secret_resolver=broken_secret_resolver)

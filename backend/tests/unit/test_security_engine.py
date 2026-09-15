@@ -66,6 +66,9 @@ _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.oauth.link_complete",  # Phase A
     "kortex.security.oauth.unlink",  # Phase A
     "kortex.security.oauth.list_links",  # Phase A
+    "kortex.security.integration_oauth.begin",  # Integration Hub M2
+    "kortex.security.integration_oauth.complete",  # Integration Hub M2
+    "kortex.security.integration_oauth.status",  # Integration Hub M2
 ]
 _STILL_PLACEHOLDER_CAPABILITY_NAMES = [
     "kortex.security.signature.verify",

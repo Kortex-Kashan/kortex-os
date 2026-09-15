@@ -21,6 +21,10 @@ from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.container import Container
 from kortex.engines.connector.diagnostics import ConnectorDiagnostics
 from kortex.engines.connector.drivers.mcp_driver import McpConnectorDriver
+from kortex.engines.connector.github_actions import (
+    register_github_profile_capabilities,
+    unregister_github_profile_capabilities,
+)
 from kortex.engines.connector.events import (
     ConnectorActionCompletedEvent,
     ConnectorActionFailedEvent,
@@ -67,9 +71,10 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         profile_manager: ConnectorProfileManager | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
         pipeline: ConnectorPipeline | None = None,
-        secret_resolver: Callable[[str, str], Awaitable[str | None]] | None = None,
+        secret_resolver: Callable[[str, str, str], Awaitable[str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
         data_store: IDataStore | None = None,
+        integration_credential_revoker: Callable[[str, str, str], Awaitable[bool]] | None = None,
     ) -> None:
         """Initialize ConnectorEngine with component dependencies.
 
@@ -79,14 +84,27 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
             rate_limiter: Optional TokenBucketRateLimiter instance.
             pipeline: Optional ConnectorPipeline instance.
             secret_resolver: Optional credential resolution async callback, taking
-                ``(secret_handle, tenant_id)`` and returning the resolved secret
-                value. Tenant-scoped so a resolved credential can never cross a
-                tenant boundary. If not supplied here, `initialize()` wires one
-                from the Kernel-registered Security Engine's secret store, the
-                same deferred-wiring pattern already used for Storage Engine
-                dependencies below.
+                ``(secret_handle, tenant_id, profile_id)`` and returning the
+                resolved secret value. Tenant-scoped so a resolved credential can
+                never cross a tenant boundary; `profile_id` (Integration Hub M2)
+                additionally lets a resolver bind resolution to the exact
+                profile it was issued to. If not supplied here, `initialize()`
+                wires one from the Kernel-registered Security Engine's
+                `IntegrationOAuthManager` (which itself passes a plain,
+                non-OAuth-managed secret through unchanged — MCP and any other
+                existing connector are unaffected), the same deferred-wiring
+                pattern already used for Storage Engine dependencies below.
             diagnostics: Optional ConnectorDiagnostics instance.
             data_store: Optional IDataStore instance from Storage Engine for execution history.
+            integration_credential_revoker: Optional async callback, taking
+                ``(tenant_id, profile_id, provider)`` and returning whether a
+                credential was actually revoked. Used exclusively by
+                `disconnect_integration()` (Integration Hub M2) to reach
+                `SecurityEngine`'s `IntegrationOAuthManager` without this
+                engine ever importing its internals directly — the same
+                injection style already used for `secret_resolver`. If not
+                supplied here, `initialize()` wires one from the
+                Kernel-registered Security Engine.
         """
         super().__init__()
         self._data_store = data_store
@@ -96,6 +114,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         )
         self._rate_limiter = rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
         self._secret_resolver = secret_resolver
+        self._integration_credential_revoker = integration_credential_revoker
         self._diagnostics = (
             diagnostics
             if diagnostics is not None
@@ -199,17 +218,27 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 # Wire the production secret resolver from the Kernel-registered
                 # Security Engine if the caller didn't already supply one (M6.0-2:
                 # this is the fix for connector actions with a real secret_handle
-                # failing "Secret resolver unavailable." in every prior boot path
-                # — SecurityEngine.get_secret(secret_handle, tenant_id) already
-                # matches this resolver's tenant-scoped (handle, tenant_id)
-                # contract exactly, so it's assigned directly, unwrapped).
+                # failing "Secret resolver unavailable." in every prior boot path).
+                # Integration Hub M2: resolves through `IntegrationOAuthManager.
+                # resolve_access_token(handle, tenant_id, profile_id)` rather than
+                # `SecurityEngine.get_secret` directly — it already implements the
+                # superset contract (passes a plain, non-OAuth secret through
+                # unchanged via `SecretStore.get_secret` internally, exactly as
+                # `get_secret` alone did before), so MCP and any other existing
+                # connector are unaffected, and an OAuth-managed GitHub secret
+                # additionally gets its (tenant_id, profile_id) binding check and
+                # expiry/refresh handling for free, with no second resolver path.
                 if self._secret_resolver is None and kernel.container.has("engine.security"):
                     try:
                         security_engine = kernel.container.resolve("engine.security")
                         if security_engine is not None:
-                            self._secret_resolver = security_engine.get_secret
+                            self._secret_resolver = security_engine.integration_oauth_manager.resolve_access_token
                             if self._pipeline._secret_resolver is None:
                                 self._pipeline._secret_resolver = self._secret_resolver
+                            if self._integration_credential_revoker is None:
+                                self._integration_credential_revoker = (
+                                    security_engine.integration_oauth_manager.disconnect_credential
+                                )
                     except Exception:
                         self.logger.debug(
                             "SecurityEngine not resolved from Kernel container; "
@@ -271,6 +300,16 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 description="Create or update a tenant-scoped connector profile (M7.3)",
                 provider=self.name,
                 handler=self.register_profile,
+                required_permissions=["connector:write"],
+            )
+            kernel.register_capability(
+                name="kortex.connector.integration.disconnect",
+                description=(
+                    "Disconnect a third-party integration profile (Integration Hub M2): "
+                    "unregisters its capabilities and revokes its credential in one call."
+                ),
+                provider=self.name,
+                handler=self.disconnect_integration,
                 required_permissions=["connector:write"],
             )
             kernel.register_capability(
@@ -609,6 +648,21 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         ):
             await self._mcp_driver.teardown_profile(profile.profile_id, tenant_id=profile.tenant_id)
 
+        # Integration Hub M2: a GitHub-linked profile (marked via
+        # `options.integration_provider`, since its `driver_id` stays the
+        # generic `connector-http-rest` — plain metadata, mirroring how
+        # `options.endpoint_url` already marks MCP profiles) gets its four
+        # curated capabilities registered/unregistered as it
+        # activates/deactivates, `owner_id=profile_id`, directly on
+        # `RegistryEngine` — same dynamic pattern as the MCP branch above.
+        if profile.options.get("integration_provider") == "github":
+            registry_engine = self._resolve_registry_engine()
+            if registry_engine is not None:
+                if profile.is_active:
+                    register_github_profile_capabilities(registry_engine, self, profile.profile_id)
+                else:
+                    unregister_github_profile_capabilities(registry_engine, profile.profile_id)
+
         return profile
 
     async def list_profiles(
@@ -649,7 +703,72 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         deleted = await self._profile_manager.delete_profile(profile_id)
         if deleted and profile.driver_id in ("connector-mcp", "kortex.mcp") and self._mcp_driver is not None:
             await self._mcp_driver.teardown_profile(profile_id, tenant_id=tid)
+        if deleted and profile.options.get("integration_provider") == "github":
+            registry_engine = self._resolve_registry_engine()
+            if registry_engine is not None:
+                unregister_github_profile_capabilities(registry_engine, profile_id)
         return deleted
+
+    def _resolve_registry_engine(self) -> RegistryEngine | None:
+        """Resolve the Kernel-registered `RegistryEngine`, or `None` if
+        unavailable (e.g. this engine was constructed in isolation for a
+        unit test with no Kernel) — callers treat that as "nothing to
+        register/unregister against" rather than raising, matching this
+        engine's existing tolerance for a missing Kernel context elsewhere
+        (`initialize()`'s own `contextlib.suppress(Exception)` around the
+        identical lookup for the MCP driver wiring)."""
+        if self._kernel is None:
+            return None
+        with contextlib.suppress(Exception):
+            return cast("RegistryEngine", self._kernel.get_engine("registry"))
+        return None
+
+    async def disconnect_integration(
+        self,
+        profile_id: str,
+        principal: SecurityPrincipal | None = None,
+    ) -> dict[str, Any]:
+        """Capability handler for `kortex.connector.integration.disconnect`
+        (Integration Hub M2).
+
+        Backend-authoritative, single-call, idempotent disconnect: unlike a
+        frontend sequencing two separate capability calls (which a crash or
+        a dropped second request could interrupt between), everything below
+        happens server-side inside this one handler invocation. Capability
+        unregistration happens **first, unconditionally** — the invariant
+        "successful disconnect -> no executable capabilities remain
+        registered for this profile" is satisfied by that step alone, before
+        credential revocation is even attempted, so a failure revoking the
+        credential never leaves a stale, still-dispatchable capability
+        behind. Revocation and profile deactivation are best-effort on top
+        of that already-satisfied guarantee.
+
+        Preserves engine ownership: this method (`ConnectorEngine`) is the
+        single orchestration point the frontend talks to, exactly as it
+        already is for every other `kortex.connector.profile.*` operation;
+        `SecurityEngine`'s `IntegrationOAuthManager` remains the sole owner
+        of credential state, reached only through the injected
+        `integration_credential_revoker` callable below, never a direct
+        import of its internals.
+        """
+        self.ensure_state(EngineState.READY, EngineState.RUNNING)
+        profile = await self.get_profile(profile_id, principal=principal)
+        tenant_id = principal.tenant_id if principal is not None else profile.tenant_id
+        provider = profile.options.get("integration_provider")
+
+        if provider:
+            registry_engine = self._resolve_registry_engine()
+            if registry_engine is not None:
+                unregister_github_profile_capabilities(registry_engine, profile.profile_id)
+
+        revoked = False
+        if provider and self._integration_credential_revoker is not None:
+            revoked = await self._integration_credential_revoker(tenant_id, profile.profile_id, provider)
+
+        with contextlib.suppress(Exception):
+            await self.register_profile(profile.model_copy(update={"is_active": False}), principal=principal)
+
+        return {"disconnected": True, "credential_revoked": revoked}
 
     # -- Internal Helper Methods --------------------------------------------
 

@@ -831,6 +831,7 @@ class AuthenticationManager(IAuthenticationManager):
             state.tenant_id or "",
             state.principal_id or "",
             state.principal_type or "",
+            state.profile_id or "",
             state.issued_at_utc.isoformat(),
             state.expires_at_utc.isoformat(),
         )
@@ -847,15 +848,22 @@ class AuthenticationManager(IAuthenticationManager):
         tenant_id: str | None = None,
         principal_id: str | None = None,
         principal_type: str | None = None,
+        profile_id: str | None = None,
     ) -> OAuthStatePayload:
         """Issue a short-lived (10-minute), signed OAuth `state` payload.
 
         Self-contained and self-validating, exactly like `issue_token` —
-        never persisted, never looked up server-side on the callback. For
-        `intent="link"`, `tenant_id`/`principal_id`/`principal_type` capture
-        the already-authenticated caller who initiated the flow, signed
-        alongside the rest of the payload so the callback cannot be
-        redirected to link a different principal than the one who started it.
+        never persisted, never looked up server-side on the callback (a
+        caller needing single-use/replay protection on top of this, such as
+        `IntegrationOAuthManager` for `intent="connector_link"`, layers its
+        own persisted nonce ledger on top; this method's own guarantee is
+        limited to "signature is valid and not expired"). For `intent="link"`
+        or `intent="connector_link"`, `tenant_id`/`principal_id`/
+        `principal_type` capture the already-authenticated caller who
+        initiated the flow, and `profile_id` (connector_link only) the
+        `ConnectorProfile` being linked — all signed alongside the rest of
+        the payload so the callback cannot be redirected to a different
+        principal, tenant, or profile than the one who started it.
         """
         issued_at_utc = datetime.now(UTC)
         state = OAuthStatePayload(
@@ -865,6 +873,7 @@ class AuthenticationManager(IAuthenticationManager):
             tenant_id=tenant_id,
             principal_id=principal_id,
             principal_type=principal_type,
+            profile_id=profile_id,
             issued_at_utc=issued_at_utc,
             expires_at_utc=issued_at_utc + _OAUTH_STATE_TTL,
         )

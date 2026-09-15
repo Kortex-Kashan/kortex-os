@@ -2,8 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ConnectorAccessDeniedError,
   deleteConnectorProfile,
+  disconnectIntegration,
   listConnectorProfiles,
   registerConnectorProfile,
+  registerIntegrationConnectorProfile,
 } from "../api";
 import type { CreateConnectionPayload } from "../types";
 
@@ -36,6 +38,51 @@ export function useDeleteConnectorProfile() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (profileId: string) => deleteConnectorProfile(profileId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: CONNECTOR_PROFILES_QUERY_KEY });
+    },
+  });
+}
+
+export interface RegisterIntegrationConnectionInput {
+  profileId: string;
+  name: string;
+  driverId: string;
+  secretHandle: string;
+  integrationProvider: string;
+  options?: Record<string, unknown>;
+}
+
+/** Integration Hub M2: registers a connector profile whose credential an
+ * OAuth flow (e.g. `completeGitHubOAuth`) already wrote — see
+ * `registerIntegrationConnectorProfile` in `api.ts` for why this is a
+ * distinct call from `useRegisterConnectorProfile` above. */
+export function useRegisterIntegrationConnectorProfile() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: RegisterIntegrationConnectionInput) =>
+      registerIntegrationConnectorProfile(
+        input.profileId,
+        input.name,
+        input.driverId,
+        input.secretHandle,
+        input.integrationProvider,
+        input.options,
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: CONNECTOR_PROFILES_QUERY_KEY });
+    },
+  });
+}
+
+/** Integration Hub M2: disconnects a connected integration in one
+ * backend-authoritative call (`kortex.connector.integration.disconnect`) —
+ * never followed by a separate `useDeleteConnectorProfile` call for this
+ * purpose (see `disconnectIntegration` in `api.ts`). */
+export function useDisconnectIntegration() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (profileId: string) => disconnectIntegration(profileId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: CONNECTOR_PROFILES_QUERY_KEY });
     },

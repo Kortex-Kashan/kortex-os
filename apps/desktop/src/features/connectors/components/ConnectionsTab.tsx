@@ -43,15 +43,17 @@ import { useConnectors } from "../hooks/useConnectors";
 import {
   useConnectorProfiles,
   useDeleteConnectorProfile,
+  useDisconnectIntegration,
   useRegisterConnectorProfile,
 } from "../hooks/useConnectorProfiles";
+import { GitHubConnectionForm } from "./GitHubConnectionForm";
 import { McpConnectionForm } from "./McpConnectionForm";
 import type { ConnectorProfile, CreateConnectionPayload } from "../types";
 
 export function ConnectionsTab() {
   const { data, isPending, isError, error, refetch, isFetching } = useConnectorProfiles();
   const [createOpen, setCreateOpen] = useState(false);
-  const [formMode, setFormMode] = useState<"standard" | "mcp">("standard");
+  const [formMode, setFormMode] = useState<"standard" | "mcp" | "github">("standard");
 
   if (isPending) {
     return <LoadingState />;
@@ -124,9 +126,20 @@ export function ConnectionsTab() {
             >
               MCP (Streamable HTTP)
             </Button>
+            <Button
+              type="button"
+              variant={formMode === "github" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setFormMode("github")}
+              data-testid="github-mode-button"
+            >
+              GitHub
+            </Button>
           </div>
           {formMode === "mcp" ? (
             <McpConnectionForm onSuccess={() => setCreateOpen(false)} onCancel={() => setCreateOpen(false)} />
+          ) : formMode === "github" ? (
+            <GitHubConnectionForm onSuccess={() => setCreateOpen(false)} onCancel={() => setCreateOpen(false)} />
           ) : (
             <CreateConnectionForm onSuccess={() => setCreateOpen(false)} onCancel={() => setCreateOpen(false)} />
           )}
@@ -190,6 +203,18 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 function ConnectionCard({ profile }: { profile: ConnectorProfile }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const deleteProfile = useDeleteConnectorProfile();
+  const disconnectIntegration = useDisconnectIntegration();
+  // Integration Hub M2: a connection with an `integrationProvider` (e.g.
+  // "github") was linked via `IntegrationOAuthManager` — disconnecting it
+  // must go through the single, backend-authoritative
+  // `kortex.connector.integration.disconnect` call (unregisters capabilities
+  // *and* revokes the credential together), never the plain
+  // `kortex.connector.profile.delete` this card uses for every other
+  // connection kind.
+  const isIntegration = profile.integrationProvider !== null;
+  const removeMutation = isIntegration ? disconnectIntegration : deleteProfile;
+  const actionLabel = isIntegration ? "Disconnect" : "Delete";
+  const actionInProgressLabel = isIntegration ? "Disconnecting…" : "Deleting…";
 
   return (
     <>
@@ -208,14 +233,16 @@ function ConnectionCard({ profile }: { profile: ConnectorProfile }) {
             variant="destructive"
             size="sm"
             onClick={() => setConfirmOpen(true)}
-            aria-label={`Delete connection ${profile.name}`}
+            aria-label={`${actionLabel} connection ${profile.name}`}
           >
-            Delete
+            {actionLabel}
           </Button>
         </div>
-        {deleteProfile.isError && (
+        {removeMutation.isError && (
           <p className="mt-2 text-caption text-destructive" role="alert">
-            {deleteProfile.error instanceof Error ? deleteProfile.error.message : "Failed to delete connection."}
+            {removeMutation.error instanceof Error
+              ? removeMutation.error.message
+              : `Failed to ${actionLabel.toLowerCase()} connection.`}
           </p>
         )}
       </li>
@@ -223,7 +250,9 @@ function ConnectionCard({ profile }: { profile: ConnectorProfile }) {
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete connection "{profile.name}"?</DialogTitle>
+            <DialogTitle>
+              {actionLabel} connection "{profile.name}"?
+            </DialogTitle>
             <DialogDescription>
               Anything relying on this connection — including AI Studio agents — will no longer be able to
               reach it. This cannot be undone.
@@ -234,19 +263,19 @@ function ConnectionCard({ profile }: { profile: ConnectorProfile }) {
               variant="outline"
               size="sm"
               onClick={() => setConfirmOpen(false)}
-              disabled={deleteProfile.isPending}
+              disabled={removeMutation.isPending}
             >
               Keep Connection
             </Button>
             <Button
               variant="destructive"
               size="sm"
-              disabled={deleteProfile.isPending}
+              disabled={removeMutation.isPending}
               onClick={() => {
-                void deleteProfile.mutateAsync(profile.profileId).then(() => setConfirmOpen(false));
+                void removeMutation.mutateAsync(profile.profileId).then(() => setConfirmOpen(false));
               }}
             >
-              {deleteProfile.isPending ? "Deleting…" : "Confirm Delete"}
+              {removeMutation.isPending ? actionInProgressLabel : `Confirm ${actionLabel}`}
             </Button>
           </DialogFooter>
         </DialogContent>

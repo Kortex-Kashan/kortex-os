@@ -177,3 +177,60 @@ Cross-cutting fix, not itself a numbered roadmap phase item: `CapabilityDispatch
   - **Backend full suite**: 1 pre-existing failure (`test_restart_recovery_ready_and_approved_workflows`)
   - **Overall repository CI**: NOT GREEN due to pre-existing workflow durability defect (`DEFECT-002`, optimistic-lock race condition on durability restart recovery). Classified as PRE-EXISTING BASELINE DEFECT, reproduced on baseline `63460cb`, deferred for separate workflow durability investigation. See `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md` §5.12 and `docs/release/rc-testing/KNOWN_FINDINGS.md` DEFECT-002.
 
+## Integration Hub track — M2: GitHub OAuth Connector
+
+**Status**: M2 — ACCEPTED / COMPLETE (2 PRE-EXISTING BASELINE DEFECTS DEFERRED)
+
+Second Integration Hub milestone, following M1's dynamic per-profile capability pattern
+(`kortex.mcp.<profile_id>.<tool_name>`) rather than F5's boot-time-fixed one — a connected
+GitHub profile registers/unregisters its own capabilities on connect/disconnect, exactly like
+an MCP profile does, with `owner_id = profile_id`. See
+`docs/architecture/integration_hub_m2_github_oauth_connector_implementation_report.md` for the
+full report, including the three rounds of architecture correction this milestone went through
+before implementation (capability identity, engine ownership, credential binding/state
+security/disconnect authority, and GitHub token-lifecycle handling).
+
+- [x] `IntegrationOAuthManager` (`kortex.engines.security.integration_oauth_manager`) —
+  SecurityEngine-owned OAuth begin/complete/status/disconnect-credential, GitHub token
+  refresh with mandatory rotation and per-`(tenant_id, profile_id)` synchronization,
+  `REAUTHORIZATION_REQUIRED` transition on an invalid/expired refresh token.
+- [x] `OAuthIntegrationCredentialRecord`/`OAuthStateNonceRecord` (`kortex.engines.security.models`)
+  — opaque `SecretStore` handle keyed by `(tenant_id, profile_id)` (never the reverse), atomic
+  single-use OAuth `state` consumption (`UPDATE ... WHERE consumed_at IS NULL`).
+- [x] `GitHubIntegrationOAuthProvider` (`kortex.engines.security.oauth.github_provider`) —
+  Authorization Code flow with `offline_access`, explicit non-expiring/no-refresh-token
+  compatibility.
+- [x] `kortex.security.integration_oauth.begin/complete/status` capabilities — hard
+  tenant/principal binding on complete, mirroring `oauth_link_complete_capability`'s existing
+  precedent over the identical desktop deep-link transport.
+- [x] GitHub curated actions (`kortex.engines.connector.github_actions`) — static descriptor
+  catalog (`user_get`, `repo_get`, `issues_list`, `issue_create`) reusing `actions.py`'s
+  `make_action_handler()` unmodified; dynamic per-profile registration/unregistration directly
+  on `RegistryEngine`, wired into `ConnectorEngine.register_profile()`/`delete_profile()`.
+- [x] `kortex.connector.integration.disconnect` — single, backend-authoritative, idempotent
+  capability: unregisters capabilities first, unconditionally, before revoking the credential,
+  so no frontend two-call sequence can leave a stale, dispatchable capability behind.
+- [x] `secret_resolver` grows a third, backward-compatible `profile_id` parameter
+  (`ConnectorEngine`/`ConnectorPipeline`) so credential resolution can be bound to the exact
+  profile it was issued to — MCP and every other plain-secret connector unaffected.
+- [x] Desktop "Connect with GitHub" flow (`GitHubConnectionForm.tsx`, `githubConnectorOAuth.ts`,
+  `useConnectorOAuthDeepLink.ts` on a distinct `kortex-connector-auth://` scheme) and a
+  provider-aware "Disconnect" action in the Connections tab.
+- [x] Tests: 36 new backend tests (unit: `test_integration_oauth_manager.py`,
+  `test_integration_oauth_token_lifecycle.py`, `test_github_actions.py`; integration:
+  `test_github_connector_oauth_integration.py`) plus 6 new frontend tests
+  (`GitHubConnectionForm.test.tsx`), including the concurrency-critical single-use-state and
+  refresh-rotation-synchronization guarantees proven with `asyncio.gather`, not merely asserted.
+- [x] Acceptance & CI Reconciliation:
+  - **M2 acceptance**: ACCEPTED by Chief Architect
+  - **M2-specific tests**: PASS (36/36 new backend tests, 6/6 new frontend tests)
+  - **Desktop CI**: `tsc --noEmit` clean; `vitest run` 169/169 passing (163 pre-existing + 6 new)
+  - **Backend full suite**: `pytest backend/tests -q` → 4023 passed, 4 failed, 2 skipped
+  - **Overall repository CI**: NOT GREEN due to two PRE-EXISTING BASELINE DEFECTS, neither an M2
+    regression (both verified via `git stash` against unmodified `main` HEAD `f5d57cb`):
+    - `DEFECT-002` (carried over from M1, unrelated Workflow Engine durability race condition) —
+      `test_workflow_durability.py::test_restart_recovery_ready_and_approved_workflows`.
+    - `DEFECT-003` (new, unrelated Update Engine test-fixture staleness) — 3 tests in
+      `test_update_integration.py`, root cause: a hardcoded `expires_at` fixture date now in the
+      past. See `docs/release/rc-testing/KNOWN_FINDINGS.md`.
+

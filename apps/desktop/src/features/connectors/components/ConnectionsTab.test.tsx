@@ -67,6 +67,7 @@ function makeProfile(overrides: Partial<ConnectorProfile> = {}): ConnectorProfil
     isActive: true,
     rateLimitPerSec: 10,
     maxRetries: 3,
+    integrationProvider: null,
     ...overrides,
   };
 }

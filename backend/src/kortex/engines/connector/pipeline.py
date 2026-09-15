@@ -41,7 +41,7 @@ class ConnectorPipeline(IConnectorPipeline):
         self,
         registry: IConnectorDriverRegistry,
         rate_limiter: IRateLimiter | None = None,
-        secret_resolver: Callable[[str, str], Awaitable[str | None]] | None = None,
+        secret_resolver: Callable[[str, str, str], Awaitable[str | None]] | None = None,
         diagnostics: ConnectorDiagnostics | None = None,
     ) -> None:
         """Initialize ConnectorPipeline.
@@ -50,9 +50,14 @@ class ConnectorPipeline(IConnectorPipeline):
             registry: IConnectorDriverRegistry instance for driver lookup.
             rate_limiter: Optional IRateLimiter instance for rate limiting.
             secret_resolver: Optional async callable for resolving a secret handle
-                to a token string, taking ``(secret_handle, tenant_id)``. Tenant
-                is threaded through so a resolved credential can never cross a
-                tenant boundary (M6.0-2).
+                to a token string, taking ``(secret_handle, tenant_id, profile_id)``.
+                Tenant is threaded through so a resolved credential can never cross
+                a tenant boundary (M6.0-2). `profile_id` (Integration Hub M2) lets a
+                resolver additionally bind resolution to the exact profile — e.g.
+                `IntegrationOAuthManager.resolve_access_token` refuses to return a
+                token whose recorded owner doesn't match — while a plain resolver
+                (`SecurityEngine.get_secret`'s 2-arg contract) simply ignores it,
+                unaffected.
             diagnostics: Optional ConnectorDiagnostics instance for stage & attempt metric recording.
         """
         self._registry = registry
@@ -144,7 +149,14 @@ class ConnectorPipeline(IConnectorPipeline):
                 )
 
             try:
-                secret_token = await self._secret_resolver(handle, request.tenant_id)
+                # Integration Hub M2: `profile.profile_id` is the third
+                # argument so a resolver can bind resolution to the exact
+                # `(tenant_id, profile_id)` pair, not just possession of
+                # `handle` — see `IntegrationOAuthManager.resolve_access_token`.
+                # The default/plain resolver (`SecurityEngine.get_secret`'s
+                # 2-arg contract) ignores it entirely; MCP and any other
+                # plain-secret connector are unaffected.
+                secret_token = await self._secret_resolver(handle, request.tenant_id, profile.profile_id)
             except Exception:
                 self._safe_record("record_authentication_failure")
                 self._safe_record("record_error_category", "authentication")

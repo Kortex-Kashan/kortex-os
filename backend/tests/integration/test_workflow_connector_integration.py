@@ -276,7 +276,7 @@ def setup_mock_transport(
     )
 
 
-async def mock_secret_resolver(handle: str, tenant_id: str) -> str:
+async def mock_secret_resolver(handle: str, tenant_id: str, profile_id: str) -> str:
     return "Bearer secret-token-xyz-123"
 
 
@@ -1056,7 +1056,7 @@ async def test_secret_token_isolation_across_context_logs_and_events(
 
     fake_secret = "Bearer super-secret-api-token-999"
 
-    async def mock_secret_res(handle: str, tenant_id: str) -> str:
+    async def mock_secret_res(handle: str, tenant_id: str, profile_id: str) -> str:
         return fake_secret
 
     connector_engine = ConnectorEngine(secret_resolver=mock_secret_res)

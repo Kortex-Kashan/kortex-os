@@ -82,6 +82,7 @@ describe("McpConnectionForm", () => {
       isActive: true,
       rateLimitPerSec: 10,
       maxRetries: 3,
+      integrationProvider: null,
     });
     const onSuccess = vi.fn();
     renderForm({ onSuccess });

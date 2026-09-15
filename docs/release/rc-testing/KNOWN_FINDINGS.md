@@ -177,3 +177,69 @@ Per Chief Architect decision:
 - It remains an active, known CI failure until separately corrected and verified.
 - Integration Hub M1 milestone status is formally: **M1 — ACCEPTED / COMPLETE with PRE-EXISTING CI DEFECT DEFERRED**.
 - Overall repository CI status: **NOT GREEN** due to this pre-existing workflow durability defect (Desktop CI: GREEN, M1 tests: PASS, Backend full suite: 1 pre-existing failure).
+
+---
+
+## DEFECT-003 — Hardcoded, now-expired update manifest fixture fails 3 tests in `test_update_integration.py`
+
+| Field | Value |
+|---|---|
+| **ID** | DEFECT-003 |
+| **Severity** | **P3 — Low** (test-fixture data staleness, not an engine defect) |
+| **Classification** | **PRE-EXISTING BASELINE DEFECT** (not an Integration Hub M2 regression) |
+| **Type** | Test-fixture data staleness (hardcoded expiry date now in the past) |
+| **Distinct from** | `DEFECT-002` (unrelated engine/component: Update Engine test fixtures vs. Workflow Engine durability recovery) |
+| **Exact Tests** | `tests/integration/test_update_integration.py::test_end_to_end_successful_update_lifecycle`, `tests/integration/test_update_integration.py::test_recovery_delegation_on_post_mutation_failure`, `tests/integration/test_update_integration.py::test_checkpoint_failure_aborts_before_any_destructive_mutation` |
+| **Exact Failure** | `kortex.engines.update.exceptions.UpdateManifestError: Update manifest 'mf-0.2.0' expired at 2026-09-12T00:00:00Z (current: <real wall-clock time>)` |
+| **Baseline Commit** | `f5d57cb65b882bd6fe87f8527474804320c0a624` (reproduced on the unmodified `main` HEAD immediately prior to Integration Hub M2, via `git stash`) |
+| **Scope Ownership** | Update Engine (`kortex.engines.update`) test suite / fixture maintenance |
+| **Status** | **DEFERRED** (deferred for separate fixture-date correction; outside Integration Hub M2 scope) |
+
+### Summary
+
+Three tests in `test_update_integration.py` construct (or reuse a shared helper that constructs)
+an `UpdateManifest` fixture with a hardcoded `expires_at: "2026-09-12T00:00:00Z"`. `UpdateManifest.
+parse_dict` (`backend/src/kortex/engines/update/manifest.py`) checks this timestamp against real
+wall-clock time and raises `UpdateManifestError` once it has passed — which it now has. This is a
+test-data staleness bug, not a defect in the Update Engine's expiry-checking logic itself (which
+is behaving exactly as designed: rejecting an expired manifest).
+
+### Observed Behavior
+
+```
+kortex.engines.update.exceptions.UpdateManifestError: Update manifest 'mf-0.2.0' expired at
+2026-09-12T00:00:00Z (current: 2026-09-15T11:35:08.579730+00:00)
+```
+
+### Root Cause
+
+The fixture manifest's `expires_at` field is a fixed, hardcoded ISO-8601 timestamp rather than
+one computed relative to the time the test runs (e.g. `now + timedelta(days=N)`). Any test run
+after `2026-09-12T00:00:00Z` fails closed at manifest-parse time, before any of the actual
+lifecycle/recovery/checkpoint logic each test intends to exercise ever runs.
+
+### Baseline Reproduction Evidence
+
+Formally classified as a **PRE-EXISTING BASELINE DEFECT**, confirmed via `git stash` isolation
+during Integration Hub M2 work:
+
+1. **Unmodified `main` baseline (`f5d57cb65b882bd6fe87f8527474804320c0a624`)**: all three tests
+   fail identically with zero Integration Hub M2 code changes present — verified directly by
+   stashing every M2 change and re-running the three tests in isolation.
+2. **Not an M2 Regression**: Integration Hub M2's scope (`kortex.engines.security.*`,
+   `kortex.engines.connector.*`, desktop Connectors UI) touches no file under
+   `kortex.engines.update`, `test_update_integration.py`, or `manifest.py`.
+3. **Scope Ownership**: Owned by the Update Engine test suite's fixture maintenance, unrelated to
+   Integration Hub M2's architectural boundary.
+
+### Governance & Acceptance Rules
+
+Per Chief Architect decision:
+- **Do NOT fix this defect (or the fixture) under Integration Hub M2.**
+- This defect is **DEFERRED** for separate fixture-date correction (e.g. computing `expires_at`
+  relative to test run time rather than a fixed calendar date).
+- It must **NOT** be silently treated as an M2 failure.
+- It must **NOT** be silently treated as resolved.
+- It remains an active, known CI failure until separately corrected.
+- Distinct from `DEFECT-002` — the two are unrelated engines/components and must not be
+  conflated or resolved together.
