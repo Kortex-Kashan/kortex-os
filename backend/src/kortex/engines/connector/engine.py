@@ -40,6 +40,7 @@ from kortex.engines.connector.interfaces import (
     IBaseConnectorDriver,
     IEngineDiagnostics,
 )
+from kortex.engines.connector.mcp_gateway import McpGateway, register_mcp_gateway_capabilities
 from kortex.engines.connector.models import (
     ActionRequest,
     ActionResult,
@@ -137,6 +138,7 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
         self._kernel: Kernel | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._mcp_driver: McpConnectorDriver | None = None
+        self._mcp_gateway: McpGateway | None = None
 
     @property
     def name(self) -> str:
@@ -184,6 +186,16 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
     def mcp_driver(self) -> McpConnectorDriver | None:
         """Access the wired MCP connector driver instance."""
         return self._mcp_driver
+
+    @property
+    def mcp_gateway(self) -> McpGateway | None:
+        """Access the MCP Gateway/Catalog boundary registered during `initialize()`.
+
+        `None` only when this engine was never initialized against a Kernel
+        (an isolated unit-test construction) — the Gateway is a Kernel
+        capability boundary and has no meaning without one.
+        """
+        return self._mcp_gateway
 
     # -- BaseEngine Lifecycle Implementations ---------------------------------
 
@@ -326,6 +338,15 @@ class ConnectorEngine(BaseEngine, IEngineDiagnostics):
                 handler=self.delete_profile,
                 required_permissions=["connector:write"],
             )
+
+            # MCP Gateway / Catalog: the controlled access/routing boundary
+            # (`kortex.mcp.gateway.invoke`) and the read-only discovery
+            # projection (`kortex.mcp.catalog.*`). Registered here, inside the
+            # same boot-phase block as this engine's other capabilities,
+            # because `Kernel.register_capability` refuses registration once
+            # boot completes. Neither adds a registry, a dispatcher, nor an
+            # execution path — see `mcp_gateway.py`'s module docstring.
+            self._mcp_gateway = register_mcp_gateway_capabilities(kernel, self)
 
             self._set_state(EngineState.READY)
             self.logger.info("Connector Engine initialized successfully.")

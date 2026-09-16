@@ -125,6 +125,16 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.license.status.get": (True, True),
     "kortex.license.token.verify": (True, True),
     "kortex.marketplace.listing.list": (True, True),
+    # MCP Gateway / Catalog. The four catalog capabilities are pure read
+    # projections over ConnectorProfileManager + RegistryEngine (read-only,
+    # idempotent); `gateway.invoke` routes to an arbitrary remote MCP tool
+    # whose own effects are unknown to KORTEX, so it is classified
+    # fail-closed as mutating and non-idempotent.
+    "kortex.mcp.catalog.capability.get": (True, True),
+    "kortex.mcp.catalog.capability.list": (True, True),
+    "kortex.mcp.catalog.profile.get": (True, True),
+    "kortex.mcp.catalog.profile.list": (True, True),
+    "kortex.mcp.gateway.invoke": (False, False),
     "kortex.monitoring.dashboard.get": (True, True),
     "kortex.monitoring.diagnostics.get": (True, True),
     "kortex.monitoring.metrics.get": (True, True),
