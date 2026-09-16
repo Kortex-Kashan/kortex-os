@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
+## [Unreleased]
+
+Documentation note: this section records engineering work accepted since `[1.0.0]` that has not yet been assigned a release version or tag — that decision (`OWNER DECISION REQUIRED`) is tracked separately in `docs/release/RELEASE_CANDIDATE_READINESS.md` §14.1 and is out of scope for this entry.
+
+### Added
+- **Phase 7 — Production Hardening** (all formally accepted; see `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md` §5.1–§5.11 and `.kortex/roadmap.md`): Sentinel Engine (health monitoring/integrity), Monitoring Engine (metrics/dashboards), Backup Engine (AES-256-GCM encrypted, fail-closed), Recovery Engine (durable journal, staged restore, multi-tier verification/rollback), Update Engine (Ed25519-signed manifests, staged migration, 3-layer rollback authority), Database Migration Wiring (Alembic foundation), Docker production builds, Desktop installers (Windows MSI + NSIS), CI/CD (`backend-ci.yml`/`desktop-ci.yml`), and Production Secret Storage / Native Windows Keyring.
+- **Application Completion track M7.1–M7.6** (see `.kortex/roadmap.md`): Local Runtime Completion (sidecar supervision, persistent keys, first-run bootstrap), AI Studio Conversational Completion, AI Studio ↔ Connector Engine Integration, Document Engine ↔ AI Studio Integration, Knowledge Engine ↔ AI Studio Integration, AI Execution Control Plane Hardening.
+- **Integration Hub track M1 — MCP Foundation + Capability Projection Bridge** (`da93c64`, `79040e9`): Streamable HTTP MCP client transport, dynamic per-profile capability registration (`kortex.mcp.<profile_id>.<tool_name>`), tenant-scoped capability projection bridge, desktop Connections UI and Visual Workflow Canvas palette integration.
+- **Integration Hub track M2 — GitHub OAuth Connector** (`721d30a`; see `docs/architecture/integration_hub_m2_github_oauth_connector_implementation_report.md`): `IntegrationOAuthManager` (SecurityEngine-owned OAuth lifecycle with mandatory refresh-token rotation), GitHub curated action catalog with dynamic per-profile capability registration, backend-authoritative disconnect capability, desktop "Connect with GitHub" flow.
+
+### Fixed
+- **DEFECT-002** — Workflow durability restart-recovery optimistic-lock race condition, root-caused to `DatabaseEngineManager` lacking application-level SQLite writer serialization (`6cc223b`).
+- **DEFECT-003** — Hardcoded, now-expired Update Engine manifest test-fixture timestamps causing 3 integration test failures (`283cf87`).
+- Pre-existing `mypy` failure on `mcp.*` imports (missing type stubs), which was aborting Backend CI's lint/type-check step before tests could run (`bdb9461`).
+
 ## [1.0.0] - 2026-08-08
 
 ### Added

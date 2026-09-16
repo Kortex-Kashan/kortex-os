@@ -1,6 +1,6 @@
 # Known Findings — discovered while building the RC test environment
 
-Read this before filing a defect. These were found while preparing and validating this environment. **None has been fixed** — per RC process, findings are captured, reproduced, classified, and left for Chief Architect review.
+Read this before filing a defect. These were found while preparing and validating this environment. Per RC process, findings are captured, reproduced, classified, and left for Chief Architect review before any fix — each entry's own `Status` field is authoritative for whether it has since been resolved (DEFECT-001, DEFECT-002, and DEFECT-003 are, as of this reconciliation pass, all **RESOLVED**; see each entry below for its own Resolution record).
 
 ---
 
@@ -139,8 +139,20 @@ Importing `kortex.engines.security.models` as the first KORTEX import raises `Im
 | **Exact Failure** | `WorkflowStateConflictError` followed by assertion failure `assert WorkflowState.RUNNING == WorkflowState.COMPLETED` |
 | **Baseline Commit** | `63460cb792222ab2796615afbb9498dd6f389ed` (reproduced on M1 parent baseline) |
 | **M1 Commit** | `79040e9270cdf87b0bc616b6f84f2cd8679d0f72` (also reproduces on current M1 commit) |
-| **Scope Ownership** | Workflow Engine (`kortex.engines.workflow`) / Durability & Persistence layer |
-| **Status** | **DEFERRED** (deferred for separate workflow-engine durability investigation; outside Integration Hub M1 scope) |
+| **Scope Ownership** | Originally attributed to Workflow Engine (`kortex.engines.workflow`) / Durability & Persistence layer; root-caused on resolution to `DatabaseEngineManager` (`backend/src/kortex/core/db.py`) |
+| **Status** | **RESOLVED** — commit `6cc223be7ebcfe17269408791ae532b6dd5d039e` (`fix(storage): serialize concurrent SQLite sessions`) |
+
+### Resolution
+
+**Root cause confirmed**: the defect was one layer lower than originally scoped. SQLite allows only one writer transaction at a time, but `DatabaseEngineManager` never enforced that at the application level, so two concurrent `get_session()` callers could have their transactions interleave against the shared connection — making one session's own just-committed write not yet visible to a different session's read-modify-write cycle a moment later. The Workflow Engine's restart-recovery path was the reachable symptom (an optimistic-lock version conflict leaving an instance `RUNNING` instead of `COMPLETED`), not the fault's origin.
+
+**Correction**: `DatabaseEngineManager` now serializes the entire SQLite session lifetime behind a per-event-loop-bound `asyncio.Lock`, leaving PostgreSQL's genuine per-connection concurrency untouched. The lock is lazily rebuilt if the running event loop changes, since `asyncio.Lock` binds to whichever loop first acquires it and a `DatabaseEngineManager` can legitimately outlive one loop (e.g. an application restart that reuses the same manager).
+
+**Adjacent defect surfaced and fixed in the same commit**: a pre-existing test-design race in `test_workflow_definition_version_safety.py` — the test mutated a `WorkflowInstance` object immediately after `start_workflow()` returned, racing that same call's own unawaited background execution task — was newly exposed once this defect stopped masking it, and was fixed alongside it.
+
+**Regression coverage added**: a storage-layer concurrent-write stress test, a Workflow Engine restart-recovery stress test, and two tests documenting the lock's re-entrancy boundary (sequential acquisition on one task never hangs; genuine nested acquisition on one task times out by design rather than deadlocking silently).
+
+**Governance**: per the original acceptance record, this was correctly never treated as an M1 regression and M1 acceptance was not withheld pending its resolution. It is resolved as a dedicated, separate fix, consistent with the original deferral.
 
 ### Summary
 
@@ -171,12 +183,14 @@ This defect is formally classified as a **PRE-EXISTING BASELINE DEFECT**:
 
 Per Chief Architect decision:
 - **Do NOT fix this defect under Integration Hub M1.**
-- This defect is **DEFERRED** for a separate, dedicated workflow-engine durability investigation.
-- It must **NOT** be silently treated as an M1 failure.
-- It must **NOT** be silently treated as resolved.
-- It remains an active, known CI failure until separately corrected and verified.
-- Integration Hub M1 milestone status is formally: **M1 — ACCEPTED / COMPLETE with PRE-EXISTING CI DEFECT DEFERRED**.
-- Overall repository CI status: **NOT GREEN** due to this pre-existing workflow durability defect (Desktop CI: GREEN, M1 tests: PASS, Backend full suite: 1 pre-existing failure).
+- This defect was **DEFERRED** for a separate, dedicated workflow-engine durability investigation.
+- It was correctly **NOT** silently treated as an M1 failure.
+- It was correctly **NOT** silently treated as resolved prior to an actual fix landing.
+- (Historical, at M1 time) It remained an active, known CI failure until separately corrected and verified.
+- Integration Hub M1 milestone status at the time was formally: **M1 — ACCEPTED / COMPLETE with PRE-EXISTING CI DEFECT DEFERRED**.
+- (Historical, at M1 time) Overall repository CI status: NOT GREEN due to this pre-existing workflow durability defect (Desktop CI: GREEN, M1 tests: PASS, Backend full suite: 1 pre-existing failure).
+
+**Update — resolved**: the separate, dedicated investigation this defect was deferred for concluded with commit `6cc223be7ebcfe17269408791ae532b6dd5d039e` (see Resolution above). Integration Hub M1 status is now **M1 — ACCEPTED / COMPLETE (PRE-EXISTING CI DEFECT RESOLVED)**. This defect is no longer an active CI failure.
 
 ---
 
@@ -193,7 +207,13 @@ Per Chief Architect decision:
 | **Exact Failure** | `kortex.engines.update.exceptions.UpdateManifestError: Update manifest 'mf-0.2.0' expired at 2026-09-12T00:00:00Z (current: <real wall-clock time>)` |
 | **Baseline Commit** | `f5d57cb65b882bd6fe87f8527474804320c0a624` (reproduced on the unmodified `main` HEAD immediately prior to Integration Hub M2, via `git stash`) |
 | **Scope Ownership** | Update Engine (`kortex.engines.update`) test suite / fixture maintenance |
-| **Status** | **DEFERRED** (deferred for separate fixture-date correction; outside Integration Hub M2 scope) |
+| **Status** | **RESOLVED** — commit `283cf87fab6ffe2624bbd8fef5d0bc7826c4620a` (`test(update): fix DEFECT-003 stale Update Engine manifest test fixture timestamps`) |
+
+### Resolution
+
+**Fix**: `create_signed_package` (`backend/tests/integration/test_update_integration.py`) now computes timezone-aware UTC `created_at`/`expires_at` timestamps relative to the time the test actually runs, instead of the previous fixed, hardcoded ISO-8601 calendar date. All three affected tests (`test_end_to_end_successful_update_lifecycle`, `test_recovery_delegation_on_post_mutation_failure`, `test_checkpoint_failure_aborts_before_any_destructive_mutation`) pass again. No change to `UpdateManifest.parse_dict`'s expiry-checking logic itself, which was behaving exactly as designed — this was purely a test-fixture correction, not an Update Engine behavior change.
+
+**Governance**: per the original deferral, this was not fixed under Integration Hub M2 as an in-scope change — it landed as its own dedicated, separately-authored commit, consistent with "deferred for separate fixture-date correction."
 
 ### Summary
 
@@ -236,10 +256,12 @@ during Integration Hub M2 work:
 
 Per Chief Architect decision:
 - **Do NOT fix this defect (or the fixture) under Integration Hub M2.**
-- This defect is **DEFERRED** for separate fixture-date correction (e.g. computing `expires_at`
+- This defect was **DEFERRED** for separate fixture-date correction (e.g. computing `expires_at`
   relative to test run time rather than a fixed calendar date).
-- It must **NOT** be silently treated as an M2 failure.
-- It must **NOT** be silently treated as resolved.
-- It remains an active, known CI failure until separately corrected.
-- Distinct from `DEFECT-002` — the two are unrelated engines/components and must not be
+- It was correctly **NOT** silently treated as an M2 failure.
+- It was correctly **NOT** silently treated as resolved prior to an actual fix landing.
+- (Historical, at M2 time) It remained an active, known CI failure until separately corrected.
+- Distinct from `DEFECT-002` — the two are unrelated engines/components and were not
   conflated or resolved together.
+
+**Update — resolved**: the separate fixture-date correction this defect was deferred for landed as commit `283cf87fab6ffe2624bbd8fef5d0bc7826c4620a` (see Resolution above). This defect is no longer an active CI failure.

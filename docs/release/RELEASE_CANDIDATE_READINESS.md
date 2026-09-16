@@ -2,7 +2,7 @@
 
 **Authoritative RC readiness document.** Produced by the Final Production Reconciliation pass and finalized by the Final RC Ambiguity Resolution & Baseline Freeze pass. For per-work-package implementation detail and acceptance records, see `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`; for roadmap completion status, see `.kortex/roadmap.md`.
 
-> **Manual RC validation:** the test environment and runbook the Chief Architect uses to exercise, stress, and attempt to break this RC live in **[`rc-testing/`](rc-testing/README.md)**. That directory records defects found while building the environment (`rc-testing/KNOWN_FINDINGS.md`). **DEFECT-001** (P1, pre-existing — Backup Engine could not resolve the Windows desktop's `0x`-prefixed key, so Backup, and by extension the checkpoint Recovery/Update both depend on, was non-functional on the desktop build) has been **found, fixed, and verified**: `BackupCryptoManager` now accepts the platform's own already-canonical `0x`-prefixed hex representation — the same one `kernel_bootstrap.py` and Docker's entrypoint already accepted — closing the one consumer that was out of step with an established contract. Verified with a real backend, the real desktop-generated key format, and no workaround: `kortex.backup.create` → 200, `kortex.backup.verify` → 200. **DEFECT-002** (P2, pre-existing baseline defect — Workflow durability restart recovery optimistic-lock race condition in `test_restart_recovery_ready_and_approved_workflows`) reproduces on both M1 parent baseline `63460cb` and current M1 commit `79040e9`; it is not an M1 regression, is outside Integration Hub M1 scope, and is formally deferred for separate workflow durability investigation. See `KNOWN_FINDINGS.md` and `PRODUCTION_HARDENING_RECONCILIATION.md` §5.12 for full details.
+> **Manual RC validation:** the test environment and runbook the Chief Architect uses to exercise, stress, and attempt to break this RC live in **[`rc-testing/`](rc-testing/README.md)**. That directory records defects found while building the environment (`rc-testing/KNOWN_FINDINGS.md`). **DEFECT-001** (P1, pre-existing — Backup Engine could not resolve the Windows desktop's `0x`-prefixed key, so Backup, and by extension the checkpoint Recovery/Update both depend on, was non-functional on the desktop build) has been **found, fixed, and verified**: `BackupCryptoManager` now accepts the platform's own already-canonical `0x`-prefixed hex representation — the same one `kernel_bootstrap.py` and Docker's entrypoint already accepted — closing the one consumer that was out of step with an established contract. Verified with a real backend, the real desktop-generated key format, and no workaround: `kortex.backup.create` → 200, `kortex.backup.verify` → 200. **DEFECT-002** (P2, pre-existing baseline defect — Workflow durability restart recovery optimistic-lock race condition in `test_restart_recovery_ready_and_approved_workflows`) reproduced on both M1 parent baseline `63460cb` and current M1 commit `79040e9`; it was not an M1 regression and was outside Integration Hub M1 scope. **RESOLVED** by commit `6cc223b` — root cause was `DatabaseEngineManager` lacking application-level SQLite writer serialization, not the Workflow Engine. **DEFECT-003** (P3, pre-existing baseline defect — hardcoded, now-expired `expires_at` fixture timestamp in 3 Update Engine integration tests, discovered during Integration Hub M2) reproduced on unmodified `main` HEAD `f5d57cb`; **RESOLVED** by commit `283cf87`, which computes fixture timestamps relative to execution time instead of a fixed calendar date. See `KNOWN_FINDINGS.md` and `PRODUCTION_HARDENING_RECONCILIATION.md` §5.12/§5.13 for full details.
 
 **Status terminology used here, and nowhere blurred**: `DONE`, `PASS`, `TECHNICAL RC READY`, `OWNER DECISION REQUIRED`, `DEFERRED / POST-RC`, `PUBLIC RELEASE BLOCKER`.
 
@@ -33,8 +33,8 @@ PUBLIC PRODUCTION RELEASE: PENDING RELEASE IDENTITY / SIGNING POLICY
 
 | Item | Value |
 |---|---|
-| Accepted engineering baseline | `98d94b4c4da9cbec0b3c50af6894af88f8796aae` |
-| Documentation reconciliation commit | `86469c97820713ff9774973319d28331a51b55b7` |
+| Accepted engineering baseline | `283cf87fab6ffe2624bbd8fef5d0bc7826c4620a` |
+| Documentation reconciliation commit | this pass, against the baseline above (prior: `86469c97820713ff9774973319d28331a51b55b7`) |
 | Branch | `main` |
 | Supported RC distribution topologies | Windows x64 desktop installer (MSI + NSIS); Docker/headless production container |
 
@@ -50,9 +50,10 @@ PUBLIC PRODUCTION RELEASE: PENDING RELEASE IDENTITY / SIGNING POLICY
 | Phase 6 — Pilot Business Modules | `DONE` | Module base contract, Finance, HR & Payroll, Operations |
 | Phase 7 — Production Hardening | `DONE` | §4 below |
 | Application Completion track M7.1–M7.6 | `DONE` | Local runtime, AI Studio conversational, Connector/Document/Knowledge ↔ AI Studio integrations, Control Plane hardening |
-| Integration Hub track M1 | **ACCEPTED / COMPLETE** | MCP Foundation + Capability Projection Bridge (PRE-EXISTING CI DEFECT DEFERRED, §5.12) |
+| Integration Hub track M1 | **ACCEPTED / COMPLETE** | MCP Foundation + Capability Projection Bridge (PRE-EXISTING CI DEFECT RESOLVED, §5.12) |
+| Integration Hub track M2 | **ACCEPTED / COMPLETE** | GitHub OAuth Connector (§5.13) |
 
-**There is no next core engine.** The planned engineering roadmap is complete.
+**There is no next core engine.** The planned engineering roadmap is complete. (Integration Hub is a separate, additive connector track — see `.kortex/roadmap.md` — and does not itself constitute a new core-engine milestone.)
 
 ## 4. Phase 7 Production Hardening — `DONE`
 
@@ -144,25 +145,29 @@ Proven, not mocked: a committed, `#[ignore]`-gated integration test re-invokes t
 
 ## 11. CI/CD — `PASS`
 
-| Workflow / Job | Latest Status |
-|---|---|
-| Backend CI — Lint, type-check, and test (Python 3.12) | `PASS` (`33992464212`) |
-| Backend CI — Docker build and smoke test | `PASS` (`33992464212`) |
-| Desktop CI — Typecheck and test (TypeScript) | `PASS` (`33992464220`) |
-| Desktop CI — Tauri shell (cargo check) | `PASS` (`33992464220`) |
-| Desktop CI — Windows installer build and smoke test | `PASS` (`33992464220`) |
-| Desktop CI — Real Windows keyring integration test | `PASS` (`33992464220`, 196s) |
+**Note (this reconciliation pass)**: the run IDs below were the most recent verified GitHub Actions evidence as of the Native Keyring / Docker baseline (pre-dating Integration Hub M1 and M2). They are preserved as historical record, not re-stamped as current. At the present baseline, HEAD `283cf87`, Backend CI (full pytest suite, lint, type-check, and Docker build/smoke test) is stated to be green — this was reported directly rather than independently re-verified by this pass, since no `gh` CLI or live CI access was available in this session to pull an actual run identifier. No run ID is invented below for `283cf87`.
 
-CI has demonstrably caught real defects rather than merely passing: Desktop CI #41 and #42 each surfaced a genuine, CI-only-reproducible failure that local testing could not have caught, both diagnosed and fixed using CI evidence.
+| Workflow / Job | Latest Independently-Verified Status |
+|---|---|
+| Backend CI — Lint, type-check, and test (Python 3.12) | `PASS` (`33992464212`, pre-M1/M2 baseline) |
+| Backend CI — Docker build and smoke test | `PASS` (`33992464212`, pre-M1/M2 baseline) |
+| Desktop CI — Typecheck and test (TypeScript) | `PASS` (`33992464220`, pre-M1/M2 baseline) |
+| Desktop CI — Tauri shell (cargo check) | `PASS` (`33992464220`, pre-M1/M2 baseline) |
+| Desktop CI — Windows installer build and smoke test | `PASS` (`33992464220`, pre-M1/M2 baseline) |
+| Desktop CI — Real Windows keyring integration test | `PASS` (`33992464220`, 196s, pre-M1/M2 baseline) |
+
+CI has demonstrably caught real defects rather than merely passing: Desktop CI #41 and #42 each surfaced a genuine, CI-only-reproducible failure that local testing could not have caught, both diagnosed and fixed using CI evidence. The same pattern held for Integration Hub M1/M2: DEFECT-002, DEFECT-003, and the MCP mypy hygiene gap were all real CI-blocking failures, diagnosed and fixed with commit-level evidence (`6cc223b`, `283cf87`, `bdb9461` respectively) — see `PRODUCTION_HARDENING_RECONCILIATION.md` §5.12/§5.13.
 
 ## 12. Test Evidence
 
-**Backend full suite**: `3,260 passed, 2 skipped, 1 failed` (3,263 collected).
+**Backend full suite (pre-M1/M2 baseline, `98d94b4c`)**: `3,260 passed, 2 skipped, 1 failed` (3,263 collected).
 
 - **2 skipped** — pre-existing, documented Ollama-unavailable environmental skips.
-- **1 failed** — `test_execution_envelope_and_idempotency.py::test_client_timeout_cancellation_does_not_strand_processing_record`. Classification: **PRE-EXISTING NON-DETERMINISTIC TEST ISSUE**. Reproduced: passes 3/3 in isolated single-test runs and 20/20 running its full file in isolation; fails only under full-suite load. Identical signature to the flake already documented during Update Engine acceptance. Structurally unreachable from any recent work. **Not modified, not skipped, not weakened.** Does not block technical RC.
+- **1 failed** — `test_execution_envelope_and_idempotency.py::test_client_timeout_cancellation_does_not_strand_processing_record`. Classification: **PRE-EXISTING NON-DETERMINISTIC TEST ISSUE**. Reproduced: passes 3/3 in isolated single-test runs and 20/20 running its full file in isolation; fails only under full-suite load. Identical signature to the flake already documented during Update Engine acceptance. Structurally unreachable from any recent work. **Not modified, not skipped, not weakened.** Does not block technical RC. This is a distinct, still-open, non-deterministic timing issue — it must not be conflated with DEFECT-002 or DEFECT-003 (both resolved, §5.12/§5.13 of the reconciliation document), which were deterministic and are now fixed.
 
-This is deliberately **not** reported as "all tests passed."
+**At the current baseline, HEAD `283cf87`**: full backend suite, Backend CI lint/type-check, and Docker build/smoke test are reported green (Integration Hub M2 acceptance, DEFECT-002/DEFECT-003 resolved). This pass did not re-run the full suite independently to produce a fresh exact pass/fail/skip count or confirm whether the non-deterministic flake above still reproduces under load at this HEAD — that would require local test execution or CI access beyond this reconciliation pass's scope, and no count is fabricated here.
+
+This is deliberately **not** reported as "all tests passed" without qualification.
 
 **Desktop suite**: `575 passed, 0 failed` (design-system 50, apps/desktop 525).
 **Rust (Tauri crate)**: `48 passed, 0 failed, 2 ignored` (the two real-OS-keyring tests, `#[ignore]`-gated by design, executed explicitly in CI).
@@ -231,7 +236,7 @@ No fake certificate, test certificate, or simulated signing step was added. Sign
 | Docker OS-credential-store parity (OD-2) | `DEFERRED / POST-RC` | Docker production v1 uses the accepted operator-supplied-secret model. Native OS credential-store parity with the Windows desktop keyring is not an RC requirement and remains future release-engineering work. A container has no user-session credential store to bind to. |
 | Bare/server fresh-machine validation | `DEFERRED / POST-RC` deployment hardening | Outside the supported RC distribution topology (Windows desktop + Docker are both validated) |
 | Installer footprint optimization | `DEFERRED / POST-RC` optional optimization | No functional or distribution blocker demonstrated |
-| `CHANGELOG.md` Phase 7 backfill | `DEFERRED / POST-RC` documentation debt | Last updated through M7.5; covers no Phase 7 work. Required before a `[1.0.0]` release entry, not before technical RC freeze |
+| `CHANGELOG.md` Phase 7 / M7.x / Integration Hub backfill | **DONE (this pass)**, recorded under `[Unreleased]` | The file's only prior entry (`[1.0.0] - 2026-08-08`) covered architecture ratification only, not M7.5 as previously stated here — that prior characterization was itself inaccurate. Phase 7, the M7.1–M7.6 track, and Integration Hub M1/M2 are now recorded under `[Unreleased]`, deliberately not tied to a version number pending the still-open RC-identity decision (§14.1) |
 | External M7.x vs. native Phase 6/7 numbering conflict | `DEFERRED` | Long-standing documentation-numbering question, explicitly out of scope for every production-hardening pass |
 | Pre-existing `sidecar.rs` `cargo fmt` drift and `large_enum_variant` clippy warning | `DEFERRED / POST-RC` | Predate all recent work; `fmt` is not part of the CI baseline; clippy is informational by documented, deliberate choice |
 
