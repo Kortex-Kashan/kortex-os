@@ -7,6 +7,8 @@ and PostgreSQL (enterprise server adapter interface).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime
 import enum
 import logging
@@ -128,6 +130,42 @@ class DatabaseEngineManager:
 
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
+        # DEFECT-002 fix: SQLite (in-memory via StaticPool, or file-based via
+        # a multi-connection pool) fundamentally allows only one writer
+        # transaction at a time -- but nothing upstream of this class ever
+        # enforced that at the application level. Two concurrent
+        # `execute_in_transaction` callers (e.g. two WorkflowEngine restart-
+        # recovery tasks resuming different instances) could each acquire
+        # their own AsyncSession and have their transactions' statements
+        # interleave against the single underlying connection object
+        # (StaticPool) or race SQLite's own file lock (pooled file-based),
+        # so that a session's own prior, successfully committed write was
+        # not yet visible/durable by the time a *different* session's
+        # transaction ran its own read-modify-write cycle -- surfacing as a
+        # spurious optimistic-lock version conflict on a row nothing else
+        # was legitimately contending for. Serializing session acquisition
+        # for SQLite only (never for PostgreSQL, which has genuine
+        # per-connection isolation and must not be bottlenecked by this)
+        # makes the application's concurrency model match what SQLite
+        # itself already guarantees, closing the gap at its root rather than
+        # papering over the symptom with a retry. See `get_session()`/
+        # `_sqlite_lock()`.
+        #
+        # `asyncio.Lock` binds to whichever event loop first successfully
+        # calls `acquire()` on it, and raises `RuntimeError: ... is bound to
+        # a different event loop` if reused from a different one afterward.
+        # A `DatabaseEngineManager` instance can legitimately outlive one
+        # event loop -- e.g. a real application restart, or a test
+        # simulating one, that reconnects/reuses the same manager under a
+        # fresh loop without ever calling `disconnect()` first -- so the
+        # lock itself, plus which loop it is currently bound to, are tracked
+        # together and transparently rebuilt in `_sqlite_lock()` whenever
+        # the running loop has changed. Recreating on a loop change is safe:
+        # a single process never runs two event loops truly concurrently on
+        # one thread, so whatever held the old lock is necessarily gone
+        # once a new loop is running.
+        self._sqlite_write_lock: asyncio.Lock | None = None
+        self._sqlite_write_lock_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def dialect(self) -> DatabaseDialect:
@@ -148,6 +186,10 @@ class DatabaseEngineManager:
         if "sqlite" in self._url:
             self._dialect = DatabaseDialect.SQLITE
             connect_args = {"check_same_thread": False}
+            # Actual lock construction is deferred to `_sqlite_lock()`'s
+            # first call, which binds it to whichever loop is running at
+            # that point -- never here, since `connect()` itself may run on
+            # a loop that later goes away (see the field's own docstring).
         elif "postgresql" in self._url or "asyncpg" in self._url:
             self._dialect = DatabaseDialect.POSTGRESQL
 
@@ -167,6 +209,18 @@ class DatabaseEngineManager:
             autoflush=False,
         )
 
+    def _sqlite_lock(self) -> asyncio.Lock:
+        """Return the SQLite write-serialization lock, rebound to the
+        currently running event loop if it has changed since the lock was
+        last (re)created. Only ever called when `self._dialect ==
+        DatabaseDialect.SQLITE`, from `get_session()`.
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._sqlite_write_lock is None or self._sqlite_write_lock_loop is not current_loop:
+            self._sqlite_write_lock = asyncio.Lock()
+            self._sqlite_write_lock_loop = current_loop
+        return self._sqlite_write_lock
+
     async def create_all_tables(self) -> None:
         """Create all registered ORM tables in the database."""
         if not self._engine:
@@ -177,11 +231,21 @@ class DatabaseEngineManager:
         logger.info("Database tables initialized successfully.")
 
     async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
-        """Yield an async database session context."""
+        """Yield an async database session context.
+
+        DEFECT-002 fix: for SQLite, the entire session lifetime (acquire,
+        caller's work, commit/rollback) is serialized behind a per-loop lock
+        -- see `_sqlite_lock()` and the field docstrings in `__init__` for
+        the full rationale. PostgreSQL takes the `nullcontext()` branch and
+        is never serialized here, preserving genuine concurrent access.
+        """
         if not self._session_factory:
             await self.connect()
         assert self._session_factory is not None
-        async with self._session_factory() as session:
+        lock_cm: asyncio.Lock | contextlib.AbstractAsyncContextManager[None] = (
+            self._sqlite_lock() if self._dialect == DatabaseDialect.SQLITE else contextlib.nullcontext()
+        )
+        async with lock_cm, self._session_factory() as session:
             try:
                 yield session
                 await session.commit()

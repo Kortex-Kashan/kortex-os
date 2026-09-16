@@ -89,6 +89,17 @@ async def test_scenario_a_resume_after_new_publish_stays_on_v1(test_store: Workf
     instance = await engine.start_workflow("scenario_a", tenant_id=_TENANT)
     assert instance.definition_version == "1.0.0"
 
+    # `start_workflow` returns before its own background execution task (tracked in
+    # `engine._running_tasks`, per DEFECT-002's investigation) has run a single step --
+    # that task and this test both mutate the SAME `instance` object and the same
+    # persisted row. Awaiting the real task the engine itself just scheduled (never a
+    # fixed sleep) drains that task to genuine completion first, so the manual "paused
+    # mid-flight" simulation below is a deliberate, deterministic override of a
+    # finished run rather than a race with the engine's own in-flight writes.
+    running_task = engine._running_tasks.get(instance.id)
+    if running_task is not None:
+        await running_task
+
     # Simulate the instance having paused mid-flight (e.g. after step 1) rather than completing
     # instantly, so there is something meaningful left to resume.
     instance.current_step_index = 0

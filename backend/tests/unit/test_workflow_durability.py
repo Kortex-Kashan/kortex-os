@@ -500,6 +500,74 @@ async def test_restart_recovery_ready_and_approved_workflows(test_store: Workflo
 
 
 @pytest.mark.asyncio
+async def test_restart_recovery_of_two_concurrent_instances_is_never_racy() -> None:
+    """DEFECT-002 regression: strengthened coverage for the exact race
+    `test_restart_recovery_ready_and_approved_workflows` above exercises
+    once per run. That test alone reproduced the race only ~1-in-6 to
+    1-in-8 runs before the fix (a genuine race, not a deterministic bug),
+    so a single pass gives CI a poor chance of ever catching a regression.
+    This repeats the identical two-concurrent-instance recovery scenario
+    many times in one test, multiplying the chance a reintroduced race is
+    caught in any given CI run.
+
+    Each iteration gets its own fresh in-memory SQLite engine/store/kernel
+    -- no shared state, no test-order dependency between iterations. Each
+    iteration awaits the actual recovery tasks directly (`engine.
+    _running_tasks.values()`), never a fixed sleep-and-poll, so completion
+    detection is exact rather than probabilistic.
+    """
+    from kortex.core.db import DatabaseEngineManager
+    from kortex.engines.storage.stores.data_store import RelationalDataStore
+
+    step1 = WorkflowStep(id="s1", name="Step 1")
+    step2 = WorkflowStep(id="s2", name="Step 2")
+    wf_def = WorkflowDefinition(id="wf_ra_stress", name="Ready and Approved Flow (stress)", steps=[step1, step2])
+
+    failures: list[str] = []
+    for iteration in range(25):
+        db_manager = DatabaseEngineManager("sqlite+aiosqlite:///:memory:")
+        await db_manager.connect()
+        await db_manager.create_all_tables()
+        store = WorkflowStore(RelationalDataStore(db_manager))
+        await store.save_definition(wf_def)
+
+        inst_ready = WorkflowInstance(
+            definition_id="wf_ra_stress", state=WorkflowState.READY, status=WorkflowStatus.PENDING
+        )
+        inst_approved = WorkflowInstance(
+            definition_id="wf_ra_stress",
+            current_step_index=1,
+            current_step_id="s2",
+            state=WorkflowState.APPROVED,
+            status=WorkflowStatus.RUNNING,
+        )
+        await store.save_instance(inst_ready, definition=wf_def)
+        await store.save_instance(inst_approved, definition=wf_def)
+
+        engine = WorkflowEngine()
+        engine.set_workflow_store(store)
+        engine.register_definition(wf_def)
+
+        recovered = await engine.hydrate_and_recover()
+        assert {i.id for i in recovered} == {inst_ready.id, inst_approved.id}
+
+        # Await the real recovery tasks directly -- never a fixed sleep --
+        # so this waits exactly as long as needed and no test-order/timing
+        # assumption is baked in.
+        await asyncio.gather(*engine._running_tasks.values(), return_exceptions=True)
+
+        ready_state = engine.get_instance(inst_ready.id).state
+        approved_state = engine.get_instance(inst_approved.id).state
+        if ready_state != WorkflowState.COMPLETED or approved_state != WorkflowState.COMPLETED:
+            failures.append(f"iteration {iteration}: ready={ready_state.value}, approved={approved_state.value}")
+
+        if db_manager._engine:
+            await db_manager._engine.dispose()
+
+    assert failures == [], "Restart recovery race reproduced:\n" + "\n".join(failures)
+
+
+@pytest.mark.asyncio
 async def test_persistence_transaction_rollback_on_failure(test_store: WorkflowStore) -> None:
     """Test that database operations roll back cleanly if an exception occurs mid-transaction."""
     step = WorkflowStep(id="s1", name="Step 1")
