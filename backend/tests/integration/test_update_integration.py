@@ -13,6 +13,7 @@ Verifies the 3 Clarifications:
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 import json
 import zipfile
@@ -108,11 +109,15 @@ def create_signed_package(
         UpdateManifestVersion,
     )
 
+    now = datetime.datetime.now(datetime.UTC)
+    created_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = (now + datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     manifest_obj = UpdateManifest(
         manifest_version="kortex-update-manifest-v1.0",
         manifest_id=f"mf-{target_version}",
-        created_at="2026-09-05T00:00:00Z",
-        expires_at="2026-09-12T00:00:00Z",
+        created_at=created_at,
+        expires_at=expires_at,
         key_id=key_id,
         signature="",
         version=UpdateManifestVersion(
