@@ -105,6 +105,15 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
     ("4c99c2ff7376", frozenset({"ops_vehicles", "ops_vehicle_tracking_records", "ops_incidents"})),
     ("e1a2b3c4d5f6", frozenset()),
     ("4d094027c916", frozenset({"workflow_definition_versions"})),
+    # Python + Desktop Automation. Purely additive: `upgrade()` only does
+    # `op.create_table` (+ `op.create_index` on tables it creates in the same
+    # migration), so table-existence alone remains a sufficient proxy for this
+    # revision's schema changes being fully present, and `_COLUMN_REQUIREMENTS`
+    # needs no parallel entry.
+    (
+        "a7f3c19d4b20",
+        frozenset({"python_actions", "python_action_versions", "python_execution_records"}),
+    ),
 )
 
 # Column-level counterpart to `_REVISION_CHAIN` for a revision that adds a

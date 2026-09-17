@@ -47,6 +47,7 @@ from kortex.engines.knowledge.engine import KnowledgeEngine
 from kortex.engines.license.engine import LicenseEngine
 from kortex.engines.marketplace.engine import MarketplaceEngine
 from kortex.engines.monitoring.engine import MonitoringEngine
+from kortex.engines.python_exec.engine import PythonExecutionEngine
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.exceptions import SecretNotFoundError
 from kortex.engines.security.models import PrincipalType
@@ -283,6 +284,15 @@ async def build_and_boot_kernel() -> Kernel:
 
     # Phase 7 — Production Hardening — Monitoring Engine: Operational telemetry, metrics, and alerting.
     kernel.register_engine(MonitoringEngine())
+
+    # Python + Desktop Automation — Python Execution Engine: versioned,
+    # immutable Python Actions executed inside the governed platform
+    # boundary. Same deferred-wiring pattern as every engine above — it
+    # resolves Storage Engine's IDataStore from the Kernel IoC container
+    # during `initialize()`. The runtime image and sandbox identity are
+    # provisioned lazily on first execution, not at boot, so a deployment
+    # that never runs Python pays nothing for this engine.
+    kernel.register_engine(PythonExecutionEngine())
 
     # Phase 7 — Production Hardening — Backup Engine: Snapshot capture, packaging, encryption, validation, retention.
     kernel.register_engine(BackupEngine())

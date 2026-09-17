@@ -92,6 +92,10 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "ops_incidents",
         "ops_vehicle_tracking_records",
         "ops_vehicles",
+        # Python + Desktop Automation.
+        "python_action_versions",
+        "python_actions",
+        "python_execution_records",
         "security_audit_records",
         "security_principals",
         "security_role_permissions",

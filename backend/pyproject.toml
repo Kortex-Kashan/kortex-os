@@ -68,6 +68,13 @@ markers = [
     "integration: Integration tests requiring database",
     "e2e: End-to-end tests",
     "slow: Tests that take more than 5 seconds",
+    # Tests that assert an operating-system security primitive is actually
+    # in force -- a restricted token, a Job Object limit, an ACL, a
+    # namespace. They spawn real processes and are platform-specific, so
+    # they are marked separately from ordinary integration tests: a passing
+    # integration run on a platform where these skip is NOT evidence that
+    # the boundary was verified.
+    "os_security: OS-level security enforcement tests (real processes, platform-specific)",
 ]
 
 [tool.mypy]

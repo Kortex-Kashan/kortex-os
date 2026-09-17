@@ -24,6 +24,7 @@ from kortex.core.dispatch import CapabilityRequest
 from kortex.core.kernel import Kernel
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.document.engine import DocumentEngine
+from kortex.engines.python_exec.engine import PythonExecutionEngine
 from kortex.engines.recipe.engine import RecipeEngine
 from kortex.engines.registry.engine import _BOOTSTRAP_EXEMPT_CAPABILITIES
 from kortex.engines.security.engine import SecurityEngine
@@ -57,6 +58,16 @@ _EXPECTED_PERMISSIONS: dict[str, list[str] | None] = {
     "kortex.connector.profile.register": ["connector:write"],  # M7.3
     "kortex.connector.profile.list": ["connector:read"],  # M7.3
     "kortex.connector.profile.delete": ["connector:write"],  # M7.3
+    # Python + Desktop Automation. `python:trust` is deliberately absent from
+    # `action.publish`: it is checked inside the handler, not by the dispatcher,
+    # because it gates one *argument* (publishing at TRUSTED level) rather than
+    # the capability as a whole. Listing it here would wrongly require it for
+    # every publish, including ordinary untrusted ones.
+    "kortex.python.execute": ["python:execute"],
+    "kortex.python.action.publish": ["python:write"],
+    "kortex.python.action.get": ["python:read"],
+    "kortex.python.action.list": ["python:read"],
+    "kortex.python.action.version.list": ["python:read"],
     "kortex.recipe.load": ["recipe:write"],
     "kortex.recipe.validate": ["recipe:read"],
     "kortex.recipe.compile": ["recipe:read"],
@@ -96,6 +107,10 @@ async def _build_full_kernel(tmp_path: Path) -> tuple[Kernel, StorageEngine, Sec
     kernel.register_engine(ConnectorEngine())
     kernel.register_engine(RecipeEngine())
     kernel.register_engine(DocumentEngine())
+    # Registered for its capability *metadata* only. Nothing here executes
+    # Python: the engine provisions its runtime image lazily, on first
+    # execution, so booting it costs nothing and touches no filesystem.
+    kernel.register_engine(PythonExecutionEngine(execution_root=tmp_path / "prodperm_pyexec"))
     await kernel.boot()
     return kernel, storage_engine, security_engine
 

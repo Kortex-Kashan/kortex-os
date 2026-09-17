@@ -153,6 +153,16 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.operations.vehicle.tracking_history": (True, True),
     "kortex.operations.vehicle.tracking_record": (False, False),
     "kortex.operations.vehicle.unassign": (False, False),
+    # Python + Desktop Automation. `execute` is fail-closed mutating and
+    # non-idempotent: what a Python Action does is opaque to KORTEX, so the
+    # platform cannot claim its effects converge on replay. `action.publish`
+    # is non-idempotent by construction -- every publish appends a new
+    # immutable version rather than converging on an existing one.
+    "kortex.python.action.get": (True, True),
+    "kortex.python.action.list": (True, True),
+    "kortex.python.action.publish": (False, False),
+    "kortex.python.action.version.list": (True, True),
+    "kortex.python.execute": (False, False),
     "kortex.security.access.authorize": (True, True),
     "kortex.security.auth.authenticate": (False, False),
     "kortex.security.auth.change_password": (False, True),
