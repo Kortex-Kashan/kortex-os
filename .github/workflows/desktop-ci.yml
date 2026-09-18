@@ -111,6 +111,60 @@ jobs:
         continue-on-error: true
         run: cargo clippy
 
+  # Python + Desktop Automation milestone (Phase 6): builds and tests the
+  # .NET 8 Desktop Agent (apps/desktop-agent), including the genuine FlaUI/
+  # UIA3 end-to-end fixture (DesktopAutomationHandlerE2ETests) against a
+  # real WinForms application on a real Windows desktop session --
+  # windows-latest GitHub-hosted runners provide one, the same property the
+  # windows-installer job below already relies on for its own real
+  # install/launch/health-check smoke test. Never converts a genuine E2E
+  # assertion into a mock to make this job pass.
+  desktop-agent:
+    name: Desktop Agent (.NET) build, test, and real FlaUI E2E
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # Restores and builds the app project, the WinForms E2E fixture
+      # (KortexAutomationTestApp), and the test project in one pass --
+      # `dotnet test` on the test project transitively builds both of its
+      # ProjectReferences (see tests/KortexAgent.Tests.csproj).
+      - name: Restore and build
+        working-directory: apps/desktop-agent
+        run: dotnet build KortexAgent.csproj tests/KortexAgent.Tests.csproj -c Release
+
+      - name: dotnet format (verify-no-changes)
+        working-directory: apps/desktop-agent
+        run: |
+          dotnet format KortexAgent.csproj --verify-no-changes
+          dotnet format tests/KortexAgent.Tests.csproj --verify-no-changes
+
+      # Runs the full suite unconditionally, including the real FlaUI E2E
+      # (DesktopAutomationHandlerE2ETests) and ApplicationAllowListTests.
+      # `[RequiresElevationFact]`-marked tests in NonExportableKeyTests.cs
+      # (machine-scoped CNG key creation) report as xunit SKIP with an
+      # explicit reason rather than PASS/FAIL when the runner's token is
+      # not elevated -- distinct from a passing or failing assertion, and
+      # never converted into either. A TRX log is always produced (`if:
+      # always()` upload below) so a skip is visible in the run's own
+      # artifacts, not just inferred from the console summary.
+      - name: dotnet test (build/unit/allow-list/real FlaUI E2E)
+        working-directory: apps/desktop-agent
+        run: dotnet test tests/KortexAgent.Tests.csproj -c Release --no-build --logger "trx;LogFileName=desktop-agent-test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-agent-test-results
+          path: apps/desktop-agent/tests/TestResults/desktop-agent-test-results.trx
+          retention-days: 7
+          if-no-files-found: warn
+
   # Desktop Installers milestone (implementation_plan.md Part 2). Windows is
   # the fully-validated target (OD-DI-3): no macOS runner is used here, and
   # none is faked -- see implementation_plan.md Part 2 §D18/§D26. Build-only,

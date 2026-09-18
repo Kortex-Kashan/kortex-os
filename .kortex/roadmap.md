@@ -243,3 +243,68 @@ security/disconnect authority, and GitHub token-lifecycle handling).
     test also passes at this HEAD. See `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`
     §5.13 for the consolidated record.
 
+## Python + Desktop Automation
+
+**Status**: Implementation complete — awaiting Chief Architect review and acceptance
+
+Closes the gap `docs/architecture/phase5_locked_architecture_spec.md` §2 explicitly deferred as
+"Phase 6 Non-Goals" for the Phase 5 identity/mTLS milestone: a capability-transport protocol over
+the existing Agent Gateway mTLS session, and the native Windows UI automation execution layer
+behind it. Reuses the existing capability architecture (`CapabilityDispatcher`, `SecurityEngine`,
+Agent Gateway, .NET Desktop Agent) unmodified in its enforcement semantics; introduces no second
+authorization authority, no second workflow engine, and no generic execution/script channel.
+
+- [x] `agent.proto` — typed `DesktopLaunch/Click/Type/ReadTextCommand` + `DesktopCommandResult`
+  messages over the existing session stream. Application launch resolves an operator-managed
+  allow-list key only, never a caller-supplied path or command line; UI targeting is
+  AutomationId/Name/ControlType only (no screen coordinates); zero or ambiguous matches fail
+  closed. Verified as a closed set by an exact field-list contract test.
+- [x] Desktop-command transport (`kortex.engines.agent_gateway.engine`) — correlated
+  request/response queue over the existing per-session stream, gated on a new
+  `AgentSession.identity_confirmed` flag so a session may push/receive desktop commands only
+  after passing the machine-installation binding check Phase 5 established (closes a gap found
+  during review: that check previously applied only to the `status` heartbeat, not to this new
+  privileged traffic on the same stream).
+- [x] `kortex.desktop.launch`/`.click`/`.type`/`.read_text` (`kortex.engines.desktop_automation`)
+  — registered through the unmodified `Kernel.invoke_capability` → `CapabilityDispatcher` →
+  `SecurityEngine` enforcement path; wired into the production boot path
+  (`kernel_bootstrap.build_and_boot_kernel`) with graceful degradation (capabilities registered,
+  gateway not listening) when Desktop Agent PKI has not been provisioned.
+- [x] `DesktopAutomationHandler`/`ApplicationAllowList` (`apps/desktop-agent`) — FlaUI/UIA3
+  execution: allow-listed launch with fail-closed argument restriction, deterministic UI-element
+  resolution, a single dedicated worker thread serializing all UIA/COM calls (not safe for
+  concurrent access from the per-command background tasks the agent's session loop dispatches),
+  and a bounded verify-after-set retry closing a real type-then-click timing race found during
+  local E2E verification.
+- [x] Genuine Windows E2E (`DesktopAutomationHandlerE2ETests`) — a minimal, purpose-built WinForms
+  fixture (`KortexAutomationTestApp`) proving the full launch → type → click → read_text round
+  trip against a real, freshly-computed result (7 × 8 = 56), not an echoed input; plus adversarial
+  cases (disallowed application, missing window, missing/ambiguous element, killed process,
+  launch failure) against the same real fixture.
+- [x] Desktop Agent CI (`desktop-ci.yml`, `desktop-agent` job) — builds and runs the full .NET test
+  suite, including the real FlaUI E2E, on a `windows-latest` runner (the same real-desktop-session
+  property the pre-existing `windows-installer` job already relies on).
+- **Acceptance & CI Reconciliation**:
+  - **Implementation commit**: `c79d57e` (`feat(desktop-automation): implement native Windows UI
+    automation (Phase 6)`)
+  - **Backend full suite**: `pytest` → 4,261 passed, 0 failed, 4 skipped (environment-gated: no
+    local Ollama instance; Windows-only branches)
+  - **Desktop Agent .NET suite**: `dotnet test` → 19 passed, 0 failed, 3 skipped (require an
+    elevated/SYSTEM token for machine-scoped CNG key creation — not exercised on an unprivileged
+    local run; see `NonExportableKeyTests.cs`'s own `[RequiresElevationFact]`)
+  - **mypy**: clean on both `--platform win32` and `--platform linux`
+  - **ruff**: clean (lint and format)
+  - **dotnet format**: clean
+  - **Security review**: two findings fixed — Windows command-line argument quoting
+    (`ProcessStartInfo.ArgumentList` replacing a hand-rolled escaper that mishandled trailing
+    backslashes) and local-path disclosure in `LAUNCH_FAILED` error messages (agent-internal
+    exception text no longer reaches the wire-facing result).
+  - **Known, documented limitations** (not blocking, not this milestone's scope to close):
+    single-agent-per-tenant is the practical operating model beyond explicit `agent_id`
+    disambiguation; `ApplicationAllowList` requires an agent restart to pick up changes (no
+    hot-reload); the allow-list has no tenant/principal scoping; the persisted Graphify knowledge
+    graph has not been re-indexed against this work.
+  - **Acceptance**: PENDING — not yet reviewed by Chief Architect. Following this file's own
+    established convention (stated verbatim on this document's Phase 4/5 items), this entry is not
+    checked off as accepted until that review occurs.
+
