@@ -58,6 +58,10 @@ SENSITIVE_KEY_NAMES: set[str] = {
     # `api/main.py`'s `/events/stream` -- this key must be caught by the
     # exact same sanitizer already applied to that relay's outbound payload.
     "decider_session_token",
+    # Phase 6 desktop automation: `kortex.desktop.type`'s input text — never
+    # persisted into an audit context or cached idempotency response, since
+    # it may carry a password or other value a user typed into a UI field.
+    "ui_input_text",
 }
 
 

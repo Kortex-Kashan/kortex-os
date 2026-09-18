@@ -27,6 +27,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\KortexAgent.csproj" />
+    <!-- Phase 7 E2E fixture: referenced only so `dotnet test` always builds
+         a fresh copy before the E2E test runs; `TestAppLocator` finds the
+         resulting .exe on disk rather than relying on WinExe copy-local
+         behavior, which is unreliable for a non-library reference. -->
+    <ProjectReference Include="..\testapp\KortexAutomationTestApp.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

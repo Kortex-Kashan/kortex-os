@@ -1,17 +1,24 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    KORTEX Windows Desktop Agent (Phase 5).
+    KORTEX Windows Desktop Agent (Phase 5/6).
 
-    Establishes machine identity, enrolls once against the backend over trusted
-    HTTPS, and maintains an mTLS gRPC session. It executes nothing: there is no
-    UI automation, no browser driver, and no process launching here, and none
-    may be added without the Phase 6 authorization design.
+    Phase 5: establishes machine identity, enrolls once against the backend
+    over trusted HTTPS, and maintains an mTLS gRPC session. Phase 6 (this
+    milestone) adds the one thing Phase 5 deliberately withheld: execution of
+    a finite, explicitly typed set of UI-automation commands the Gateway
+    pushes down that same session — `DesktopAutomationHandler`, using
+    FlaUI/UI Automation (UIA3). There is still no browser driver, no shell,
+    no arbitrary process launching, and no generic script/command execution
+    anywhere in this project — see `DesktopAutomationHandler`'s own docstring
+    for the allow-list and deterministic-targeting design that keeps it that
+    way.
 
     Windows-only by construction — the agent's security model depends on the
     Windows Registry for the Machine Installation ID and on Windows CNG for a
     non-exportable private key, neither of which has a cross-platform
-    equivalent that preserves the same guarantees.
+    equivalent that preserves the same guarantees, and FlaUI/UI Automation
+    itself is a Windows-only accessibility API.
   -->
 
   <PropertyGroup>
@@ -33,6 +40,8 @@
     </PackageReference>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+    <PackageReference Include="FlaUI.Core" Version="5.0.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -58,6 +67,13 @@
     <None Remove="tests\**\*" />
     <Content Remove="tests\**\*" />
     <EmbeddedResource Remove="tests\**\*" />
+    <!-- Same reason: `testapp\` is a second nested project directory
+         (the Phase 7 E2E fixture, `KortexAutomationTestApp.csproj`),
+         co-located here for convenience the same way `tests\` is. -->
+    <Compile Remove="testapp\**\*.cs" />
+    <None Remove="testapp\**\*" />
+    <Content Remove="testapp\**\*" />
+    <EmbeddedResource Remove="testapp\**\*" />
   </ItemGroup>
 
 </Project>

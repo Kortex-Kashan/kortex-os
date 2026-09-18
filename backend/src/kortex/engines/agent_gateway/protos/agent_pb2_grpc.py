@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from kortex.engines.agent_gateway.protos import agent_pb2 as kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2
+from . import agent_pb2 as agent__pb2
 
 GRPC_GENERATED_VERSION = '1.68.1'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in kortex/engines/agent_gateway/protos/agent_pb2_grpc.py depends on'
+        + f' but the generated code in agent_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -36,8 +36,8 @@ class DesktopAgentGatewayStub(object):
         """
         self.Connect = channel.stream_stream(
                 '/kortex.agent.v1.DesktopAgentGateway/Connect',
-                request_serializer=kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2.AgentMessage.SerializeToString,
-                response_deserializer=kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2.GatewayMessage.FromString,
+                request_serializer=agent__pb2.AgentMessage.SerializeToString,
+                response_deserializer=agent__pb2.GatewayMessage.FromString,
                 _registered_method=True)
 
 
@@ -45,7 +45,8 @@ class DesktopAgentGatewayServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Connect(self, request_iterator, context):
-        """Bidirectional stream establishing the authenticated agent session
+        """Bidirectional stream establishing the authenticated agent session and
+        carrying every subsequent capability command/result for its lifetime.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -56,8 +57,8 @@ def add_DesktopAgentGatewayServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Connect': grpc.stream_stream_rpc_method_handler(
                     servicer.Connect,
-                    request_deserializer=kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2.AgentMessage.FromString,
-                    response_serializer=kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2.GatewayMessage.SerializeToString,
+                    request_deserializer=agent__pb2.AgentMessage.FromString,
+                    response_serializer=agent__pb2.GatewayMessage.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -85,8 +86,8 @@ class DesktopAgentGateway(object):
             request_iterator,
             target,
             '/kortex.agent.v1.DesktopAgentGateway/Connect',
-            kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2.AgentMessage.SerializeToString,
-            kortex_dot_engines_dot_agent__gateway_dot_protos_dot_agent__pb2.GatewayMessage.FromString,
+            agent__pb2.AgentMessage.SerializeToString,
+            agent__pb2.GatewayMessage.FromString,
             options,
             channel_credentials,
             insecure,

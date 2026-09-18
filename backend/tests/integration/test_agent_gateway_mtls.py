@@ -813,16 +813,40 @@ def test_gateway_no_capability_execution() -> None:
 # -- Test 35: protobuf contract has no executable fields -----------------------
 
 
-def test_grpc_contract_no_executable_fields() -> None:
-    """TEST 35: the compiled protobuf descriptor contains no execution messages.
+def test_grpc_contract_no_generic_execution_fields() -> None:
+    """TEST 35: the compiled protobuf descriptor carries no *generic* execution
+    primitive — no arbitrary script, shell, command line, or byte payload.
 
-    Inspects the compiled `FileDescriptor` — the actual wire contract — rather
-    than the .proto text, so a stale or divergent generated module cannot pass.
+    Phase 5 froze this contract at session-only and this test originally
+    asserted the message set was exactly `{AgentMessage, GatewayMessage,
+    AgentStatus, SessionAck}` — no execution vocabulary at all. Phase 6 (this
+    milestone, `docs/architecture/phase5_locked_architecture_spec.md` §2's own
+    documented deferral) deliberately adds capability transport, so that
+    "zero execution messages" invariant no longer holds and would be the
+    wrong thing to keep asserting.
+
+    What must still hold, and is asserted here instead: the transport remains
+    a closed, enumerable set of narrow, strongly-typed desktop-automation
+    messages — never a generic channel that could carry an arbitrary script,
+    shell command, or executable path. Any new field is a deliberate,
+    reviewed addition to this exact set; this test breaks on anything else,
+    by construction, because both assertions below are `==`, not `in`.
     """
     file_descriptor = agent_pb2.DESCRIPTOR
 
     message_names = set(file_descriptor.message_types_by_name)
-    assert message_names == {"AgentMessage", "GatewayMessage", "AgentStatus", "SessionAck"}
+    assert message_names == {
+        "AgentMessage",
+        "GatewayMessage",
+        "AgentStatus",
+        "SessionAck",
+        "UiElementSelector",
+        "DesktopLaunchCommand",
+        "DesktopClickCommand",
+        "DesktopTypeCommand",
+        "DesktopReadTextCommand",
+        "DesktopCommandResult",
+    }
 
     # Exactly one service, exactly one method, bidirectional streaming.
     assert set(file_descriptor.services_by_name) == {"DesktopAgentGateway"}
@@ -832,39 +856,69 @@ def test_grpc_contract_no_executable_fields() -> None:
     assert connect.client_streaming is True
     assert connect.server_streaming is True
 
-    # Every field across every message, checked against execution vocabulary.
+    # No field anywhere in the contract carries a generic execution
+    # primitive: an arbitrary script, shell invocation, command line, or raw
+    # byte/blob payload. `application_id` (below) is an allow-list *key*,
+    # never a path, and is explicitly exempted from the "path"-style check
+    # by not matching any fragment here.
     forbidden_fragments = (
-        "capability",
-        "execute",
-        "command",
         "shell",
-        "process",
         "script",
         "python",
         "powershell",
         "cmd",
         "payload_bytes",
-        "automation",
-        "keystroke",
-        "click",
+        "raw_bytes",
+        "exec",
+        "eval",
+        "subprocess",
+        "file_path",
+        "executable_path",
     )
     for message_name, message in file_descriptor.message_types_by_name.items():
         for field in message.fields:
             lowered = field.name.lower()
             for fragment in forbidden_fragments:
                 assert fragment not in lowered, (
-                    f"{message_name}.{field.name} matches forbidden execution vocabulary {fragment!r}"
+                    f"{message_name}.{field.name} matches forbidden generic-execution vocabulary {fragment!r}"
                 )
 
-    # The agent->gateway and gateway->agent payload unions each have exactly
-    # one permitted member.
-    assert [f.name for f in file_descriptor.message_types_by_name["AgentMessage"].fields] == ["status"]
-    assert [f.name for f in file_descriptor.message_types_by_name["GatewayMessage"].fields] == ["session_ack"]
+    # The agent->gateway and gateway->agent payload unions each carry exactly
+    # the reviewed set of members — one session-lifecycle member plus one
+    # member per capability, never a single generic "instruction" field.
+    assert [f.name for f in file_descriptor.message_types_by_name["AgentMessage"].fields] == [
+        "status",
+        "desktop_result",
+    ]
+    assert [f.name for f in file_descriptor.message_types_by_name["GatewayMessage"].fields] == [
+        "session_ack",
+        "desktop_launch",
+        "desktop_click",
+        "desktop_type",
+        "desktop_read_text",
+    ]
     assert [f.name for f in file_descriptor.message_types_by_name["AgentStatus"].fields] == [
         "machine_installation_id",
         "status",
     ]
     assert [f.name for f in file_descriptor.message_types_by_name["SessionAck"].fields] == ["session_id"]
+
+    # Every command is keyed for correlation and, for launch, resolves an
+    # application by allow-list key — never a filesystem path or shell line.
+    assert [f.name for f in file_descriptor.message_types_by_name["DesktopLaunchCommand"].fields] == [
+        "command_id",
+        "application_id",
+        "arguments",
+        "timeout_seconds",
+    ]
+    for target_message in ("DesktopClickCommand", "DesktopTypeCommand", "DesktopReadTextCommand"):
+        field_names = [f.name for f in file_descriptor.message_types_by_name[target_message].fields]
+        assert field_names[:3] == ["command_id", "window_handle", "selector"]
+    assert [f.name for f in file_descriptor.message_types_by_name["UiElementSelector"].fields] == [
+        "automation_id",
+        "name",
+        "control_type",
+    ]
 
 
 def test_proto_sources_are_identical() -> None:

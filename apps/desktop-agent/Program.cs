@@ -1,15 +1,19 @@
-// KORTEX Windows Desktop Agent (Phase 5).
+// KORTEX Windows Desktop Agent (Phase 5/6).
 //
-// Runs as a LocalSystem Windows Service. Its entire job in Phase 5 is to prove
-// who it is and hold an authenticated session open:
+// Runs as a LocalSystem Windows Service. Phase 5 proves who it is and holds
+// an authenticated session open:
 //
 //   Machine Installation ID (HKLM)  ->  non-exportable CNG key  ->  CSR
 //     ->  trusted HTTPS enrollment  ->  client certificate  ->  mTLS session
 //
-// It executes nothing. There is deliberately no UI automation, no browser
-// driver, no shell, and no process launching in this program, and the protocol
-// it speaks has no message that could ask for any. Capability execution is
-// Phase 6 and requires its own authorization design.
+// Phase 6 (this milestone) executes exactly one thing over that session: the
+// finite, explicitly typed set of desktop-automation commands the wire
+// contract now carries (`DesktopLaunchCommand`/`DesktopClickCommand`/
+// `DesktopTypeCommand`/`DesktopReadTextCommand`), each answered with a
+// `DesktopCommandResult`. There is still no shell, no arbitrary process
+// launching, and no browser driver anywhere in this program — see
+// `DesktopAutomationHandler` and `ApplicationAllowList` for the allow-list
+// and deterministic-targeting design that keeps it that way.
 
 using System.Net.Http;
 using System.Net.Security;
@@ -60,7 +64,10 @@ internal static class Program
 
             Log($"Client certificate: CN={certificate.GetNameInfo(X509NameType.SimpleName, false)}");
 
-            await RunSessionLoopAsync(options, machineId, rootCa, certificate, shutdown.Token)
+            var allowList = ApplicationAllowList.LoadFromFile(options.AllowListPath);
+            using var automation = new DesktopAutomationHandler(allowList, Log);
+
+            await RunSessionLoopAsync(options, machineId, rootCa, certificate, automation, shutdown.Token)
                 .ConfigureAwait(false);
             return 0;
         }
@@ -197,6 +204,7 @@ internal static class Program
         string machineId,
         X509Certificate2 rootCa,
         X509Certificate2 clientCertificate,
+        DesktopAutomationHandler automation,
         CancellationToken cancellationToken)
     {
         var attempt = 0;
@@ -205,7 +213,7 @@ internal static class Program
         {
             try
             {
-                await RunOneSessionAsync(options, machineId, rootCa, clientCertificate, cancellationToken)
+                await RunOneSessionAsync(options, machineId, rootCa, clientCertificate, automation, cancellationToken)
                     .ConfigureAwait(false);
                 attempt = 0; // a clean session resets the backoff
             }
@@ -237,6 +245,7 @@ internal static class Program
         string machineId,
         X509Certificate2 rootCa,
         X509Certificate2 clientCertificate,
+        DesktopAutomationHandler automation,
         CancellationToken cancellationToken)
     {
         var handler = new SocketsHttpHandler
@@ -267,15 +276,100 @@ internal static class Program
             },
         }).ConfigureAwait(false);
 
+        // Every pushed command is answered as soon as its own `ExecuteAsync`
+        // completes, so a slow UI operation (a launch that takes several
+        // seconds, a click that blocks briefly) never stalls the read loop
+        // below and never delays answering a different, unrelated command
+        // that arrives while the first is still running. The actual FlaUI/UIA
+        // work for all of them still runs one at a time, serialized onto
+        // `DesktopAutomationHandler`'s own dedicated worker thread — see its
+        // class-level remarks for why that serialization is required.
+        //
+        // gRPC client streams require the caller to serialize writes onto
+        // `RequestStream`; one lock, scoped to this one session's `call`, is
+        // enough since nothing outside this method ever writes to it.
+        var writeLock = new SemaphoreSlim(1, 1);
+        var pendingReplies = new List<Task>();
+
         await foreach (var message in call.ResponseStream.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (message.PayloadCase == GatewayMessage.PayloadOneofCase.SessionAck)
+            switch (message.PayloadCase)
             {
-                Log($"Session established: {message.SessionAck.SessionId}");
+                case GatewayMessage.PayloadOneofCase.SessionAck:
+                    Log($"Session established: {message.SessionAck.SessionId}");
+                    break;
+                case GatewayMessage.PayloadOneofCase.DesktopLaunch:
+                    pendingReplies.Add(RunCommandAsync(call, writeLock, message.DesktopLaunch.CommandId,
+                        () => automation.ExecuteAsync(() => automation.Handle(message.DesktopLaunch)), cancellationToken));
+                    break;
+                case GatewayMessage.PayloadOneofCase.DesktopClick:
+                    pendingReplies.Add(RunCommandAsync(call, writeLock, message.DesktopClick.CommandId,
+                        () => automation.ExecuteAsync(() => automation.Handle(message.DesktopClick)), cancellationToken));
+                    break;
+                case GatewayMessage.PayloadOneofCase.DesktopType:
+                    pendingReplies.Add(RunCommandAsync(call, writeLock, message.DesktopType.CommandId,
+                        () => automation.ExecuteAsync(() => automation.Handle(message.DesktopType)), cancellationToken));
+                    break;
+                case GatewayMessage.PayloadOneofCase.DesktopReadText:
+                    pendingReplies.Add(RunCommandAsync(call, writeLock, message.DesktopReadText.CommandId,
+                        () => automation.ExecuteAsync(() => automation.Handle(message.DesktopReadText)), cancellationToken));
+                    break;
             }
+            pendingReplies.RemoveAll(task => task.IsCompleted);
         }
 
+        await Task.WhenAll(pendingReplies).ConfigureAwait(false);
         await call.RequestStream.CompleteAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs one command on <see cref="DesktopAutomationHandler"/>'s
+    /// dedicated worker thread and writes its `DesktopCommandResult` back
+    /// under <paramref name="writeLock"/>, so concurrent replies never
+    /// interleave writes on the single shared `RequestStream`.
+    /// </summary>
+    private static async Task RunCommandAsync(
+        AsyncDuplexStreamingCall<AgentMessage, GatewayMessage> call,
+        SemaphoreSlim writeLock,
+        string commandId,
+        Func<Task<DesktopCommandResult>> executeAsync,
+        CancellationToken cancellationToken)
+    {
+        DesktopCommandResult result;
+        try
+        {
+            result = await executeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log($"Command {commandId} raised an unhandled exception: {ex.Message}");
+            result = new DesktopCommandResult
+            {
+                CommandId = commandId,
+                Success = false,
+                ErrorCode = "INTERNAL_ERROR",
+                ErrorMessage = "The agent encountered an internal error executing this command.",
+            };
+        }
+
+        await writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await call.RequestStream.WriteAsync(new AgentMessage { DesktopResult = result }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // A write failure means the Gateway never learns this command's
+            // outcome — its caller will eventually see a transport timeout
+            // instead. That is still a real, diagnosable failure and must
+            // not vanish silently just because nothing here awaits this
+            // task's result.
+            Log($"Command {commandId} succeeded but writing its result failed: {ex.Message}");
+        }
+        finally
+        {
+            writeLock.Release();
+        }
     }
 
     private static string PemEncode(string label, byte[] der)
@@ -301,7 +395,8 @@ internal sealed record AgentOptions(
     string BackendBaseUrl,
     string GatewayAddress,
     string? EnrollmentToken,
-    string RootCaPath)
+    string RootCaPath,
+    string AllowListPath)
 {
     public static AgentOptions Parse(string[] args)
     {
@@ -309,6 +404,7 @@ internal sealed record AgentOptions(
         var backend = "https://gateway.kortex.local:8443";
         var gateway = "https://gateway.kortex.local:50051";
         var rootCa = DefaultRootCaPath;
+        var allowList = DefaultAllowListPath;
 
         for (var i = 0; i < args.Length - 1; i++)
         {
@@ -326,13 +422,22 @@ internal sealed record AgentOptions(
                 case "--root-ca":
                     rootCa = args[i + 1];
                     break;
+                case "--allow-list":
+                    allowList = args[i + 1];
+                    break;
             }
         }
 
-        return new AgentOptions(backend.TrimEnd('/'), gateway, token, rootCa);
+        return new AgentOptions(backend.TrimEnd('/'), gateway, token, rootCa, allowList);
     }
 
     public const string DefaultRootCaPath = @"C:\Program Files\KORTEX\Agent\certs\kortex_root_ca.crt";
+
+    // Operator-managed: which applications `kortex.desktop.launch` may start
+    // on this machine. Absent by default — see `ApplicationAllowList
+    // .LoadFromFile`'s own docstring for why a missing file means "nothing
+    // is launchable" rather than an agent startup failure.
+    public const string DefaultAllowListPath = @"C:\Program Files\KORTEX\Agent\config\allowed-applications.json";
 }
 
 /// <summary>Resolves the persistent Machine Installation ID from HKLM.</summary>

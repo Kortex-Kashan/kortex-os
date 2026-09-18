@@ -35,11 +35,25 @@ from kortex.core.exceptions import (
     IdempotencyError,
     ResourceNotFoundError,
 )
+from kortex.engines.agent_gateway.exceptions import (
+    DesktopAgentAmbiguousError,
+    DesktopAgentUnavailableError,
+    DesktopCommandTimeoutError,
+    DesktopSessionDisconnectedError,
+)
 from kortex.engines.ai.exceptions import (
     AIGovernanceError,
     AIGovernanceNotFoundError,
     AIGovernanceQuotaExceededError,
     AIPolicyViolationError,
+)
+from kortex.engines.desktop_automation.exceptions import (
+    DesktopApplicationNotAllowedError,
+    DesktopAutomationError,
+    DesktopElementAmbiguousError,
+    DesktopElementNotFoundError,
+    DesktopInvalidSelectorError,
+    DesktopWindowNotFoundError,
 )
 from kortex.engines.security.exceptions import (
     AuthenticationError,
@@ -118,6 +132,31 @@ def map_exception(exc: BaseException) -> ErrorMapping:
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.BAD_REQUEST)
     if isinstance(exc, TimeoutError):
         return ErrorMapping("TIMEOUT_EXCEEDED", http.HTTPStatus.REQUEST_TIMEOUT)
+    # Phase 6 desktop automation. Order matters here too:
+    # `DesktopApplicationNotAllowedError`/`DesktopWindowNotFoundError`/
+    # `DesktopElementNotFoundError`/`DesktopElementAmbiguousError` are all
+    # `DesktopAutomationError` subclasses, so the specific checks precede
+    # the generic fallback below it.
+    if isinstance(exc, DesktopCommandTimeoutError):
+        return ErrorMapping("TIMEOUT_EXCEEDED", http.HTTPStatus.REQUEST_TIMEOUT)
+    if isinstance(exc, (DesktopAgentUnavailableError, DesktopSessionDisconnectedError)):
+        return ErrorMapping("SERVICE_UNAVAILABLE", http.HTTPStatus.SERVICE_UNAVAILABLE)
+    if isinstance(exc, DesktopAgentAmbiguousError):
+        return ErrorMapping("VALIDATION_FAILED", http.HTTPStatus.UNPROCESSABLE_ENTITY)
+    if isinstance(exc, DesktopApplicationNotAllowedError):
+        return ErrorMapping("PERMISSION_DENIED", http.HTTPStatus.FORBIDDEN)
+    if isinstance(
+        exc,
+        (
+            DesktopInvalidSelectorError,
+            DesktopWindowNotFoundError,
+            DesktopElementNotFoundError,
+            DesktopElementAmbiguousError,
+        ),
+    ):
+        return ErrorMapping("VALIDATION_FAILED", http.HTTPStatus.UNPROCESSABLE_ENTITY)
+    if isinstance(exc, DesktopAutomationError):
+        return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.INTERNAL_SERVER_ERROR)
     if isinstance(exc, SecurityEngineError):
         return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.INTERNAL_SERVER_ERROR)
     return ErrorMapping("EXECUTION_FAILED", http.HTTPStatus.INTERNAL_SERVER_ERROR)

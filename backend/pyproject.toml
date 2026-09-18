@@ -208,6 +208,14 @@ ignore = [
     "S107",  # hardcoded password default
     "S108",  # hardcoded temp-file path (tmp_path-adjacent fixtures)
 ]
+# Phase 6: this file imports the Phase 5 `harness` fixture by name from
+# `test_agent_gateway_mtls.py` -- the standard, documented pytest idiom for
+# reusing a fixture across modules (the importing module must bind it under
+# the identical name for pytest's fixture resolution to find it). Every test
+# function's own `harness: GatewayHarness` parameter then legitimately
+# shadows that import, which ruff's flake8-based F811 cannot distinguish
+# from an accidental redefinition -- it is not one.
+"tests/integration/test_desktop_command_transport.py" = ["F811"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["kortex"]

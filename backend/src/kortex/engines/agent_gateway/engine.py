@@ -1,5 +1,5 @@
 """
-KORTEX Agent Gateway (Phase 5).
+KORTEX Agent Gateway (Phase 5/6).
 
 A `grpc.aio` server that terminates mutual TLS with Desktop Agents and
 maintains authenticated sessions, per
@@ -30,10 +30,20 @@ can influence it.
 
 What this module deliberately cannot do
 ---------------------------------------
-It does not import, reference, or reach `CapabilityDispatcher`, and the
-protocol it speaks has no message capable of expressing an instruction. An
-authenticated session is the entire product of Phase 5; executing anything
-over that session is Phase 6 and requires its own authorization design.
+It does not import, reference, or reach `CapabilityDispatcher`. Every
+capability-level authorization decision (RBAC/ABAC, tenant isolation,
+audit) happens in `kortex.engines.desktop_automation` and in
+`CapabilityDispatcher` before `send_desktop_command` below is ever called;
+this module only correlates an already-authorized command to the one
+session it is addressed to and pushes it down that session's stream. The
+wire protocol itself remains closed and narrow — see `agent.proto`'s header
+comment — never a generic instruction/script/shell channel.
+
+A session may answer a desktop command only after its first `status`
+message has passed the machine_installation_id binding check
+(`AgentSession.identity_confirmed`); `_resolve_target_session` never
+selects, and `_run_session_loop` never acts on a `desktop_result` from, a
+session that has not reached that point.
 """
 
 from __future__ import annotations
@@ -44,13 +54,19 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import grpc
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
+from kortex.engines.agent_gateway.exceptions import (
+    DesktopAgentAmbiguousError,
+    DesktopAgentUnavailableError,
+    DesktopCommandTimeoutError,
+    DesktopSessionDisconnectedError,
+)
 from kortex.engines.agent_gateway.protos import agent_pb2, agent_pb2_grpc
 from kortex.engines.security.agent_session import (
     AgentAuthorizationDeniedError,
@@ -60,11 +76,16 @@ from kortex.engines.security.agent_session import (
 from kortex.engines.security.pki import KortexPki
 from kortex.engines.storage.interfaces import IDataStore
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _logger = logging.getLogger(__name__)
 
 LIFECYCLE_MONITOR_INTERVAL_SECONDS: Final[float] = 5.0
+DEFAULT_DESKTOP_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
 
 _UNAUTHENTICATED_MESSAGE: Final[str] = "Agent identity is disabled or revoked."
+_SESSION_CLOSED_MESSAGE: Final[str] = "Agent session closed while the command was in flight."
 
 
 @dataclass
@@ -77,6 +98,25 @@ class AgentSession:
     machine_installation_id: str | None
     revoked: asyncio.Event = field(default_factory=asyncio.Event)
     revocation_reason: str | None = None
+    # Set only after this session's first `status` message has passed the
+    # machine_installation_id binding check below. A session that never
+    # reaches that point — a client that connects with a valid certificate
+    # but never sends `status`, or sends a mismatched one — must never be
+    # selected as a desktop-command target (`_resolve_target_session`
+    # filters on this) and must never have a `desktop_result` acted on
+    # (`_run_session_loop` checks this before resolving one). Identity
+    # binding is otherwise checked exactly once, at connect time; without
+    # this flag a session that skipped that check would still be usable for
+    # every privileged operation Phase 6 adds on top of Phase 5's session.
+    identity_confirmed: bool = False
+    # Phase 6 desktop-command transport. `outbound` carries GatewayMessages
+    # a capability handler wants pushed down this specific session's stream;
+    # `pending_commands` correlates a command_id to the Future a handler is
+    # awaiting, resolved when the matching `desktop_result` arrives back on
+    # the same stream. Both are per-session so one agent's traffic can never
+    # be observed or resolved by another agent's stream.
+    outbound: asyncio.Queue[agent_pb2.GatewayMessage] = field(default_factory=asyncio.Queue)
+    pending_commands: dict[str, asyncio.Future[agent_pb2.DesktopCommandResult]] = field(default_factory=dict)
 
 
 class DesktopAgentGatewayServicer(agent_pb2_grpc.DesktopAgentGatewayServicer):
@@ -157,7 +197,6 @@ class DesktopAgentGatewayServicer(agent_pb2_grpc.DesktopAgentGatewayServicer):
             machine_installation_id=identity.machine_installation_id,
         )
 
-        expected_machine_id = identity.machine_installation_id
         self._sessions[session.session_id] = session
         _logger.info(
             "Agent session established.",
@@ -165,54 +204,46 @@ class DesktopAgentGatewayServicer(agent_pb2_grpc.DesktopAgentGatewayServicer):
         )
 
         try:
-            async for message in self._merge_with_revocation(request_iterator, session, context):
-                if not message.HasField("status"):
-                    # The contract has exactly one agent payload. Anything else
-                    # is a client that does not speak this protocol.
-                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Unsupported agent message.")
-                    return
-
-                presented = message.status.machine_installation_id
-                if not presented or presented != expected_machine_id:
-                    # Cryptographic identity and installation binding must
-                    # agree. A valid certificate presented from a different
-                    # installation than the one it was enrolled for is
-                    # rejected, not merely logged.
-                    _logger.warning(
-                        "Agent session rejected: MachineInstallationId does not match the enrolled principal.",
-                        extra={"session_id": session.session_id, "principal_id": principal_id},
-                    )
-                    await context.abort(grpc.StatusCode.UNAUTHENTICATED, _UNAUTHENTICATED_MESSAGE)
-                    return
-
-                yield agent_pb2.GatewayMessage(session_ack=agent_pb2.SessionAck(session_id=session.session_id))
+            async for gateway_message in self._run_session_loop(request_iterator, session, context):
+                yield gateway_message
         finally:
             self._sessions.pop(session.session_id, None)
+            self._fail_pending_commands(session, DesktopSessionDisconnectedError(_SESSION_CLOSED_MESSAGE))
             _logger.info("Agent session closed.", extra={"session_id": session.session_id})
 
-    async def _merge_with_revocation(
+    async def _run_session_loop(
         self,
         request_iterator: AsyncIterator[agent_pb2.AgentMessage],
         session: AgentSession,
         context: grpc.aio.ServicerContext,
-    ) -> AsyncIterator[agent_pb2.AgentMessage]:
-        """Yield client messages, aborting promptly if the session is revoked.
+    ) -> AsyncIterator[agent_pb2.GatewayMessage]:
+        """Drive one session's stream: acknowledge status, route desktop
+        command results back to their waiting caller, push queued desktop
+        commands out, and abort promptly on revocation.
 
-        The lifecycle monitor cannot reach into an in-flight RPC to cancel it,
-        so it sets the session's `revoked` event and this loop — which is
-        inside the RPC — turns that into an actual abort. Without racing the
-        event against the read, a silent agent that never sends another
-        message would keep its stream open indefinitely after being disabled.
+        Three sources race on every iteration: the next inbound
+        `AgentMessage`, the next queued outbound `GatewayMessage` a
+        capability handler enqueued via `AgentGatewayEngine.send_desktop_command`,
+        and the lifecycle monitor's revocation event. The lifecycle monitor
+        cannot reach into an in-flight RPC to cancel it, so it sets `revoked`
+        and this loop — which is inside the RPC — turns that into an actual
+        abort; without racing the event against the reads, a silent agent
+        that never sends another message would keep its stream open
+        indefinitely after being disabled.
         """
-        revoked_task = asyncio.ensure_future(session.revoked.wait())
+        revoked_task: asyncio.Task[bool] = asyncio.ensure_future(session.revoked.wait())
         iterator = request_iterator.__aiter__()
+        inbound_task: asyncio.Task[agent_pb2.AgentMessage] = asyncio.ensure_future(iterator.__anext__())
+        outbound_task: asyncio.Task[agent_pb2.GatewayMessage] = asyncio.ensure_future(session.outbound.get())
         try:
             while True:
-                next_task = asyncio.ensure_future(iterator.__anext__())
-                done, _pending = await asyncio.wait({next_task, revoked_task}, return_when=asyncio.FIRST_COMPLETED)
+                done, _pending = await asyncio.wait(
+                    {revoked_task, inbound_task, outbound_task}, return_when=asyncio.FIRST_COMPLETED
+                )
 
                 if revoked_task in done:
-                    next_task.cancel()
+                    inbound_task.cancel()
+                    outbound_task.cancel()
                     _logger.warning(
                         "Agent session revoked by lifecycle monitor.",
                         extra={
@@ -224,12 +255,85 @@ class DesktopAgentGatewayServicer(agent_pb2_grpc.DesktopAgentGatewayServicer):
                     await context.abort(grpc.StatusCode.UNAUTHENTICATED, _UNAUTHENTICATED_MESSAGE)
                     return
 
+                if outbound_task in done:
+                    yield outbound_task.result()
+                    outbound_task = asyncio.ensure_future(session.outbound.get())
+                    continue
+
+                # inbound_task in done
                 try:
-                    yield next_task.result()
+                    message = inbound_task.result()
                 except StopAsyncIteration:
+                    return
+                inbound_task = asyncio.ensure_future(iterator.__anext__())
+
+                if message.HasField("status"):
+                    presented = message.status.machine_installation_id
+                    if not presented or presented != session.machine_installation_id:
+                        # Cryptographic identity and installation binding must
+                        # agree. A valid certificate presented from a different
+                        # installation than the one it was enrolled for is
+                        # rejected, not merely logged.
+                        _logger.warning(
+                            "Agent session rejected: MachineInstallationId does not match the enrolled principal.",
+                            extra={"session_id": session.session_id, "principal_id": session.principal_id},
+                        )
+                        await context.abort(grpc.StatusCode.UNAUTHENTICATED, _UNAUTHENTICATED_MESSAGE)
+                        return
+                    session.identity_confirmed = True
+                    yield agent_pb2.GatewayMessage(session_ack=agent_pb2.SessionAck(session_id=session.session_id))
+                elif message.HasField("desktop_result"):
+                    if not session.identity_confirmed:
+                        # A compliant client always sends `status` before
+                        # ever being pushed a command to answer, so this is
+                        # unreachable for one — but reject explicitly rather
+                        # than silently accepting a result from a session
+                        # that has not yet proven its machine-installation
+                        # binding, matching the same fail-closed direction
+                        # `_resolve_target_session` enforces on the send side.
+                        await context.abort(grpc.StatusCode.UNAUTHENTICATED, _UNAUTHENTICATED_MESSAGE)
+                        return
+                    self._resolve_pending_command(session, message.desktop_result)
+                else:
+                    # The contract has exactly two agent payloads. Anything
+                    # else is a client that does not speak this protocol.
+                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Unsupported agent message.")
                     return
         finally:
             revoked_task.cancel()
+            inbound_task.cancel()
+            outbound_task.cancel()
+
+    @staticmethod
+    def _resolve_pending_command(session: AgentSession, result: agent_pb2.DesktopCommandResult) -> None:
+        """Deliver an agent's `desktop_result` to the handler awaiting it.
+
+        A result for a `command_id` this session has no pending future for —
+        already delivered, already timed out, or never issued by this
+        process — is logged and dropped. It is never treated as a wildcard
+        match against some other pending command: doing so would let a
+        stale or malformed result resolve the wrong caller.
+        """
+        future = session.pending_commands.get(result.command_id)
+        if future is None or future.done():
+            _logger.warning(
+                "Received desktop_result for unknown or already-resolved command_id.",
+                extra={"session_id": session.session_id, "command_id": result.command_id},
+            )
+            return
+        future.set_result(result)
+
+    @staticmethod
+    def _fail_pending_commands(session: AgentSession, error: Exception) -> None:
+        """Fail every still-pending command future when a session ends.
+
+        Without this, a command issued just before disconnect would hang its
+        caller until `send_desktop_command`'s own timeout — a real but much
+        slower and less informative failure than "the session is gone".
+        """
+        for future in session.pending_commands.values():
+            if not future.done():
+                future.set_exception(error)
 
 
 class AgentGatewayEngine:
@@ -369,3 +473,60 @@ class AgentGatewayEngine:
             revoked.append(session.session_id)
 
         return revoked
+
+    # -- Desktop command transport (Phase 6) ---------------------------------
+
+    def _resolve_target_session(self, tenant_id: str, agent_principal_id: str | None) -> AgentSession:
+        """Select the one live session a desktop command should be sent to.
+
+        Fail-closed, mirroring the UI-element-selector rule one level up:
+        zero matching sessions is unavailable, more than one with no
+        `agent_principal_id` to disambiguate is ambiguous, and a command is
+        never routed to an arbitrarily chosen session among several live
+        candidates.
+        """
+        candidates = [
+            session
+            for session in self._sessions.values()
+            if session.identity_confirmed
+            and session.tenant_id == tenant_id
+            and (agent_principal_id is None or session.principal_id == agent_principal_id)
+        ]
+        if not candidates:
+            raise DesktopAgentUnavailableError(f"No connected desktop agent is available for tenant '{tenant_id}'.")
+        if len(candidates) > 1:
+            raise DesktopAgentAmbiguousError(
+                f"Multiple connected desktop agents match tenant '{tenant_id}'; "
+                "an explicit agent_id is required to disambiguate."
+            )
+        return candidates[0]
+
+    async def send_desktop_command(
+        self,
+        *,
+        tenant_id: str,
+        build_command: Callable[[str], agent_pb2.GatewayMessage],
+        agent_principal_id: str | None = None,
+        timeout_seconds: float = DEFAULT_DESKTOP_COMMAND_TIMEOUT_SECONDS,
+    ) -> agent_pb2.DesktopCommandResult:
+        """Send one desktop command to the resolved session and await its result.
+
+        `build_command` receives the server-generated `command_id` and must
+        return the fully-populated `GatewayMessage` to enqueue — keeping
+        command_id generation exclusively here means a caller can never
+        supply (and thus never collide or replay) one of its own.
+        """
+        session = self._resolve_target_session(tenant_id, agent_principal_id)
+        command_id = str(uuid.uuid4())
+        future: asyncio.Future[agent_pb2.DesktopCommandResult] = asyncio.get_running_loop().create_future()
+        session.pending_commands[command_id] = future
+        try:
+            await session.outbound.put(build_command(command_id))
+            try:
+                return await asyncio.wait_for(future, timeout=timeout_seconds)
+            except TimeoutError as exc:
+                raise DesktopCommandTimeoutError(
+                    f"Desktop agent did not respond to command '{command_id}' within {timeout_seconds}s."
+                ) from exc
+        finally:
+            session.pending_commands.pop(command_id, None)
