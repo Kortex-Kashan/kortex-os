@@ -114,6 +114,26 @@ module = ["kortex.engines.agent_gateway.protos.*"]
 ignore_errors = true
 disallow_untyped_calls = false
 
+# Windows-only boundary modules (see the two mypy steps in
+# .github/workflows/backend-ci.yml). `winapi.py` calls `ctypes.WinDLL` at
+# module scope and `windows_boundary.py` uses `msvcrt.get_osfhandle`; neither
+# exists in Linux typeshed, and neither module can even be imported off
+# Windows -- which is exactly why `gateway.py` imports them lazily. Under
+# `--platform linux` they are dropped from the crawl by `--exclude`, and this
+# override stops the Gateway's lazy import from dragging them back in.
+#
+# This does NOT stop them being type-checked: `--exclude` is absent from the
+# `--platform win32` step, so there they are explicitly specified on the
+# command line, `follow_imports` does not apply, and they are checked in full
+# strict mode against Windows typeshed -- the only typeshed under which their
+# APIs exist.
+[[tool.mypy.overrides]]
+module = [
+    "kortex.engines.python_exec.winapi",
+    "kortex.engines.python_exec.windows_boundary",
+]
+follow_imports = "silent"
+
 [tool.ruff]
 target-version = "py312"
 line-length = 120

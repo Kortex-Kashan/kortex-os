@@ -50,11 +50,35 @@ jobs:
       - name: Ruff format check
         run: python -m ruff format --check .
 
-      # backend/pyproject.toml's `[tool.mypy]` already scopes this to `src`
-      # (mypy_path = ["src"]) in strict mode -- this reproduces that exactly,
-      # not a new configuration.
-      - name: mypy
-        run: python -m mypy src
+      # `src` contains code for two target platforms, so one type-check run
+      # cannot be correct for all of it: mypy resolves the standard library
+      # against a single platform's typeshed, and `ctypes.WinDLL` /
+      # `msvcrt.get_osfhandle` simply do not exist in the Linux one. Running
+      # only `--platform linux` reported 9 false errors against genuinely
+      # correct Windows code; running only `--platform win32` would silently
+      # stop checking every `sys.platform != "win32"` branch. Both platforms
+      # are therefore checked explicitly, on this same Linux runner --
+      # `--platform` selects which typeshed mypy reasons against and does not
+      # require running on that OS.
+      #
+      # Strict mode (backend/pyproject.toml `[tool.mypy]`, mypy_path = ["src"])
+      # applies unchanged to both runs.
+
+      # Checks the whole tree, INCLUDING the Windows-only boundary modules
+      # (python_exec/winapi.py, python_exec/windows_boundary.py). They are
+      # explicitly on the command line here, so the `follow_imports` override
+      # in pyproject.toml does not apply and they are fully type-checked --
+      # this is the run that proves the Windows implementation is type-correct.
+      - name: mypy (Windows target - checks Windows-only boundary modules)
+        run: python -m mypy src --platform win32
+
+      # Checks the whole tree EXCEPT those two modules, which cannot be
+      # imported off Windows at all (see python_exec/gateway.py's lazy import).
+      # This is the run that covers `linux_boundary.py` and every
+      # `sys.platform != "win32"` branch, which the win32 run treats as
+      # unreachable.
+      - name: mypy (Linux target - checks Linux-only boundary and POSIX branches)
+        run: python -m mypy src --platform linux --exclude 'python_exec.(winapi|windows_boundary)\.py$'
 
       - name: pytest
         shell: bash
