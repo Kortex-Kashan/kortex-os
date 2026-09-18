@@ -32,6 +32,7 @@ from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from kortex.api.agent_enrollment import router as agent_enrollment_router
 from kortex.api.errors import error_details, error_message, map_exception
 from kortex.api.kernel_bootstrap import build_and_boot_kernel
 from kortex.api.schemas import IpcCapabilityRequest, IpcError, IpcResultEnvelope
@@ -59,6 +60,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="KORTEX IPC Bridge", lifespan=_lifespan)
+
+# Phase 5: the Desktop Agent's enrollment endpoint. Mounted as a router rather
+# than an `@app.post` here because it is the first route on this app that is
+# versioned (`/api/v1/...`) and it owns its own request parsing — see that
+# module's docstring for why it must not use the shared validation handler.
+app.include_router(agent_enrollment_router)
 
 
 def _kernel(request_or_ws: Request | WebSocket) -> Kernel:

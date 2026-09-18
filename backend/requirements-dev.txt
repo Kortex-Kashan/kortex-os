@@ -7,4 +7,8 @@ pytest-cov>=6.0.0
 ruff>=0.9.0
 mypy>=1.14.0
 types-PyYAML>=6.0.0
+# Phase 5 protobuf stub generation. Version matched to grpcio in
+# requirements.txt -- see the note there about the specification's
+# non-existent 1.68.2 pin.
+grpcio-tools==1.68.1
 pre-commit>=4.0.0

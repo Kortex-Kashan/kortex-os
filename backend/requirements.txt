@@ -19,3 +19,12 @@ pdfplumber>=0.11.0
 rapidocr-onnxruntime>=1.4.0
 opencv-python-headless>=4.5.1.48
 mcp==1.24.0
+
+# Phase 5 Agent Gateway (mTLS gRPC session transport).
+# The locked Phase 5 specification (S28) pins grpcio==1.68.2. That release
+# does not exist on PyPI on any platform -- the 1.68 series is 1.68.0,
+# 1.68.1, then 1.69.0 -- so it cannot be installed and would break every
+# environment that resolves this file. Pinned to 1.68.1, the latest
+# existing release in the specified series. Flagged for Chief Architect
+# confirmation; no other spec value was altered.
+grpcio==1.68.1

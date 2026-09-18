@@ -377,6 +377,68 @@ class IdempotencyStore:
             with contextlib.suppress(Exception):
                 await self._cache_store.delete(self._cache_key(tenant_id, idempotency_key))
 
+    async def release_claim_if_owned(
+        self,
+        tenant_id: str,
+        idempotency_key: str,
+        request_id: str,
+        error_message: str,
+    ) -> bool:
+        """Release a PROCESSING claim that *this* request owns, marking it FAILED.
+
+        Exists for one narrow window that `record_failed` cannot cover. The
+        dispatcher claims an idempotency key in its own transaction, and that
+        transaction can commit and *then* have the caller's cancellation
+        delivered while the call is still unwinding — before the dispatcher
+        has entered the `try` whose `except BaseException` calls
+        `record_failed`. The row is durably PROCESSING, nobody will ever
+        complete it, and it stays that way until the stale-lease reclaim in
+        `claim_or_get_execution` ages it out. This closes that window.
+
+        Ownership is proven by `request_id` rather than assumed. A row only
+        carries this request's id if this request actually won the claim:
+        every claiming path above (fresh INSERT, stale reclaim, FAILED ->
+        PROCESSING retry) writes it, and no other path does. That matters
+        because the caller invoking this cannot always know the claim's
+        outcome — the cancellation may have pre-empted the return value — so
+        it must be safe to call speculatively. Scoping the UPDATE by
+        `request_id` makes a losing caller's release a no-op instead of
+        letting it mark a *concurrent winner's* in-flight record FAILED,
+        which would hand a duplicate request permission to execute a second
+        time. The `state == PROCESSING` guard likewise keeps an already
+        COMPLETED result from ever being overwritten.
+
+        Returns:
+            True if a row was actually released, False if this request owned
+            nothing — the normal outcome when the claim never committed.
+        """
+
+        async def _action(session: AsyncSession) -> bool:
+            update_stmt = (
+                update(IdempotencyRecordModel)
+                .where(
+                    IdempotencyRecordModel.tenant_id == tenant_id,
+                    IdempotencyRecordModel.idempotency_key == idempotency_key,
+                    IdempotencyRecordModel.request_id == request_id,
+                    IdempotencyRecordModel.state == IdempotencyState.PROCESSING.value,
+                )
+                .values(
+                    state=IdempotencyState.FAILED.value,
+                    error_message=error_message[:1000],
+                    updated_at=datetime.datetime.now(datetime.UTC),
+                )
+            )
+            result = cast(CursorResult[Any], await session.execute(update_stmt))
+            return bool(result.rowcount == 1)
+
+        released = await self._data_store.execute_in_transaction(_action)
+
+        if released and self._cache_store is not None:
+            with contextlib.suppress(Exception):
+                await self._cache_store.delete(self._cache_key(tenant_id, idempotency_key))
+
+        return released
+
     async def get_record(self, tenant_id: str, idempotency_key: str) -> IdempotencyRecordModel | None:
         """Retrieve the raw IdempotencyRecordModel for inspection."""
 

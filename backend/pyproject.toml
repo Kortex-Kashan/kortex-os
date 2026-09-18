@@ -98,10 +98,32 @@ ignore_missing_imports = true
 module = ["mcp.*"]
 ignore_missing_imports = true
 
+# `grpcio` (Phase 5 Agent Gateway) ships no `py.typed` marker and its stubs are
+# a separate, unpinned distribution; same for the protobuf runtime.
+[[tool.mypy.overrides]]
+module = ["grpc.*", "google.protobuf.*"]
+ignore_missing_imports = true
+
+# Generated protobuf/gRPC stubs. Emitted verbatim by `grpc_tools.protoc` and
+# regenerated from `agent.proto`, never hand-edited, so their annotations
+# cannot be brought up to this project's standard without diverging from the
+# generator. The contract itself is asserted directly against the compiled
+# descriptor by `test_grpc_contract_no_executable_fields`.
+[[tool.mypy.overrides]]
+module = ["kortex.engines.agent_gateway.protos.*"]
+ignore_errors = true
+disallow_untyped_calls = false
+
 [tool.ruff]
 target-version = "py312"
 line-length = 120
 src = ["src", "tests"]
+# Protobuf/gRPC stubs are emitted verbatim by `grpc_tools.protoc` and are
+# regenerated from `agent.proto`, never hand-edited. Linting them would only
+# produce findings that cannot be fixed without diverging from the generator's
+# output, and the contract they encode is asserted directly by
+# `test_grpc_contract_no_executable_fields` against the compiled descriptor.
+extend-exclude = ["*_pb2.py", "*_pb2_grpc.py", "*_pb2.pyi"]
 
 [tool.ruff.lint]
 select = [

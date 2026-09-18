@@ -426,13 +426,40 @@ class CapabilityDispatcher:
         idempotency_key = request.idempotency_key
 
         if idempotency_key and idempotency_store is not None:
-            claim_status, cached_response, _ = await idempotency_store.claim_or_get_execution(
-                tenant_id=tenant_id,
-                idempotency_key=idempotency_key,
-                capability_name=request.capability_name,
-                request_id=request.request_id,
-                correlation_id=request.correlation_id,
-            )
+            try:
+                claim_status, cached_response, _ = await idempotency_store.claim_or_get_execution(
+                    tenant_id=tenant_id,
+                    idempotency_key=idempotency_key,
+                    capability_name=request.capability_name,
+                    request_id=request.request_id,
+                    correlation_id=request.correlation_id,
+                )
+            except BaseException as exc:
+                # The claim commits in its own transaction, which leaves a
+                # window the `except BaseException` below cannot reach: a
+                # client-side timeout can cancel this coroutine *after* that
+                # transaction has committed PROCESSING but *before* control
+                # reaches the `try` that would call `record_failed`. The row
+                # is then durably claimed by an execution that never starts,
+                # and nothing completes it until the stale-lease reclaim in
+                # `claim_or_get_execution` ages it out — the exact stranding
+                # the handler below exists to prevent, just one statement too
+                # early to be caught by it.
+                #
+                # Speculative by necessity: cancellation may have pre-empted
+                # the return value, so whether we won the claim is unknown
+                # here. `release_claim_if_owned` is scoped to this
+                # `request_id`, so it releases only a row we actually own and
+                # is a no-op otherwise — in particular it can never mark a
+                # *concurrent* holder's record FAILED and let a duplicate
+                # execute twice.
+                await idempotency_store.release_claim_if_owned(
+                    tenant_id=tenant_id,
+                    idempotency_key=idempotency_key,
+                    request_id=request.request_id,
+                    error_message=str(exc) or type(exc).__name__,
+                )
+                raise
             if claim_status == ClaimResult.COMPLETED:
                 logger.info(
                     "Idempotency hit for capability '%s', key '%s' under tenant '%s'. Returning cached result.",

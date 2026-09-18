@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    KORTEX Windows Desktop Agent (Phase 5).
+
+    Establishes machine identity, enrolls once against the backend over trusted
+    HTTPS, and maintains an mTLS gRPC session. It executes nothing: there is no
+    UI automation, no browser driver, and no process launching here, and none
+    may be added without the Phase 6 authorization design.
+
+    Windows-only by construction — the agent's security model depends on the
+    Windows Registry for the Machine Installation ID and on Windows CNG for a
+    non-exportable private key, neither of which has a cross-platform
+    equivalent that preserves the same guarantees.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Kortex.Agent</RootNamespace>
+    <AssemblyName>KortexAgent</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
+    <PackageReference Include="Google.Protobuf" Version="3.29.3" />
+    <PackageReference Include="Grpc.Tools" Version="2.69.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="protos\agent.proto" GrpcServices="Client" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Adversarial matrix test 23 exercises `NonExportableKey` directly. -->
+    <InternalsVisibleTo Include="KortexAgent.Tests" />
+  </ItemGroup>
+
+  <!--
+    The SDK-style default compile glob is `**/*.cs` under the project
+    directory, which would otherwise also pick up tests\*.cs, a separate
+    xunit test project nested under this one for convenience of co-location:
+    Excluding it here is what makes "one project directory, two .csproj
+    files" work at all: without it, this project fails to compile because it
+    has no xunit reference, and the test project would separately duplicate
+    every application source file.
+  -->
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <None Remove="tests\**\*" />
+    <Content Remove="tests\**\*" />
+    <EmbeddedResource Remove="tests\**\*" />
+  </ItemGroup>
+
+</Project>

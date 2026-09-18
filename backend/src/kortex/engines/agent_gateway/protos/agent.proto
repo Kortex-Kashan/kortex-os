@@ -1,0 +1,45 @@
+// KORTEX Phase 5 — Desktop Agent session protocol.
+//
+// This contract is deliberately minimal. Phase 5 establishes an authenticated
+// session and nothing more: the agent reports that it is online and bound to a
+// specific Windows installation, and the Gateway acknowledges the session.
+//
+// There is intentionally no message here capable of carrying an instruction —
+// no capability request, no command, no script, no process or shell payload.
+// That absence is a security control, not an omission to be filled in later
+// without review: it means a compromised Gateway, or a forged GatewayMessage,
+// has no wire representation with which to ask an agent to execute anything.
+// Capability transport is Phase 6 and must be introduced with its own
+// authorization design.
+
+syntax = "proto3";
+
+package kortex.agent.v1;
+
+option csharp_namespace = "Kortex.Agent.V1";
+
+service DesktopAgentGateway {
+  // Bidirectional stream establishing the authenticated agent session
+  rpc Connect(stream AgentMessage) returns (stream GatewayMessage);
+}
+
+message AgentMessage {
+  oneof payload {
+    AgentStatus status = 1;
+  }
+}
+
+message GatewayMessage {
+  oneof payload {
+    SessionAck session_ack = 1;
+  }
+}
+
+message AgentStatus {
+  string machine_installation_id = 1;
+  string status = 2; // "ONLINE"
+}
+
+message SessionAck {
+  string session_id = 1;
+}

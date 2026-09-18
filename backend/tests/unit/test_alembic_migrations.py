@@ -96,6 +96,8 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "python_action_versions",
         "python_actions",
         "python_execution_records",
+        # Phase 5 agent identity / enrollment.
+        "security_agent_enrollment_tokens",
         "security_audit_records",
         "security_principals",
         "security_role_permissions",

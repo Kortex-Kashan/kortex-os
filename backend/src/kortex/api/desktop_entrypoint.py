@@ -114,6 +114,19 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
         "a7f3c19d4b20",
         frozenset({"python_actions", "python_action_versions", "python_execution_records"}),
     ),
+    # Phase 5 (agent identity / enrollment). This revision is the second one
+    # in the chain to do both kinds of change at once: it creates a new table
+    # AND adds a column to the already-existing `security_principals`. The
+    # table below covers the first half; the `_COLUMN_REQUIREMENTS` entry for
+    # this revision covers the second, without which a legacy database that
+    # happens to have the new table -- `create_all()` creates missing tables
+    # while never altering existing ones, so that combination is the norm, not
+    # an edge case -- would be stamped as already carrying a column it does
+    # not have.
+    (
+        "f5a1b2c3d4e5",
+        frozenset({"security_agent_enrollment_tokens"}),
+    ),
 )
 
 # Column-level counterpart to `_REVISION_CHAIN` for a revision that adds a
@@ -125,6 +138,7 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
 # table-existence check in `_REVISION_CHAIN`.
 _COLUMN_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "e1a2b3c4d5f6": (("security_principals", "email"),),
+    "f5a1b2c3d4e5": (("security_principals", "machine_installation_id"),),
 }
 
 

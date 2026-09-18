@@ -1,0 +1,4 @@
+# Standard .NET build output -- never committed.
+bin/
+obj/
+*.user

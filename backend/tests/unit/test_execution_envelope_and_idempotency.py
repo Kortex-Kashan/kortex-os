@@ -26,6 +26,7 @@ from kortex.core.db import DatabaseEngineManager
 from kortex.core.dispatch import CapabilityRequest
 from kortex.core.exceptions import ConcurrentExecutionError, IdempotencyError
 from kortex.core.idempotency import (
+    ClaimResult,
     IdempotencyState,
 )
 from kortex.core.kernel import Kernel
@@ -59,10 +60,15 @@ class _CounterSpy:
         self.invocations: list[dict[str, Any]] = []
         self.return_value = return_value or {"status": "ok"}
         self.sleep_s = sleep_s
+        # Set the moment the handler is entered, so a test that needs to act
+        # *while the handler is running* can wait for that to actually be
+        # true instead of guessing at a wall-clock delay.
+        self.entered = asyncio.Event()
 
     async def __call__(self, **kwargs: Any) -> Any:
         self.call_count += 1
         self.invocations.append(dict(kwargs))
+        self.entered.set()
         if self.sleep_s > 0:
             await asyncio.sleep(self.sleep_s)
         if isinstance(self.return_value, Exception):
@@ -663,8 +669,26 @@ async def test_client_timeout_cancellation_does_not_strand_processing_record(tmp
         context={"resource_tenant_id": "tenant-cancel"},
     )
 
+    # Cancel only once the handler is genuinely running. `asyncio.wait_for`'s
+    # deadline is wall-clock and starts before dispatch does, so timing it
+    # from the call site made *which phase* got cancelled a race: on a loaded
+    # machine the 100ms could elapse during authentication, authorization or
+    # the idempotency claim instead, leaving no record at all (correctly — an
+    # uncommitted claim rolls back) and silently testing something other than
+    # what this test is named for. Starting the invocation first and waiting
+    # for the handler to signal entry pins the scenario to the one in the
+    # docstring. The cancellation itself is still delivered by `wait_for`,
+    # exactly as `api/main.py` delivers it in production.
+    invocation = asyncio.ensure_future(kernel.invoke_capability(request))
+    await asyncio.wait_for(slow_spy.entered.wait(), timeout=30.0)
+
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(kernel.invoke_capability(request), timeout=0.1)
+        await asyncio.wait_for(invocation, timeout=0.1)
+
+    # Precondition, asserted rather than assumed: the cancellation landed
+    # mid-handler, which is the only arrangement under which the dispatcher
+    # owes us a FAILED record at all.
+    assert slow_spy.call_count == 1
 
     # Give the dispatcher's own except-block cleanup a moment to finish
     # running (it executes as part of unwinding the cancelled task).
@@ -679,6 +703,188 @@ async def test_client_timeout_cancellation_does_not_strand_processing_record(tmp
     # claim it (proven generically by `test_failed_execution_allows_atomic_retry_claim`)
     # rather than being permanently blocked behind a claim nobody will ever complete.
     assert record.state == IdempotencyState.FAILED.value
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_between_claim_commit_and_handler_does_not_strand_record(
+    tmp_path: Path,
+) -> None:
+    """The idempotency claim commits in its own transaction, one statement
+    before the `try` whose `except BaseException` performs failure cleanup.
+    A caller's timeout landing in that gap used to leave the record durably
+    PROCESSING with nothing left running to complete it — recoverable only
+    by the stale-lease reclaim, which blocks legitimate retries until it
+    fires. The dispatcher must release a claim it owns even when it is
+    cancelled before it ever reaches the handler.
+
+    Deterministic by construction: rather than racing a wall-clock timeout
+    into a microsecond-wide window, this drives the cancellation from inside
+    the claim call itself, at the precise point the production race can
+    reach — after the claim transaction has committed, before control
+    returns to the dispatcher.
+    """
+    kernel, storage_engine, security_engine = await _build_authenticated_kernel(tmp_path, "claim_gap")
+
+    spy = _CounterSpy({"result": "never_runs"})
+    kernel.register_capability(
+        name="test.claim.gap",
+        description="Never actually reached",
+        provider="test",
+        handler=spy,
+        requires_authentication=True,
+        required_permissions=["claim:gap"],
+    )
+    await kernel.boot()
+
+    token = await _seed_user_with_permission(
+        storage_engine.data, security_engine, "tenant-gap", "user-gap", "claim:gap"
+    )
+    key = "claim-gap-key-1"
+
+    store = kernel._dispatcher._resolve_idempotency_store()
+    assert store is not None
+    real_claim = store.claim_or_get_execution
+
+    async def _claim_then_cancel(**kwargs: Any) -> Any:
+        outcome = await real_claim(**kwargs)
+        # The PROCESSING row is committed at this point. Deliver the
+        # cancellation here, while the claim call is still unwinding.
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        await asyncio.sleep(0)
+        return outcome
+
+    store.claim_or_get_execution = _claim_then_cancel  # type: ignore[method-assign]
+
+    request = CapabilityRequest(
+        capability_name="test.claim.gap",
+        idempotency_key=key,
+        session_token=token,
+        context={"resource_tenant_id": "tenant-gap"},
+    )
+
+    task = asyncio.current_task()
+    assert task is not None
+    with pytest.raises(asyncio.CancelledError):
+        await kernel.invoke_capability(request)
+    # This test cancelled its own task on purpose; clear that so the
+    # assertions below can still await the database.
+    task.uncancel()
+
+    store.claim_or_get_execution = real_claim  # type: ignore[method-assign]
+
+    # The handler never ran: the cancellation landed before dispatch reached
+    # it, which is exactly the window under test.
+    assert spy.call_count == 0
+
+    record = await store.get_record("tenant-gap", key)
+    assert record is not None
+    # Released, not stranded. A retry may claim it immediately instead of
+    # waiting out the stale-PROCESSING lease.
+    assert record.state == IdempotencyState.FAILED.value
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_claim_never_releases_a_concurrent_holders_record(
+    tmp_path: Path,
+) -> None:
+    """The release above runs speculatively — the dispatcher cannot always
+    know whether it won the claim, because cancellation may have pre-empted
+    the return value. So it must be scoped to the caller's own `request_id`:
+    a request that *lost* the claim and is then cancelled must not mark the
+    winner's in-flight record FAILED, which would let a duplicate execute a
+    second time while the original is still running.
+    """
+    kernel, _storage_engine, _security_engine = await _build_authenticated_kernel(tmp_path, "claim_owner")
+    await kernel.boot()
+
+    store = kernel._dispatcher._resolve_idempotency_store()
+    assert store is not None
+
+    # The winner claims the key and is still executing.
+    claim, _, _ = await store.claim_or_get_execution(
+        tenant_id="tenant-own",
+        idempotency_key="owned-key",
+        capability_name="test.owned",
+        request_id="winner-request",
+        correlation_id="winner-correlation",
+    )
+    assert claim == ClaimResult.CLAIMED
+
+    # A different request, cancelled mid-claim, speculatively releases.
+    released = await store.release_claim_if_owned(
+        tenant_id="tenant-own",
+        idempotency_key="owned-key",
+        request_id="loser-request",
+        error_message="cancelled",
+    )
+    assert released is False
+
+    record = await store.get_record("tenant-own", "owned-key")
+    assert record is not None
+    assert record.state == IdempotencyState.PROCESSING.value
+    assert record.request_id == "winner-request"
+
+    # The owner's own release does take effect.
+    assert (
+        await store.release_claim_if_owned(
+            tenant_id="tenant-own",
+            idempotency_key="owned-key",
+            request_id="winner-request",
+            error_message="cancelled",
+        )
+        is True
+    )
+    record = await store.get_record("tenant-own", "owned-key")
+    assert record is not None
+    assert record.state == IdempotencyState.FAILED.value
+
+    await kernel.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_release_claim_if_owned_never_overwrites_a_completed_result(
+    tmp_path: Path,
+) -> None:
+    """A COMPLETED record is a durable answer already returned to a caller.
+    The speculative release must never downgrade one to FAILED, which would
+    discard a real result and permit re-execution of a completed mutation.
+    """
+    kernel, _storage_engine, _security_engine = await _build_authenticated_kernel(tmp_path, "claim_done")
+    await kernel.boot()
+
+    store = kernel._dispatcher._resolve_idempotency_store()
+    assert store is not None
+
+    await store.claim_or_get_execution(
+        tenant_id="tenant-done",
+        idempotency_key="done-key",
+        capability_name="test.done",
+        request_id="req-done",
+        correlation_id="corr-done",
+    )
+    await store.record_completed(
+        tenant_id="tenant-done",
+        idempotency_key="done-key",
+        response_payload={"result": "already returned"},
+    )
+
+    released = await store.release_claim_if_owned(
+        tenant_id="tenant-done",
+        idempotency_key="done-key",
+        request_id="req-done",
+        error_message="cancelled",
+    )
+    assert released is False
+
+    record = await store.get_record("tenant-done", "done-key")
+    assert record is not None
+    assert record.state == IdempotencyState.COMPLETED.value
 
     await kernel.shutdown()
 

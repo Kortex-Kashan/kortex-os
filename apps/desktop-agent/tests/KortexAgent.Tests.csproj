@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Adversarial matrix test 23: the agent's private key must be non-exportable.
+
+    Built and run with the .NET 8 SDK on Windows 10.0.26200 (2026-09-17),
+    confirming the property this test asserts.
+
+    Windows-only: the guarantee under test is enforced by Windows CNG, so there
+    is no meaningful cross-platform version of this assertion.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>KortexAgent.Tests</AssemblyName>
+    <RootNamespace>Kortex.Agent.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KortexAgent.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -243,3 +243,50 @@ class OAuthRefreshInvalidError(SecurityEngineError):
     `bad_refresh_token`) — distinguishes "reauthorization is required" from a
     transient network/provider failure. Never includes the refresh token in
     its message."""
+
+
+# -- Internal PKI (Phase 5) --------------------------------------------------
+
+
+class PkiError(SecurityEngineError):
+    """Base exception for the internal KORTEX PKI subsystem.
+
+    Never includes private key material, PEM bytes, or a CSR's contents in
+    its message — only the handle or subject that failed.
+    """
+
+
+class CaAlreadyExistsError(PkiError):
+    """Raised when `pki init` is invoked while a Root CA private key already
+    exists in the `SecretStore`.
+
+    The CA is never silently regenerated: a second `init` aborts, because
+    overwriting it would instantly and irrecoverably invalidate every client
+    certificate already issued from the previous CA.
+    """
+
+
+class CaUnavailableError(PkiError):
+    """Raised when required CA material is missing, unreadable, or fails
+    integrity verification.
+
+    Every security component that depends on the CA must fail closed on this
+    error rather than continuing with a degraded or absent trust anchor.
+    """
+
+
+class ServerCertificateUnavailableError(PkiError):
+    """Raised when the Gateway server certificate or its private key is
+    missing from the `SecretStore`, or does not parse.
+
+    The Agent Gateway aborts boot on this error — it never falls back to a
+    self-signed certificate, a plaintext-TLS listener, or a disabled-TLS mode.
+    """
+
+
+class CsrValidationError(PkiError):
+    """Raised when a submitted CSR is malformed or fails its embedded
+    self-signature check.
+
+    Never includes the CSR bytes in its message.
+    """

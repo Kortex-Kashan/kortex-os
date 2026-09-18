@@ -27,7 +27,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import JSON, LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from kortex.core.db import BaseModel as SQLAlchemyBaseModel
@@ -250,6 +250,7 @@ class PrincipalRecord(SQLAlchemyBaseModel):
     __tablename__ = "security_principals"
     __table_args__ = (
         UniqueConstraint("tenant_id", "principal_id", "principal_type", name="uq_security_principals_tenant_principal"),
+        UniqueConstraint("machine_installation_id", name="uq_security_principals_machine_id"),
     )
 
     tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
@@ -271,6 +272,57 @@ class PrincipalRecord(SQLAlchemyBaseModel):
     # already-deployed table, so it ships with a real, additive Alembic
     # migration rather than relying on `Base.metadata.create_all()`.
     email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
+    # Phase 5 (agent identity): the canonical UUIDv4 Machine Installation ID
+    # of the Windows installation this principal was enrolled from, read by
+    # the Desktop Agent from `HKLM\SOFTWARE\KORTEX\Agent`. Nullable because
+    # only `AGENT` principals ever carry one — every `USER` and
+    # `SERVICE_PRINCIPAL` row (and every principal provisioned before this
+    # column existed) leaves it NULL.
+    #
+    # This is an installation *binding* attribute, NOT an authentication
+    # factor: the sole cryptographic factor is the agent's non-exportable
+    # private key and its issued X.509 client certificate. The Gateway
+    # nevertheless requires both to agree — a certificate whose CN resolves
+    # to this principal must arrive alongside an `AgentStatus` carrying this
+    # exact value, or the session is rejected.
+    #
+    # Globally unique (not per-tenant) so one Windows installation can never
+    # be enrolled twice, including across two different tenants. Enforced in
+    # the database by `uq_security_principals_machine_id` above, not merely
+    # by the enrollment service's own pre-check.
+    machine_installation_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+
+
+class AgentEnrollmentTokenRecord(SQLAlchemyBaseModel):
+    """SQLAlchemy ORM model for single-use agent enrollment tokens (Phase 5).
+
+    Colocated in `security/models.py` per the same cross-engine convention
+    `SecretRecord`/`PrincipalRecord`/`RolePermissionRecord` already establish.
+
+    Only `SHA-256(raw_token)` is ever persisted, in `token_hash`. The raw
+    64-character hex token exists exactly once — at generation, when it is
+    handed to the administrator — and is never written to this table, to a
+    log, to an audit record, or to any API response thereafter.
+
+    The six `enrollment_*`/`issued_*`/`certificate_*` columns below are
+    written as a single atomic group inside the enrollment transaction and
+    together constitute the `ENROLLMENT_COMPLETED` state. A row in which
+    only some of them are populated is NOT completed: it denotes a violated
+    database invariant and forces a fail-closed rejection rather than a
+    certificate re-issue. See `agent_enrollment.enrollment_state`.
+    """
+
+    __tablename__ = "security_agent_enrollment_tokens"
+
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrollment_principal_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enrollment_csr_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enrollment_machine_installation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    issued_certificate: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    certificate_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RolePermissionRecord(SQLAlchemyBaseModel):
