@@ -203,22 +203,42 @@ def test_environment_is_built_from_an_allowlist_not_by_pruning_secrets() -> None
 
 
 def test_environment_allowlist_matching_is_case_insensitive() -> None:
-    """`os.environ` upper-cases every key on Windows.
+    """The base environment allowlist matches keys case-insensitively.
 
-    A case-sensitive allowlist silently matched nothing for `SystemRoot`/
-    `windir` during implementation -- an allowlist that quietly matches nothing
-    looks identical to a working one, so this pins the behaviour.
+    `os.environ` upper-cases every key on Windows, so a case-sensitive
+    allowlist silently matched nothing for `SystemRoot`/`windir` during
+    implementation -- an allowlist that quietly matches nothing looks
+    identical to a working one, so this pins the behaviour. The matching is
+    not Windows-specific, so it is asserted on POSIX too against that
+    platform's own allowlist.
     """
+    # The allowlist itself is platform-specific (`_WINDOWS_BASE_ENV_KEYS` vs
+    # `_POSIX_BASE_ENV_KEYS`), so the fixture has to be too -- asserting the
+    # Windows keys on POSIX would only prove that `SystemRoot` is correctly
+    # absent there, not that matching is case-insensitive. Both branches pin
+    # the same invariant against their own platform's allowlist: a key whose
+    # case differs from the allowlist entry is still matched, and the parent's
+    # own spelling is what survives.
+    if _IS_WINDOWS:
+        parent_environment = {"SYSTEMROOT": r"C:\Windows", "WINDIR": r"C:\Windows"}
+    else:
+        parent_environment = {"lang": "en_US.UTF-8", "lc_all": "en_US.UTF-8"}
+
     environment = build_environment(
-        parent_environment={"SYSTEMROOT": r"C:\Windows", "WINDIR": r"C:\Windows"},
+        parent_environment=parent_environment,
         workspace_path="/ws",
         runtime_path="/runtime",
         input_file="/ws/input.json",
         bridge_address=None,
         execution_token=None,
     )
-    assert environment.get("SYSTEMROOT") == r"C:\Windows"
-    assert environment.get("WINDIR") == r"C:\Windows"
+
+    if _IS_WINDOWS:
+        assert environment.get("SYSTEMROOT") == r"C:\Windows"
+        assert environment.get("WINDIR") == r"C:\Windows"
+    else:
+        assert environment.get("lang") == "en_US.UTF-8"
+        assert environment.get("lc_all") == "en_US.UTF-8"
 
 
 def test_path_points_only_at_the_provisioned_runtime() -> None:
