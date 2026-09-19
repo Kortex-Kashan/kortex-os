@@ -129,13 +129,19 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      # Restores and builds the app project, the WinForms E2E fixture
-      # (KortexAutomationTestApp), and the test project in one pass --
-      # `dotnet test` on the test project transitively builds both of its
-      # ProjectReferences (see tests/KortexAgent.Tests.csproj).
+      # Restores and builds the app project and the test project (which
+      # transitively also builds the WinForms E2E fixture,
+      # KortexAutomationTestApp, via its own ProjectReference -- see
+      # tests/KortexAgent.Tests.csproj). Built as two separate `dotnet build`
+      # invocations, not one command with two project arguments: MSBuild's
+      # CLI (`dotnet build` included) only accepts a single project or
+      # solution path -- passing both in one invocation fails immediately
+      # with "MSB1008: Only one project can be specified."
       - name: Restore and build
         working-directory: apps/desktop-agent
-        run: dotnet build KortexAgent.csproj tests/KortexAgent.Tests.csproj -c Release
+        run: |
+          dotnet build KortexAgent.csproj -c Release
+          dotnet build tests/KortexAgent.Tests.csproj -c Release
 
       - name: dotnet format (verify-no-changes)
         working-directory: apps/desktop-agent
