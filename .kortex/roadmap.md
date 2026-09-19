@@ -283,15 +283,28 @@ authorization authority, no second workflow engine, and no generic execution/scr
   launch failure) against the same real fixture.
 - [x] Desktop Agent CI (`desktop-ci.yml`, `desktop-agent` job) — builds and runs the full .NET test
   suite, including the real FlaUI E2E, on a `windows-latest` runner (the same real-desktop-session
-  property the pre-existing `windows-installer` job already relies on).
+  property the pre-existing `windows-installer` job already relies on). Verified GREEN on real
+  GitHub Actions (PR #2, run `35426973160`, commit `bb05069`) after three closeout-phase fixes to
+  genuine defects the job's first real run surfaced (it had only ever been validated locally
+  before): (1) `dotnet build` invoked with two project arguments in one call — MSBuild only accepts
+  one (`MSB1008`); (2) no `.gitattributes`, so the runner's default `core.autocrlf=true` rewrote
+  LF-committed `.cs` files to CRLF at checkout, violating the repo's own `.editorconfig`
+  (`end_of_line = lf`) before `dotnet format --verify-no-changes` ran; (3) a real, pre-existing
+  `xUnit2013` analyzer violation in `NonExportableKeyTests.cs` that `dotnet format` had been
+  flagging as a warning throughout this milestone but was never fixed. See commits `179e82c`,
+  `ba75e52`, `bb05069`.
 - **Acceptance & CI Reconciliation**:
   - **Implementation commit**: `c79d57e` (`feat(desktop-automation): implement native Windows UI
     automation (Phase 6)`)
   - **Backend full suite**: `pytest` → 4,261 passed, 0 failed, 4 skipped (environment-gated: no
     local Ollama instance; Windows-only branches)
-  - **Desktop Agent .NET suite**: `dotnet test` → 19 passed, 0 failed, 3 skipped (require an
-    elevated/SYSTEM token for machine-scoped CNG key creation — not exercised on an unprivileged
-    local run; see `NonExportableKeyTests.cs`'s own `[RequiresElevationFact]`)
+  - **Desktop Agent .NET suite (local, unelevated token)**: `dotnet test` → 19 passed, 0 failed, 3
+    skipped (require an elevated/SYSTEM token for machine-scoped CNG key creation; see
+    `NonExportableKeyTests.cs`'s own `[RequiresElevationFact]`)
+  - **Desktop Agent .NET suite (real GitHub Actions `windows-latest` runner, PR #2 run
+    `35426973160`)**: `dotnet test` → 22 passed, 0 failed, 0 skipped — the runner's elevated token
+    exercises the CNG key tests that skip locally, so this is strictly more coverage than the local
+    run, not different behavior.
   - **mypy**: clean on both `--platform win32` and `--platform linux`
   - **ruff**: clean (lint and format)
   - **dotnet format**: clean
@@ -302,8 +315,11 @@ authorization authority, no second workflow engine, and no generic execution/scr
   - **Known, documented limitations** (not blocking, not this milestone's scope to close):
     single-agent-per-tenant is the practical operating model beyond explicit `agent_id`
     disambiguation; `ApplicationAllowList` requires an agent restart to pick up changes (no
-    hot-reload); the allow-list has no tenant/principal scoping; the persisted Graphify knowledge
-    graph has not been re-indexed against this work.
+    hot-reload); the allow-list has no tenant/principal scoping. The persisted Graphify knowledge
+    graph has been re-indexed against this work's architectural changes (21,747→21,906 nodes,
+    51,754→52,069 edges); the Python↔C# gRPC boundary is verified as two separately-confirmed
+    endpoints rather than one unified graph path, since static AST extraction cannot see across
+    that language boundary.
   - **Acceptance**: PENDING — not yet reviewed by Chief Architect. Following this file's own
     established convention (stated verbatim on this document's Phase 4/5 items), this entry is not
     checked off as accepted until that review occurs.
