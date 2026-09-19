@@ -41,6 +41,7 @@ from kortex.engines.connector.actions import ConnectorActionBootstrapEngine, Con
 from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
 from kortex.engines.connector.engine import ConnectorEngine
 from kortex.engines.connector.reference_actions import REFERENCE_ACTION_DESCRIPTORS
+from kortex.engines.desktop_automation.engine import DesktopAutomationEngine
 from kortex.engines.document.engine import DocumentEngine
 from kortex.engines.document_intelligence.engine import DocumentIntelligenceEngine
 from kortex.engines.knowledge.engine import KnowledgeEngine
@@ -293,6 +294,19 @@ async def build_and_boot_kernel() -> Kernel:
     # provisioned lazily on first execution, not at boot, so a deployment
     # that never runs Python pays nothing for this engine.
     kernel.register_engine(PythonExecutionEngine())
+
+    # Python + Desktop Automation — Desktop Automation Engine: registers
+    # `kortex.desktop.launch`/`.click`/`.type`/`.read_text`, reaching a
+    # Windows Desktop Agent over the Phase 6 desktop-command transport
+    # (`AgentGatewayEngine`, `kortex.engines.agent_gateway`) via mTLS. Same
+    # deferred-wiring pattern as every engine above for its Storage Engine
+    # dependency. If Desktop Agent PKI material (CA/server certificate) has
+    # not been provisioned, `start()` degrades to "capabilities registered,
+    # gateway not listening" rather than failing kernel boot — most
+    # deployments configure no desktop agents at all, and requiring PKI
+    # material just to boot would be the wrong direction to fail in. See
+    # `DesktopAutomationEngine.start()`.
+    kernel.register_engine(DesktopAutomationEngine())
 
     # Phase 7 — Production Hardening — Backup Engine: Snapshot capture, packaging, encryption, validation, retention.
     kernel.register_engine(BackupEngine())

@@ -1,16 +1,20 @@
-// KORTEX Phase 5 — Desktop Agent session protocol.
+// KORTEX Phase 5/6 — Desktop Agent session and capability-transport protocol.
 //
-// This contract is deliberately minimal. Phase 5 establishes an authenticated
-// session and nothing more: the agent reports that it is online and bound to a
-// specific Windows installation, and the Gateway acknowledges the session.
+// Phase 5 established an authenticated session and nothing more. Phase 6 adds
+// the capability transport that Phase 5 deliberately left absent, under its
+// own authorization design (see `docs/architecture/phase5_locked_architecture_spec.md`
+// §2, "Phase 6 Non-Goals", and `backend/src/kortex/engines/agent_gateway/engine.py`).
 //
-// There is intentionally no message here capable of carrying an instruction —
-// no capability request, no command, no script, no process or shell payload.
-// That absence is a security control, not an omission to be filled in later
-// without review: it means a compromised Gateway, or a forged GatewayMessage,
-// has no wire representation with which to ask an agent to execute anything.
-// Capability transport is Phase 6 and must be introduced with its own
-// authorization design.
+// This still is not a generic execution channel. There is no message here
+// that carries an arbitrary script, shell command, or process invocation —
+// every command is its own strongly-typed message for exactly one narrow,
+// pre-authorized capability (`kortex.desktop.launch`/`click`/`type`/`read_text`).
+// A Gateway (or a forged GatewayMessage) can ask an agent to launch one of a
+// finite set of allow-listed applications and interact with one deterministic
+// UI element — nothing else has a wire representation. `command_id` exists
+// purely for request/response correlation over the long-lived `Connect`
+// stream; it is server-generated and never trusted as an identity or
+// authorization claim.
 
 syntax = "proto3";
 
@@ -19,19 +23,25 @@ package kortex.agent.v1;
 option csharp_namespace = "Kortex.Agent.V1";
 
 service DesktopAgentGateway {
-  // Bidirectional stream establishing the authenticated agent session
+  // Bidirectional stream establishing the authenticated agent session and
+  // carrying every subsequent capability command/result for its lifetime.
   rpc Connect(stream AgentMessage) returns (stream GatewayMessage);
 }
 
 message AgentMessage {
   oneof payload {
     AgentStatus status = 1;
+    DesktopCommandResult desktop_result = 2;
   }
 }
 
 message GatewayMessage {
   oneof payload {
     SessionAck session_ack = 1;
+    DesktopLaunchCommand desktop_launch = 2;
+    DesktopClickCommand desktop_click = 3;
+    DesktopTypeCommand desktop_type = 4;
+    DesktopReadTextCommand desktop_read_text = 5;
   }
 }
 
@@ -42,4 +52,58 @@ message AgentStatus {
 
 message SessionAck {
   string session_id = 1;
+}
+
+// Deterministic UI element target. Every field supplied must match — an
+// omitted field is not a wildcard on that field's absence in the UI tree,
+// it simply narrows on fewer axes. The agent fails closed (rejects the
+// command) on zero or on more than one matching element; it never guesses.
+message UiElementSelector {
+  string automation_id = 1;
+  string name = 2;
+  string control_type = 3;
+}
+
+// `application_id` is a key into the Desktop Agent's local, operator-managed
+// application allow-list — never a raw executable path. A path supplied by a
+// caller has no wire representation here, so there is nothing for this
+// message to inject an arbitrary executable through.
+message DesktopLaunchCommand {
+  string command_id = 1;
+  string application_id = 2;
+  repeated string arguments = 3;
+  int32 timeout_seconds = 4;
+}
+
+message DesktopClickCommand {
+  string command_id = 1;
+  string window_handle = 2;
+  UiElementSelector selector = 3;
+}
+
+message DesktopTypeCommand {
+  string command_id = 1;
+  string window_handle = 2;
+  UiElementSelector selector = 3;
+  string text = 4; // never logged or included in any audit context
+}
+
+message DesktopReadTextCommand {
+  string command_id = 1;
+  string window_handle = 2;
+  UiElementSelector selector = 3;
+  int32 max_length = 4;
+}
+
+message DesktopCommandResult {
+  string command_id = 1;
+  bool success = 2;
+  string error_code = 3;
+  string error_message = 4;
+  // Populated by a successful `desktop_launch` only.
+  string window_handle = 5;
+  int32 process_id = 6;
+  // Populated by a successful `desktop_read_text` only.
+  string text = 7;
+  bool truncated = 8;
 }

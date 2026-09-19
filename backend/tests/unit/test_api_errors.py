@@ -5,6 +5,20 @@ from __future__ import annotations
 
 from kortex.api.errors import map_exception
 from kortex.core.exceptions import CapabilityNotFoundError
+from kortex.engines.agent_gateway.exceptions import (
+    DesktopAgentAmbiguousError,
+    DesktopAgentUnavailableError,
+    DesktopCommandTimeoutError,
+    DesktopSessionDisconnectedError,
+)
+from kortex.engines.desktop_automation.exceptions import (
+    DesktopApplicationNotAllowedError,
+    DesktopElementAmbiguousError,
+    DesktopElementNotFoundError,
+    DesktopInvalidSelectorError,
+    DesktopLaunchFailedError,
+    DesktopWindowNotFoundError,
+)
 from kortex.engines.security.exceptions import (
     AuthenticationError,
     AuthorizationDeniedError,
@@ -48,5 +62,46 @@ class TestMapException:
 
     def test_arbitrary_exception_maps_to_execution_failed_500(self) -> None:
         mapping = map_exception(RuntimeError("unexpected"))
+        assert mapping.category == "EXECUTION_FAILED"
+        assert mapping.http_status == 500
+
+    def test_desktop_command_timeout_maps_to_timeout_exceeded_408(self) -> None:
+        mapping = map_exception(DesktopCommandTimeoutError("no reply"))
+        assert mapping.category == "TIMEOUT_EXCEEDED"
+        assert mapping.http_status == 408
+
+    def test_desktop_agent_unavailable_maps_to_service_unavailable_503(self) -> None:
+        mapping = map_exception(DesktopAgentUnavailableError("no agent"))
+        assert mapping.category == "SERVICE_UNAVAILABLE"
+        assert mapping.http_status == 503
+
+    def test_desktop_session_disconnected_maps_to_service_unavailable_503(self) -> None:
+        mapping = map_exception(DesktopSessionDisconnectedError("closed"))
+        assert mapping.category == "SERVICE_UNAVAILABLE"
+        assert mapping.http_status == 503
+
+    def test_desktop_agent_ambiguous_maps_to_validation_failed_422(self) -> None:
+        mapping = map_exception(DesktopAgentAmbiguousError("pick one"))
+        assert mapping.category == "VALIDATION_FAILED"
+        assert mapping.http_status == 422
+
+    def test_desktop_application_not_allowed_maps_to_permission_denied_403(self) -> None:
+        mapping = map_exception(DesktopApplicationNotAllowedError("no.", error_code="APPLICATION_NOT_ALLOWED"))
+        assert mapping.category == "PERMISSION_DENIED"
+        assert mapping.http_status == 403
+
+    def test_desktop_ui_targeting_errors_map_to_validation_failed_422(self) -> None:
+        for exc in (
+            DesktopInvalidSelectorError("empty selector"),
+            DesktopWindowNotFoundError("stale", error_code="WINDOW_NOT_FOUND"),
+            DesktopElementNotFoundError("none", error_code="ELEMENT_NOT_FOUND"),
+            DesktopElementAmbiguousError("many", error_code="ELEMENT_AMBIGUOUS"),
+        ):
+            mapping = map_exception(exc)
+            assert mapping.category == "VALIDATION_FAILED"
+            assert mapping.http_status == 422
+
+    def test_desktop_launch_failed_maps_to_execution_failed_500(self) -> None:
+        mapping = map_exception(DesktopLaunchFailedError("boom", error_code="LAUNCH_FAILED"))
         assert mapping.category == "EXECUTION_FAILED"
         assert mapping.http_status == 500

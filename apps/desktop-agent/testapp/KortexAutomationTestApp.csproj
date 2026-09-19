@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    KORTEX Desktop Automation E2E fixture (Phase 7).
+
+    A minimal, purpose-built WinForms application with stable AutomationIds,
+    used exclusively to give `DesktopAutomationHandlerE2ETests` (and any real
+    Desktop Agent smoke test) a deterministic target — never shipped as part
+    of the agent, never a general-purpose RPA demo. Real Windows applications
+    (Notepad, Calculator) vary their control tree across OS builds and
+    localizations; this fixture's AutomationIds are frozen by this project
+    and never change under the test.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Kortex.Agent.TestApp</RootNamespace>
+    <AssemblyName>KortexAutomationTestApp</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>

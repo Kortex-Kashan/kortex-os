@@ -243,3 +243,84 @@ security/disconnect authority, and GitHub token-lifecycle handling).
     test also passes at this HEAD. See `docs/architecture/PRODUCTION_HARDENING_RECONCILIATION.md`
     §5.13 for the consolidated record.
 
+## Python + Desktop Automation
+
+**Status**: Implementation complete — awaiting Chief Architect review and acceptance
+
+Closes the gap `docs/architecture/phase5_locked_architecture_spec.md` §2 explicitly deferred as
+"Phase 6 Non-Goals" for the Phase 5 identity/mTLS milestone: a capability-transport protocol over
+the existing Agent Gateway mTLS session, and the native Windows UI automation execution layer
+behind it. Reuses the existing capability architecture (`CapabilityDispatcher`, `SecurityEngine`,
+Agent Gateway, .NET Desktop Agent) unmodified in its enforcement semantics; introduces no second
+authorization authority, no second workflow engine, and no generic execution/script channel.
+
+- [x] `agent.proto` — typed `DesktopLaunch/Click/Type/ReadTextCommand` + `DesktopCommandResult`
+  messages over the existing session stream. Application launch resolves an operator-managed
+  allow-list key only, never a caller-supplied path or command line; UI targeting is
+  AutomationId/Name/ControlType only (no screen coordinates); zero or ambiguous matches fail
+  closed. Verified as a closed set by an exact field-list contract test.
+- [x] Desktop-command transport (`kortex.engines.agent_gateway.engine`) — correlated
+  request/response queue over the existing per-session stream, gated on a new
+  `AgentSession.identity_confirmed` flag so a session may push/receive desktop commands only
+  after passing the machine-installation binding check Phase 5 established (closes a gap found
+  during review: that check previously applied only to the `status` heartbeat, not to this new
+  privileged traffic on the same stream).
+- [x] `kortex.desktop.launch`/`.click`/`.type`/`.read_text` (`kortex.engines.desktop_automation`)
+  — registered through the unmodified `Kernel.invoke_capability` → `CapabilityDispatcher` →
+  `SecurityEngine` enforcement path; wired into the production boot path
+  (`kernel_bootstrap.build_and_boot_kernel`) with graceful degradation (capabilities registered,
+  gateway not listening) when Desktop Agent PKI has not been provisioned.
+- [x] `DesktopAutomationHandler`/`ApplicationAllowList` (`apps/desktop-agent`) — FlaUI/UIA3
+  execution: allow-listed launch with fail-closed argument restriction, deterministic UI-element
+  resolution, a single dedicated worker thread serializing all UIA/COM calls (not safe for
+  concurrent access from the per-command background tasks the agent's session loop dispatches),
+  and a bounded verify-after-set retry closing a real type-then-click timing race found during
+  local E2E verification.
+- [x] Genuine Windows E2E (`DesktopAutomationHandlerE2ETests`) — a minimal, purpose-built WinForms
+  fixture (`KortexAutomationTestApp`) proving the full launch → type → click → read_text round
+  trip against a real, freshly-computed result (7 × 8 = 56), not an echoed input; plus adversarial
+  cases (disallowed application, missing window, missing/ambiguous element, killed process,
+  launch failure) against the same real fixture.
+- [x] Desktop Agent CI (`desktop-ci.yml`, `desktop-agent` job) — builds and runs the full .NET test
+  suite, including the real FlaUI E2E, on a `windows-latest` runner (the same real-desktop-session
+  property the pre-existing `windows-installer` job already relies on). Verified GREEN on real
+  GitHub Actions (PR #2, run `35426973160`, commit `bb05069`) after three closeout-phase fixes to
+  genuine defects the job's first real run surfaced (it had only ever been validated locally
+  before): (1) `dotnet build` invoked with two project arguments in one call — MSBuild only accepts
+  one (`MSB1008`); (2) no `.gitattributes`, so the runner's default `core.autocrlf=true` rewrote
+  LF-committed `.cs` files to CRLF at checkout, violating the repo's own `.editorconfig`
+  (`end_of_line = lf`) before `dotnet format --verify-no-changes` ran; (3) a real, pre-existing
+  `xUnit2013` analyzer violation in `NonExportableKeyTests.cs` that `dotnet format` had been
+  flagging as a warning throughout this milestone but was never fixed. See commits `179e82c`,
+  `ba75e52`, `bb05069`.
+- **Acceptance & CI Reconciliation**:
+  - **Implementation commit**: `c79d57e` (`feat(desktop-automation): implement native Windows UI
+    automation (Phase 6)`)
+  - **Backend full suite**: `pytest` → 4,261 passed, 0 failed, 4 skipped (environment-gated: no
+    local Ollama instance; Windows-only branches)
+  - **Desktop Agent .NET suite (local, unelevated token)**: `dotnet test` → 19 passed, 0 failed, 3
+    skipped (require an elevated/SYSTEM token for machine-scoped CNG key creation; see
+    `NonExportableKeyTests.cs`'s own `[RequiresElevationFact]`)
+  - **Desktop Agent .NET suite (real GitHub Actions `windows-latest` runner, PR #2 run
+    `35426973160`)**: `dotnet test` → 22 passed, 0 failed, 0 skipped — the runner's elevated token
+    exercises the CNG key tests that skip locally, so this is strictly more coverage than the local
+    run, not different behavior.
+  - **mypy**: clean on both `--platform win32` and `--platform linux`
+  - **ruff**: clean (lint and format)
+  - **dotnet format**: clean
+  - **Security review**: two findings fixed — Windows command-line argument quoting
+    (`ProcessStartInfo.ArgumentList` replacing a hand-rolled escaper that mishandled trailing
+    backslashes) and local-path disclosure in `LAUNCH_FAILED` error messages (agent-internal
+    exception text no longer reaches the wire-facing result).
+  - **Known, documented limitations** (not blocking, not this milestone's scope to close):
+    single-agent-per-tenant is the practical operating model beyond explicit `agent_id`
+    disambiguation; `ApplicationAllowList` requires an agent restart to pick up changes (no
+    hot-reload); the allow-list has no tenant/principal scoping. The persisted Graphify knowledge
+    graph has been re-indexed against this work's architectural changes (21,747→21,906 nodes,
+    51,754→52,069 edges); the Python↔C# gRPC boundary is verified as two separately-confirmed
+    endpoints rather than one unified graph path, since static AST extraction cannot see across
+    that language boundary.
+  - **Acceptance**: PENDING — not yet reviewed by Chief Architect. Following this file's own
+    established convention (stated verbatim on this document's Phase 4/5 items), this entry is not
+    checked off as accepted until that review occurs.
+

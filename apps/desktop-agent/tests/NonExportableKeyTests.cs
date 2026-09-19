@@ -309,7 +309,7 @@ public sealed class NonExportableKeyTests
         var source = ReadAgentSource();
 
         var occurrences = System.Text.RegularExpressions.Regex.Matches(source, @"CngKeyCreationOptions\.\w+");
-        Assert.Equal(1, occurrences.Count);
+        Assert.Single(occurrences);
         Assert.Equal("CngKeyCreationOptions.MachineKey", occurrences[0].Value);
 
         // And the production creation call is not swallowed by a catch that
