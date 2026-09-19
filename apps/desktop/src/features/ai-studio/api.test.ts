@@ -6,7 +6,13 @@ vi.mock("@/ipc/client", () => ({
   invokeCapability: invokeCapabilityMock,
 }));
 
-import { AiStudioAccessDeniedError, AiStudioRequestError, listAiModels, listAiProviders } from "./api";
+import {
+  AiStudioAccessDeniedError,
+  AiStudioRequestError,
+  listAiModels,
+  listAiProviders,
+  normalizePayload,
+} from "./api";
 
 beforeEach(() => {
   invokeCapabilityMock.mockReset();
@@ -152,5 +158,77 @@ describe("listAiModels", () => {
     invokeCapabilityMock.mockResolvedValueOnce(failureEnvelope("EXECUTION_FAILED", "boom"));
 
     await expect(listAiModels()).rejects.toBeInstanceOf(AiStudioRequestError);
+  });
+});
+
+describe("normalizePayload", () => {
+  it("unwraps single-key { result: [...] } wrapper", () => {
+    expect(normalizePayload({ result: ["item-1", "item-2"] })).toEqual(["item-1", "item-2"]);
+  });
+
+  it("unwraps single-key { result: primitive } wrapper", () => {
+    expect(normalizePayload({ result: true })).toBe(true);
+    expect(normalizePayload({ result: 42 })).toBe(42);
+    expect(normalizePayload({ result: "done" })).toBe("done");
+  });
+
+  it("unwraps single-key { result: null } to null", () => {
+    expect(normalizePayload({ result: null })).toBeNull();
+  });
+
+  it("returns direct dictionary untouched", () => {
+    const dict = {
+      tenant_id: "acme",
+      provider_id: "google-gemini",
+      enabled: true,
+      has_credential: true,
+    };
+    expect(normalizePayload(dict)).toEqual(dict);
+  });
+
+  it("returns objects with multiple keys including 'result' untouched", () => {
+    const multiKey = { result: "value", extra: 123 };
+    expect(normalizePayload(multiKey)).toEqual(multiKey);
+  });
+
+  it("returns arrays untouched", () => {
+    expect(normalizePayload([{ id: "1" }])).toEqual([{ id: "1" }]);
+  });
+
+  it("normalizes null and undefined to null", () => {
+    expect(normalizePayload(null)).toBeNull();
+    expect(normalizePayload(undefined)).toBeNull();
+  });
+});
+
+describe("error envelope propagation", () => {
+  it("attaches the original IpcResultEnvelope to AiStudioAccessDeniedError", async () => {
+    const envelope = failureEnvelope("PERMISSION_DENIED", "no access");
+    invokeCapabilityMock.mockResolvedValueOnce(envelope);
+
+    let caughtError: unknown;
+    try {
+      await listAiProviders();
+    } catch (e) {
+      caughtError = e;
+    }
+
+    expect(caughtError).toBeInstanceOf(AiStudioAccessDeniedError);
+    expect((caughtError as AiStudioAccessDeniedError).envelope).toBe(envelope);
+  });
+
+  it("attaches the original IpcResultEnvelope to AiStudioRequestError", async () => {
+    const envelope = failureEnvelope("EXECUTION_FAILED", "internal error");
+    invokeCapabilityMock.mockResolvedValueOnce(envelope);
+
+    let caughtError: unknown;
+    try {
+      await listAiModels();
+    } catch (e) {
+      caughtError = e;
+    }
+
+    expect(caughtError).toBeInstanceOf(AiStudioRequestError);
+    expect((caughtError as AiStudioRequestError).envelope).toBe(envelope);
   });
 });

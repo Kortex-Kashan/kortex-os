@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { AiStudioAccessDeniedError, listAiProviders } from "../api";
+import { useAiStudioQueryInterceptor } from "./useAiStudioQueryInterceptor";
 
 export const AI_PROVIDERS_QUERY_KEY = ["ai-studio", "providers"] as const;
 
@@ -10,9 +11,11 @@ export const AI_PROVIDERS_QUERY_KEY = ["ai-studio", "providers"] as const;
  * `AiStudioApp` derives "empty" itself from `data.length === 0`.
  */
 export function useAiProviders() {
+  const { interceptQuery } = useAiStudioQueryInterceptor();
+
   return useQuery({
     queryKey: AI_PROVIDERS_QUERY_KEY,
-    queryFn: listAiProviders,
+    queryFn: interceptQuery(listAiProviders),
     // An access-denied result is deterministic — see
     // `features/connectors/hooks/useConnectors.ts`'s identical rationale.
     retry: (failureCount, error) => !(error instanceof AiStudioAccessDeniedError) && failureCount < 1,

@@ -65,6 +65,10 @@ export function useAuth(): AuthContextValue {
   return context;
 }
 
+export function useOptionalAuth(): AuthContextValue | null {
+  return React.useContext(AuthContext);
+}
+
 export interface AuthProviderProps {
   children: React.ReactNode;
 }

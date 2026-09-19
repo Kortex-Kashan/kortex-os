@@ -2,6 +2,12 @@ import { useState } from "react";
 import {
   Badge,
   Button,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   Select,
   SelectContent,
   SelectItem,
@@ -43,6 +49,7 @@ interface ProviderConfigCardProps {
  */
 export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
   const configure = useConfigureAiProvider();
   const test = useTestAiProviderConnection();
   const remove = useRemoveAiProviderConfig();
@@ -117,7 +124,7 @@ export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => remove.mutate(provider.providerId)}
+                onClick={() => setRemoveDialogOpen(true)}
                 disabled={busy}
               >
                 {remove.isPending ? "Removing…" : "Remove configuration"}
@@ -183,6 +190,44 @@ export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps
               );
             }}
           />
+
+          <Dialog open={removeDialogOpen} onOpenChange={setRemoveDialogOpen}>
+            <DialogContent data-testid="remove-config-dialog">
+              <DialogHeader>
+                <DialogTitle>Remove Configuration</DialogTitle>
+                <DialogDescription>
+                  Are you sure you want to remove the configuration for{" "}
+                  <span className="font-semibold text-foreground">{provider.displayName}</span>? This will permanently
+                  delete your stored API key and credentials from secure storage and reset provider settings for this tenant.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button
+                  variant="outline"
+                  onClick={() => setRemoveDialogOpen(false)}
+                  disabled={remove.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    remove.mutate(provider.providerId, {
+                      onSuccess: () => {
+                        setRemoveDialogOpen(false);
+                        test.reset();
+                        configure.reset();
+                      },
+                    });
+                  }}
+                  disabled={remove.isPending}
+                  data-testid="confirm-remove-btn"
+                >
+                  {remove.isPending ? "Removing…" : "Confirm removal"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </>
       )}
     </li>

@@ -1,4 +1,4 @@
-import { invokeCapability } from "@/ipc/client";
+import { invokeCapability, type IpcResultEnvelope } from "@/ipc/client";
 import type {
   AiConnectionTestResult,
   AiModel,
@@ -17,25 +17,59 @@ const PROVIDER_TEST_CAPABILITY = "kortex.ai.provider.test";
 const PROVIDER_CONFIG_REMOVE_CAPABILITY = "kortex.ai.provider.config.remove";
 
 /**
- * Thrown when the backend denies a call with `PERMISSION_DENIED` — see
- * `apps/desktop/src/features/connectors/api.ts`'s `ConnectorAccessDeniedError`
- * for why this stays a single, unified category rather than splitting
- * 401 vs. 403 (the IPC transport carries `httpStatus` for that distinction,
- * but this feature does not yet consume it, matching Connectors/Workflow/
- * Marketplace).
+ * Normalizes the raw payload from an IPC success envelope.
+ *
+ * The backend (`backend/src/kortex/api/main.py::_invoke`) packs capability results as:
+ *   payload = result if isinstance(result, dict) else {"result": _jsonable(result)}
+ *
+ * Thus:
+ * - A handler returning a direct dict produces `payload: { ... }` (no `result` wrapper).
+ * - A handler returning a list or primitive produces `payload: { result: [...] }` or `{ result: val }`.
+ *
+ * This normalizer unwraps `{ result: ... }` when and only when it is a single-key wrapper,
+ * returning the direct dictionary or the unwrapped inner value.
+ */
+export function normalizePayload(payload: unknown): unknown {
+  if (payload == null) {
+    return null;
+  }
+  if (typeof payload === "object" && !Array.isArray(payload)) {
+    const record = payload as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (keys.length === 1 && "result" in record) {
+      return record.result ?? null;
+    }
+    return record;
+  }
+  return payload;
+}
+
+/**
+ * Thrown when the backend denies a call with `PERMISSION_DENIED`.
+ * Propagates the original `IpcResultEnvelope` so callers (like `reportIpcResult`)
+ * can inspect `envelope.httpStatus` (e.g. 401 session expiry vs 403 authorization denial).
  */
 export class AiStudioAccessDeniedError extends Error {
-  constructor(message: string) {
+  readonly envelope?: IpcResultEnvelope;
+
+  constructor(message: string, envelope?: IpcResultEnvelope) {
     super(message);
     this.name = "AiStudioAccessDeniedError";
+    this.envelope = envelope;
   }
 }
 
-/** Any other `FAILURE` envelope — a generic, recoverable failure. */
+/**
+ * Any other `FAILURE` envelope — a generic, recoverable failure.
+ * Propagates the original `IpcResultEnvelope`.
+ */
 export class AiStudioRequestError extends Error {
-  constructor(message: string) {
+  readonly envelope?: IpcResultEnvelope;
+
+  constructor(message: string, envelope?: IpcResultEnvelope) {
     super(message);
     this.name = "AiStudioRequestError";
+    this.envelope = envelope;
   }
 }
 
@@ -88,16 +122,16 @@ async function invokeListCapability(capabilityName: string): Promise<unknown[]> 
   });
 
   if (envelope.status === "SUCCESS") {
-    const result = envelope.payload?.result;
-    return Array.isArray(result) ? result : [];
+    const normalized = normalizePayload(envelope.payload);
+    return Array.isArray(normalized) ? normalized : [];
   }
 
   const failure = envelope.errors[0];
   const message = failure?.message ?? `Failed to load ${capabilityName}.`;
   if (failure?.category === "PERMISSION_DENIED") {
-    throw new AiStudioAccessDeniedError(message);
+    throw new AiStudioAccessDeniedError(message, envelope);
   }
-  throw new AiStudioRequestError(message);
+  throw new AiStudioRequestError(message, envelope);
 }
 
 /**
@@ -155,11 +189,14 @@ interface RawConnectionTestResult {
 }
 
 function toAiProviderConfig(raw: RawAiProviderConfig): AiProviderConfig {
+  if (!raw) {
+    throw new Error("Invalid provider configuration response: received null or undefined.");
+  }
   return {
     tenantId: raw.tenant_id,
     providerId: raw.provider_id,
-    enabled: raw.enabled,
-    hasCredential: raw.has_credential,
+    enabled: raw.enabled ?? true,
+    hasCredential: raw.has_credential ?? false,
     defaultModel: raw.default_model ?? null,
     createdAt: raw.created_at ?? null,
     updatedAt: raw.updated_at ?? null,
@@ -167,9 +204,12 @@ function toAiProviderConfig(raw: RawAiProviderConfig): AiProviderConfig {
 }
 
 function toConnectionTestResult(raw: RawConnectionTestResult): AiConnectionTestResult {
+  if (!raw) {
+    throw new Error("Invalid connection test response: received null or undefined.");
+  }
   return {
     providerId: raw.provider_id,
-    connected: raw.connected,
+    connected: raw.connected ?? false,
     detail: raw.detail ?? null,
     models: (raw.models ?? []).map(toAiModel),
   };
@@ -187,15 +227,15 @@ async function invokeWithParameters(
   });
 
   if (envelope.status === "SUCCESS") {
-    return envelope.payload?.result ?? null;
+    return normalizePayload(envelope.payload);
   }
 
   const failure = envelope.errors[0];
   const message = failure?.message ?? `Capability ${capabilityName} failed.`;
   if (failure?.category === "PERMISSION_DENIED") {
-    throw new AiStudioAccessDeniedError(message);
+    throw new AiStudioAccessDeniedError(message, envelope);
   }
-  throw new AiStudioRequestError(message);
+  throw new AiStudioRequestError(message, envelope);
 }
 
 /** The calling tenant's own provider configurations (`ai:read`). */

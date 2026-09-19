@@ -242,11 +242,14 @@ export type IpcFailureKind = "UNAUTHORIZED" | "FORBIDDEN" | "OTHER";
  * resolves to OTHER, deliberately inert.
  */
 export function classifyIpcFailure(envelope: IpcResultEnvelope): IpcFailureKind {
-  if (envelope.status !== "FAILURE" || envelope.errors[0]?.category !== "PERMISSION_DENIED") {
+  if (envelope.status !== "FAILURE") {
     return "OTHER";
   }
   if (envelope.httpStatus === 401) {
     return "UNAUTHORIZED";
+  }
+  if (envelope.errors[0]?.category !== "PERMISSION_DENIED") {
+    return "OTHER";
   }
   if (envelope.httpStatus === 403) {
     return "FORBIDDEN";

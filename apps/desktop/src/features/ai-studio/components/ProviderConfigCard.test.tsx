@@ -361,14 +361,36 @@ describe("default-model selection", () => {
 // ---------------------------------------------------------------------------
 
 describe("removal and permissions", () => {
-  it("removes the configuration and confirms inline", async () => {
+  it("opens a confirmation dialog before removing configuration and can cancel", async () => {
+    renderCard(cloudProvider(), config());
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove configuration" }));
+
+    expect(screen.getByRole("heading", { name: "Remove Configuration" })).toBeInTheDocument();
+    expect(screen.getByText(/permanently delete your stored API key/)).toBeInTheDocument();
+
+    // Cancel closes dialog without calling removal
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Remove Configuration" })).not.toBeInTheDocument();
+    });
+    expect(removeAiProviderConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("removes the configuration when confirmed and confirms inline", async () => {
     removeAiProviderConfigMock.mockResolvedValueOnce(true);
     renderCard(cloudProvider(), config());
 
     fireEvent.click(screen.getByRole("button", { name: "Remove configuration" }));
 
+    // Confirm removal in dialog
+    fireEvent.click(screen.getByTestId("confirm-remove-btn"));
+
     expect(await screen.findByTestId("provider-feedback")).toHaveTextContent("Configuration removed.");
     expect(removeAiProviderConfigMock).toHaveBeenCalledWith("openai");
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Remove Configuration" })).not.toBeInTheDocument();
+    });
   });
 
   it("explains a permission denial in terms of the missing grant", async () => {

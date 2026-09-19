@@ -9,6 +9,7 @@ import {
 import type { AiProviderConfigureInput } from "../types";
 import { AI_MODELS_QUERY_KEY } from "./useAiModels";
 import { AI_PROVIDERS_QUERY_KEY } from "./useAiProviders";
+import { useAiStudioQueryInterceptor } from "./useAiStudioQueryInterceptor";
 
 /**
  * Server-derived state for the calling tenant's provider configurations,
@@ -23,9 +24,11 @@ import { AI_PROVIDERS_QUERY_KEY } from "./useAiProviders";
 export const AI_PROVIDER_CONFIGS_QUERY_KEY = ["ai-studio", "provider-configs"] as const;
 
 export function useAiProviderConfigs() {
+  const { interceptQuery } = useAiStudioQueryInterceptor();
+
   return useQuery({
     queryKey: AI_PROVIDER_CONFIGS_QUERY_KEY,
-    queryFn: listAiProviderConfigs,
+    queryFn: interceptQuery(listAiProviderConfigs),
     // An access-denied result is deterministic -- retrying cannot change
     // it. Matches `useAiProviders`/`useConnectors`.
     retry: (failureCount, error) => !(error instanceof AiStudioAccessDeniedError) && failureCount < 1,
@@ -43,8 +46,10 @@ export function useAiProviderConfigs() {
  */
 export function useConfigureAiProvider() {
   const client = useQueryClient();
+  const { interceptMutation } = useAiStudioQueryInterceptor();
+
   return useMutation({
-    mutationFn: (input: AiProviderConfigureInput) => configureAiProvider(input),
+    mutationFn: interceptMutation((input: AiProviderConfigureInput) => configureAiProvider(input)),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: AI_PROVIDER_CONFIGS_QUERY_KEY });
       void client.invalidateQueries({ queryKey: AI_PROVIDERS_QUERY_KEY });
@@ -63,16 +68,20 @@ export function useConfigureAiProvider() {
  * silently-staleable model cache.
  */
 export function useTestAiProviderConnection() {
+  const { interceptMutation } = useAiStudioQueryInterceptor();
+
   return useMutation({
-    mutationFn: (providerId: string) => testAiProviderConnection(providerId),
+    mutationFn: interceptMutation((providerId: string) => testAiProviderConnection(providerId)),
   });
 }
 
 /** Remove one provider configuration, then refresh the same keys as configure. */
 export function useRemoveAiProviderConfig() {
   const client = useQueryClient();
+  const { interceptMutation } = useAiStudioQueryInterceptor();
+
   return useMutation({
-    mutationFn: (providerId: string) => removeAiProviderConfig(providerId),
+    mutationFn: interceptMutation((providerId: string) => removeAiProviderConfig(providerId)),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: AI_PROVIDER_CONFIGS_QUERY_KEY });
       void client.invalidateQueries({ queryKey: AI_PROVIDERS_QUERY_KEY });
@@ -80,3 +89,4 @@ export function useRemoveAiProviderConfig() {
     },
   });
 }
+
