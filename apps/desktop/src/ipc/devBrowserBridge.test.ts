@@ -22,8 +22,7 @@ describe("devBrowserBridge security and isolation", () => {
   });
 
   it("does NOT activate mockIPC in production builds (when import.meta.env.DEV is false)", () => {
-    // @ts-expect-error mutating DEV for test simulation
-    import.meta.env.DEV = false;
+    (import.meta.env as Record<string, unknown>).DEV = false;
 
     initDevBrowserBridge();
 
@@ -31,8 +30,7 @@ describe("devBrowserBridge security and isolation", () => {
   });
 
   it("does NOT activate mockIPC when running inside a real Tauri Webview (__TAURI_INTERNALS__.invoke exists)", () => {
-    // @ts-expect-error mutating DEV for test
-    import.meta.env.DEV = true;
+    (import.meta.env as Record<string, unknown>).DEV = true;
     (window as unknown as { __TAURI_INTERNALS__: { invoke: unknown } }).__TAURI_INTERNALS__ = {
       invoke: vi.fn(),
     };
@@ -43,8 +41,7 @@ describe("devBrowserBridge security and isolation", () => {
   });
 
   it("activates mockIPC in dev mode without Tauri internals", () => {
-    // @ts-expect-error mutating DEV for test
-    import.meta.env.DEV = true;
+    (import.meta.env as Record<string, unknown>).DEV = true;
 
     initDevBrowserBridge();
 
@@ -53,8 +50,7 @@ describe("devBrowserBridge security and isolation", () => {
   });
 
   it("handlers enforce session lifecycle and strip sessionToken before resolving envelope", async () => {
-    // @ts-expect-error mutating DEV for test
-    import.meta.env.DEV = true;
+    (import.meta.env as Record<string, unknown>).DEV = true;
 
     initDevBrowserBridge();
     const handler = mockIpcFn.mock.calls[0][0] as (cmd: string, args: unknown) => Promise<unknown>;
