@@ -137,17 +137,25 @@ jobs:
       # CLI (`dotnet build` included) only accepts a single project or
       # solution path -- passing both in one invocation fails immediately
       # with "MSB1008: Only one project can be specified."
+      # Each `dotnet` invocation is explicitly checked against $LASTEXITCODE:
+      # pwsh's `run: |` block does not stop on a failing native command, so
+      # without this, only the LAST line's exit code would determine the
+      # step's result -- silently masking a real failure in an earlier line.
       - name: Restore and build
         working-directory: apps/desktop-agent
         run: |
           dotnet build KortexAgent.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build KortexAgent.csproj failed with exit code $LASTEXITCODE" }
           dotnet build tests/KortexAgent.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build tests/KortexAgent.Tests.csproj failed with exit code $LASTEXITCODE" }
 
       - name: dotnet format (verify-no-changes)
         working-directory: apps/desktop-agent
         run: |
-          dotnet format KortexAgent.csproj --verify-no-changes
-          dotnet format tests/KortexAgent.Tests.csproj --verify-no-changes
+          dotnet format KortexAgent.csproj --verify-no-changes --verbosity detailed
+          if ($LASTEXITCODE -ne 0) { throw "dotnet format KortexAgent.csproj --verify-no-changes failed with exit code $LASTEXITCODE" }
+          dotnet format tests/KortexAgent.Tests.csproj --verify-no-changes --verbosity detailed
+          if ($LASTEXITCODE -ne 0) { throw "dotnet format tests/KortexAgent.Tests.csproj --verify-no-changes failed with exit code $LASTEXITCODE" }
 
       # Runs the full suite unconditionally, including the real FlaUI E2E
       # (DesktopAutomationHandlerE2ETests) and ApplicationAllowListTests.
