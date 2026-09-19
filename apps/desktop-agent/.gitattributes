@@ -1,0 +1,9 @@
+# Enforces this repo's own declared end_of_line = lf (../../.editorconfig)
+# at checkout time, on every platform. Without this, Git for Windows'
+# default core.autocrlf=true (in effect on GitHub-hosted windows-latest
+# runners, where this project's CI actually builds/tests) silently rewrites
+# these LF-committed files to CRLF during `actions/checkout@v4` -- which
+# then fails `dotnet format --verify-no-changes` with ENDOFLINE errors
+# before a single test runs, despite the files being correctly formatted
+# in the repository itself.
+* text=auto eol=lf
