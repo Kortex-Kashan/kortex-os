@@ -245,7 +245,7 @@ security/disconnect authority, and GitHub token-lifecycle handling).
 
 ## Python + Desktop Automation
 
-**Status**: Implementation complete — awaiting Chief Architect review and acceptance
+**Status**: ACCEPTED / COMPLETE — merged to `main`
 
 Closes the gap `docs/architecture/phase5_locked_architecture_spec.md` §2 explicitly deferred as
 "Phase 6 Non-Goals" for the Phase 5 identity/mTLS milestone: a capability-transport protocol over
@@ -320,7 +320,7 @@ authorization authority, no second workflow engine, and no generic execution/scr
     51,754→52,069 edges); the Python↔C# gRPC boundary is verified as two separately-confirmed
     endpoints rather than one unified graph path, since static AST extraction cannot see across
     that language boundary.
-  - **Acceptance**: PENDING — not yet reviewed by Chief Architect. Following this file's own
-    established convention (stated verbatim on this document's Phase 4/5 items), this entry is not
-    checked off as accepted until that review occurs.
+  - **Acceptance**: ACCEPTED. Merged into `main` via
+    [PR #2](https://github.com/Kortex-Kashan/kortex-os/pull/2) (merge commit `bceb8d0c`), with all
+    6 required CI checks green on the final PR head (`05c8765`) and no unresolved review comments.
 
