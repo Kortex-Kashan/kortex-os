@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, func, select, update
+from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,8 +48,13 @@ from kortex.engines.ai.exceptions import (
     AgentTaskStoreError,
     ConversationStoreError,
 )
-from kortex.engines.ai.memory import ConversationTurn, require_identifier
-from kortex.engines.ai.models import AIProviderConfig, TokenUsage
+from kortex.engines.ai.memory import (
+    ConversationSummary,
+    ConversationTurn,
+    derive_conversation_title,
+    require_identifier,
+)
+from kortex.engines.ai.models import AIModelSummary, AIProviderConfig, TokenUsage
 from kortex.engines.ai.tools import ToolCall
 from kortex.engines.storage.interfaces import IDataStore
 
@@ -87,6 +92,7 @@ class AIConversationTurnRow(BaseModel):
     __table_args__ = (
         UniqueConstraint("tenant_id", "conversation_id", "sequence", name="uq_ai_conversation_turn_sequence"),
         Index("ix_ai_conversation_turn_lookup", "tenant_id", "conversation_id", "sequence"),
+        Index("ix_ai_conversation_turn_user_lookup", "tenant_id", "user_id"),
     )
 
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -234,6 +240,66 @@ class StorageConversationStore:
                 created_at=row.created_at,
             )
             for row in reversed(rows)
+        ]
+
+    async def list_conversations(self, tenant_id: str, user_id: str) -> list[ConversationSummary]:
+        """List this tenant+user's own conversations, most-recently-active first (Phase C).
+
+        Two narrow, tenant+user-filtered queries, never a bulk export of
+        turn content: the first aggregates `(conversation_id, min/max
+        created_at)` per conversation (never touching `user_content`/
+        `assistant_content`); the second reads only the `sequence == 1`
+        row per conversation -- exactly the first user message each
+        conversation ever needs for a title, nothing else. `sequence == 1`
+        is guaranteed to be that conversation's very first turn by
+        `append`'s own `next_sequence = max(sequence) + 1` numbering, which
+        always starts a new conversation at 1 -- so this needs no join, no
+        window function, and no dialect-specific "first row per group"
+        trick to stay portable across SQLite and PostgreSQL.
+        """
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(user_id, "user_id")
+
+        async def _aggregates(session: AsyncSession) -> list[tuple[str, datetime.datetime, datetime.datetime]]:
+            stmt = (
+                select(
+                    AIConversationTurnRow.conversation_id,
+                    func.min(AIConversationTurnRow.created_at),
+                    func.max(AIConversationTurnRow.created_at),
+                )
+                .where(
+                    AIConversationTurnRow.tenant_id == tenant_id,
+                    AIConversationTurnRow.user_id == user_id,
+                )
+                .group_by(AIConversationTurnRow.conversation_id)
+                .order_by(func.max(AIConversationTurnRow.created_at).desc())
+            )
+            result = await session.execute(stmt)
+            return [(row[0], row[1], row[2]) for row in result.all()]
+
+        aggregates = await self._run(_aggregates, "list conversations")
+        if not aggregates:
+            return []
+
+        async def _first_messages(session: AsyncSession) -> dict[str, str]:
+            stmt = select(AIConversationTurnRow.conversation_id, AIConversationTurnRow.user_content).where(
+                AIConversationTurnRow.tenant_id == tenant_id,
+                AIConversationTurnRow.user_id == user_id,
+                AIConversationTurnRow.sequence == 1,
+            )
+            result = await session.execute(stmt)
+            return {row[0]: row[1] for row in result.all()}
+
+        first_messages = await self._run(_first_messages, "read conversation titles")
+
+        return [
+            ConversationSummary(
+                conversation_id=conversation_id,
+                title=derive_conversation_title(first_messages.get(conversation_id, "")),
+                first_activity_at=first_activity_at,
+                last_activity_at=last_activity_at,
+            )
+            for conversation_id, first_activity_at, last_activity_at in aggregates
         ]
 
     async def _run(self, action: Callable[[AsyncSession], Awaitable[_T]], description: str) -> _T:
@@ -740,6 +806,119 @@ class AIProviderConfigStore:
         return bool(await self._data_store.execute_in_transaction(_action))
 
 
+class AIProviderModelCatalogRow(BaseModel):
+    """Durable per-tenant cache of one provider's live-discovered model catalog.
+
+    Fixes the AI Studio model-loss defect: `test_provider_connection`
+    (engine.py) previously returned a freshly discovered model catalog only
+    in its one-shot response, with nowhere durable to land it. The catalog
+    then lived only in the frontend's transient mutation state and was gone
+    the moment the component unmounted, collapsing the model picker back to
+    the small static `supported_models` allow-list even though the tenant's
+    stored `default_model` (in `AIProviderConfigRow`) referenced a model
+    outside it.
+
+    `(tenant_id, provider_id, model_id)` is the identity, mirroring
+    `AIProviderConfigRow`'s tenant+provider scoping. A discovery round trip
+    replaces the full set for that `(tenant_id, provider_id)` pair
+    atomically (`AIProviderModelCatalogStore.replace_catalog`) rather than
+    being upserted row-by-row, so a model the provider stopped advertising
+    is dropped rather than lingering forever. A *failed* discovery attempt
+    must never call `replace_catalog` — the previously persisted catalog is
+    left untouched, per the product requirement that a transient discovery
+    failure must not erase what was already known.
+    """
+
+    __tablename__ = "ai_provider_model_catalog"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider_id", "model_id", name="uq_ai_provider_model_catalog_entry"),
+        Index("ix_ai_provider_model_catalog_lookup", "tenant_id", "provider_id"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    discovered_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AIProviderModelCatalogStore:
+    """Relational persistence for tenant-scoped discovered AI model catalogs.
+
+    The only writer is `replace_catalog`, called by
+    `AIOrchestrationEngine.test_provider_connection` after a *successful*
+    `discover_models()` round trip. Reads (`list_for_provider`) back every
+    other model-listing path, including `kortex.ai.model.list`, so the
+    catalog a tenant sees after navigating away and back is this table's
+    contents, not whatever a since-unmounted UI component happened to be
+    holding onto.
+    """
+
+    def __init__(self, data_store: IDataStore) -> None:
+        self._data_store = data_store
+
+    async def replace_catalog(self, tenant_id: str, provider_id: str, models: list[AIModelSummary]) -> None:
+        """Atomically replace the persisted catalog for one tenant+provider.
+
+        Deletes the existing rows for `(tenant_id, provider_id)` and inserts
+        the supplied models, inside one transaction — so a reader never
+        observes a half-replaced catalog. Called only after a successful
+        discovery; a failed one must not call this at all (see class
+        docstring).
+        """
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> None:
+            await session.execute(
+                delete(AIProviderModelCatalogRow).where(
+                    AIProviderModelCatalogRow.tenant_id == tenant_id,
+                    AIProviderModelCatalogRow.provider_id == provider_id,
+                )
+            )
+            now = datetime.datetime.now(datetime.UTC)
+            for model in models:
+                session.add(
+                    AIProviderModelCatalogRow(
+                        id=str(uuid.uuid4()),
+                        tenant_id=tenant_id,
+                        provider_id=provider_id,
+                        model_id=model.model_id,
+                        provider_display_name=model.provider_display_name,
+                        discovered_at=now,
+                    )
+                )
+
+        await self._data_store.execute_in_transaction(_action)
+
+    async def list_for_provider(self, tenant_id: str, provider_id: str) -> list[AIModelSummary]:
+        """Every persisted model for one tenant+provider, or `[]` when the
+        provider has never been successfully discovered for this tenant."""
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> list[AIProviderModelCatalogRow]:
+            stmt = (
+                select(AIProviderModelCatalogRow)
+                .where(
+                    AIProviderModelCatalogRow.tenant_id == tenant_id,
+                    AIProviderModelCatalogRow.provider_id == provider_id,
+                )
+                .order_by(AIProviderModelCatalogRow.model_id)
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+        rows = await self._data_store.execute_in_transaction(_action)
+        return [
+            AIModelSummary(
+                model_id=row.model_id,
+                provider_id=row.provider_id,
+                provider_display_name=row.provider_display_name,
+            )
+            for row in rows
+        ]
+
+
 class AIDecisionAuditRow(BaseModel):
     """Relational store model for immutable AI reasoning decision records."""
 
@@ -1148,6 +1327,8 @@ __all__ = [
     "AIGovernanceStore",
     "AIProviderConfigRow",
     "AIProviderConfigStore",
+    "AIProviderModelCatalogRow",
+    "AIProviderModelCatalogStore",
     "AITenantQuotaRow",
     "StorageAgentTaskStore",
     "StorageConversationStore",

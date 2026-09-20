@@ -5,12 +5,14 @@ import type { IpcResultEnvelope } from "@/ipc/client";
 
 import { AuthProvider, useAuth } from "./AuthProvider";
 import type { AuthIdentity } from "./authTypes";
+import type { UseInactivityLogoutOptions } from "./useInactivityLogout";
 
 const {
   hasStoredSessionMock,
   clearStoredSessionMock,
   loginMock,
   checkStoredSessionMock,
+  renewSessionMock,
   classifyIpcFailureMock,
   loadCachedIdentityMock,
   saveCachedIdentityMock,
@@ -22,6 +24,7 @@ const {
   clearStoredSessionMock: vi.fn(),
   loginMock: vi.fn(),
   checkStoredSessionMock: vi.fn(),
+  renewSessionMock: vi.fn(),
   classifyIpcFailureMock: vi.fn(),
   loadCachedIdentityMock: vi.fn(),
   saveCachedIdentityMock: vi.fn(),
@@ -38,6 +41,7 @@ vi.mock("@/ipc/session", () => ({
 vi.mock("./authCapability", () => ({
   login: loginMock,
   checkStoredSession: checkStoredSessionMock,
+  renewSession: renewSessionMock,
   classifyIpcFailure: classifyIpcFailureMock,
 }));
 
@@ -99,9 +103,9 @@ function Probe() {
   );
 }
 
-function renderAuth() {
+function renderAuth(inactivityOptions?: UseInactivityLogoutOptions) {
   return render(
-    <AuthProvider>
+    <AuthProvider inactivityOptions={inactivityOptions}>
       <Probe />
     </AuthProvider>,
   );
@@ -414,6 +418,188 @@ describe("401 vs 403 (Phase 7)", () => {
 
     expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
     expect(clearStoredSessionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Phase F — true one-hour inactivity logout", () => {
+  // Fake timers are installed BEFORE mount for every test in this block:
+  // `useInactivityLogout`'s `setTimeout`/`setInterval` calls must be made
+  // against the fake clock from the moment the effect first runs, or
+  // `vi.advanceTimersByTime` later has no effect on them (a timer created
+  // against the real clock is not retroactively adopted by switching to
+  // fake timers afterward). Fake timers do not intercept microtask-based
+  // Promise resolution, so the async startup chain
+  // (`waitForBackendReady`/`hasStoredSession`/`checkStoredSession`, all
+  // pre-resolved mocks with no real delay) still resolves; `flushAsync`
+  // below drains exactly that microtask queue in place of
+  // testing-library's `waitFor` (which polls via a real `setTimeout` and
+  // would hang against a fake clock that nothing is advancing).
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function flushAsync() {
+    await act(async () => {
+      for (let i = 0; i < 10; i += 1) {
+        await Promise.resolve();
+      }
+    });
+  }
+
+  async function renderAuthenticated(inactivityOptions: UseInactivityLogoutOptions) {
+    hasStoredSessionMock.mockResolvedValue(true);
+    checkStoredSessionMock.mockResolvedValue("VALID");
+    renewSessionMock.mockResolvedValue("VALID");
+    loadCachedIdentityMock.mockReturnValue(IDENTITY);
+    renderAuth(inactivityOptions);
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+  }
+
+  it("logs the user out after the configured inactivity timeout with no activity", async () => {
+    await renderAuthenticated({ timeoutMs: 1000, heartbeatIntervalMs: 100_000 });
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    await flushAsync();
+
+    expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED");
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(clearCachedIdentityMock).toHaveBeenCalled();
+  });
+
+  it("does not log out an active user -- genuine activity resets the countdown", async () => {
+    await renderAuthenticated({ timeoutMs: 1000, heartbeatIntervalMs: 100_000 });
+
+    act(() => {
+      vi.advanceTimersByTime(900);
+      window.dispatchEvent(new Event("mousemove"));
+      vi.advanceTimersByTime(900);
+    });
+    await flushAsync();
+
+    // 1800ms of elapsed wall-clock time against a 1000ms timeout would
+    // have logged a genuinely-idle user out -- the reset at 900ms is what
+    // must have prevented it.
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED");
+  });
+
+  it("background heartbeat polling does not reset the inactivity countdown", async () => {
+    await renderAuthenticated({ timeoutMs: 1000, heartbeatIntervalMs: 100 });
+
+    act(() => {
+      // Several heartbeats fire (every 100ms) well before the 1000ms
+      // inactivity deadline -- none of them may push it out.
+      vi.advanceTimersByTime(999);
+    });
+    await flushAsync();
+    expect(renewSessionMock.mock.calls.length).toBeGreaterThan(0); // heartbeats renewing the session
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED");
+  });
+
+  it("the heartbeat renews the session via the dedicated refresh capability, not an ordinary authenticated call", async () => {
+    // Phase F security correction: after the security review found that
+    // minting a fresh access token on ANY successful authenticated call
+    // made a stolen access token renewable indefinitely, ordinary
+    // capability calls (including checkStoredSession's own signature.verify
+    // ping) no longer mint or renew anything. The heartbeat now calls
+    // `renewSession` (`kortex.security.auth.refresh`) specifically.
+    await renderAuthenticated({ timeoutMs: 100_000, heartbeatIntervalMs: 500 });
+    const renewCallsAtStart = renewSessionMock.mock.calls.length;
+    const checkCallsAtStart = checkStoredSessionMock.mock.calls.length;
+
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    await flushAsync();
+
+    expect(renewSessionMock.mock.calls.length).toBeGreaterThanOrEqual(renewCallsAtStart + 3);
+    // checkStoredSession is only ever the one-time startup validation ping
+    // -- heartbeats must never call it.
+    expect(checkStoredSessionMock.mock.calls.length).toBe(checkCallsAtStart);
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+  });
+
+  it("logs out immediately if the heartbeat discovers the refresh token is already invalid", async () => {
+    hasStoredSessionMock.mockResolvedValue(true);
+    checkStoredSessionMock.mockResolvedValue("VALID"); // startup check
+    loadCachedIdentityMock.mockReturnValue(IDENTITY);
+    // No heartbeat has fired yet at this point (interval is 500ms, nothing
+    // has advanced the clock) -- checkStoredSession alone (the startup
+    // check) is what gets this to AUTHENTICATED, so renewSession need not
+    // be primed until just before the first heartbeat below.
+    renderAuth({ timeoutMs: 100_000, heartbeatIntervalMs: 500 });
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+
+    renewSessionMock.mockResolvedValue("INVALID"); // every heartbeat from here on
+
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    await flushAsync();
+
+    expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED");
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+  });
+
+  it("cleans up timers/listeners on logout -- no further logout/heartbeat calls after the session ends", async () => {
+    await renderAuthenticated({ timeoutMs: 1000, heartbeatIntervalMs: 200 });
+
+    await act(async () => screen.getByText("Logout").click());
+    expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED");
+    const renewCallsAtLogout = renewSessionMock.mock.calls.length;
+    const clearCallsAtLogout = clearStoredSessionMock.mock.calls.length;
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    await flushAsync();
+
+    // Already signed out -- the hook must be disabled (isAuthenticated is
+    // false), so neither the heartbeat nor another timeout-triggered
+    // logout can fire again.
+    expect(renewSessionMock.mock.calls.length).toBe(renewCallsAtLogout);
+    expect(clearStoredSessionMock.mock.calls.length).toBe(clearCallsAtLogout);
+  });
+
+  it("production default (no inactivityOptions override) is exactly 60 minutes and does not fire early", async () => {
+    hasStoredSessionMock.mockResolvedValue(true);
+    checkStoredSessionMock.mockResolvedValue("VALID");
+    renewSessionMock.mockResolvedValue("VALID");
+    loadCachedIdentityMock.mockReturnValue(IDENTITY);
+    renderAuth(); // no override -- exercises the real INACTIVITY_TIMEOUT_MS/HEARTBEAT_INTERVAL_MS constants
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+
+    act(() => {
+      vi.advanceTimersByTime(59 * 60 * 1000); // 59 minutes -- must not have logged out yet
+    });
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
+
+    act(() => {
+      vi.advanceTimersByTime(2 * 60 * 1000); // past the full 60-minute mark
+    });
+    await flushAsync();
+    expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED");
   });
 });
 

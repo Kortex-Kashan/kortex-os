@@ -24,6 +24,7 @@ import type {
   AgentTaskSnapshot,
   AgentTaskStatus,
   AgentTurnResult,
+  ConversationSummaryDto,
   ConversationTurnDto,
   PendingToolCall,
 } from "./chat-types";
@@ -92,6 +93,13 @@ interface RawConversationTurn {
   created_at: string;
 }
 
+interface RawConversationSummary {
+  conversation_id: string;
+  title: string;
+  first_activity_at: string;
+  last_activity_at: string;
+}
+
 function toPendingToolCall(raw: RawToolCall): PendingToolCall {
   return {
     callId: raw.call_id,
@@ -128,6 +136,15 @@ function toConversationTurn(raw: RawConversationTurn): ConversationTurnDto {
     userContent: raw.user_content,
     assistantContent: raw.assistant_content,
     createdAt: raw.created_at,
+  };
+}
+
+function toConversationSummary(raw: RawConversationSummary): ConversationSummaryDto {
+  return {
+    conversationId: raw.conversation_id,
+    title: raw.title,
+    firstActivityAt: raw.first_activity_at,
+    lastActivityAt: raw.last_activity_at,
   };
 }
 
@@ -180,4 +197,14 @@ export async function getConversationHistory(
   });
   const arr = Array.isArray(raw) ? raw : [];
   return (arr as RawConversationTurn[]).map(toConversationTurn);
+}
+
+/** Calls the new (Phase C) `kortex.ai.conversation.list` capability to list
+ * the calling user's own conversations for "Recent Conversations" —
+ * tenant- and user-scoped entirely server-side, from the verified session;
+ * this call takes no identity parameters at all. */
+export async function listConversations(): Promise<ConversationSummaryDto[]> {
+  const raw = await invoke("kortex.ai.conversation.list", {});
+  const arr = Array.isArray(raw) ? raw : [];
+  return (arr as RawConversationSummary[]).map(toConversationSummary);
 }

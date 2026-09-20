@@ -421,3 +421,176 @@ async def test_store_is_the_only_writer(store: StorageConversationStore, data_st
         return len(list(result.scalars().all()))
 
     assert await data_store.execute_in_transaction(_count) == 1
+
+
+# --------------------------------------------------------------------------
+# Phase C — `list_conversations` (durable "Recent Conversations")
+# --------------------------------------------------------------------------
+
+
+async def test_list_conversations_empty_result(any_store: IConversationStore) -> None:
+    assert await any_store.list_conversations(TENANT, "user-1") == []
+
+
+async def test_list_conversations_returns_title_and_timestamps(any_store: IConversationStore) -> None:
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-x",
+        user_content="  What is   the capital of France?  ",
+        assistant_content="Paris.",
+        request_id="req-1",
+        user_id="user-1",
+    )
+
+    summaries = await any_store.list_conversations(TENANT, "user-1")
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary.conversation_id == "conv-x"
+    # Whitespace/newlines collapsed -- a title is one display line.
+    assert summary.title == "What is the capital of France?"
+    assert summary.first_activity_at is not None
+    assert summary.last_activity_at is not None
+
+
+async def test_list_conversations_title_truncates_a_long_first_message(any_store: IConversationStore) -> None:
+    long_message = "x" * 200
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-long",
+        user_content=long_message,
+        assistant_content="ok",
+        request_id="req-1",
+        user_id="user-1",
+    )
+
+    [summary] = await any_store.list_conversations(TENANT, "user-1")
+
+    assert summary.title.endswith("…")
+    assert len(summary.title) <= 61  # 60 chars + the ellipsis marker
+
+
+async def test_list_conversations_multiple_ordered_most_recent_first(any_store: IConversationStore) -> None:
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-oldest",
+        user_content="first ever conversation",
+        assistant_content="ack",
+        request_id="req-1",
+        user_id="user-1",
+    )
+    await asyncio.sleep(0.01)
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-newest",
+        user_content="most recent conversation",
+        assistant_content="ack",
+        request_id="req-2",
+        user_id="user-1",
+    )
+    await asyncio.sleep(0.01)
+    # A second turn in the OLDEST conversation bumps its last activity ahead
+    # of the newest conversation's only turn -- ordering must follow last
+    # activity, not conversation creation order.
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-oldest",
+        user_content="a follow-up in the oldest conversation",
+        assistant_content="ack",
+        request_id="req-3",
+        user_id="user-1",
+    )
+
+    summaries = await any_store.list_conversations(TENANT, "user-1")
+
+    assert [s.conversation_id for s in summaries] == ["conv-oldest", "conv-newest"]
+    assert summaries[0].first_activity_at < summaries[0].last_activity_at
+
+
+async def test_list_conversations_title_uses_the_first_message_even_after_later_turns(
+    any_store: IConversationStore,
+) -> None:
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-x",
+        user_content="original opening question",
+        assistant_content="ack",
+        request_id="req-1",
+        user_id="user-1",
+    )
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-x",
+        user_content="a completely different follow-up message",
+        assistant_content="ack",
+        request_id="req-2",
+        user_id="user-1",
+    )
+
+    [summary] = await any_store.list_conversations(TENANT, "user-1")
+
+    assert summary.title == "original opening question"
+
+
+async def test_list_conversations_is_tenant_scoped(any_store: IConversationStore) -> None:
+    await any_store.append(
+        tenant_id="tenant-a",
+        conversation_id="conv-a",
+        user_content="tenant A's conversation",
+        assistant_content="ack",
+        request_id="req-1",
+        user_id="user-1",
+    )
+    await any_store.append(
+        tenant_id="tenant-b",
+        conversation_id="conv-b",
+        user_content="tenant B's conversation",
+        assistant_content="ack",
+        request_id="req-2",
+        user_id="user-1",
+    )
+
+    summaries_a = await any_store.list_conversations("tenant-a", "user-1")
+    summaries_b = await any_store.list_conversations("tenant-b", "user-1")
+
+    assert [s.conversation_id for s in summaries_a] == ["conv-a"]
+    assert [s.conversation_id for s in summaries_b] == ["conv-b"]
+
+
+async def test_list_conversations_is_user_scoped_within_one_tenant(any_store: IConversationStore) -> None:
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-alice",
+        user_content="Alice's private conversation",
+        assistant_content="ack",
+        request_id="req-1",
+        user_id="alice",
+    )
+    await any_store.append(
+        tenant_id=TENANT,
+        conversation_id="conv-bob",
+        user_content="Bob's private conversation",
+        assistant_content="ack",
+        request_id="req-2",
+        user_id="bob",
+    )
+
+    alice_summaries = await any_store.list_conversations(TENANT, "alice")
+    bob_summaries = await any_store.list_conversations(TENANT, "bob")
+
+    assert [s.conversation_id for s in alice_summaries] == ["conv-alice"]
+    assert [s.conversation_id for s in bob_summaries] == ["conv-bob"]
+    # Neither user's summaries carry the other's title text anywhere.
+    assert "Bob" not in str(alice_summaries)
+    assert "Alice" not in str(bob_summaries)
+
+
+async def test_manager_list_conversations_rejects_missing_identifiers() -> None:
+    from kortex.engines.ai.exceptions import MemoryValidationError
+
+    manager = AIMemoryManager(InMemoryConversationStore())
+
+    with pytest.raises(MemoryValidationError):
+        await manager.list_conversations("", "user-1")
+    with pytest.raises(MemoryValidationError):
+        await manager.list_conversations(TENANT, "")

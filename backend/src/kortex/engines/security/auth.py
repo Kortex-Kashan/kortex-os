@@ -90,6 +90,7 @@ from kortex.engines.security.models import (
     PasswordResetTokenRecord,
     PrincipalRecord,
     PrincipalType,
+    RefreshTokenPayload,
     RolePermissionRecord,
     SecurityPrincipal,
     TokenPayload,
@@ -108,6 +109,25 @@ _OAUTH_STATE_TTL = timedelta(minutes=10)
 # byte prefix ensures one can never be replayed as the other even if their
 # other fields happened to coincide.
 _OAUTH_STATE_DOMAIN_PREFIX = b"oauth-state:"
+
+# AI Studio Functional Stabilization, Phase F security correction. This is
+# an ABSOLUTE session ceiling, deliberately independent of _TOKEN_TTL,
+# _RESET_TOKEN_TTL, and _OAUTH_STATE_TTL (none of which this change touches):
+# a refresh token issued at login can renew the access token for at most
+# this long, no matter how continuously the session is used, before the
+# principal must genuinely re-authenticate. This is what makes "renew while
+# active" bounded rather than indefinite -- see `issue_refresh_token`/
+# `verify_refresh_token` below and the Phase F security review report for
+# the full analysis this constant closes.
+_REFRESH_TOKEN_TTL = timedelta(hours=24)
+# Domain separation for the refresh token, mirroring _OAUTH_STATE_DOMAIN_PREFIX's
+# exact technique: a refresh token and an access TokenPayload are both signed
+# with the same platform Ed25519 keypair, so a distinct byte prefix ensures
+# one can never be replayed as the other even if their other fields coincide
+# -- in particular, a stolen ACCESS token (the credential exposed on every
+# ordinary capability call) can never be presented where a refresh token is
+# required, because its signature was never computed over this prefix.
+_REFRESH_TOKEN_DOMAIN_PREFIX = b"refresh-token:"
 
 # M7.1 first-run bootstrap. A fixed, well-known sentinel identity used
 # exclusively as a concurrency mutex (see `bootstrap_first_admin` below) —
@@ -573,6 +593,126 @@ class AuthenticationManager(IAuthenticationManager):
             issued_at_utc=issued_at_utc,
             expires_at_utc=expires_at_utc,
             signature=signature.signature,
+        )
+
+    # -- Session refresh (Phase F security correction) --------------------
+
+    @staticmethod
+    def _build_refresh_signing_payload(
+        token_id: str,
+        principal_id: str,
+        principal_type: str,
+        tenant_id: str,
+        issued_at_utc: datetime,
+        expires_at_utc: datetime,
+    ) -> bytes:
+        """Same length-prefixed encoding as `_build_signing_payload`, under
+        the `_REFRESH_TOKEN_DOMAIN_PREFIX` domain -- see that prefix's own
+        docstring for why this must never collide with an access token's
+        signing payload."""
+        parts = (
+            token_id,
+            principal_id,
+            principal_type,
+            tenant_id,
+            issued_at_utc.isoformat(),
+            expires_at_utc.isoformat(),
+        )
+        encoded = _REFRESH_TOKEN_DOMAIN_PREFIX
+        for part in parts:
+            part_bytes = part.encode("utf-8")
+            encoded += len(part_bytes).to_bytes(4, "big") + part_bytes
+        return encoded
+
+    async def issue_refresh_token(self, principal: SecurityPrincipal) -> RefreshTokenPayload:
+        """Issue a refresh token bounded by the absolute `_REFRESH_TOKEN_TTL`
+        session ceiling (Phase F security correction).
+
+        Called exactly once per genuine login (`authenticate`/OAuth login
+        completion) -- never re-issued or extended by ordinary capability
+        dispatch or by `kortex.security.auth.refresh` itself. Never cached,
+        revoked, or persisted anywhere, exactly like `issue_token` -- fully
+        self-contained and self-validating.
+        """
+        token_id = os.urandom(16).hex()
+        issued_at_utc = datetime.now(UTC)
+        expires_at_utc = issued_at_utc + _REFRESH_TOKEN_TTL
+
+        payload_bytes = self._build_refresh_signing_payload(
+            token_id,
+            principal.principal_id,
+            principal.principal_type.value,
+            principal.tenant_id,
+            issued_at_utc,
+            expires_at_utc,
+        )
+        signature = self._verification_service.sign(payload_bytes, self._signing_private_key, self._signing_public_key)
+
+        return RefreshTokenPayload(
+            token_id=token_id,
+            principal_id=principal.principal_id,
+            principal_type=principal.principal_type,
+            tenant_id=principal.tenant_id,
+            issued_at_utc=issued_at_utc,
+            expires_at_utc=expires_at_utc,
+            signature=signature.signature,
+        )
+
+    async def verify_refresh_token(self, token: RefreshTokenPayload) -> SecurityPrincipal:
+        """Verify a refresh token and return the resolved `SecurityPrincipal`.
+
+        Same mandatory order as `verify_token` (signature before any claim
+        is trusted, then a fresh principal re-check, then expiry against a
+        freshly-read current time) -- deliberately duplicated rather than
+        shared with `verify_token`, because sharing would require accepting
+        either payload's domain prefix at the same call site, which is
+        exactly the type confusion domain separation exists to prevent.
+
+        Raises:
+            InvalidTokenError: If the signature is missing/invalid, or the
+                principal no longer exists/is disabled.
+            InvalidSignatureError: If Ed25519 verification fails.
+            TokenExpiredError: If the refresh token is past its absolute
+                `_REFRESH_TOKEN_TTL` ceiling (or not yet valid).
+        """
+        if token.signature is None:
+            raise InvalidTokenError("Refresh token has no signature.")
+
+        payload_bytes = self._build_refresh_signing_payload(
+            token.token_id,
+            token.principal_id,
+            token.principal_type.value,
+            token.tenant_id,
+            token.issued_at_utc,
+            token.expires_at_utc,
+        )
+        signature_model = CryptographicSignature(
+            algorithm="ed25519", signature=token.signature, public_key=self._signing_public_key
+        )
+        # Raises `InvalidSignatureError` on any mismatch -- a stolen access
+        # TokenPayload can never verify here even with identical field
+        # values, because its signature was never computed over the
+        # refresh-token domain prefix.
+        self._verification_service.verify_signature_strict(payload_bytes, signature_model)
+
+        snapshot = await self._load_principal(token.tenant_id, token.principal_id, token.principal_type.value)
+        if snapshot is None or not snapshot.enabled:
+            raise InvalidTokenError("Refresh token principal is no longer valid.")
+
+        now = datetime.now(UTC)
+        try:
+            is_temporally_invalid = now > token.expires_at_utc or now < token.issued_at_utc
+        except TypeError:
+            is_temporally_invalid = True
+        if is_temporally_invalid:
+            raise TokenExpiredError("Refresh token is expired or not yet valid.")
+
+        return SecurityPrincipal(
+            principal_id=snapshot.principal_id,
+            principal_type=PrincipalType(snapshot.principal_type),
+            tenant_id=snapshot.tenant_id,
+            roles=list(snapshot.roles),
+            attributes=dict(snapshot.attributes),
         )
 
     # -- Principal Registration (Phase A: admin-provisioned "Register") ----

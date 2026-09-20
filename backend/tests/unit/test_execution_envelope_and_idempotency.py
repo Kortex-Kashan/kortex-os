@@ -238,7 +238,7 @@ async def test_transport_propagation_to_capability_request(tmp_path: Path) -> No
         parameters={"foo": "bar"},
     )
 
-    result_envelope, _, status_code = await _invoke(
+    result_envelope, _, _, status_code = await _invoke(
         kernel=kernel,
         ipc_request=ipc_req,
         session_token_blob=token_str,

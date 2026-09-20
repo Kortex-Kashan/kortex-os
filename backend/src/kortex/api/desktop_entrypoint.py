@@ -127,6 +127,19 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
         "f5a1b2c3d4e5",
         frozenset({"security_agent_enrollment_tokens"}),
     ),
+    # AI Studio functional stabilization, Phase A: purely additive
+    # `op.create_table` (+ `op.create_index` on that same new table) --
+    # table-existence alone is a sufficient proxy, same as every other
+    # pure-create_table revision above.
+    ("c3d9e7a1f2b4", frozenset({"ai_provider_model_catalog"})),
+    # Phase C: index-only revision (`op.create_index` on the pre-existing
+    # `ai_conversation_turns` table) -- no new table, same as `e1a2b3c4d5f6`
+    # above. An empty frozenset here is correct, not an oversight: this
+    # walk only proves tables, and a create_all()-built "legacy" database
+    # already carries this index as part of the ORM model's own
+    # `__table_args__`, so there is nothing further to verify at the
+    # table-existence level for this revision.
+    ("a1b2c9d3e4f5", frozenset()),
 )
 
 # Column-level counterpart to `_REVISION_CHAIN` for a revision that adds a

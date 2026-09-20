@@ -75,14 +75,14 @@ function config(overrides: Partial<AiProviderConfig> = {}): AiProviderConfig {
   };
 }
 
-function renderCard(provider: AiProvider, providerConfig?: AiProviderConfig) {
+function renderCard(provider: AiProvider, providerConfig?: AiProviderConfig, persistedModels: string[] = []) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
       <ul>
-        <ProviderConfigCard provider={provider} config={providerConfig} />
+        <ProviderConfigCard provider={provider} config={providerConfig} persistedModels={persistedModels} />
       </ul>
     </QueryClientProvider>,
   );
@@ -178,12 +178,81 @@ describe("configure dialog", () => {
     expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
   });
 
-  it("submits the trimmed key through configureAiProvider and closes on success", async () => {
+  it("keeps Save key disabled until the typed key has been tested successfully", async () => {
+    testAiProviderConnectionMock.mockResolvedValueOnce({
+      providerId: "openai",
+      connected: true,
+      detail: null,
+      models: [],
+    });
+    renderCard(cloudProvider(), undefined);
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure" }));
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-live" } });
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+
+    expect(await screen.findByText("Connection successful.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save key" })).toBeEnabled();
+    // The dialog's ad-hoc test carries the exact candidate key, not the
+    // provider's already-stored one -- distinct from the card's own
+    // "Test connection" button (which passes `undefined`).
+    expect(testAiProviderConnectionMock).toHaveBeenCalledWith("openai", "sk-live");
+  });
+
+  it("keeps Save key disabled when the test-key attempt fails", async () => {
+    testAiProviderConnectionMock.mockResolvedValueOnce({
+      providerId: "openai",
+      connected: false,
+      detail: "401 invalid_api_key",
+      models: [],
+    });
+    renderCard(cloudProvider(), undefined);
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure" }));
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-bad" } });
+    fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+
+    expect(await screen.findByText("Connection failed: 401 invalid_api_key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
+  });
+
+  it("invalidates a successful test if the key is edited afterward", async () => {
+    testAiProviderConnectionMock.mockResolvedValueOnce({
+      providerId: "openai",
+      connected: true,
+      detail: null,
+      models: [],
+    });
+    renderCard(cloudProvider(), undefined);
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure" }));
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-live" } });
+    fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+    expect(await screen.findByRole("button", { name: "Save key" })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-live-edited" } });
+
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
+    expect(screen.queryByText("Connection successful.")).not.toBeInTheDocument();
+  });
+
+  it("submits the trimmed key through configureAiProvider only after a successful test", async () => {
+    testAiProviderConnectionMock.mockResolvedValueOnce({
+      providerId: "openai",
+      connected: true,
+      detail: null,
+      models: [],
+    });
     configureAiProviderMock.mockResolvedValueOnce(config());
     renderCard(cloudProvider(), undefined);
 
     fireEvent.click(screen.getByRole("button", { name: "Configure" }));
     fireEvent.change(screen.getByLabelText("API key"), { target: { value: "  sk-live  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save key" })).toBeEnabled());
+
     fireEvent.click(screen.getByRole("button", { name: "Save key" }));
 
     await waitFor(() => {
@@ -209,6 +278,9 @@ describe("configure dialog", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Configure" }));
     expect(screen.getByLabelText("API key")).toHaveValue("");
+    // A previously successful test must not carry over either -- Save key
+    // must require a fresh test against whatever is typed this time.
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
   });
 
   it("tells the user a replacement cannot display the existing key", () => {
@@ -219,11 +291,19 @@ describe("configure dialog", () => {
   });
 
   it("reports a save failure inside the dialog and stays open", async () => {
+    testAiProviderConnectionMock.mockResolvedValueOnce({
+      providerId: "openai",
+      connected: true,
+      detail: null,
+      models: [],
+    });
     configureAiProviderMock.mockRejectedValueOnce(new Error("upstream rejected the key"));
     renderCard(cloudProvider(), undefined);
 
     fireEvent.click(screen.getByRole("button", { name: "Configure" }));
     fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-bad" } });
+    fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save key" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Save key" }));
 
     expect(await screen.findByText("upstream rejected the key")).toBeInTheDocument();
@@ -253,7 +333,10 @@ describe("connection testing", () => {
     expect(await screen.findByTestId("provider-feedback")).toHaveTextContent(
       "Connection succeeded — 2 models available.",
     );
-    expect(testAiProviderConnectionMock).toHaveBeenCalledWith("openai");
+    // Called with a second (undefined) argument: this is the card's own
+    // "Test connection" button, testing the already-stored credential, not
+    // the dialog's ad-hoc "Test key" button which passes a candidate key.
+    expect(testAiProviderConnectionMock).toHaveBeenCalledWith("openai", undefined);
   });
 
   it("reports a failed connection with the backend's normalized detail", async () => {
@@ -332,6 +415,25 @@ describe("default-model selection", () => {
     expect(await screen.findByRole("option", { name: "gpt-5-preview" })).toBeInTheDocument();
   });
 
+  it("prefers the tenant's persisted discovered catalog over the static list when no live test has run", () => {
+    // Fixes the defect where a 41-model Gemini catalog collapsed to the
+    // small static `supportedModels` list the moment the component
+    // remounted (no live test result to fall back on) even though the
+    // tenant's discovery was durably persisted server-side.
+    renderCard(cloudProvider(), config(), ["gpt-5-persisted", "gpt-5-persisted-mini"]);
+
+    fireEvent.click(screen.getByLabelText(/^Default model$/));
+    expect(screen.getByRole("option", { name: "gpt-5-persisted" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "gpt-4o" })).not.toBeInTheDocument();
+  });
+
+  it("falls back to the provider's static list when there is no persisted catalog and no live test", () => {
+    renderCard(cloudProvider(), config(), []);
+
+    fireEvent.click(screen.getByLabelText(/^Default model$/));
+    expect(screen.getByRole("option", { name: "gpt-4o" })).toBeInTheDocument();
+  });
+
   it("persists a chosen default model through configureAiProvider without resending a key", async () => {
     configureAiProviderMock.mockResolvedValueOnce(config({ defaultModel: "gpt-4o-mini" }));
     renderCard(cloudProvider(), config());
@@ -361,14 +463,36 @@ describe("default-model selection", () => {
 // ---------------------------------------------------------------------------
 
 describe("removal and permissions", () => {
-  it("removes the configuration and confirms inline", async () => {
+  it("opens a confirmation dialog before removing configuration and can cancel", async () => {
+    renderCard(cloudProvider(), config());
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove configuration" }));
+
+    expect(screen.getByRole("heading", { name: "Remove Configuration" })).toBeInTheDocument();
+    expect(screen.getByText(/permanently delete your stored API key/)).toBeInTheDocument();
+
+    // Cancel closes dialog without calling removal
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Remove Configuration" })).not.toBeInTheDocument();
+    });
+    expect(removeAiProviderConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("removes the configuration when confirmed and confirms inline", async () => {
     removeAiProviderConfigMock.mockResolvedValueOnce(true);
     renderCard(cloudProvider(), config());
 
     fireEvent.click(screen.getByRole("button", { name: "Remove configuration" }));
 
+    // Confirm removal in dialog
+    fireEvent.click(screen.getByTestId("confirm-remove-btn"));
+
     expect(await screen.findByTestId("provider-feedback")).toHaveTextContent("Configuration removed.");
     expect(removeAiProviderConfigMock).toHaveBeenCalledWith("openai");
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Remove Configuration" })).not.toBeInTheDocument();
+    });
   });
 
   it("explains a permission denial in terms of the missing grant", async () => {

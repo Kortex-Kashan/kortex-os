@@ -9,6 +9,7 @@ import {
 import type { AiProviderConfigureInput } from "../types";
 import { AI_MODELS_QUERY_KEY } from "./useAiModels";
 import { AI_PROVIDERS_QUERY_KEY } from "./useAiProviders";
+import { useAiStudioQueryInterceptor } from "./useAiStudioQueryInterceptor";
 
 /**
  * Server-derived state for the calling tenant's provider configurations,
@@ -23,9 +24,11 @@ import { AI_PROVIDERS_QUERY_KEY } from "./useAiProviders";
 export const AI_PROVIDER_CONFIGS_QUERY_KEY = ["ai-studio", "provider-configs"] as const;
 
 export function useAiProviderConfigs() {
+  const { interceptQuery } = useAiStudioQueryInterceptor();
+
   return useQuery({
     queryKey: AI_PROVIDER_CONFIGS_QUERY_KEY,
-    queryFn: listAiProviderConfigs,
+    queryFn: interceptQuery(listAiProviderConfigs),
     // An access-denied result is deterministic -- retrying cannot change
     // it. Matches `useAiProviders`/`useConnectors`.
     retry: (failureCount, error) => !(error instanceof AiStudioAccessDeniedError) && failureCount < 1,
@@ -43,8 +46,10 @@ export function useAiProviderConfigs() {
  */
 export function useConfigureAiProvider() {
   const client = useQueryClient();
+  const { interceptMutation } = useAiStudioQueryInterceptor();
+
   return useMutation({
-    mutationFn: (input: AiProviderConfigureInput) => configureAiProvider(input),
+    mutationFn: interceptMutation((input: AiProviderConfigureInput) => configureAiProvider(input)),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: AI_PROVIDER_CONFIGS_QUERY_KEY });
       void client.invalidateQueries({ queryKey: AI_PROVIDERS_QUERY_KEY });
@@ -56,23 +61,39 @@ export function useConfigureAiProvider() {
 /**
  * Test one provider's stored credential.
  *
- * Invalidates nothing: a connection test is a read that changes no server
- * state. Its result (including discovered models) is consumed directly from
- * the mutation's own `data`, which is what keeps the discovered-model list
- * scoped to the test that produced it rather than becoming a second,
- * silently-staleable model cache.
+ * A successful test with discovered models is no longer a pure read: the
+ * backend now persists that discovery into the tenant's durable model
+ * catalog (`AIProviderModelCatalogStore`), so `kortex.ai.model.list` can
+ * report it after this component unmounts, after navigation, and after a
+ * reload — fixing the defect where a live 41-model Gemini catalog collapsed
+ * back to the small static fallback list the moment the user left this tab.
+ * Invalidating `AI_MODELS_QUERY_KEY` here is what makes that persisted
+ * catalog visible without a manual refresh. The mutation's own `data` is
+ * still consumed directly for the *immediate* "N models available" feedback
+ * in this same session — invalidation is what makes that catalog survive
+ * beyond it.
  */
 export function useTestAiProviderConnection() {
+  const client = useQueryClient();
+  const { interceptMutation } = useAiStudioQueryInterceptor();
+
   return useMutation({
-    mutationFn: (providerId: string) => testAiProviderConnection(providerId),
+    mutationFn: interceptMutation(({ providerId, apiKey }: { providerId: string; apiKey?: string }) =>
+      testAiProviderConnection(providerId, apiKey),
+    ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: AI_MODELS_QUERY_KEY });
+    },
   });
 }
 
 /** Remove one provider configuration, then refresh the same keys as configure. */
 export function useRemoveAiProviderConfig() {
   const client = useQueryClient();
+  const { interceptMutation } = useAiStudioQueryInterceptor();
+
   return useMutation({
-    mutationFn: (providerId: string) => removeAiProviderConfig(providerId),
+    mutationFn: interceptMutation((providerId: string) => removeAiProviderConfig(providerId)),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: AI_PROVIDER_CONFIGS_QUERY_KEY });
       void client.invalidateQueries({ queryKey: AI_PROVIDERS_QUERY_KEY });
@@ -80,3 +101,4 @@ export function useRemoveAiProviderConfig() {
     },
   });
 }
+

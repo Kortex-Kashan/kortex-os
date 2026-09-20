@@ -3,31 +3,50 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listAiProvidersMock, listAiModelsMock, getConversationHistoryMock } = vi.hoisted(() => ({
-  listAiProvidersMock: vi.fn(),
-  listAiModelsMock: vi.fn(),
-  getConversationHistoryMock: vi.fn(),
-}));
+const { listAiProvidersMock, listAiModelsMock, configureAiProviderMock, getConversationHistoryMock, sendAgentMessageMock, listConversationsMock } =
+  vi.hoisted(() => ({
+    listAiProvidersMock: vi.fn(),
+    listAiModelsMock: vi.fn(),
+    configureAiProviderMock: vi.fn(),
+    getConversationHistoryMock: vi.fn(),
+    sendAgentMessageMock: vi.fn(),
+    listConversationsMock: vi.fn(),
+  }));
 
 vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
-  return { ...actual, listAiProviders: listAiProvidersMock, listAiModels: listAiModelsMock };
+  return {
+    ...actual,
+    listAiProviders: listAiProvidersMock,
+    listAiModels: listAiModelsMock,
+    configureAiProvider: configureAiProviderMock,
+  };
 });
 
 vi.mock("../chat-api", async () => {
   const actual = await vi.importActual<typeof import("../chat-api")>("../chat-api");
-  return { ...actual, getConversationHistory: getConversationHistoryMock };
+  return {
+    ...actual,
+    getConversationHistory: getConversationHistoryMock,
+    sendAgentMessage: sendAgentMessageMock,
+    listConversations: listConversationsMock,
+  };
 });
 
 // Stub useAuth so AiStudioApp (which reads tenantId for the Governance tab) works
 // without a real AuthProvider in these registry-focused tests.
-vi.mock("@/auth/AuthProvider", () => ({
-  useAuth: () => ({
+vi.mock("@/auth/AuthProvider", () => {
+  const authValue = {
     state: { status: "AUTHENTICATED", identity: { tenantId: "acme", principalId: "alice", principalType: "USER", roles: [] } },
     login: vi.fn(),
     logout: vi.fn(),
-  }),
-}));
+    reportIpcResult: vi.fn(),
+  };
+  return {
+    useAuth: () => authValue,
+    useOptionalAuth: () => authValue,
+  };
+});
 
 import { AiStudioAccessDeniedError, AiStudioRequestError } from "../api";
 import type { AiModel, AiProvider } from "../types";
@@ -36,7 +55,11 @@ import { AiStudioApp } from "./AiStudioApp";
 beforeEach(() => {
   listAiProvidersMock.mockReset();
   listAiModelsMock.mockReset();
+  configureAiProviderMock.mockReset();
   getConversationHistoryMock.mockReset();
+  sendAgentMessageMock.mockReset();
+  listConversationsMock.mockReset();
+  listConversationsMock.mockResolvedValue([]);
   window.localStorage.clear();
 });
 
@@ -206,18 +229,65 @@ describe("AiStudioApp", () => {
     expect(screen.getByLabelText("Message")).toBeInTheDocument();
   });
 
-  // Proves the receiving end of Mini Chat's Workflow Builder entry point
-  // (`MiniChatHost.test.tsx`'s own tests prove the *call*; this proves the
-  // *destination* actually honors it): a `?tab=workflowBuilder` deep link
-  // lands directly on the Workflow Builder tab, with no extra click needed,
-  // mirroring `WorkflowApp.tsx`'s own `?tab=approvals` precedent exactly.
-  it("honors a ?tab=workflowBuilder deep link by landing directly on the Workflow Builder tab", async () => {
+  // ---------------------------------------------------------------------------
+  // Phase C: changing provider/model must not disturb the active conversation
+  // ---------------------------------------------------------------------------
+
+  it("preserves the active conversation across a provider/model default change on the Providers & Models tab", async () => {
+    listAiProvidersMock.mockResolvedValue([makeProvider()]);
+    listAiModelsMock.mockResolvedValue([makeModel()]);
+    getConversationHistoryMock.mockResolvedValue([
+      { sequence: 1, userContent: "Hello", assistantContent: "Hi there", createdAt: "2026-01-01T00:00:00Z" },
+    ]);
+
+    renderAiStudioApp();
+
+    // Establish the conversation on the Chat tab first.
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    await screen.findByText("Hello");
+    const activeConversationId = window.localStorage.getItem(
+      "kortex.ai-studio.chat.conversation-id:acme:alice",
+    );
+    expect(activeConversationId).toBeTruthy();
+
+    // Switch to Providers & Models -- a different tab/component subtree
+    // entirely (`AiStudioApp.tsx` conditionally unmounts `ChatPanel` when
+    // it isn't the active tab), the same subtree where a provider/model
+    // default change actually happens (`ProviderConfigCard`'s own model
+    // `<Select>`, exercised directly by `ProviderConfigCard.test.tsx`).
+    fireEvent.click(screen.getByRole("tab", { name: "Providers & Models" }));
+    await screen.findByTestId("ai-provider-card");
+
+    // Back to Chat: the exact same conversation must resume, not a new one,
+    // and the previous transcript must still be there.
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+    expect(screen.getByText("Hi there")).toBeInTheDocument();
+    expect(window.localStorage.getItem("kortex.ai-studio.chat.conversation-id:acme:alice")).toBe(
+      activeConversationId,
+    );
+  });
+
+  // Phase E: the Workflow Builder tab that used to live in AI Studio has
+  // moved to the Workflow Engine app's "AI Automation" tab. AI Studio's own
+  // scope is now exactly Providers & Models + Governance + Chat -- this
+  // proves both that the old tab is genuinely gone (not merely renamed)
+  // and that a stale `?tab=workflowBuilder` deep link degrades harmlessly
+  // to the default tab rather than crashing or rendering nothing.
+  it("no longer has a Workflow Builder tab -- AI Studio's scope is Providers & Models, Governance, and Chat only", async () => {
     listAiProvidersMock.mockResolvedValueOnce([]);
     listAiModelsMock.mockResolvedValueOnce([]);
 
     renderAiStudioApp(["/ai-studio?tab=workflowBuilder"]);
 
-    expect(screen.getByRole("tab", { name: "Workflow Builder", selected: true })).toBeInTheDocument();
-    expect(await screen.findByTestId("ai-workflow-builder-panel")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Workflow Builder" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-workflow-builder-panel")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Providers & Models" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Governance" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeInTheDocument();
+    // An unrecognized `?tab=` value falls back to the default tab rather
+    // than crashing or leaving no tab selected.
+    expect(screen.getByRole("tab", { name: "Providers & Models", selected: true })).toBeInTheDocument();
   });
 });

@@ -1,7 +1,8 @@
 import * as React from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getConversationHistory, sendAgentMessage } from "../chat-api";
-import { getOrCreateConversationId } from "../chat-conversation-id";
+import { getActiveConversationId, setActiveConversationId, startNewConversationId } from "../chat-conversation-id";
+import { conversationsQueryKey } from "./useConversations";
 import type { AgentTaskStatus, AgentTurnResult, ChatMessage } from "../chat-types";
 
 function describeTerminalStatus(status: AgentTaskStatus): string {
@@ -38,20 +39,45 @@ export interface UseConversationArgs {
  * Owns the AI Studio Chat transcript for one (tenant, user) pair (M7.2).
  *
  * Every message is sent via `kortex.ai.agent.orchestrate` (see
- * `chat-api.ts`'s module doc). On mount, the transcript is rehydrated from
- * the durable `kortex.ai.conversation.history.get` capability exactly once
- * -- never from any client-cached copy -- so a reload or restart recovers
- * the real conversation. A `PAUSED_FOR_APPROVAL` result is rendered as a
- * pending-approval placeholder message; the caller is responsible for
- * polling (`useAgentStatus`) and calling `resolvePendingApproval` once that
- * poll observes a terminal status -- this hook never resumes anything
- * itself.
+ * `chat-api.ts`'s module doc). On mount, and again whenever the active
+ * conversation changes (`switchConversation`/`startNewConversation`, Phase
+ * C), the transcript is rehydrated from the durable
+ * `kortex.ai.conversation.history.get` capability exactly once per
+ * conversation -- never from any client-cached copy -- so a reload,
+ * restart, or switch to a different conversation always recovers the real
+ * transcript for whichever conversation is now active. A
+ * `PAUSED_FOR_APPROVAL` result is rendered as a pending-approval
+ * placeholder message; the caller is responsible for polling
+ * (`useAgentStatus`) and calling `resolvePendingApproval` once that poll
+ * observes a terminal status -- this hook never resumes anything itself.
+ *
+ * `conversationId` is mutable state, not a one-time `useState` initializer
+ * (Phase C): a tenant/user now has many conversations, and this hook must
+ * be able to point at a different one -- via `switchConversation` (Recent
+ * Conversations) or `startNewConversation` (New Chat) -- without the
+ * consuming component (`ChatPanel.tsx`/`MiniChatHost.tsx`) unmounting and
+ * remounting. Both setters reset local transcript state and the hydration
+ * guard so the newly active conversation's own history loads cleanly,
+ * exactly as it would on a fresh mount.
  */
 export function useConversation({ tenantId, userId }: UseConversationArgs) {
-  const [conversationId] = React.useState(() => getOrCreateConversationId(tenantId, userId));
+  const queryClient = useQueryClient();
+  const [conversationId, setConversationId] = React.useState(() => getActiveConversationId(tenantId, userId));
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [pendingTaskId, setPendingTaskId] = React.useState<string | null>(null);
   const hasHydratedRef = React.useRef(false);
+  // Closeout code-review fix: read at `onSuccess`/`onError` execution time
+  // (never from a closure captured when the mutation started) to detect a
+  // conversation switch that happened while the send was still in flight —
+  // without this, a reply for conversation A could be appended to
+  // conversation B's freshly-reset transcript if the user switched
+  // conversations before A's response resolved.
+  const conversationIdRef = React.useRef(conversationId);
+  conversationIdRef.current = conversationId;
+
+  const invalidateConversationsList = React.useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: conversationsQueryKey(tenantId, userId) });
+  }, [queryClient, tenantId, userId]);
 
   const historyQuery = useQuery({
     queryKey: ["ai-studio", "chat", "history", tenantId, conversationId],
@@ -84,12 +110,17 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
   }, [historyQuery.isSuccess, historyQuery.data]);
 
   const sendMutation = useMutation({
-    mutationFn: async (goal: string) => {
+    mutationFn: async ({ goal, conversationId: targetConversationId }: { goal: string; conversationId: string }) => {
       const taskId = crypto.randomUUID();
-      const result = await sendAgentMessage({ taskId, tenantId, userId, conversationId, goal });
+      const result = await sendAgentMessage({ taskId, tenantId, userId, conversationId: targetConversationId, goal });
       return { result, goal, taskId };
     },
-    onSuccess: ({ result, goal, taskId }) => {
+    onSuccess: ({ result, goal, taskId }, variables) => {
+      // The user switched to a different conversation while this send was
+      // still in flight — its own transcript (or new empty one) is what's
+      // showing now, so this reply belongs in the OLD conversation's
+      // history (already persisted server-side), never appended here.
+      if (variables.conversationId !== conversationIdRef.current) return;
       if (result.status === "PAUSED_FOR_APPROVAL") {
         setPendingTaskId(taskId);
         setMessages((prev) => [
@@ -113,7 +144,8 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
         { id: taskId, role: "assistant", content, createdAt: new Date().toISOString() },
       ]);
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.conversationId !== conversationIdRef.current) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -124,6 +156,12 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
         },
       ]);
     },
+    // A completed (or paused) turn may durably create a brand-new
+    // conversation, or bump an existing one's last-activity ordering --
+    // either way, Recent Conversations must reflect it without a manual
+    // refresh. `onSettled` (not just `onSuccess`) so a genuinely-persisted
+    // partial turn is never missed by only checking the happy path.
+    onSettled: invalidateConversationsList,
   });
 
   const sendMessage = React.useCallback(
@@ -134,9 +172,9 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
         ...prev,
         { id: crypto.randomUUID(), role: "user", content: trimmed, createdAt: new Date().toISOString() },
       ]);
-      sendMutation.mutate(trimmed);
+      sendMutation.mutate({ goal: trimmed, conversationId });
     },
-    [sendMutation],
+    [sendMutation, conversationId],
   );
 
   /** Called once `useAgentStatus` observes a terminal status for a
@@ -172,9 +210,44 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
         );
       }
       setPendingTaskId((current) => (current === taskId ? null : current));
+      if (status === "COMPLETED") {
+        invalidateConversationsList();
+      }
     },
-    [tenantId, conversationId],
+    [tenantId, conversationId, invalidateConversationsList],
   );
+
+  /** Selects an existing conversation (Recent Conversations, Phase C).
+   * Persists it as the new active pointer, then resets the transcript and
+   * hydration guard so `historyQuery`'s own queryKey change (it includes
+   * `conversationId`) hydrates the newly active conversation's real
+   * history -- exactly the same hydration path a fresh mount takes, not a
+   * second one. A no-op when the requested id is already active. */
+  const switchConversation = React.useCallback(
+    (nextConversationId: string) => {
+      if (nextConversationId === conversationId) return;
+      setActiveConversationId(tenantId, userId, nextConversationId);
+      hasHydratedRef.current = false;
+      setMessages([]);
+      setPendingTaskId(null);
+      setConversationId(nextConversationId);
+    },
+    [tenantId, userId, conversationId],
+  );
+
+  /** Starts a brand-new, genuinely empty conversation (New Chat, Phase C).
+   * `historyQuery` still fetches for the new id (its queryKey includes
+   * `conversationId`), but marking hydration as already-done means that
+   * fetch's inevitable empty result is simply never prepended to
+   * `messages` -- there is nothing to hydrate for an id known to have no
+   * history yet. */
+  const startNewConversation = React.useCallback(() => {
+    const generated = startNewConversationId(tenantId, userId);
+    hasHydratedRef.current = true;
+    setMessages([]);
+    setPendingTaskId(null);
+    setConversationId(generated);
+  }, [tenantId, userId]);
 
   return {
     conversationId,
@@ -185,5 +258,7 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
     pendingTaskId,
     sendMessage,
     resolvePendingApproval,
+    switchConversation,
+    startNewConversation,
   };
 }

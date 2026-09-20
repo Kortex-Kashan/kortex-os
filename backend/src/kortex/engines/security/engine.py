@@ -45,6 +45,7 @@ from kortex.engines.security.events import (
 )
 from kortex.engines.security.exceptions import (
     AuthenticationError,
+    InvalidTokenError,
     MasterKeyError,
     OAuthNoLinkedAccountError,
     OAuthProviderNotConfiguredError,
@@ -73,6 +74,7 @@ from kortex.engines.security.oauth.google_provider import GoogleOAuthProvider
 from kortex.engines.security.oauth.microsoft_provider import MicrosoftOAuthProvider
 from kortex.engines.security.oauth_state_codec import OAuthStateDecodeError, decode_oauth_state, encode_oauth_state
 from kortex.engines.security.providers.local_crypto import LocalCrypto
+from kortex.engines.security.refresh_token_codec import decode_refresh_token
 from kortex.engines.security.secrets import SecretStore
 from kortex.engines.storage.interfaces import ICacheStore, IDataStore, IFileStore
 
@@ -96,6 +98,7 @@ _AUTH_SIGNING_KEY_CONFIG_KEY = "KORTEX_AUTH_SIGNING_PRIVATE_KEY"
 _SECRET_GET_CAPABILITY = "kortex.security.secret.get"  # noqa: S105
 _SECRET_PUT_CAPABILITY = "kortex.security.secret.put"  # noqa: S105
 _AUTH_AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate"
+_AUTH_REFRESH_CAPABILITY = "kortex.security.auth.refresh"
 _ACCESS_AUTHORIZE_CAPABILITY = "kortex.security.access.authorize"
 _SIGNATURE_VERIFY_CAPABILITY = "kortex.security.signature.verify"
 _BOOTSTRAP_CREATE_ADMIN_CAPABILITY = "kortex.security.bootstrap.create_admin"
@@ -146,6 +149,7 @@ _BOOTSTRAP_ADMIN_ROLE = "admin"
 # admin-provisioned principal registration).
 _CANONICAL_CAPABILITIES: list[tuple[str, str]] = [
     (_AUTH_AUTHENTICATE_CAPABILITY, "Authenticate a caller identity."),
+    (_AUTH_REFRESH_CAPABILITY, "Exchange a refresh token for a fresh short-lived access token."),
     (_ACCESS_AUTHORIZE_CAPABILITY, "Authorize a caller's requested capability."),
     (_SECRET_GET_CAPABILITY, "Resolve a secret handle to its plaintext value."),
     (_SECRET_PUT_CAPABILITY, "Store or rotate a tenant-scoped secret under a handle."),
@@ -432,6 +436,15 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
 
             for capability_name, description in _CANONICAL_CAPABILITIES:
                 requires_authentication = True
+                # F1 convention (KORTEX OS -- Automation + Integration
+                # Fabric, Capability Model Completion): `None` here means
+                # "fall back to the legacy `_CAPABILITY_RISK_CLASSIFICATION`
+                # table in registry/engine.py", which is reserved for
+                # capabilities that predate F1. `kortex.security.auth.refresh`
+                # is authored after F1, so it declares its own classification
+                # explicitly below instead of relying on that fallback.
+                is_read_only: bool | None = None
+                is_idempotent: bool | None = None
                 if capability_name == _SECRET_GET_CAPABILITY:
                     # Phase B / B-3: was `self._secret_store.get_secret`
                     # bound directly, which made the caller-supplied
@@ -450,6 +463,24 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                     capability_description = f"{description} Fail-closed, audited (Milestones M3 + M6)."
                     # The bootstrap exception: reachable before any session token exists.
                     requires_authentication = False
+                elif capability_name == _AUTH_REFRESH_CAPABILITY:
+                    handler = self.refresh_session_capability
+                    capability_description = (
+                        f"{description} Fail-closed, audited, bounded by an absolute session "
+                        "ceiling independent of activity (Phase F security correction)."
+                    )
+                    # Bootstrap-exempt, exactly like `authenticate`: this capability
+                    # authenticates the caller ITSELF via the `refresh_token`
+                    # parameter it receives (never a session-token header) --
+                    # there is no access-token session to require here, by design.
+                    requires_authentication = False
+                    # Not read-only (a new access token exists after a
+                    # successful call that did not exist before) and not
+                    # idempotent (each call mints a genuinely different
+                    # token) -- identical classification to `authenticate`
+                    # for the identical reason.
+                    is_read_only = False
+                    is_idempotent = False
                 elif capability_name == _ACCESS_AUTHORIZE_CAPABILITY:
                     # `self.authorize` (not the raw engine method) so this
                     # capability's real dispatch path is also audited (M6).
@@ -533,6 +564,8 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                     requires_authentication=requires_authentication,
                     required_permissions=_CANONICAL_CAPABILITY_PERMISSIONS.get(capability_name),
                     requires_execution_context=capability_name in _EXECUTION_CONTEXT_REQUIRED_CAPABILITIES,
+                    is_read_only=is_read_only,
+                    is_idempotent=is_idempotent,
                 )
                 self._registered_capabilities.append(capability_name)
 
@@ -912,6 +945,73 @@ class SecurityEngine(BaseEngine, ISecurityEngine, IEngineDiagnostics):
                     principal_type=principal.principal_type.value,
                 )
             )
+        return principal
+
+    async def refresh_session_capability(self, refresh_token: str, **_extra: Any) -> SecurityPrincipal:
+        """Capability handler for `kortex.security.auth.refresh` (AI Studio
+        Functional Stabilization, Phase F security correction).
+
+        Exchanges a still-valid refresh token for a fresh `SecurityPrincipal`
+        -- from which `kortex.api.main._invoke` mints a brand-new, full-TTL
+        access token via the exact same metadata-driven path `authenticate()`
+        already uses (`requires_authentication=False` + a `SecurityPrincipal`
+        result). This is the ONLY capability that can extend a session past
+        its access token's own 15-minute expiry: ordinary capability dispatch
+        no longer mints or renews any token (that blanket behavior was the
+        Phase F security regression this capability replaces). It requires
+        the refresh token specifically -- never the access token used for
+        every ordinary call, and never accepted here even if replayed,
+        because it was never signed under the refresh-token domain prefix
+        (see `AuthenticationManager._REFRESH_TOKEN_DOMAIN_PREFIX`). The
+        refresh token itself is bounded by its own absolute
+        `_REFRESH_TOKEN_TTL` ceiling, independent of activity, so a session
+        can be kept alive by continued use but never indefinitely.
+
+        Bootstrap-exempt, exactly like `authenticate`: no access-token
+        session is assumed to exist when this is called -- that is the
+        entire point of a refresh path.
+        """
+        if not isinstance(refresh_token, str) or not refresh_token:
+            await self._record_security_audit(
+                action=_AUTH_REFRESH_CAPABILITY,
+                actor_id="unknown",
+                actor_type="HUMAN",
+                tenant_id="unknown",
+                context={"result": "failure", "reason": "missing_refresh_token"},
+            )
+            raise InvalidTokenError("Refresh token is missing.")
+
+        try:
+            decoded = decode_refresh_token(refresh_token)
+        except ValueError as exc:
+            await self._record_security_audit(
+                action=_AUTH_REFRESH_CAPABILITY,
+                actor_id="unknown",
+                actor_type="HUMAN",
+                tenant_id="unknown",
+                context={"result": "failure", "reason": "malformed_refresh_token"},
+            )
+            raise InvalidTokenError("Refresh token is malformed.") from exc
+
+        try:
+            principal = await self.authentication_manager.verify_refresh_token(decoded)
+        except Exception as exc:
+            await self._record_security_audit(
+                action=_AUTH_REFRESH_CAPABILITY,
+                actor_id=decoded.principal_id,
+                actor_type=_actor_type_for_principal_type(decoded.principal_type.value),
+                tenant_id=decoded.tenant_id,
+                context={"result": "failure", "reason": type(exc).__name__},
+            )
+            raise
+
+        await self._record_security_audit(
+            action=_AUTH_REFRESH_CAPABILITY,
+            actor_id=principal.principal_id,
+            actor_type=_actor_type_for_principal_type(principal.principal_type.value),
+            tenant_id=principal.tenant_id,
+            context={"result": "success"},
+        )
         return principal
 
     async def authorize(

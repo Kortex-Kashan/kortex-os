@@ -95,6 +95,7 @@ pub fn run() {
             ipc::invoke_capability,
             ipc::has_session,
             ipc::logout,
+            ipc::refresh_session,
             ipc::get_system_health,
             events::connect_event_stream,
         ])

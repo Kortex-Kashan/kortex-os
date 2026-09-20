@@ -108,6 +108,35 @@ def _login(client: Any, tenant_id: str, principal_id: str) -> str:
     return body["sessionToken"]
 
 
+def _login_with_refresh(client: Any, tenant_id: str, principal_id: str) -> tuple[str, str]:
+    """Same real login round trip as `_login`, but also captures the
+    refresh token minted alongside the access token (Phase F security
+    correction) -- used only by tests that exercise the refresh flow
+    itself; every pre-existing caller of `_login` needs just the access
+    token and is left untouched."""
+    response = client.post(
+        "/capabilities/invoke",
+        json={
+            "requestId": str(uuid.uuid4()),
+            "capabilityName": "kortex.security.auth.authenticate",
+            "parameters": {
+                "credentials": {
+                    "principal_type": "USER",
+                    "tenant_id": tenant_id,
+                    "principal_id": principal_id,
+                    "password": "dispatch-test-credential",
+                }
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "SUCCESS"
+    assert "sessionToken" in body, "login must mint an access token"
+    assert "refreshToken" in body, "login must also mint a refresh token"
+    return body["sessionToken"], body["refreshToken"]
+
+
 class TestHealth:
     def test_health_reports_running_kernel(self, client: Any) -> None:
         response = client.get("/health")
@@ -255,6 +284,263 @@ class TestCapabilityInvocation:
         body = response.json()
         assert "sessionToken" not in (body.get("payload") or {})
         assert base64.urlsafe_b64decode(body["sessionToken"].encode("ascii"))  # decodes without error
+
+
+# ---------------------------------------------------------------------------
+# Phase F (AI Studio functional stabilization) — session-refresh token
+# lifecycle, POST security correction.
+#
+# The approved (corrected) architecture: the access token stays short-lived
+# (`_TOKEN_TTL`, unchanged at 15 minutes — see `test_authentication_manager.
+# py`'s own Phase F assertions for that). Ordinary authenticated capability
+# dispatch never mints or reissues anything, for any capability -- an
+# earlier version of this suite (`TestPhaseFSlidingTokenReissue`, replaced
+# below) covered a design where any successful authenticated call reissued
+# a fresh token, which the Phase F security review found made a stolen
+# access token effectively renewable indefinitely. Renewal is now possible
+# only through the narrow `kortex.security.auth.refresh` capability, which
+# requires the separate refresh token minted only at login and bounded by
+# its own absolute `_REFRESH_TOKEN_TTL` ceiling (24 hours), independent of
+# activity. These tests exercise that corrected lifecycle end-to-end
+# through the real HTTP surface -- no mocked dispatcher, no mocked Security
+# Engine, matching this file's own established convention.
+#
+# "An expired access token is rejected and never reissued" is deliberately
+# NOT re-tested here: `test_authentication_manager.py::test_verify_token_
+# expired_denied` already proves `verify_token` rejects an expired-but-
+# validly-signed token at the unit level, and ordinary dispatch never
+# reaches any reissue step at all post-correction, so there is no distinct
+# code path here left to prove for that case.
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseFTokenLifecycle:
+    """AI Studio Functional Stabilization, Phase F security correction.
+
+    Replaces the earlier `TestPhaseFSlidingTokenReissue` suite, whose first
+    two tests asserted the vulnerable behavior this correction removes: an
+    ordinary, successful authenticated capability call (`kortex.security.
+    secret.get`) used to mint and return a fresh access token. That made a
+    stolen access token effectively renewable indefinitely -- anyone
+    holding a valid bearer token could keep it alive forever just by
+    replaying ordinary calls, with nothing to distinguish that from
+    genuine, legitimate use. This suite proves the corrected properties
+    instead: ordinary capability dispatch never mints or renews any token,
+    and renewal is possible only through the narrow `kortex.security.
+    auth.refresh` capability, which requires the separate refresh token
+    minted only at login -- never the access token used for every ordinary
+    call.
+    """
+
+    def test_login_mints_both_an_access_token_and_a_refresh_token(self, client: Any) -> None:
+        kernel = client.app.state.kernel
+        storage = kernel.get_engine("storage")
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, storage.data, tenant_id, "erin", ["reader"])
+
+        access_token, refresh_token = _login_with_refresh(client, tenant_id, "erin")
+        assert access_token != refresh_token, "the two tokens must be distinct credentials"
+
+    def test_ordinary_authenticated_capability_calls_never_mint_or_reissue_any_token(self, client: Any) -> None:
+        """The core Phase F regression this correction closes: a successful
+        `kortex.security.secret.get` call (or any other ordinary
+        authenticated capability) must never carry a `sessionToken` or
+        `refreshToken` in its response -- not once, and not on a tenth
+        repeat. A stolen access token replaying ordinary calls gains
+        nothing."""
+        kernel = client.app.state.kernel
+        storage = kernel.get_engine("storage")
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, storage.data, tenant_id, "erin", ["reader"])
+        client.portal.call(_grant_role_permission, storage.data, "reader", "security:read")
+        security_engine = kernel.get_engine("security")
+        client.portal.call(security_engine.secret_store.put_secret, "demo-secret", tenant_id, "demo-plaintext")
+
+        original_token = _login(client, tenant_id, "erin")
+
+        for _ in range(10):
+            response = client.post(
+                "/capabilities/invoke",
+                json={
+                    "requestId": str(uuid.uuid4()),
+                    "capabilityName": "kortex.security.secret.get",
+                    "parameters": {"secret_handle": "demo-secret", "tenant_id": tenant_id},
+                },
+                headers={"Authorization": f"Bearer {original_token}"},
+            )
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["status"] == "SUCCESS"
+            assert "sessionToken" not in body, "ordinary capability dispatch must never mint an access token"
+            assert "refreshToken" not in body, "ordinary capability dispatch must never mint a refresh token"
+
+    def test_the_original_access_token_keeps_working_across_many_ordinary_calls_with_no_new_token_ever_appearing(
+        self, client: Any
+    ) -> None:
+        """Mandatory Phase F property: a valid access token cannot be
+        indefinitely rolled forward merely by repeatedly invoking ordinary
+        capabilities. There is no rolling to observe at all -- the SAME
+        original token keeps authenticating every one of many repeated
+        calls, because nothing ever replaces it."""
+        kernel = client.app.state.kernel
+        storage = kernel.get_engine("storage")
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, storage.data, tenant_id, "frank", ["reader"])
+        client.portal.call(_grant_role_permission, storage.data, "reader", "security:read")
+        security_engine = kernel.get_engine("security")
+        client.portal.call(security_engine.secret_store.put_secret, "demo-secret-2", tenant_id, "second-plaintext")
+
+        original_token = _login(client, tenant_id, "frank")
+
+        for _ in range(5):
+            response = client.post(
+                "/capabilities/invoke",
+                json={
+                    "requestId": str(uuid.uuid4()),
+                    "capabilityName": "kortex.security.secret.get",
+                    "parameters": {"secret_handle": "demo-secret-2", "tenant_id": tenant_id},
+                },
+                headers={"Authorization": f"Bearer {original_token}"},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["payload"]["result"] == "second-plaintext"
+
+    def test_refresh_capability_exchanges_a_valid_refresh_token_for_a_fresh_access_token(self, client: Any) -> None:
+        """Mandatory Phase F property: legitimate session renewal works."""
+        kernel = client.app.state.kernel
+        storage = kernel.get_engine("storage")
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, storage.data, tenant_id, "grace", ["reader"])
+        client.portal.call(_grant_role_permission, storage.data, "reader", "security:read")
+        security_engine = kernel.get_engine("security")
+        client.portal.call(security_engine.secret_store.put_secret, "demo-secret-3", tenant_id, "third-plaintext")
+
+        access_token, refresh_token = _login_with_refresh(client, tenant_id, "grace")
+
+        response = client.post(
+            "/capabilities/invoke",
+            json={
+                "requestId": str(uuid.uuid4()),
+                "capabilityName": "kortex.security.auth.refresh",
+                "parameters": {"refresh_token": refresh_token},
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "SUCCESS"
+        assert "sessionToken" in body, "a valid refresh must mint a fresh access token"
+        new_access_token = body["sessionToken"]
+        assert new_access_token != access_token, "the refreshed access token must be genuinely new"
+        # Refreshing must never mint a NEW refresh token -- the original
+        # refresh token's own absolute ceiling is never itself extended.
+        assert "refreshToken" not in body, "kortex.security.auth.refresh must never mint a new refresh token"
+
+        decoded_original = decode_token(access_token)
+        decoded_new = decode_token(new_access_token)
+        assert decoded_new.principal_id == decoded_original.principal_id
+        assert decoded_new.tenant_id == decoded_original.tenant_id
+        assert decoded_new.issued_at_utc > decoded_original.issued_at_utc
+
+        # The refreshed access token is itself genuinely usable, not merely
+        # well-formed.
+        follow_up = client.post(
+            "/capabilities/invoke",
+            json={
+                "requestId": str(uuid.uuid4()),
+                "capabilityName": "kortex.security.secret.get",
+                "parameters": {"secret_handle": "demo-secret-3", "tenant_id": tenant_id},
+            },
+            headers={"Authorization": f"Bearer {new_access_token}"},
+        )
+        assert follow_up.status_code == 200, follow_up.text
+        assert follow_up.json()["payload"]["result"] == "third-plaintext"
+
+    def test_refresh_capability_rejects_an_access_token_presented_as_a_refresh_token(self, client: Any) -> None:
+        """Mandatory Phase F property: an access token cannot be used to
+        obtain a fresh token. Domain separation means a real, currently
+        valid access token -- exactly the artifact exposed on every
+        ordinary capability call, and therefore the one most likely to be
+        stolen -- is worthless at the refresh endpoint, even though it is a
+        genuine, correctly-signed KORTEX token for the same principal. The
+        failure surfaces as 403 (not 401): the payload is well-formed and
+        does decode, but its signature was never computed over the
+        refresh-token domain prefix, so it fails the same
+        `InvalidSignatureError` path -- and the same 403 mapping
+        (`errors.py`) -- as any other cryptographic signature mismatch.
+        Either way, no token of any kind is minted."""
+        kernel = client.app.state.kernel
+        storage = kernel.get_engine("storage")
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, storage.data, tenant_id, "heidi", ["reader"])
+
+        access_token = _login(client, tenant_id, "heidi")
+
+        response = client.post(
+            "/capabilities/invoke",
+            json={
+                "requestId": str(uuid.uuid4()),
+                "capabilityName": "kortex.security.auth.refresh",
+                "parameters": {"refresh_token": access_token},
+            },
+        )
+        assert response.status_code == 403, response.text
+        body = response.json()
+        assert body["status"] == "FAILURE"
+        assert "sessionToken" not in body
+        assert "refreshToken" not in body
+
+    def test_refresh_capability_rejects_a_malformed_refresh_token(self, client: Any) -> None:
+        response = client.post(
+            "/capabilities/invoke",
+            json={
+                "requestId": str(uuid.uuid4()),
+                "capabilityName": "kortex.security.auth.refresh",
+                "parameters": {"refresh_token": "not-a-real-token"},
+            },
+        )
+        assert response.status_code == 401, response.text
+        assert response.json()["status"] == "FAILURE"
+
+    def test_an_unauthenticated_dispatch_failure_never_reissues_a_token(self, client: Any) -> None:
+        """A call with no bearer token at all fails before `verify_token`
+        ever runs -- there is no principal to reissue for, and the response
+        must carry no `sessionToken` field whatsoever."""
+        response = client.post(
+            "/capabilities/invoke",
+            json={
+                "requestId": str(uuid.uuid4()),
+                "capabilityName": "kortex.security.secret.get",
+                "parameters": {"secret_handle": "x", "tenant_id": "any"},
+            },
+        )
+        assert response.status_code == 401, response.text
+        assert "sessionToken" not in response.json()
+
+    def test_an_authorization_denial_never_reissues_a_token(self, client: Any) -> None:
+        """A genuinely authenticated caller, denied by RBAC for THIS
+        specific capability, must not have any token minted on the way to
+        the 403 -- token minting only ever happens inside the SUCCESS path
+        of `kortex.security.auth.authenticate`/`oauth.login_complete`/
+        `auth.refresh`; an `AuthorizationDeniedError` on an ordinary
+        capability never reaches that path at all (and, post-Phase-F,
+        ordinary capabilities never mint anything regardless of outcome)."""
+        kernel = client.app.state.kernel
+        storage = kernel.get_engine("storage")
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, storage.data, tenant_id, "grace", [])  # no roles/permissions
+
+        token = _login(client, tenant_id, "grace")
+        response = client.post(
+            "/capabilities/invoke",
+            json={
+                "requestId": str(uuid.uuid4()),
+                "capabilityName": "kortex.security.secret.get",
+                "parameters": {"secret_handle": "does-not-matter", "tenant_id": tenant_id},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 403, response.text
+        assert "sessionToken" not in response.json()
 
 
 class TestEventStream:

@@ -64,6 +64,7 @@ _PRODUCTION_TABLE_NAMES = frozenset(
         "ai_conversation_turns",
         "ai_decision_records",
         "ai_governance_policies",
+        "ai_provider_model_catalog",
         "ai_tenant_quotas",
         "approval_decisions",
         "approval_delegations",

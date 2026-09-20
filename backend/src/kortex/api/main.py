@@ -42,10 +42,24 @@ from kortex.core.idempotency import sanitize_for_persistence
 from kortex.core.kernel import Kernel
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.models import SecurityPrincipal
+from kortex.engines.security.refresh_token_codec import encode_refresh_token
 
 logger = logging.getLogger("kortex.api")
 
 _DEFAULT_TIMEOUT_MS = 30_000
+
+# AI Studio Functional Stabilization, Phase F security correction. Only a
+# genuine login mints a NEW refresh token alongside the access token --
+# `kortex.security.auth.refresh` itself deliberately does not (its own
+# refresh token keeps its original, fixed absolute expiry; only the access
+# token it returns is fresh), and no other capability mints or renews
+# anything at all. See `_invoke`'s docstring below for the full rationale.
+_LOGIN_CAPABILITIES = frozenset(
+    {
+        "kortex.security.auth.authenticate",
+        "kortex.security.oauth.login_complete",
+    }
+)
 
 
 @asynccontextmanager
@@ -109,10 +123,10 @@ async def _invoke(
     kernel: Kernel,
     ipc_request: IpcCapabilityRequest,
     session_token_blob: str | None,
-) -> tuple[IpcResultEnvelope, str | None, int]:
+) -> tuple[IpcResultEnvelope, str | None, str | None, int]:
     """Dispatch one capability call and build the response envelope.
 
-    Returns `(envelope, minted_session_token, http_status)`.
+    Returns `(envelope, minted_session_token, minted_refresh_token, http_status)`.
     `http_status` carries the per-exception status `errors.map_exception`
     resolved (e.g. `AuthenticationError` -> 401 vs `AuthorizationDeniedError`
     -> 403, both `PERMISSION_DENIED`) — it must flow through from here,
@@ -122,11 +136,14 @@ async def _invoke(
     `minted_session_token` is non-`None` only immediately after a
     *successful* dispatch of a capability whose registry descriptor has
     `requires_authentication is False` and whose raw result is a
-    `SecurityPrincipal` — today that is
-    exactly (and only) `kortex.security.auth.authenticate`, the sole
-    capability the registry permits to register that way at all (enforced
-    by `RegistryEngine.register_capability`'s own hard-coded invariant,
-    unrelated to and unmodified by this code).
+    `SecurityPrincipal` — today that is `kortex.security.auth.authenticate`,
+    `kortex.security.oauth.login_complete`, and `kortex.security.auth.refresh`
+    (Phase F), the only capabilities the registry permits to register that
+    way at all (enforced by `RegistryEngine.register_capability`'s own
+    hard-coded invariant, unrelated to and unmodified by this code).
+    `minted_refresh_token` is non-`None` only alongside a login proper
+    (`_LOGIN_CAPABILITIES`) — never alongside a plain refresh, so a refresh
+    token's own absolute lifetime is never itself extended.
 
     This is metadata-driven (`descriptor.requires_authentication`,
     `isinstance(result, SecurityPrincipal)`), not a `capability_name`
@@ -135,13 +152,28 @@ async def _invoke(
     and stores the resulting session token"), not a capability-routing
     decision. It does not change how the request is dispatched — dispatch
     is identical for every capability regardless of this check's outcome.
-    An alternative was considered (a new `kortex.security.auth.login`
-    capability owned by the Security Engine) and rejected: it would have
-    required broadening `RegistryEngine`'s bootstrap-exemption invariant
-    and the Security Engine's spec-S15-ratified four-capability list,
-    which is a larger, more invasive change than this narrow, additive
-    transport-layer step. Documented in the M3 final report as an
-    architectural decision, not silently made.
+    The one exception is `_LOGIN_CAPABILITIES` membership, used only to
+    decide whether a SECOND, refresh, token also gets minted — this is a
+    narrow, additive check confined to this transport-layer function; it
+    changes what gets attached to the response, never how or whether the
+    capability itself was dispatched.
+
+    Phase F security correction (AI Studio Functional Stabilization): an
+    earlier version of this function reissued a fresh access token after
+    *any* successful authenticated capability call. That was found to make
+    a stolen access token effectively renewable indefinitely — nothing
+    distinguished the legitimate desktop app's own traffic from a stolen
+    token being replayed by an attacker, since both are just "a valid
+    bearer token calling an authenticated capability." Ordinary capability
+    dispatch (the `elif descriptor.requires_authentication` branch that
+    used to live here) no longer mints or renews anything at all. Renewal
+    is now possible only through the narrow `kortex.security.auth.refresh`
+    capability, which requires the separate, narrowly-scoped refresh token
+    minted only at login — never the access token used for ordinary calls
+    — and that refresh token is itself bounded by an absolute ceiling
+    (`AuthenticationManager._REFRESH_TOKEN_TTL`) independent of activity.
+    See the Phase F security review report for the full stolen-token
+    analysis this change closes.
     """
     correlation_id = ipc_request.correlation_id or str(uuid.uuid4())
     timeout_s = (ipc_request.timeout_ms or _DEFAULT_TIMEOUT_MS) / 1000.0
@@ -161,6 +193,7 @@ async def _invoke(
                     warnings=[],
                     execution_duration_ms=0.0,
                 ),
+                None,
                 None,
                 401,
             )
@@ -209,6 +242,7 @@ async def _invoke(
                 execution_duration_ms=duration_ms,
             ),
             None,
+            None,
             mapping.http_status,
         )
     except Exception as exc:
@@ -233,20 +267,34 @@ async def _invoke(
                 execution_duration_ms=duration_ms,
             ),
             None,
+            None,
             mapping.http_status,
         )
 
     duration_ms = (time.monotonic() - start) * 1000
 
     minted_token: str | None = None
+    minted_refresh_token: str | None = None
     try:
         descriptor = kernel.get_capability(ipc_request.capability_name)
         if not descriptor.requires_authentication and isinstance(result, SecurityPrincipal):
+            # Covers `authenticate`, `oauth_login_complete`, and (Phase F)
+            # `kortex.security.auth.refresh` -- all three are registered
+            # `requires_authentication=False` and authenticate the caller
+            # themselves (credentials / OAuth code / refresh token), rather
+            # than via a session-token header. Every one of them mints a
+            # fresh access token on success. Only a genuine login
+            # (`_LOGIN_CAPABILITIES`) additionally mints a NEW refresh
+            # token -- `auth.refresh` deliberately does not, so a session's
+            # absolute lifetime is never itself extended by using it.
             security_engine = cast(SecurityEngine, kernel.get_engine("security"))
             issued = await security_engine.authentication_manager.issue_token(result)
             minted_token = encode_token(issued)
+            if ipc_request.capability_name in _LOGIN_CAPABILITIES:
+                issued_refresh = await security_engine.authentication_manager.issue_refresh_token(result)
+                minted_refresh_token = encode_refresh_token(issued_refresh)
     except Exception:
-        logger.exception("Failed to mint session token after successful bootstrap-exempt dispatch.")
+        logger.exception("Failed to mint a session token after successful dispatch.")
 
     payload = result if isinstance(result, dict) else {"result": _jsonable(result)}
     return (
@@ -260,6 +308,7 @@ async def _invoke(
             execution_duration_ms=duration_ms,
         ),
         minted_token,
+        minted_refresh_token,
         200,
     )
 
@@ -287,11 +336,13 @@ async def invoke_capability(
 ) -> JSONResponse:
     kernel = _kernel(request)
     session_token_blob = _extract_bearer(authorization)
-    envelope, minted_token, status_code = await _invoke(kernel, ipc_request, session_token_blob)
+    envelope, minted_token, minted_refresh_token, status_code = await _invoke(kernel, ipc_request, session_token_blob)
 
     body = envelope.model_dump(by_alias=True)
     if minted_token is not None:
         body["sessionToken"] = minted_token
+    if minted_refresh_token is not None:
+        body["refreshToken"] = minted_refresh_token
     return JSONResponse(status_code=status_code, content=body)
 
 

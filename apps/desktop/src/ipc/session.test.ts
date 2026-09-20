@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { clearStoredSession, hasStoredSession } from "@/ipc/session";
+import { clearStoredSession, hasStoredSession, renewStoredSession } from "@/ipc/session";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
@@ -27,5 +27,22 @@ describe("clearStoredSession", () => {
     invokeMock.mockResolvedValueOnce(undefined);
     await clearStoredSession();
     expect(invokeMock).toHaveBeenCalledWith("logout");
+  });
+});
+
+describe("renewStoredSession", () => {
+  it("invokes refresh_session and returns its envelope verbatim", async () => {
+    const envelope = { status: "SUCCESS", payload: { result: { principalId: "alice" } } };
+    invokeMock.mockResolvedValueOnce(envelope);
+    const result = await renewStoredSession();
+    expect(invokeMock).toHaveBeenCalledWith("refresh_session");
+    expect(result).toEqual(envelope);
+  });
+
+  it("propagates a FAILURE envelope without throwing (no refresh token held)", async () => {
+    const envelope = { status: "FAILURE", errors: [{ category: "PERMISSION_DENIED" }] };
+    invokeMock.mockResolvedValueOnce(envelope);
+    const result = await renewStoredSession();
+    expect(result).toEqual(envelope);
   });
 });

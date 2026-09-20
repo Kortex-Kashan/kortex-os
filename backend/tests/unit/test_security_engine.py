@@ -49,6 +49,7 @@ from kortex.engines.storage.engine import StorageEngine
 
 _CANONICAL_CAPABILITY_NAMES = [
     "kortex.security.auth.authenticate",
+    "kortex.security.auth.refresh",  # Phase F security correction
     "kortex.security.access.authorize",
     "kortex.security.secret.get",
     "kortex.security.secret.put",  # M7.3

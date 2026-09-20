@@ -2,6 +2,12 @@ import { useState } from "react";
 import {
   Badge,
   Button,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   Select,
   SelectContent,
   SelectItem,
@@ -20,6 +26,12 @@ import { ProviderConfigDialog } from "./ProviderConfigDialog";
 interface ProviderConfigCardProps {
   provider: AiProvider;
   config: AiProviderConfig | undefined;
+  /** This tenant's persisted discovered-model catalog for this provider
+   * (`kortex.ai.model.list`, backed by `AIProviderModelCatalogStore`) — the
+   * durable fallback between a live-just-now test result and the provider's
+   * small static `supportedModels` list. Survives navigation and reload,
+   * which the live test result (component-local mutation state) does not. */
+  persistedModels: string[];
 }
 
 /**
@@ -41,8 +53,9 @@ interface ProviderConfigCardProps {
  * app-shell change outside B4's boundary — so a toast would silently
  * render nowhere.
  */
-export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps) {
+export function ProviderConfigCard({ provider, config, persistedModels }: ProviderConfigCardProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
   const configure = useConfigureAiProvider();
   const test = useTestAiProviderConnection();
   const remove = useRemoveAiProviderConfig();
@@ -51,12 +64,22 @@ export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps
   const isConfigured = config !== undefined;
   const hasCredential = config?.hasCredential === true;
 
-  // Live discovery from the most recent successful test wins over the
-  // provider's static `supportedModels`: it is what this tenant's own
-  // credential can actually reach right now. Falls back to the static list
-  // so a default model can still be chosen before any test has run.
+  // Three tiers, most-authoritative first:
+  //  1. A live discovery from the test just run in this session (component
+  //     state — gone on unmount/navigation/reload).
+  //  2. This tenant's persisted discovered catalog (survives all of that —
+  //     this is what fixes the "41 Gemini models disappear after
+  //     navigating away" defect: the picker no longer collapses to (3)
+  //     just because this component remounted).
+  //  3. The provider's small static `supportedModels` allow-list, used only
+  //     when this tenant has never successfully discovered this provider.
   const discoveredModels = test.data?.models.map((model) => model.modelId) ?? [];
-  const selectableModels = discoveredModels.length > 0 ? discoveredModels : provider.supportedModels;
+  const selectableModels =
+    discoveredModels.length > 0
+      ? discoveredModels
+      : persistedModels.length > 0
+        ? persistedModels
+        : provider.supportedModels;
 
   const busy = configure.isPending || test.isPending || remove.isPending;
 
@@ -108,7 +131,7 @@ export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps
             <Button
               size="sm"
               variant="outline"
-              onClick={() => test.mutate(provider.providerId)}
+              onClick={() => test.mutate({ providerId: provider.providerId })}
               disabled={busy || !hasCredential}
             >
               {test.isPending ? "Testing…" : "Test connection"}
@@ -117,7 +140,7 @@ export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => remove.mutate(provider.providerId)}
+                onClick={() => setRemoveDialogOpen(true)}
                 disabled={busy}
               >
                 {remove.isPending ? "Removing…" : "Remove configuration"}
@@ -183,6 +206,44 @@ export function ProviderConfigCard({ provider, config }: ProviderConfigCardProps
               );
             }}
           />
+
+          <Dialog open={removeDialogOpen} onOpenChange={setRemoveDialogOpen}>
+            <DialogContent data-testid="remove-config-dialog">
+              <DialogHeader>
+                <DialogTitle>Remove Configuration</DialogTitle>
+                <DialogDescription>
+                  Are you sure you want to remove the configuration for{" "}
+                  <span className="font-semibold text-foreground">{provider.displayName}</span>? This will permanently
+                  delete your stored API key and credentials from secure storage and reset provider settings for this tenant.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button
+                  variant="outline"
+                  onClick={() => setRemoveDialogOpen(false)}
+                  disabled={remove.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    remove.mutate(provider.providerId, {
+                      onSuccess: () => {
+                        setRemoveDialogOpen(false);
+                        test.reset();
+                        configure.reset();
+                      },
+                    });
+                  }}
+                  disabled={remove.isPending}
+                  data-testid="confirm-remove-btn"
+                >
+                  {remove.isPending ? "Removing…" : "Confirm removal"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </>
       )}
     </li>

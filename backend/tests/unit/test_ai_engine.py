@@ -95,6 +95,8 @@ class InMemoryKernelBridge(IKernelBridge):
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
         requires_execution_context: bool = False,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
     ) -> object:
         self.capabilities[name] = {
             "description": description,
@@ -104,6 +106,8 @@ class InMemoryKernelBridge(IKernelBridge):
             "requires_authentication": requires_authentication,
             "security_classification": security_classification,
             "requires_execution_context": requires_execution_context,
+            "is_read_only": is_read_only,
+            "is_idempotent": is_idempotent,
         }
 
     async def publish_event(

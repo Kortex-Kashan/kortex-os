@@ -55,6 +55,18 @@ function failureEnvelope(category: string, message: string) {
   };
 }
 
+function directDictEnvelope(payload: Record<string, unknown> | null) {
+  return {
+    requestId: "req-1",
+    correlationId: "corr-1",
+    status: "SUCCESS" as const,
+    payload,
+    errors: [],
+    warnings: [],
+    executionDurationMs: 1,
+  };
+}
+
 const RAW_CONFIG = {
   tenant_id: "acme",
   provider_id: "openai",
@@ -269,6 +281,24 @@ describe("configureAiProvider", () => {
     expect(config).not.toHaveProperty("secretHandle");
   });
 
+  it("handles real backend direct-dictionary payload without { result: ... } wrapper", async () => {
+    // Regression test for: Cannot read properties of null (reading 'provider_id')
+    // Backend returns payload = result (dict) directly, without {"result": ...}
+    invokeCapabilityMock.mockResolvedValueOnce(directDictEnvelope(RAW_CONFIG));
+
+    const config = await configureAiProvider({ providerId: "openai", apiKey: "sk-live" });
+
+    expect(config).toEqual({
+      tenantId: "acme",
+      providerId: "openai",
+      enabled: true,
+      hasCredential: true,
+      defaultModel: "gpt-4o",
+      createdAt: "2026-01-01T00:00:00+00:00",
+      updatedAt: "2026-01-02T00:00:00+00:00",
+    });
+  });
+
   it("raises AiStudioAccessDeniedError when the caller lacks ai:manage", async () => {
     invokeCapabilityMock.mockResolvedValueOnce(failureEnvelope("PERMISSION_DENIED", "Missing permission: ai:manage"));
 
@@ -361,6 +391,23 @@ describe("testAiProviderConnection", () => {
 
     expect((await testAiProviderConnection("openai")).models).toEqual([]);
   });
+
+  it("handles real backend direct-dictionary payload without { result: ... } wrapper", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(
+      directDictEnvelope({
+        provider_id: "openai",
+        connected: true,
+        detail: null,
+        models: [{ model_id: "gpt-4o", provider_id: "openai", provider_display_name: "OpenAI" }],
+      }),
+    );
+
+    const result = await testAiProviderConnection("openai");
+    expect(result.connected).toBe(true);
+    expect(result.models).toEqual([
+      { modelId: "gpt-4o", providerId: "openai", providerDisplayName: "OpenAI" },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -391,6 +438,14 @@ describe("removeAiProviderConfig", () => {
     );
 
     expect(await removeAiProviderConfig("openai")).toBe(false);
+  });
+
+  it("handles real backend direct-dictionary payload without { result: ... } wrapper", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(
+      directDictEnvelope({ provider_id: "openai", tenant_id: "acme", removed: true }),
+    );
+
+    expect(await removeAiProviderConfig("openai")).toBe(true);
   });
 
   it("treats a null result as not removed", async () => {

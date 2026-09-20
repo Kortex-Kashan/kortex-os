@@ -16,15 +16,14 @@ import { useAiModels } from "../hooks/useAiModels";
 import { useAiProviderConfigs } from "../hooks/useAiProviderConfigs";
 import { useAiProviders } from "../hooks/useAiProviders";
 import type { AiModel } from "../types";
-import { WorkflowBuilderPanel } from "@/features/ai-workflow-builder/components/WorkflowBuilderPanel";
 import { AiGovernanceTab } from "./AiGovernanceTab";
 import { ChatPanel } from "./ChatPanel";
 import { ProviderConfigCard } from "./ProviderConfigCard";
 import { useAuth } from "@/auth/AuthProvider";
 
-type AiTab = "registry" | "governance" | "chat" | "workflowBuilder";
+type AiTab = "registry" | "governance" | "chat";
 
-const TAB_IDS: readonly AiTab[] = ["registry", "governance", "chat", "workflowBuilder"];
+const TAB_IDS: readonly AiTab[] = ["registry", "governance", "chat"];
 
 function isAiTab(value: string | null): value is AiTab {
   return TAB_IDS.includes(value as AiTab);
@@ -34,21 +33,23 @@ const TAB_LABEL: Record<AiTab, string> = {
   registry: "Providers & Models",
   governance: "Governance",
   chat: "Chat",
-  workflowBuilder: "Workflow Builder",
 };
 
 /** The AI Studio workspace: tabbed between the provider/model registry
- * (read-only), the AI Governance dashboard (M5.6), Chat (M7.2), and the
- * Workflow Builder. Each tab independently manages its own loading/error
- * states.
+ * (read-only), the AI Governance dashboard (M5.6), and Chat (M7.2). Each
+ * tab independently manages its own loading/error states.
  *
- * The initial tab honors a `?tab=` search param (the same
- * `navigateToApplication({ applicationId, search })` deep-link convention
- * `WorkflowApp.tsx`'s own `?tab=approvals` already establishes, used by
- * `ToolCallCard.tsx` to jump straight into the Workflow Approval Queue) so
- * another surface — Mini Chat's Workflow Builder entry point — can deep-link
- * directly onto the `workflowBuilder` tab without the user having to click
- * into AI Studio and then select it manually. */
+ * AI Studio functional stabilization, Phase E: the Workflow Builder tab
+ * that used to live here has been moved to the Workflow Engine app (its
+ * "AI Automation" tab, `WorkflowApp.tsx`) — AI Studio's own scope is now
+ * exactly Providers & Models + Governance + Chat, per the approved IA. Mini
+ * Chat's builder entry point now deep-links to Workflow Engine directly
+ * (`navigateToApplication({ applicationId: "workflow-engine", search:
+ * "?tab=aiAutomation" })`) instead of through this tab.
+ *
+ * The initial tab still honors a `?tab=` search param for whatever future
+ * deep-link this workspace's own tabs might need, even though nothing
+ * currently deep-links into AI Studio specifically. */
 export function AiStudioApp() {
   const [searchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab");
@@ -66,7 +67,7 @@ export function AiStudioApp() {
         aria-label="AI Studio tabs"
         className="flex gap-1 border-b border-border pb-1"
       >
-        {(["registry", "governance", "chat", "workflowBuilder"] as AiTab[]).map((tab) => (
+        {(["registry", "governance", "chat"] as AiTab[]).map((tab) => (
           <button
             key={tab}
             role="tab"
@@ -110,7 +111,6 @@ export function AiStudioApp() {
         )}
         {activeTab === "governance" && <AiGovernanceTab tenantId={tenantId} />}
         {activeTab === "chat" && <ChatPanel tenantId={tenantId} userId={userId} />}
-        {activeTab === "workflowBuilder" && <WorkflowBuilderPanel />}
       </div>
     </div>
   );
@@ -139,15 +139,27 @@ function SectionShell({
 function ProvidersSection() {
   const { data, isPending, isError, error, refetch, isFetching } = useAiProviders();
   const configs = useAiProviderConfigs();
+  const models = useAiModels();
 
-  // The two queries are deliberately not gated on each other. The registry
+  // The three queries are deliberately not gated on each other. The registry
   // is the list of providers that exist; configurations are which of them
-  // this tenant has set up. A tenant with `ai:read` but not `ai:manage`
-  // still sees the registry, so a configuration failure must degrade to
-  // "no configuration known" rather than blanking the section — the cards
-  // then render as unconfigured, and the first management action reports
-  // the real permission error from the backend.
+  // this tenant has set up; models is this tenant's persisted discovered
+  // catalog per provider. A tenant with `ai:read` but not `ai:manage` still
+  // sees the registry, so a configuration or models-list failure must
+  // degrade gracefully rather than blanking the section — configless cards
+  // render as unconfigured, and a models-list failure just means each
+  // card's persisted-catalog fallback tier is empty this render (cards fall
+  // through to their static list), not that the registry disappears.
   const configByProviderId = new Map((configs.data ?? []).map((config) => [config.providerId, config]));
+  const modelIdsByProviderId = new Map<string, string[]>();
+  for (const model of models.data ?? []) {
+    const existing = modelIdsByProviderId.get(model.providerId);
+    if (existing) {
+      existing.push(model.modelId);
+    } else {
+      modelIdsByProviderId.set(model.providerId, [model.modelId]);
+    }
+  }
 
   if (isPending) {
     return (
@@ -175,6 +187,7 @@ function ProvidersSection() {
           onRefresh={() => {
             void refetch();
             void configs.refetch();
+            void models.refetch();
           }}
           // Deliberately the providers query's own `isFetching`, not
           // `isFetching || configs.isFetching`. Refresh re-requests both,
@@ -190,12 +203,13 @@ function ProvidersSection() {
       {providers.length === 0 ? (
         <p className="text-body text-muted-foreground">No AI providers are currently registered.</p>
       ) : (
-        <ul className="space-y-3">
+        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {providers.map((provider) => (
             <ProviderConfigCard
               key={provider.providerId}
               provider={provider}
               config={configByProviderId.get(provider.providerId)}
+              persistedModels={modelIdsByProviderId.get(provider.providerId) ?? []}
             />
           ))}
         </ul>
@@ -233,7 +247,7 @@ function ModelsSection() {
       {models.length === 0 ? (
         <p className="text-body text-muted-foreground">No AI models are currently available.</p>
       ) : (
-        <ul className="space-y-3">
+        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {models.map((model) => (
             <ModelCard key={`${model.providerId}:${model.modelId}`} model={model} />
           ))}
