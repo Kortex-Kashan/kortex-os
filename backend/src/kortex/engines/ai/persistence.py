@@ -831,9 +831,7 @@ class AIProviderModelCatalogRow(BaseModel):
 
     __tablename__ = "ai_provider_model_catalog"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "provider_id", "model_id", name="uq_ai_provider_model_catalog_entry"
-        ),
+        UniqueConstraint("tenant_id", "provider_id", "model_id", name="uq_ai_provider_model_catalog_entry"),
         Index("ix_ai_provider_model_catalog_lookup", "tenant_id", "provider_id"),
     )
 
@@ -859,9 +857,7 @@ class AIProviderModelCatalogStore:
     def __init__(self, data_store: IDataStore) -> None:
         self._data_store = data_store
 
-    async def replace_catalog(
-        self, tenant_id: str, provider_id: str, models: list[AIModelSummary]
-    ) -> None:
+    async def replace_catalog(self, tenant_id: str, provider_id: str, models: list[AIModelSummary]) -> None:
         """Atomically replace the persisted catalog for one tenant+provider.
 
         Deletes the existing rows for `(tenant_id, provider_id)` and inserts

@@ -34,9 +34,7 @@ def upgrade() -> None:
             "updated_at", sa.DateTime(timezone=True), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "tenant_id", "provider_id", "model_id", name="uq_ai_provider_model_catalog_entry"
-        ),
+        sa.UniqueConstraint("tenant_id", "provider_id", "model_id", name="uq_ai_provider_model_catalog_entry"),
     )
     op.create_index(
         "ix_ai_provider_model_catalog_lookup",
