@@ -76,6 +76,49 @@ def require_identifier(value: str | None, field_name: str) -> str:
     return value
 
 
+_TITLE_MAX_LENGTH = 60
+
+
+def derive_conversation_title(user_content: str) -> str:
+    """Deterministic, single-line title for `kortex.ai.conversation.list`
+    (Phase C), derived from a conversation's first user message.
+
+    Whitespace/newlines are collapsed (a title is one display line, not a
+    reflow of the original message), then truncated to `_TITLE_MAX_LENGTH`
+    characters with a trailing ellipsis so a long first message never grows
+    a "Recent Conversations" row unpredictably. Public so both
+    `InMemoryConversationStore` and `persistence.StorageConversationStore`
+    share exactly one truncation rule rather than two that could drift.
+    """
+    collapsed = " ".join(user_content.split())
+    if not collapsed:
+        return "New conversation"
+    if len(collapsed) <= _TITLE_MAX_LENGTH:
+        return collapsed
+    return collapsed[:_TITLE_MAX_LENGTH].rstrip() + "…"
+
+
+class ConversationSummary(BaseModel):
+    """Read-only summary of one conversation, for `kortex.ai.conversation.list`
+    (AI Studio functional stabilization, Phase C — durable "Recent
+    Conversations").
+
+    Derived entirely from the same `AIConversationTurnRow` aggregates
+    `get_turns`/`get_context` already read — there is no separate
+    conversation-list persistence, and none is needed: the durable turns
+    table `StorageConversationStore` already writes to is the single source
+    of truth for both "read one conversation's turns" and "list a user's
+    conversations".
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: str
+    title: str
+    first_activity_at: datetime.datetime
+    last_activity_at: datetime.datetime
+
+
 class ConversationTurn(BaseModel):
     """One completed (user, assistant) exchange.
 
@@ -122,6 +165,16 @@ class IConversationStore(Protocol):
         self, tenant_id: str, conversation_id: str, limit: int, offset: int = 0
     ) -> list[ConversationTurn]:
         """Return at most `limit` most-recent turns, oldest-first, with optional `offset`."""
+        ...
+
+    async def list_conversations(self, tenant_id: str, user_id: str) -> list[ConversationSummary]:
+        """List this tenant+user's own conversations, most-recently-active first.
+
+        Tenant- and user-scoped by construction: a caller can only ever
+        list conversations belonging to the identity `list_conversations`
+        is called with, never another user's or another tenant's, within
+        one call.
+        """
         ...
 
 
@@ -172,6 +225,26 @@ class InMemoryConversationStore(IConversationStore):
             start_idx = max(0, end_idx - limit)
             return list(turns[start_idx:end_idx])
 
+    async def list_conversations(self, tenant_id: str, user_id: str) -> list[ConversationSummary]:
+        async with self._lock:
+            summaries: list[ConversationSummary] = []
+            for (t_id, conversation_id), turns in self._turns.items():
+                if t_id != tenant_id or not turns:
+                    continue
+                first = turns[0]
+                if first.user_id != user_id:
+                    continue
+                summaries.append(
+                    ConversationSummary(
+                        conversation_id=conversation_id,
+                        title=derive_conversation_title(first.user_content),
+                        first_activity_at=first.created_at,
+                        last_activity_at=turns[-1].created_at,
+                    )
+                )
+            summaries.sort(key=lambda s: s.last_activity_at, reverse=True)
+            return summaries
+
 
 class AIMemoryManager:
     """Retrieves and records conversation history.
@@ -202,6 +275,18 @@ class AIMemoryManager:
         if offset > 0:
             return await self._store.recent_turns(tenant_id, conversation_id, self._max_history_turns, offset=offset)
         return await self._store.recent_turns(tenant_id, conversation_id, self._max_history_turns)
+
+    async def list_conversations(self, tenant_id: str, user_id: str) -> list[ConversationSummary]:
+        """List this tenant+user's own conversations, most-recently-active first (Phase C).
+
+        Backs `kortex.ai.conversation.list`. Both identifiers are required
+        and validated here, same as every other method on this class —
+        there is no code path where an unscoped or partially-scoped list
+        request reaches the store.
+        """
+        require_identifier(tenant_id, "tenant_id")
+        require_identifier(user_id, "user_id")
+        return await self._store.list_conversations(tenant_id, user_id)
 
     async def get_context(self, tenant_id: str, conversation_id: str, offset: int = 0) -> list[str]:
         """Return the rendered form of exactly what `get_turns` returns."""
@@ -254,9 +339,11 @@ __all__ = [
     "ASSISTANT_MARKER",
     "USER_MARKER",
     "AIMemoryManager",
+    "ConversationSummary",
     "ConversationTurn",
     "IConversationStore",
     "InMemoryConversationStore",
+    "derive_conversation_title",
     "require_identifier",
     "sanitize_context_content",
 ]

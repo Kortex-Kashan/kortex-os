@@ -60,6 +60,7 @@ from kortex.engines.ai.openai_provider import DEFAULT_OPENAI_MODEL, OpenAIProvid
 from kortex.engines.ai.persistence import (
     AIGovernanceStore,
     AIProviderConfigStore,
+    AIProviderModelCatalogStore,
     StorageAgentTaskStore,
     StorageConversationStore,
 )
@@ -299,6 +300,14 @@ class KernelProductionBootstrap:
         # facade still receives this exact instance, not a second one.
         provider_config_store = AIProviderConfigStore(data_store) if data_store is not None else None
 
+        # Durable, tenant-scoped discovered-model catalog (fixes the AI
+        # Studio model-loss defect). Same opt-in-by-wiring pattern as
+        # `provider_config_store` immediately above: absent in any
+        # environment without a real `data_store` (most unit tests), which
+        # simply keeps `kortex.ai.model.list` on its pre-existing static
+        # fallback behavior rather than failing.
+        model_catalog_store = AIProviderModelCatalogStore(data_store) if data_store is not None else None
+
         # Phase B / B2-B3: the credentialed cloud providers (OpenAI, Gemini,
         # Anthropic) are constructed here, INSIDE bootstrap.py, rather than by
         # the caller and passed in via `custom_providers` the way Ollama is.
@@ -527,6 +536,7 @@ class KernelProductionBootstrap:
             secret_getter=secret_getter,
             secret_putter=secret_putter,
             cloud_routing_authority=cloud_routing_authority,
+            model_catalog_store=model_catalog_store,
         )
 
         logger.info("AI Orchestration Engine bootstrap assembly complete.")

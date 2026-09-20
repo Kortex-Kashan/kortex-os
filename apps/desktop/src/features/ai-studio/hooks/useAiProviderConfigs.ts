@@ -61,17 +61,29 @@ export function useConfigureAiProvider() {
 /**
  * Test one provider's stored credential.
  *
- * Invalidates nothing: a connection test is a read that changes no server
- * state. Its result (including discovered models) is consumed directly from
- * the mutation's own `data`, which is what keeps the discovered-model list
- * scoped to the test that produced it rather than becoming a second,
- * silently-staleable model cache.
+ * A successful test with discovered models is no longer a pure read: the
+ * backend now persists that discovery into the tenant's durable model
+ * catalog (`AIProviderModelCatalogStore`), so `kortex.ai.model.list` can
+ * report it after this component unmounts, after navigation, and after a
+ * reload — fixing the defect where a live 41-model Gemini catalog collapsed
+ * back to the small static fallback list the moment the user left this tab.
+ * Invalidating `AI_MODELS_QUERY_KEY` here is what makes that persisted
+ * catalog visible without a manual refresh. The mutation's own `data` is
+ * still consumed directly for the *immediate* "N models available" feedback
+ * in this same session — invalidation is what makes that catalog survive
+ * beyond it.
  */
 export function useTestAiProviderConnection() {
+  const client = useQueryClient();
   const { interceptMutation } = useAiStudioQueryInterceptor();
 
   return useMutation({
-    mutationFn: interceptMutation((providerId: string) => testAiProviderConnection(providerId)),
+    mutationFn: interceptMutation(({ providerId, apiKey }: { providerId: string; apiKey?: string }) =>
+      testAiProviderConnection(providerId, apiKey),
+    ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: AI_MODELS_QUERY_KEY });
+    },
   });
 }
 

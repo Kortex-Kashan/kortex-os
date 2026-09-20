@@ -3,12 +3,13 @@ import * as React from "react";
 import type { IpcResultEnvelope } from "@/ipc/client";
 import { clearStoredSession, hasStoredSession } from "@/ipc/session";
 
-import { checkStoredSession, classifyIpcFailure, login as loginCapability } from "./authCapability";
+import { checkStoredSession, classifyIpcFailure, login as loginCapability, renewSession } from "./authCapability";
 import type { AuthState, BootstrapCredentials, LoginCredentials } from "./authTypes";
 import { waitForBackendReady } from "./backendReadiness";
 import { bootstrapFirstAdmin } from "./bootstrapCapability";
 import { clearCachedIdentity, loadCachedIdentity, saveCachedIdentity } from "./identityCache";
 import { completeOAuthLogin, type OAuthProviderId } from "./oauthCapability";
+import { useInactivityLogout, type UseInactivityLogoutOptions } from "./useInactivityLogout";
 
 interface AuthContextValue {
   state: AuthState;
@@ -71,6 +72,13 @@ export function useOptionalAuth(): AuthContextValue | null {
 
 export interface AuthProviderProps {
   children: React.ReactNode;
+  /**
+   * Phase F test seam only: overrides the inactivity timeout / heartbeat
+   * interval `useInactivityLogout` otherwise defaults to (60 minutes / 5
+   * minutes). Production code never passes this — omitting it is what
+   * keeps the real default at exactly 60 minutes.
+   */
+  inactivityOptions?: UseInactivityLogoutOptions;
 }
 
 /**
@@ -84,7 +92,7 @@ export interface AuthProviderProps {
  * provider only ever holds UI-facing state (`AuthState`) and non-secret
  * display identity, never the token.
  */
-export function AuthProvider({ children }: AuthProviderProps) {
+export function AuthProvider({ children, inactivityOptions }: AuthProviderProps) {
   const [state, setState] = React.useState<AuthState>({ status: "CHECKING" });
   // A synchronous guard against duplicate submissions — belt-and-suspenders
   // alongside the LoginScreen disabling its own submit button, since a
@@ -273,6 +281,48 @@ export function AuthProvider({ children }: AuthProviderProps) {
     clearCachedIdentity();
     setState({ status: "UNAUTHENTICATED" });
   }, []);
+
+  // Phase F — true one-hour inactivity logout. Enabled only while genuinely
+  // AUTHENTICATED: there is nothing to idle out of before that, and the
+  // hook's own effect teardown (on `enabled` flipping to false, e.g. right
+  // here the instant `logout()` changes `state.status`) removes every
+  // listener/timer, so a signed-out session never leaves a stray inactivity
+  // watcher running in the background.
+  //
+  // `onTimeout` calls the exact same `logout()` used everywhere else in
+  // this provider — an inactivity logout is not a different code path from
+  // a manual one, it clears the same stored session and cached identity.
+  //
+  // `onHeartbeat` renews the stored session via `renewSession`
+  // (`kortex.security.auth.refresh`, Phase F security correction) —
+  // deliberately NOT `checkStoredSession`/an ordinary authenticated call:
+  // after the Phase F security review found that minting a fresh access
+  // token on *any* successful authenticated capability call made a stolen
+  // access token effectively renewable forever, ordinary capability
+  // dispatch (including `checkStoredSession`'s own `kortex.security.
+  // signature.verify` ping) no longer mints or renews anything at all.
+  // Renewal now goes through the separate, narrowly-scoped refresh token
+  // this provider never sees the value of — Rust custodies it exactly like
+  // the access token, under its own keychain entry. If the refresh itself
+  // fails (the refresh token is invalid, past its own absolute ceiling, or
+  // was never issued), this signs out immediately rather than leaving the
+  // UI showing a stale AUTHENTICATED state that the next real action would
+  // just bounce off a 401 anyway.
+  const isAuthenticated = state.status === "AUTHENTICATED";
+  useInactivityLogout(
+    isAuthenticated,
+    () => {
+      void logout();
+    },
+    () => {
+      void renewSession().then((result) => {
+        if (result === "INVALID") {
+          void logout();
+        }
+      });
+    },
+    inactivityOptions,
+  );
 
   const value = React.useMemo<AuthContextValue>(
     () => ({ state, login, logout, bootstrap, loginWithOAuth, retryConnection, reportIpcResult }),

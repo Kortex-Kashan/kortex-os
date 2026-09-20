@@ -142,6 +142,43 @@ class TokenPayload(BaseModel):
     )
 
 
+class RefreshTokenPayload(BaseModel):
+    """The claims encoded by a session-refresh credential, plus its detached
+    Ed25519 signature (AI Studio Functional Stabilization, Phase F security
+    correction).
+
+    Structurally identical in *shape* to `TokenPayload` but a distinct model
+    on purpose, mirroring `OAuthStatePayload`'s own precedent: `Authentication
+    Manager.issue_refresh_token`/`verify_refresh_token` sign/verify a
+    domain-separated byte encoding (a `"refresh-token:"` prefix) so a
+    captured refresh token can never be replayed as an ordinary access
+    `TokenPayload` or vice versa, even though both are signed with the same
+    platform Ed25519 keypair.
+
+    Issued exactly once, alongside the access token, at the moment a
+    principal authenticates (`kortex.security.auth.authenticate` or
+    `kortex.security.oauth.login_complete`) — never re-issued or extended on
+    ordinary capability dispatch. Its own `expires_at_utc` is an absolute
+    session ceiling (`AuthenticationManager._REFRESH_TOKEN_TTL`), independent
+    of and never widened by activity: it is the one hard limit on how long a
+    session can be kept alive by the sliding-renewal mechanism before the
+    principal must genuinely re-authenticate. Usable for exactly one purpose
+    — exchanging itself for a fresh access token via the narrow
+    `kortex.security.auth.refresh` capability — and is never accepted as a
+    `Bearer` credential for ordinary capability calls.
+    """
+
+    token_id: str = Field(min_length=1, description="Unique identifier for this refresh token instance.")
+    principal_id: str = Field(min_length=1)
+    principal_type: PrincipalType
+    tenant_id: str = Field(min_length=1)
+    issued_at_utc: datetime
+    expires_at_utc: datetime
+    signature: bytes | None = Field(
+        default=None, description="Detached Ed25519 signature over the other claim fields. Never trusted unread."
+    )
+
+
 class OAuthStatePayload(BaseModel):
     """The claims encoded by a signed OAuth `state` parameter (Phase A), plus
     its detached Ed25519 signature — structurally identical in *shape* to

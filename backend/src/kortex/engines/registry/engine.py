@@ -59,6 +59,20 @@ _BOOTSTRAP_EXEMPT_CAPABILITIES = frozenset(
         "kortex.security.oauth.get_config",
         "kortex.security.oauth.login_begin",
         "kortex.security.oauth.login_complete",
+        # AI Studio Functional Stabilization, Phase F security correction:
+        # exchanges a refresh token for a fresh access token. Must be
+        # reachable with no valid access-token session at all -- that is
+        # the entire point of a refresh path (the access token has often
+        # already expired by the time this is called). Not a general
+        # bypass: it authenticates the caller itself via the `refresh_token`
+        # parameter it receives (`AuthenticationManager.verify_refresh_token`,
+        # a distinct, domain-separated credential from the ordinary session
+        # token), exactly mirroring how `authenticate` verifies `credentials`
+        # and `reset_password` verifies its own token parameter. It never
+        # accepts the ordinary session token/Authorization header as a
+        # substitute -- domain separation makes that cryptographically
+        # impossible, not just unchecked.
+        "kortex.security.auth.refresh",
     }
 )
 """Capabilities permitted to register with `requires_authentication=False` —

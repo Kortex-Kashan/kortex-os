@@ -80,6 +80,7 @@ from kortex.engines.ai.interfaces import (
 )
 from kortex.engines.ai.memory import (
     AIMemoryManager,
+    ConversationSummary,
     ConversationTurn,
     InMemoryConversationStore,
     require_identifier,
@@ -620,6 +621,7 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         secret_getter: Any = None,
         secret_putter: Any = None,
         cloud_routing_authority: TenantCloudRoutingAuthority | None = None,
+        model_catalog_store: Any = None,
     ) -> None:
         """Initialize AIOrchestrationEngine with optional component injections.
 
@@ -634,11 +636,22 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         is absent the provider-configuration capabilities fail explicitly
         (`AIEngineNotConfiguredError`) rather than pretending to store a
         credential; see `configure_provider`.
+
+        `model_catalog_store` is the durable, tenant-scoped cache of
+        `discover_models()` results (`AIProviderModelCatalogStore`), typed
+        `Any` for the same import-boundary reason as `provider_config_store`.
+        When absent, `test_provider_connection` still returns a live
+        discovery result but has nowhere to persist it, and
+        `list_models_for_tenant` falls back to each provider's static
+        `supported_models` — the exact behavior this engine had before this
+        store existed, so omitting it (as most unit tests do) degrades
+        gracefully rather than failing.
         """
         super().__init__()
         self._provider_config_store = provider_config_store
         self._secret_getter = secret_getter
         self._secret_putter = secret_putter
+        self._model_catalog_store = model_catalog_store
         self._credential_resolver = (
             TenantCredentialResolver(provider_config_store, secret_getter)
             if provider_config_store is not None and secret_getter is not None
@@ -872,6 +885,25 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 security_classification="INTERNAL",
             )
             kernel.register_capability(
+                name="kortex.ai.conversation.list",
+                description=(
+                    "List the calling user's own conversations (Recent Conversations) — "
+                    "tenant- and user-scoped, never accepting a caller-supplied identity"
+                ),
+                provider=self.name,
+                handler=self.list_conversations,
+                requires_execution_context=True,
+                required_permissions=["ai:read"],
+                security_classification="INTERNAL",
+                # Explicit per F1 convention for newly authored capabilities
+                # (registry/engine.py's `_CAPABILITY_RISK_CLASSIFICATION` is a
+                # fallback reserved for pre-F1 entries, not for new ones): a
+                # pure read with no side effects, same shape as the sibling
+                # `kortex.ai.conversation.history.get`/`provider.config.list`.
+                is_read_only=True,
+                is_idempotent=True,
+            )
+            kernel.register_capability(
                 name="kortex.ai.provider.register",
                 description="Register an AI provider with the engine registry",
                 provider=self.name,
@@ -889,9 +921,14 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             )
             kernel.register_capability(
                 name="kortex.ai.model.list",
-                description="List models declared across all registered AI providers",
+                description=(
+                    "List models available to the calling tenant across all registered AI "
+                    "providers, preferring each provider's persisted discovered catalog over "
+                    "its static supported_models fallback"
+                ),
                 provider=self.name,
-                handler=self.list_models,
+                handler=self.list_models_for_tenant,
+                requires_execution_context=True,
                 required_permissions=["ai:read"],
                 security_classification="INTERNAL",
             )
@@ -1252,6 +1289,18 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != request.tenant_id:
                 request = request.model_copy(update={"tenant_id": principal_tenant_id})
+            # Phase C closeout security fix: `user_id` was never re-bound
+            # here, only `tenant_id` -- a caller-constructed `request.
+            # user_id` was persisted into conversation history verbatim
+            # (`AIMemoryManager.append_history`), which `kortex.ai.
+            # conversation.list` (Phase C, correctly scoped by the VERIFIED
+            # principal) then surfaces back to the impersonated user as
+            # their own conversation. Same class of gap `tenant_id`
+            # rebinding already closed for cross-tenant forgery; closing it
+            # identically for cross-user forgery.
+            principal_user_id = require_identifier(getattr(principal, "principal_id", None), "principal.principal_id")
+            if principal_user_id != request.user_id:
+                request = request.model_copy(update={"user_id": principal_user_id})
 
         async with self._throttler.acquire_generation_slot(request.tenant_id):
             # 1. Emit generation started event
@@ -1452,6 +1501,15 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
                 task = task.model_copy(update={"tenant_id": principal_tenant_id})
+            # Phase C closeout security fix: see the identical fix/comment
+            # in `generate_response` -- `task.user_id` must be re-bound the
+            # same way `task.tenant_id` already is, or a caller can have a
+            # conversation turn durably recorded under another real user's
+            # identity, later surfaced to that victim by `kortex.ai.
+            # conversation.list`.
+            principal_user_id = require_identifier(getattr(principal, "principal_id", None), "principal.principal_id")
+            if principal_user_id != task.user_id:
+                task = task.model_copy(update={"user_id": principal_user_id})
 
         async with self._throttler.acquire_agent_slot(task.tenant_id):
             try:
@@ -1504,6 +1562,11 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             principal_tenant_id = require_identifier(getattr(principal, "tenant_id", None), "principal.tenant_id")
             if principal_tenant_id != task.tenant_id:
                 task = task.model_copy(update={"tenant_id": principal_tenant_id})
+            # Phase C closeout security fix: see the identical fix/comment
+            # in `generate_response`/`orchestrate_agent`.
+            principal_user_id = require_identifier(getattr(principal, "principal_id", None), "principal.principal_id")
+            if principal_user_id != task.user_id:
+                task = task.model_copy(update={"user_id": principal_user_id})
 
         async with self._throttler.acquire_agent_slot(task.tenant_id):
             try:
@@ -1716,6 +1779,43 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
 
         return await self._memory_manager.get_turns(tenant_id, conversation_id, offset=offset)
 
+    async def list_conversations(self, execution_context: Any = None) -> list[ConversationSummary]:
+        """Capability handler for `kortex.ai.conversation.list` (Phase C —
+        durable "Recent Conversations").
+
+        Unlike `get_conversation_history` above (which predates this
+        capability and keeps its pre-existing signature/behavior
+        unchanged — it takes a caller-supplied `conversation_id` and
+        `tenant_id`, correcting only the tenant from a verified principal
+        when one is present), this capability takes **no identity
+        parameter at all**. Both `tenant_id` and `user_id` come exclusively
+        from the verified execution context, so there is no parameter a
+        caller could ever supply to list another tenant's or another
+        user's conversations.
+
+        This is also the actual security boundary for conversation
+        identifiers in this feature: a caller only ever learns a
+        conversation_id that belongs to it — either the one it generated
+        itself, or one this capability returns — and this capability never
+        returns another user's ids. `get_conversation_history`'s own
+        tenant-only scoping is therefore never reachable cross-user in
+        practice, because nothing hands a user a conversation_id it does
+        not already own.
+
+        Raises whatever `require_identifier` raises (via
+        `AIMemoryManager.list_conversations`) if no verified principal is
+        present — this capability has no fallback for an unauthenticated
+        or system caller, unlike the identity-optional handlers above.
+        """
+        principal = _principal_from(execution_context)
+        tenant_id = require_identifier(
+            getattr(principal, "tenant_id", None) if principal is not None else None, "principal.tenant_id"
+        )
+        user_id = require_identifier(
+            getattr(principal, "principal_id", None) if principal is not None else None, "principal.principal_id"
+        )
+        return await self._memory_manager.list_conversations(tenant_id, user_id)
+
     async def _record_agent_conversation_turn(
         self, task: AgentTask, result: AgentExecutionResult
     ) -> AgentExecutionResult:
@@ -1873,8 +1973,26 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         removed = await store.delete(tenant_id, provider_id)
         return {"provider_id": provider_id, "tenant_id": tenant_id, "removed": removed}
 
-    async def test_provider_connection(self, provider_id: str, execution_context: Any = None) -> dict[str, Any]:
+    async def test_provider_connection(
+        self, provider_id: str, api_key: str | None = None, execution_context: Any = None
+    ) -> dict[str, Any]:
         """Capability handler for `kortex.ai.provider.test` (Phase B / B2).
+
+        `api_key`, when supplied, is a candidate credential to test ad-hoc --
+        e.g. one just typed into the provider configuration dialog but not
+        yet saved (AI Studio functional stabilization: "Save Key" must be
+        gated on a real test of the exact key about to be saved, not saved
+        blind and tested afterward). It is used for this one provider round
+        trip only, is never written to `SecretStore` or any table, and is
+        unrelated to what `configure_provider` persists -- that remains a
+        separate, later, explicit call the frontend makes only after this
+        test reports `connected: true`. The parameter is named `api_key` for
+        the same audit-redaction reason `configure_provider`'s parameter is:
+        `core.idempotency.sanitize_for_persistence` redacts by this exact
+        key name.
+
+        When omitted, this resolves and tests the calling tenant's own
+        already-stored credential -- the original, unchanged behavior.
 
         Generic across every provider: resolves the registered provider and
         the calling tenant's own credential (never a caller-supplied one --
@@ -1907,6 +2025,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
         empty, and `detail` reports the discovery failure -- this is a
         successful connection with an incomplete discovery, not a failed
         connection.
+
+        Discovered-model persistence (`_model_catalog_store`) only happens
+        when testing the tenant's *stored* credential (`api_key is None`):
+        persisting a catalog against a not-yet-saved candidate key would
+        attribute that catalog to a provider configuration the tenant may
+        never actually save.
         """
         tenant_id = _authoritative_tenant_id(execution_context, "")
         require_identifier(tenant_id, "tenant_id")
@@ -1923,8 +2047,13 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                 "models": [],
             }
 
+        testing_stored_credential = api_key is None
         credential: str | None = None
-        if self._credential_resolver is not None:
+        if api_key is not None:
+            if not api_key.strip():
+                raise ValueError("api_key must not be empty or whitespace-only.")
+            credential = api_key
+        elif self._credential_resolver is not None:
             resolved = await self._credential_resolver.resolve(tenant_id, provider_id)
             credential = resolved.plaintext if resolved is not None else None
 
@@ -1945,6 +2074,21 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             try:
                 discovered = await provider.discover_models(credential)
                 models = [m.model_dump(mode="json") for m in discovered]
+                if testing_stored_credential and self._model_catalog_store is not None and discovered:
+                    # Persist only on a *successful* discovery. A failed one
+                    # falls to the except clause below and must never reach
+                    # here — the previously persisted catalog stays exactly
+                    # as it was (see AIProviderModelCatalogRow's docstring).
+                    try:
+                        await self._model_catalog_store.replace_catalog(tenant_id, provider_id, discovered)
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist discovered model catalog for tenant=%s provider=%s. "
+                            "The connection test itself still succeeded; the next successful test "
+                            "will retry persistence.",
+                            tenant_id,
+                            provider_id,
+                        )
             except (PermanentProviderError, TransientProviderError, AIProviderTimeoutError) as exc:
                 discovery_detail = str(exc)
 
@@ -2179,7 +2323,12 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
 
         A pure flatten of `list_providers()`'s own `supported_models` field
         (see `AIModelSummary`'s docstring) — zero routing/selection logic,
-        unlike `ModelRouter`, which this does not call or duplicate."""
+        unlike `ModelRouter`, which this does not call or duplicate.
+
+        Process-global and tenant-blind on purpose: this is the static
+        routing catalog every tenant shares. `list_models_for_tenant` is the
+        tenant-scoped, persisted-catalog-aware capability handler that
+        actually backs `kortex.ai.model.list`."""
         return [
             AIModelSummary(
                 model_id=model_id,
@@ -2189,6 +2338,49 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
             for provider in self._provider_registry.list_providers()
             for model_id in provider.supported_models
         ]
+
+    async def list_models_for_tenant(self, execution_context: Any = None) -> list[AIModelSummary]:
+        """Capability handler for `kortex.ai.model.list` (model-catalog persistence fix).
+
+        Per provider, prefers the calling tenant's persisted discovered
+        catalog (`AIProviderModelCatalogStore`, written by
+        `test_provider_connection` on a successful discovery) over the
+        static `supported_models` allow-list -- and falls back to the
+        static list only when that tenant has never successfully discovered
+        models for that provider, matching the product requirement "do not
+        fall back to the small static list unless the provider has never
+        been discovered/configured."
+
+        Without a verified tenant (no execution context — in-process/system
+        callers and existing unit tests) or without a configured
+        `model_catalog_store`, this degrades to exactly `list_models()`'s
+        static flatten, so every caller that predates the catalog store
+        keeps working unchanged.
+        """
+        tenant_id = _authoritative_tenant_id(execution_context, "")
+        static_models = self.list_models()
+
+        if not tenant_id or self._model_catalog_store is None:
+            return static_models
+
+        static_by_provider: dict[str, list[AIModelSummary]] = {}
+        for model in static_models:
+            static_by_provider.setdefault(model.provider_id, []).append(model)
+
+        result: list[AIModelSummary] = []
+        for provider_id, fallback in static_by_provider.items():
+            try:
+                persisted = await self._model_catalog_store.list_for_provider(tenant_id, provider_id)
+            except Exception:
+                logger.exception(
+                    "Failed to read persisted model catalog for tenant=%s provider=%s; "
+                    "falling back to the static supported_models list for this provider.",
+                    tenant_id,
+                    provider_id,
+                )
+                persisted = []
+            result.extend(persisted if persisted else fallback)
+        return result
 
     # -- Durable Approval Decision Resume (M6.2-4) ---------------------------
 

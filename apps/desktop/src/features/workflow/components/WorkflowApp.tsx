@@ -1,6 +1,17 @@
 /**
  * Workflow workspace shell (M5.6) — tabbed navigation across:
  *  - Definitions: read-only workflow definition catalog (existing, preserved)
+ *  - Manual Automation: the existing visual/manual workflow builder (was
+ *    labeled "Builder" — AI Studio functional stabilization Phase E renamed
+ *    the visible label only; the tab id and underlying `WorkflowBuilderTab`
+ *    behavior are unchanged)
+ *  - AI Automation: the natural-language AI Workflow Builder, moved here
+ *    from AI Studio (Phase E) — `ai-automation/components/WorkflowBuilderPanel`,
+ *    relocated wholesale, not rewritten
+ *  - Python Automation: a new, minimal surface over the already-existing,
+ *    already-governed `kortex.python.execute`/`kortex.python.action.list`
+ *    capabilities (Phase E) — no new backend capability, no second Python
+ *    execution path
  *  - Instances: execution timeline with step detail
  *  - Approvals: human governance decision queue
  *  - Schedules: durable cron schedule manager
@@ -27,8 +38,10 @@ import {
 import { WorkflowAccessDeniedError } from "../api";
 import { useWorkflows } from "../hooks/useWorkflows";
 import type { WorkflowDefinition } from "../types";
+import { WorkflowBuilderPanel } from "../ai-automation/components/WorkflowBuilderPanel";
 import { InstanceTimeline } from "./InstanceTimeline";
 import { ApprovalQueue } from "./ApprovalQueue";
+import { PythonAutomationTab } from "./PythonAutomationTab";
 import { ScheduleManager } from "./ScheduleManager";
 import { ExternalExecutionInspector } from "./ExternalExecutionInspector";
 import { WorkflowBuilderTab } from "./builder/WorkflowBuilderTab";
@@ -37,11 +50,21 @@ import { WorkflowBuilderTab } from "./builder/WorkflowBuilderTab";
 // Tab definition
 // ---------------------------------------------------------------------------
 
-type TabId = "definitions" | "builder" | "instances" | "approvals" | "schedules" | "executions";
+type TabId =
+  | "definitions"
+  | "builder"
+  | "aiAutomation"
+  | "pythonAutomation"
+  | "instances"
+  | "approvals"
+  | "schedules"
+  | "executions";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "definitions", label: "Definitions" },
-  { id: "builder", label: "Builder" },
+  { id: "builder", label: "Manual Automation" },
+  { id: "aiAutomation", label: "AI Automation" },
+  { id: "pythonAutomation", label: "Python Automation" },
   { id: "instances", label: "Instances" },
   { id: "approvals", label: "Approvals" },
   { id: "schedules", label: "Schedules" },
@@ -52,7 +75,16 @@ const TABS: { id: TabId; label: string }[] = [
 // Main shell
 // ---------------------------------------------------------------------------
 
-const TAB_IDS: readonly TabId[] = ["definitions", "builder", "instances", "approvals", "schedules", "executions"];
+const TAB_IDS: readonly TabId[] = [
+  "definitions",
+  "builder",
+  "aiAutomation",
+  "pythonAutomation",
+  "instances",
+  "approvals",
+  "schedules",
+  "executions",
+];
 
 function isTabId(value: string | null): value is TabId {
   return TAB_IDS.includes(value as TabId);
@@ -99,6 +131,8 @@ export function WorkflowApp() {
       >
         {activeTab === "definitions" && <DefinitionsTab onOpenBuilder={() => setActiveTab("builder")} />}
         {activeTab === "builder" && <WorkflowBuilderTab />}
+        {activeTab === "aiAutomation" && <WorkflowBuilderPanel />}
+        {activeTab === "pythonAutomation" && <PythonAutomationTab />}
         {activeTab === "instances" && <InstanceTimeline />}
         {activeTab === "approvals" && <ApprovalQueue />}
         {activeTab === "schedules" && <ScheduleManager />}

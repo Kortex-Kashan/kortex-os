@@ -3,9 +3,10 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listWorkflowDefinitionsMock, listPendingApprovalsMock } = vi.hoisted(() => ({
+const { listWorkflowDefinitionsMock, listPendingApprovalsMock, listPythonActionsMock } = vi.hoisted(() => ({
   listWorkflowDefinitionsMock: vi.fn(),
   listPendingApprovalsMock: vi.fn(),
+  listPythonActionsMock: vi.fn(),
 }));
 
 vi.mock("../api", async () => {
@@ -15,6 +16,11 @@ vi.mock("../api", async () => {
     listWorkflowDefinitions: listWorkflowDefinitionsMock,
     listPendingApprovals: listPendingApprovalsMock,
   };
+});
+
+vi.mock("../python-automation/api", async () => {
+  const actual = await vi.importActual<typeof import("../python-automation/api")>("../python-automation/api");
+  return { ...actual, listPythonActions: listPythonActionsMock };
 });
 
 vi.mock("@/auth/AuthProvider", () => ({
@@ -36,6 +42,8 @@ beforeEach(() => {
   listWorkflowDefinitionsMock.mockReset();
   listPendingApprovalsMock.mockReset();
   listPendingApprovalsMock.mockResolvedValue([]);
+  listPythonActionsMock.mockReset();
+  listPythonActionsMock.mockResolvedValue([]);
 });
 
 function renderWorkflowApp(initialEntries: string[] = ["/workflows"]) {
@@ -193,5 +201,80 @@ describe("WorkflowApp", () => {
     renderWorkflowApp(["/workflows?tab=not-a-real-tab"]);
 
     expect(screen.getByRole("tab", { name: "Definitions" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase E: Workflow Engine IA -- Manual/AI/Python Automation
+  // ---------------------------------------------------------------------------
+
+  it("exposes the intended automation tabs: Manual, AI, and Python Automation, alongside the existing ones", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp();
+
+    expect(screen.getByRole("tab", { name: "Definitions" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Manual Automation" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "AI Automation" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Python Automation" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Instances" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Approvals" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Schedules" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Governed Executions" })).toBeInTheDocument();
+    // The old bare "Builder" label is gone -- renamed, not duplicated.
+    expect(screen.queryByRole("tab", { name: "Builder" })).not.toBeInTheDocument();
+  });
+
+  it("Manual Automation still renders the existing visual workflow builder, unchanged behavior under a new label", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp();
+    fireEvent.click(screen.getByRole("tab", { name: "Manual Automation" }));
+
+    expect(await screen.findByTestId("workflow-builder-tab")).toBeInTheDocument();
+  });
+
+  it("AI Automation renders the existing (relocated) AI Workflow Builder, reaching its real functionality", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp();
+    fireEvent.click(screen.getByRole("tab", { name: "AI Automation" }));
+
+    expect(await screen.findByTestId("ai-workflow-builder-panel")).toBeInTheDocument();
+    // The real intent-input/Generate flow is present, not a placeholder.
+    expect(screen.getByTestId("builder-intent-input")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-generate-button")).toBeInTheDocument();
+  });
+
+  it("Python Automation lists already-published Python Actions and can trigger one through the governed execution path", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+    listPythonActionsMock.mockResolvedValueOnce([
+      { actionId: "act-1", name: "Sync Inventory", description: "Syncs inventory levels.", latestVersion: 3, isActive: true },
+    ]);
+
+    renderWorkflowApp();
+    fireEvent.click(screen.getByRole("tab", { name: "Python Automation" }));
+
+    expect(await screen.findByText("Sync Inventory")).toBeInTheDocument();
+    expect(screen.getByText("act-1 · v3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+  });
+
+  it("Python Automation shows an explicit empty state when no actions are published", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+    listPythonActionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp();
+    fireEvent.click(screen.getByRole("tab", { name: "Python Automation" }));
+
+    expect(await screen.findByText("No Python Actions have been published yet.")).toBeInTheDocument();
+  });
+
+  it("deep-links straight to the AI Automation tab via a ?tab= query param (Mini Chat's entry point)", async () => {
+    listWorkflowDefinitionsMock.mockResolvedValueOnce([]);
+
+    renderWorkflowApp(["/workflows?tab=aiAutomation"]);
+
+    expect(screen.getByRole("tab", { name: "AI Automation" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByTestId("ai-workflow-builder-panel")).toBeInTheDocument();
   });
 });

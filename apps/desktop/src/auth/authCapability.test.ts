@@ -2,12 +2,26 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { IpcResultEnvelope } from "@/ipc/client";
 
-import { checkStoredSession, classifyIpcFailure, login, requestPasswordReset, resetPassword } from "./authCapability";
+import {
+  checkStoredSession,
+  classifyIpcFailure,
+  login,
+  renewSession,
+  requestPasswordReset,
+  resetPassword,
+} from "./authCapability";
 
-const { invokeCapabilityMock } = vi.hoisted(() => ({ invokeCapabilityMock: vi.fn() }));
+const { invokeCapabilityMock, renewStoredSessionMock } = vi.hoisted(() => ({
+  invokeCapabilityMock: vi.fn(),
+  renewStoredSessionMock: vi.fn(),
+}));
 
 vi.mock("@/ipc/client", () => ({
   invokeCapability: invokeCapabilityMock,
+}));
+
+vi.mock("@/ipc/session", () => ({
+  renewStoredSession: renewStoredSessionMock,
 }));
 
 function envelope(overrides: Partial<IpcResultEnvelope> = {}): IpcResultEnvelope {
@@ -167,6 +181,51 @@ describe("checkStoredSession", () => {
   it("returns BACKEND_UNAVAILABLE when invokeCapability rejects outright", async () => {
     invokeCapabilityMock.mockRejectedValueOnce(new Error("tauri ipc failure"));
     expect(await checkStoredSession()).toBe("BACKEND_UNAVAILABLE");
+  });
+});
+
+describe("renewSession", () => {
+  it("returns VALID on a SUCCESS envelope (the refresh minted a fresh access token)", async () => {
+    renewStoredSessionMock.mockResolvedValueOnce(envelope({ status: "SUCCESS", payload: { result: { principalId: "alice" } } }));
+    expect(await renewSession()).toBe("VALID");
+  });
+
+  it("returns INVALID when the refresh token is invalid, expired, past its absolute ceiling, or missing", async () => {
+    renewStoredSessionMock.mockResolvedValueOnce(
+      envelope({
+        status: "FAILURE",
+        httpStatus: 401,
+        errors: [{ category: "PERMISSION_DENIED", message: "invalid refresh token", correlationId: "c" }],
+      }),
+    );
+    expect(await renewSession()).toBe("INVALID");
+  });
+
+  it("returns INVALID for the synthetic no-refresh-token-held response (no real httpStatus at all)", async () => {
+    renewStoredSessionMock.mockResolvedValueOnce(
+      envelope({
+        status: "FAILURE",
+        httpStatus: undefined,
+        errors: [{ category: "PERMISSION_DENIED", message: "No refresh token is held.", correlationId: "c" }],
+      }),
+    );
+    expect(await renewSession()).toBe("INVALID");
+  });
+
+  it("returns BACKEND_UNAVAILABLE when the backend is unreachable", async () => {
+    renewStoredSessionMock.mockResolvedValueOnce(
+      envelope({
+        status: "FAILURE",
+        httpStatus: undefined,
+        errors: [{ category: "SERVICE_UNAVAILABLE", message: "unreachable", correlationId: "c" }],
+      }),
+    );
+    expect(await renewSession()).toBe("BACKEND_UNAVAILABLE");
+  });
+
+  it("returns BACKEND_UNAVAILABLE when renewStoredSession rejects outright", async () => {
+    renewStoredSessionMock.mockRejectedValueOnce(new Error("tauri ipc failure"));
+    expect(await renewSession()).toBe("BACKEND_UNAVAILABLE");
   });
 });
 

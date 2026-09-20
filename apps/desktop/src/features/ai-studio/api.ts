@@ -286,15 +286,26 @@ export async function configureAiProvider(input: AiProviderConfigureInput): Prom
 }
 
 /**
- * Test one provider's stored credential and discover its live models
- * (`ai:manage`).
+ * Test a provider's credential and discover its live models (`ai:manage`).
  *
- * No credential is sent: the backend resolves the calling tenant's own
- * stored key through `TenantCredentialResolver`. The vendor API is called
- * by the backend provider adapter — never by this workspace.
+ * When `apiKey` is omitted, the backend resolves and tests the calling
+ * tenant's own already-stored key through `TenantCredentialResolver` — the
+ * original behavior, used by the card's standalone "Test connection"
+ * button. When `apiKey` is supplied, the backend tests that exact candidate
+ * key ad-hoc instead — never persisting it — which is what lets the
+ * configuration dialog gate "Save Key" on a real test of the key about to
+ * be saved. Either way, the vendor API is called by the backend provider
+ * adapter, never by this workspace.
  */
-export async function testAiProviderConnection(providerId: string): Promise<AiConnectionTestResult> {
-  const raw = await invokeWithParameters(PROVIDER_TEST_CAPABILITY, { provider_id: providerId });
+export async function testAiProviderConnection(
+  providerId: string,
+  apiKey?: string,
+): Promise<AiConnectionTestResult> {
+  const parameters: Record<string, unknown> = { provider_id: providerId };
+  if (apiKey !== undefined) {
+    parameters.api_key = apiKey;
+  }
+  const raw = await invokeWithParameters(PROVIDER_TEST_CAPABILITY, parameters);
   return toConnectionTestResult(raw as RawConnectionTestResult);
 }
 

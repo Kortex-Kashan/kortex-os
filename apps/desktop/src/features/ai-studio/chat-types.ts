@@ -69,6 +69,18 @@ export interface ConversationTurnDto {
   createdAt: string;
 }
 
+/** Mirrors `kortex.engines.ai.memory.ConversationSummary` — the shape
+ * `kortex.ai.conversation.list` returns (AI Studio functional
+ * stabilization, Phase C — durable "Recent Conversations"). Tenant- and
+ * user-scoped entirely server-side; this workspace never supplies either
+ * identifier when calling it. */
+export interface ConversationSummaryDto {
+  conversationId: string;
+  title: string;
+  firstActivityAt: string;
+  lastActivityAt: string;
+}
+
 export type ChatMessageRole = "user" | "assistant" | "system";
 
 /** One entry in the chat transcript `useConversation` renders. A message

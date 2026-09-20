@@ -136,4 +136,95 @@ describe("devBrowserBridge security and isolation", () => {
 
     vi.unstubAllGlobals();
   });
+
+  // Phase F security correction: dev-mode parity for the refresh token.
+  describe("Phase F refresh token handling", () => {
+    it("captures refreshToken into its own storage slot, separate from sessionToken, and strips it from the envelope", async () => {
+      (import.meta.env as Record<string, unknown>).DEV = true;
+      initDevBrowserBridge();
+      const handler = mockIpcFn.mock.calls[0][0] as (cmd: string, args: unknown) => Promise<unknown>;
+
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "SUCCESS",
+          payload: { result: { principal_id: "alice" } },
+          sessionToken: "access-123",
+          refreshToken: "refresh-456",
+        }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const loginEnvelope = (await handler("invoke_capability", {
+        request: { requestId: "r1", capabilityName: "kortex.security.auth.authenticate" },
+      })) as Record<string, unknown>;
+
+      expect(sessionStorage.getItem("kortex_desktop_dev_session_token")).toBe("access-123");
+      expect(sessionStorage.getItem("kortex_desktop_dev_refresh_token")).toBe("refresh-456");
+      expect(loginEnvelope.sessionToken).toBeUndefined();
+      expect(loginEnvelope.refreshToken).toBeUndefined();
+
+      vi.unstubAllGlobals();
+    });
+
+    it("refresh_session returns a FAILURE envelope with no network call when no refresh token is held", async () => {
+      (import.meta.env as Record<string, unknown>).DEV = true;
+      initDevBrowserBridge();
+      const handler = mockIpcFn.mock.calls[0][0] as (cmd: string, args: unknown) => Promise<unknown>;
+      const mockFetch = vi.fn();
+      vi.stubGlobal("fetch", mockFetch);
+
+      const envelope = (await handler("refresh_session", undefined)) as Record<string, unknown>;
+
+      expect(envelope.status).toBe("FAILURE");
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      vi.unstubAllGlobals();
+    });
+
+    it("refresh_session sends the stored refresh token as a body parameter and stores the fresh access token", async () => {
+      (import.meta.env as Record<string, unknown>).DEV = true;
+      sessionStorage.setItem("kortex_desktop_dev_refresh_token", "refresh-456");
+
+      initDevBrowserBridge();
+      const handler = mockIpcFn.mock.calls[0][0] as (cmd: string, args: unknown) => Promise<unknown>;
+
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "SUCCESS",
+          payload: { result: { principal_id: "alice" } },
+          sessionToken: "fresh-access-789",
+        }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const envelope = (await handler("refresh_session", undefined)) as Record<string, unknown>;
+
+      expect(envelope.status).toBe("SUCCESS");
+      expect(envelope.sessionToken).toBeUndefined();
+      expect(sessionStorage.getItem("kortex_desktop_dev_session_token")).toBe("fresh-access-789");
+      const [, options] = mockFetch.mock.calls[0];
+      const sentBody = JSON.parse((options as { body: string }).body);
+      expect(sentBody.capabilityName).toBe("kortex.security.auth.refresh");
+      expect(sentBody.parameters).toEqual({ refresh_token: "refresh-456" });
+
+      vi.unstubAllGlobals();
+    });
+
+    it("logout clears both the access token and the refresh token", async () => {
+      (import.meta.env as Record<string, unknown>).DEV = true;
+      sessionStorage.setItem("kortex_desktop_dev_session_token", "access-123");
+      sessionStorage.setItem("kortex_desktop_dev_refresh_token", "refresh-456");
+      initDevBrowserBridge();
+      const handler = mockIpcFn.mock.calls[0][0] as (cmd: string, args: unknown) => Promise<unknown>;
+
+      await handler("logout", undefined);
+
+      expect(sessionStorage.getItem("kortex_desktop_dev_session_token")).toBeNull();
+      expect(sessionStorage.getItem("kortex_desktop_dev_refresh_token")).toBeNull();
+    });
+  });
 });

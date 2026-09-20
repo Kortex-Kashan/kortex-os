@@ -33,6 +33,16 @@ const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:8000";
 const BACKEND_URL_ENV: &str = "KORTEX_BACKEND_URL";
 const KEYRING_SERVICE: &str = "kortex-desktop";
 const KEYRING_USER: &str = "session-token";
+/// Phase F security correction: the refresh token is a distinct credential
+/// from the access token above, stored under its own keychain entry so it
+/// is never accidentally conflated with (or attached to ordinary calls
+/// like) the access token. See `TokenStore`'s refresh-* methods.
+const KEYRING_USER_REFRESH: &str = "refresh-token";
+/// The one capability allowed to consume a refresh token (`refresh_session`
+/// below) — never attached as a `Bearer` credential, always sent as an
+/// explicit body parameter, matching the backend's own contract for
+/// `kortex.security.auth.refresh`.
+const REFRESH_CAPABILITY_NAME: &str = "kortex.security.auth.refresh";
 
 /// Exact mirror of the frontend's `IpcCapabilityRequest`
 /// (`apps/desktop/src/ipc/client.ts`) and the backend's `IpcCapabilityRequest`
@@ -95,10 +105,12 @@ pub struct IpcResultEnvelope {
     pub http_status: Option<u16>,
 }
 
-/// The raw HTTP response body carries one extra field beyond
-/// `IpcResultEnvelope`: `sessionToken`, present only immediately after a
-/// successful login (see `backend/src/kortex/api/main.py::_invoke`). This
-/// type exists so that field is captured and stripped *here*, never
+/// The raw HTTP response body carries up to two extra fields beyond
+/// `IpcResultEnvelope`: `sessionToken` (present only immediately after a
+/// successful login/refresh — see `backend/src/kortex/api/main.py::_invoke`)
+/// and `refreshToken` (Phase F security correction; present only
+/// immediately after a successful login, never after a plain refresh).
+/// This type exists so both fields are captured and stripped *here*, never
 /// forwarded to the frontend as part of `IpcResultEnvelope`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +119,8 @@ struct RawBackendResponse {
     envelope: IpcResultEnvelope,
     #[serde(default)]
     session_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
 }
 
 /// Session-token custody, abstracted behind a trait so production code
@@ -114,12 +128,24 @@ struct RawBackendResponse {
 /// (an in-memory double) share the exact same `invoke_capability` logic.
 /// The webview never has access to either implementation — only Rust
 /// commands hold a `TokenStore`.
+///
+/// Phase F security correction: the `*_refresh` methods custody a SECOND,
+/// distinct credential under its own storage slot — never returned by
+/// `load()`/attached by `forward_capability_request`'s `Bearer` header,
+/// and never overwritten by an ordinary call's (nonexistent, post-Phase-F)
+/// `sessionToken`. Only `refresh_session` below ever reads it, and only
+/// `logout` and a successful login ever write it.
 pub trait TokenStore: Send + Sync {
     fn load(&self) -> Option<String>;
     fn store(&self, token: &str);
     /// Discards the held session token (logout). A store with nothing held
     /// is a no-op, never an error.
     fn clear(&self);
+    fn load_refresh(&self) -> Option<String>;
+    fn store_refresh(&self, token: &str);
+    /// Discards the held refresh token (logout). A store with nothing held
+    /// is a no-op, never an error.
+    fn clear_refresh(&self);
 }
 
 /// Production implementation: the OS-native credential store (Windows
@@ -151,6 +177,25 @@ impl TokenStore for KeyringTokenStore {
             // "Nothing was ever stored" and "the OS keychain entry is
             // already gone" are both acceptable logout outcomes, never a
             // reason to fail the logout the caller is already committed to.
+            let _ = entry.delete_credential();
+        }
+    }
+
+    fn load_refresh(&self) -> Option<String> {
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER_REFRESH)
+            .ok()?
+            .get_password()
+            .ok()
+    }
+
+    fn store_refresh(&self, token: &str) {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER_REFRESH) {
+            let _ = entry.set_password(token);
+        }
+    }
+
+    fn clear_refresh(&self) {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER_REFRESH) {
             let _ = entry.delete_credential();
         }
     }
@@ -273,6 +318,9 @@ pub async fn forward_capability_request(
     if let Some(token) = &raw.session_token {
         state.token_store.store(token);
     }
+    if let Some(refresh_token) = &raw.refresh_token {
+        state.token_store.store_refresh(refresh_token);
+    }
 
     let mut envelope = raw.envelope;
     envelope.http_status = Some(http_status);
@@ -294,6 +342,78 @@ pub async fn invoke_capability(
     Ok(forward_capability_request(&state, request).await)
 }
 
+/// Phase F security correction: exchanges the held refresh token for a
+/// fresh access token via `kortex.security.auth.refresh`, reusing
+/// `forward_capability_request` exactly like any other capability call —
+/// the refresh token travels as an explicit body parameter, never as the
+/// `Bearer` credential (that header still carries whatever access token is
+/// currently held, which `auth.refresh` ignores since it is registered
+/// `requires_authentication=False`). A successful response's `sessionToken`
+/// is captured and stored by the same generic path every other call
+/// already uses; the webview only ever sees whether the call succeeded.
+///
+/// If no refresh token is held at all (never logged in this way, or
+/// already logged out), returns a synthetic FAILURE envelope without ever
+/// making a network call — there is nothing to exchange. Implemented as a
+/// plain function over `&IpcClientState` (mirroring `forward_capability_
+/// request`'s own split from `invoke_capability`) so it is directly
+/// testable without a full Tauri harness.
+async fn refresh_session_impl(state: &IpcClientState) -> IpcResultEnvelope {
+    let Some(refresh_token) = state.token_store.load_refresh() else {
+        let request_id = uuid_like_id();
+        return IpcResultEnvelope {
+            request_id: request_id.clone(),
+            correlation_id: request_id,
+            status: "FAILURE".to_string(),
+            payload: None,
+            errors: vec![IpcError {
+                category: "PERMISSION_DENIED".to_string(),
+                message: "No refresh token is held.".to_string(),
+                details: None,
+                correlation_id: "no-refresh-token".to_string(),
+            }],
+            warnings: vec![],
+            execution_duration_ms: 0.0,
+            http_status: None,
+        };
+    };
+
+    let request_id = uuid_like_id();
+    let request = IpcCapabilityRequest {
+        request_id: request_id.clone(),
+        capability_name: REFRESH_CAPABILITY_NAME.to_string(),
+        parameters: serde_json::json!({ "refresh_token": refresh_token }),
+        correlation_id: Some(request_id),
+        idempotency_key: None,
+        timeout_ms: None,
+    };
+    forward_capability_request(state, request).await
+}
+
+#[tauri::command]
+pub async fn refresh_session(
+    state: tauri::State<'_, Arc<IpcClientState>>,
+) -> Result<IpcResultEnvelope, ()> {
+    // Same unreachable-`Err` note as `invoke_capability` above.
+    Ok(refresh_session_impl(&state).await)
+}
+
+/// Minimal, dependency-free unique-enough request id for the one command
+/// (`refresh_session`) that must construct its own `IpcCapabilityRequest`
+/// rather than receive one from the webview — every other command's
+/// request id already comes from the frontend's own `crypto.randomUUID()`.
+/// Not a real UUID (no external crate pulled in for one call site); only
+/// needs to be unique enough for correlation/log-reading, never parsed as
+/// a UUID by anything.
+fn uuid_like_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("refresh-session-{nanos:x}")
+}
+
 /// M4.1: reports only whether a session token is currently held — never
 /// the token's value. Lets the frontend decide, on startup, whether a
 /// backend validation round trip is worth attempting at all (no stored
@@ -307,9 +427,16 @@ pub fn has_session(state: tauri::State<'_, Arc<IpcClientState>>) -> bool {
 /// M4.1: discards the held session token (logout). Rust remains the sole
 /// custodian of the token for its entire lifecycle, including its end —
 /// the webview asks for logout, it never handles the token itself.
+///
+/// Phase F security correction: also discards the held refresh token —
+/// without this, a logged-out session's refresh token would remain in the
+/// OS keychain, still capable of minting a fresh access token via
+/// `refresh_session` for the remainder of its own absolute ceiling. Logout
+/// must end BOTH credentials' usefulness, not just the access token's.
 #[tauri::command]
 pub fn logout(state: tauri::State<'_, Arc<IpcClientState>>) {
     state.clear_token();
+    state.token_store.clear_refresh();
 }
 
 /// Outcome of a `GET {base_url}/health` call, returned verbatim to the
@@ -419,6 +546,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryTokenStore {
         token: Mutex<Option<String>>,
+        refresh_token: Mutex<Option<String>>,
     }
 
     impl TokenStore for MemoryTokenStore {
@@ -432,6 +560,18 @@ mod tests {
 
         fn clear(&self) {
             *self.token.lock().unwrap() = None;
+        }
+
+        fn load_refresh(&self) -> Option<String> {
+            self.refresh_token.lock().unwrap().clone()
+        }
+
+        fn store_refresh(&self, token: &str) {
+            *self.refresh_token.lock().unwrap() = Some(token.to_string());
+        }
+
+        fn clear_refresh(&self) {
+            *self.refresh_token.lock().unwrap() = None;
         }
     }
 
@@ -757,5 +897,131 @@ mod tests {
         assert_eq!(outcome.status_code, Some(200));
         assert!(outcome.body.is_none());
         assert!(outcome.error.is_some());
+    }
+
+    // -- Phase F security correction: refresh-token custody --------------
+
+    #[test]
+    fn memory_token_store_refresh_round_trips_independently_of_the_access_token() {
+        let store = MemoryTokenStore::default();
+        assert_eq!(store.load_refresh(), None);
+        store.store("access-token");
+        store.store_refresh("refresh-token");
+        assert_eq!(store.load(), Some("access-token".to_string()));
+        assert_eq!(store.load_refresh(), Some("refresh-token".to_string()));
+
+        store.clear_refresh();
+        assert_eq!(store.load_refresh(), None);
+        // Clearing the refresh token must never touch the access token.
+        assert_eq!(store.load(), Some("access-token".to_string()));
+        // Clearing an already-empty refresh slot is a no-op, never a panic.
+        store.clear_refresh();
+        assert_eq!(store.load_refresh(), None);
+    }
+
+    #[tokio::test]
+    async fn a_login_response_with_a_refresh_token_stores_it_separately_from_the_access_token() {
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"principalId":"alice"},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"access-blob","refreshToken":"refresh-blob"}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store.clone());
+
+        let envelope = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(envelope.status, "SUCCESS");
+        // Neither token may ever appear on the envelope returned to the
+        // caller (webview) — same guarantee `sessionToken` already has,
+        // now proven for `refreshToken` too.
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(!serialized.contains("access-blob"));
+        assert!(!serialized.contains("refresh-blob"));
+        assert_eq!(store.load(), Some("access-blob".to_string()));
+        assert_eq!(store.load_refresh(), Some("refresh-blob".to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_call_response_with_no_refresh_token_field_leaves_any_stored_refresh_token_untouched() {
+        // Mirrors the backend's own Phase F contract: an ordinary
+        // capability response never carries `refreshToken` at all. This
+        // proves the Rust side does not, say, clear the refresh slot just
+        // because the field was absent from a given response.
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":null,"errors":[],"warnings":[],"executionDurationMs":1.0}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        store.store_refresh("still-here");
+        let state = state_with(server.base_url, store.clone());
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(store.load_refresh(), Some("still-here".to_string()));
+    }
+
+    #[tokio::test]
+    async fn refresh_session_with_no_stored_refresh_token_makes_no_network_call() {
+        // Points at a closed port: if `refresh_session_impl` tried to make
+        // a real request here, it would fail with SERVICE_UNAVAILABLE, not
+        // the PERMISSION_DENIED this test asserts -- so a SERVICE_UNAVAILABLE
+        // result would indicate the "no network call" contract was broken.
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with("http://127.0.0.1:1".to_string(), store);
+
+        let envelope = refresh_session_impl(&state).await;
+
+        assert_eq!(envelope.status, "FAILURE");
+        assert_eq!(envelope.errors[0].category, "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn refresh_session_sends_the_refresh_token_as_a_body_parameter_never_as_the_bearer_header() {
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"principalId":"alice"},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"fresh-access-blob"}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        store.store("stale-access-token");
+        store.store_refresh("the-refresh-token");
+        let state = state_with(server.base_url, store.clone());
+
+        let envelope = refresh_session_impl(&state).await;
+
+        assert_eq!(envelope.status, "SUCCESS");
+        let (headers, body) = server.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(body["capabilityName"], "kortex.security.auth.refresh");
+        assert_eq!(body["parameters"]["refresh_token"], "the-refresh-token");
+        // The stale access token is still whatever `forward_capability_
+        // request` always attaches (harmless: `auth.refresh` ignores it) --
+        // the refresh token itself must never appear in that header.
+        let auth = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(auth, Some("Bearer stale-access-token".to_string()));
+        assert!(!auth.unwrap().contains("the-refresh-token"));
+        // A successful refresh mints a new access token via the same
+        // generic capture path -- and must never mint a new refresh token.
+        assert_eq!(store.load(), Some("fresh-access-blob".to_string()));
+        assert_eq!(store.load_refresh(), Some("the-refresh-token".to_string()));
+    }
+
+    #[test]
+    fn logout_clears_both_the_access_token_and_the_refresh_token() {
+        // `logout` itself takes a `tauri::State`, which requires a running
+        // Tauri app to construct -- exercised at the `TokenStore` level
+        // instead, which is exactly what `logout`'s own body delegates to
+        // (`state.clear_token()` + `state.token_store.clear_refresh()`).
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with("http://127.0.0.1:1".to_string(), store);
+        state.token_store.store("access-token");
+        state.token_store.store_refresh("refresh-token");
+
+        state.clear_token();
+        state.token_store.clear_refresh();
+
+        assert_eq!(state.current_token(), None);
+        assert_eq!(state.token_store.load_refresh(), None);
     }
 }

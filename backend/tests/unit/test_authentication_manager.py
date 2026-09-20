@@ -42,7 +42,13 @@ from kortex.engines.security.exceptions import (
     SigningKeyError,
     TokenExpiredError,
 )
-from kortex.engines.security.models import PrincipalRecord, PrincipalType, SecurityPrincipal, TokenPayload
+from kortex.engines.security.models import (
+    PrincipalRecord,
+    PrincipalType,
+    RefreshTokenPayload,
+    SecurityPrincipal,
+    TokenPayload,
+)
 from kortex.engines.security.providers.local_crypto import LocalCrypto
 from kortex.engines.storage.engine import StorageEngine
 
@@ -134,6 +140,38 @@ def _sign_custom_token(
         payload_bytes, manager._signing_private_key, manager._signing_public_key
     )
     return TokenPayload(
+        token_id=token_id,
+        principal_id=principal.principal_id,
+        principal_type=principal.principal_type,
+        tenant_id=principal.tenant_id,
+        issued_at_utc=issued_at_utc,
+        expires_at_utc=expires_at_utc,
+        signature=signature.signature,
+    )
+
+
+def _sign_custom_refresh_token(
+    manager: AuthenticationManager,
+    principal: SecurityPrincipal,
+    issued_at_utc: datetime,
+    expires_at_utc: datetime,
+    token_id: str = "custom-refresh-token-id",
+) -> RefreshTokenPayload:
+    """Same technique as `_sign_custom_token`, under the refresh-token
+    domain prefix — lets tests construct a refresh token past its absolute
+    ceiling without waiting on a real clock."""
+    payload_bytes = manager._build_refresh_signing_payload(
+        token_id,
+        principal.principal_id,
+        principal.principal_type.value,
+        principal.tenant_id,
+        issued_at_utc,
+        expires_at_utc,
+    )
+    signature = manager._verification_service.sign(
+        payload_bytes, manager._signing_private_key, manager._signing_public_key
+    )
+    return RefreshTokenPayload(
         token_id=token_id,
         principal_id=principal.principal_id,
         principal_type=principal.principal_type,
@@ -901,3 +939,196 @@ async def test_provision_principal_is_tenant_scoped(tmp_path: Path) -> None:
         }
     )
     assert principal_b.tenant_id == tenant_b
+
+
+# ---------------------------------------------------------------------------
+# Phase F (AI Studio functional stabilization) — session-refresh token
+# security properties. Which capability is allowed to trigger renewal, and
+# the login-vs-refresh distinction, live in `kortex.api.main._invoke` and
+# `SecurityEngine` (transport/capability concerns, not this module), and are
+# exercised end-to-end in `tests/e2e/test_ipc_bridge.py`
+# (`TestPhaseFTokenLifecycle`). What belongs here is what this module owns
+# directly: the underlying access-token TTL stays genuinely short, the two
+# unrelated TTLs (password reset, OAuth state) were not touched, and the new
+# refresh-token primitives (`issue_refresh_token`/`verify_refresh_token`)
+# have the exact security properties a session-refresh credential must
+# have — an absolute, activity-independent ceiling, and domain separation
+# strict enough that a real, validly-signed access token can never be
+# substituted for a refresh token.
+# ---------------------------------------------------------------------------
+
+
+def test_phase_f_did_not_widen_the_underlying_token_ttl() -> None:
+    """The approved Phase F architecture is a SHORT-LIVED, SLIDING token —
+    never a flat 60-minute token. `_TOKEN_TTL` must remain exactly the
+    pre-Phase-F 15 minutes; widening it to 60 minutes would have been the
+    explicitly-rejected naive approach (flat TTL = 60 min, not
+    inactivity-based, and a 4x larger stolen-token replay window)."""
+    from kortex.engines.security.auth import _TOKEN_TTL
+
+    assert timedelta(minutes=15) == _TOKEN_TTL
+
+
+def test_phase_f_left_unrelated_ttls_untouched() -> None:
+    """The password-reset token TTL and the OAuth `state` CSRF-nonce TTL
+    are unrelated threat models (email-link interception; OAuth redirect
+    replay) and must not have been widened, narrowed, or otherwise touched
+    while implementing the *session* inactivity requirement."""
+    from kortex.engines.security.auth import _OAUTH_STATE_TTL, _RESET_TOKEN_TTL
+
+    assert timedelta(minutes=30) == _RESET_TOKEN_TTL
+    assert timedelta(minutes=10) == _OAUTH_STATE_TTL
+
+
+def test_phase_f_refresh_token_ttl_is_a_distinct_absolute_ceiling() -> None:
+    """The refresh token's own ceiling must be independent of, and much
+    longer than, the access token's 15-minute TTL — it is what lets an
+    active session outlive repeated access-token expiries — while still
+    being a genuine, finite bound (never "no expiry")."""
+    from kortex.engines.security.auth import _REFRESH_TOKEN_TTL, _TOKEN_TTL
+
+    assert timedelta(hours=24) == _REFRESH_TOKEN_TTL
+    assert _REFRESH_TOKEN_TTL > _TOKEN_TTL
+
+
+@pytest.mark.asyncio
+async def test_issue_refresh_token_sets_the_documented_ttl(tmp_path: Path) -> None:
+    from kortex.engines.security.auth import _REFRESH_TOKEN_TTL
+
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+    await _seed_principal(storage.data, tenant_a, "refresh-user", "USER", "correct-secret", roles=["role-a"])
+    principal = await manager.authenticate(
+        {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "refresh-user", "password": "correct-secret"}
+    )
+
+    refresh_token = await manager.issue_refresh_token(principal)
+
+    assert isinstance(refresh_token, RefreshTokenPayload)
+    assert refresh_token.signature is not None
+    assert refresh_token.expires_at_utc - refresh_token.issued_at_utc == _REFRESH_TOKEN_TTL
+
+
+@pytest.mark.asyncio
+async def test_verify_refresh_token_round_trip_resolves_the_same_principal(tmp_path: Path) -> None:
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+    await _seed_principal(
+        storage.data, tenant_a, "refresh-user", "USER", "correct-secret", roles=["role-a"], attributes={"env": "prod"}
+    )
+    principal = await manager.authenticate(
+        {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "refresh-user", "password": "correct-secret"}
+    )
+
+    refresh_token = await manager.issue_refresh_token(principal)
+    resolved = await manager.verify_refresh_token(refresh_token)
+
+    assert resolved.principal_id == "refresh-user"
+    assert resolved.tenant_id == tenant_a
+    assert resolved.roles == ["role-a"]
+    assert resolved.attributes == {"env": "prod"}
+
+
+@pytest.mark.asyncio
+async def test_verify_refresh_token_rejects_a_missing_signature(tmp_path: Path) -> None:
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+    await _seed_principal(storage.data, tenant_a, "refresh-user", "USER", "correct-secret")
+    principal = await manager.authenticate(
+        {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "refresh-user", "password": "correct-secret"}
+    )
+    now = datetime.now(UTC)
+    unsigned = RefreshTokenPayload(
+        token_id="unsigned",
+        principal_id=principal.principal_id,
+        principal_type=principal.principal_type,
+        tenant_id=principal.tenant_id,
+        issued_at_utc=now,
+        expires_at_utc=now + timedelta(hours=24),
+        signature=None,
+    )
+
+    with pytest.raises(InvalidTokenError):
+        await manager.verify_refresh_token(unsigned)
+
+
+@pytest.mark.asyncio
+async def test_verify_refresh_token_rejects_a_token_past_its_absolute_ceiling(tmp_path: Path) -> None:
+    """The mandatory "no indefinite renewal" proof: a refresh token whose
+    own `expires_at_utc` has passed is rejected outright, regardless of how
+    recently it was actively used — there is no activity signal anywhere in
+    this check that could extend it."""
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+    await _seed_principal(storage.data, tenant_a, "refresh-user", "USER", "correct-secret")
+    principal = await manager.authenticate(
+        {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "refresh-user", "password": "correct-secret"}
+    )
+    long_ago = datetime.now(UTC) - timedelta(hours=48)
+    expired_refresh_token = _sign_custom_refresh_token(
+        manager, principal, issued_at_utc=long_ago, expires_at_utc=long_ago + timedelta(hours=24)
+    )
+
+    with pytest.raises(TokenExpiredError):
+        await manager.verify_refresh_token(expired_refresh_token)
+
+
+@pytest.mark.asyncio
+async def test_verify_refresh_token_rejects_a_disabled_principal(tmp_path: Path) -> None:
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+    await _seed_principal(storage.data, tenant_a, "refresh-user", "USER", "correct-secret")
+    principal = await manager.authenticate(
+        {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "refresh-user", "password": "correct-secret"}
+    )
+    refresh_token = await manager.issue_refresh_token(principal)
+
+    async def _disable(session: AsyncSession) -> None:
+        from sqlalchemy import select
+
+        res = await session.execute(
+            select(PrincipalRecord).where(
+                PrincipalRecord.tenant_id == tenant_a, PrincipalRecord.principal_id == "refresh-user"
+            )
+        )
+        record = res.scalar_one()
+        record.enabled = False
+
+    await storage.data.execute_in_transaction(_disable)
+
+    with pytest.raises(InvalidTokenError):
+        await manager.verify_refresh_token(refresh_token)
+
+
+@pytest.mark.asyncio
+async def test_verify_refresh_token_rejects_a_genuine_access_token_presented_as_a_refresh_token(
+    tmp_path: Path,
+) -> None:
+    """The core domain-separation proof: a REAL, currently-valid, correctly
+    signed access `TokenPayload` for this exact principal — precisely the
+    artifact exposed on every ordinary capability call, and therefore the
+    one an attacker is most likely to obtain — must never verify as a
+    refresh token, even though every claim field matches a real principal.
+    Its signature was computed over the access-token domain prefix, never
+    the refresh-token one, so re-interpreting its bytes as a
+    `RefreshTokenPayload` and verifying must fail closed."""
+    tenant_a = _tenant_a(tmp_path)
+    _kernel, storage, manager = await _make_manager(tmp_path)
+    await _seed_principal(storage.data, tenant_a, "refresh-user", "USER", "correct-secret")
+    principal = await manager.authenticate(
+        {"principal_type": "USER", "tenant_id": tenant_a, "principal_id": "refresh-user", "password": "correct-secret"}
+    )
+    access_token = await manager.issue_token(principal)
+
+    forged_refresh_token = RefreshTokenPayload(
+        token_id=access_token.token_id,
+        principal_id=access_token.principal_id,
+        principal_type=access_token.principal_type,
+        tenant_id=access_token.tenant_id,
+        issued_at_utc=access_token.issued_at_utc,
+        expires_at_utc=access_token.expires_at_utc,
+        signature=access_token.signature,
+    )
+
+    with pytest.raises(InvalidSignatureError):
+        await manager.verify_refresh_token(forged_refresh_token)

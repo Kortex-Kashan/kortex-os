@@ -29,7 +29,7 @@ from kortex.core.kernel import Kernel, KernelState
 from kortex.engines.ai.bootstrap import AIEngineRuntimeConfig, KernelProductionBootstrap
 from kortex.engines.ai.bridge import KernelBridgeAdapter
 from kortex.engines.ai.credentials import TenantCredentialResolver
-from kortex.engines.ai.openai_provider import OpenAIProvider
+from kortex.engines.ai.openai_provider import SUPPORTED_OPENAI_MODELS, OpenAIProvider
 from kortex.engines.ai.persistence import AIProviderConfigStore
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
@@ -375,3 +375,276 @@ async def test_connection_test_survives_discover_models_failing_after_test_conne
     # succeeded before call #2 (discover_models) failed -- not a test that
     # coincidentally passes because nothing was actually invoked twice.
     assert call_count["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Model-catalog persistence (AI Studio functional stabilization) -- the
+# defect this fixes: a successful discovery previously lived only in this
+# capability's one-shot response, so `kortex.ai.model.list` never reflected
+# it, and it vanished the instant the caller stopped holding onto it. These
+# tests drive the full real chain -- capability -> discovery ->
+# `AIProviderModelCatalogStore` -> a SEPARATE, later `kortex.ai.model.list`
+# call -- proving the catalog is durable, not just present in the test's own
+# response.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def kernel_env_nonstatic_models(tmp_path: Path) -> AsyncIterator[tuple[Kernel, list[httpx.Request]]]:
+    """Same wiring as `kernel_env`, except the discovered model ids
+    (`gpt-9-alpha`/`gpt-9-beta`) are deliberately NOT members of
+    `SUPPORTED_OPENAI_MODELS` (which already happens to contain
+    `gpt-4o`/`gpt-4o-mini`/`gpt-4.1`/`gpt-4.1-mini` -- `kernel_env`'s own
+    discovered ids). Persistence-vs-static-fallback and cross-tenant-leak
+    tests need ids that cannot be confused with the static allow-list,
+    or a genuine leak would be indistinguishable from a correct static
+    fallback that merely happens to overlap."""
+    db_path = (tmp_path / f"kortex_nonstatic_{uuid4().hex[:8]}.db").as_posix()
+    db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_path}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+
+    kernel = Kernel()
+    kernel._db_manager = db_manager
+    data_store = RelationalDataStore(db_manager)
+
+    storage_engine = StorageEngine(base_directory=str(tmp_path / f"storage_nonstatic_{uuid4().hex[:8]}"))
+    security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(security_engine)
+
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        auth = request.headers.get("Authorization", "")
+        if auth == f"Bearer {_API_KEY_A}":
+            return httpx.Response(200, json={"data": [{"id": "gpt-9-alpha"}, {"id": "gpt-9-beta"}]})
+        return httpx.Response(401, json={"error": {"message": "invalid_api_key"}})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    resolver = TenantCredentialResolver(AIProviderConfigStore(data_store), security_engine.get_secret)
+    mock_openai = OpenAIProvider(credential_resolver=resolver, client=mock_client)
+
+    bootstrap = KernelProductionBootstrap(
+        config=AIEngineRuntimeConfig(environment="production", storage_backend="sqlite", enable_cloud_models=False)
+    )
+    ai_engine = bootstrap.create_ai_engine(
+        kernel_bridge=KernelBridgeAdapter(kernel),  # type: ignore[arg-type]
+        data_store=data_store,
+        custom_providers=[mock_openai],
+        registered_engines=list(kernel.get_all_engines().keys()),
+        secret_getter=security_engine.get_secret,
+        secret_putter=security_engine.put_secret,
+    )
+    kernel.register_engine(ai_engine)
+
+    hasher = PasswordHasher()
+
+    async def _seed(session: AsyncSession) -> None:
+        for permission in ("ai:manage", "ai:read"):
+            session.add(RolePermissionRecord(id=str(uuid4()), role=_ROLE, permission=permission))
+        for tenant, principal in ((_TENANT_A, "admin_a"), (_TENANT_B, "admin_b")):
+            session.add(
+                PrincipalRecord(
+                    id=str(uuid4()),
+                    tenant_id=tenant,
+                    principal_id=principal,
+                    principal_type="USER",
+                    credential_hash=hasher.hash(f"pass-{principal}"),
+                    roles=[_ROLE],
+                    attributes={"clearance_level": "RESTRICTED"},
+                )
+            )
+        await session.flush()
+
+    await kernel.boot()
+    assert kernel.state == KernelState.RUNNING
+    await storage_engine.data.execute_in_transaction(_seed)
+
+    try:
+        yield kernel, captured_requests
+    finally:
+        if kernel.state == KernelState.RUNNING:
+            await kernel.shutdown()
+        await mock_client.aclose()
+        await db_manager.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_model_list_reflects_the_persisted_catalog_after_a_successful_test(
+    kernel_env_nonstatic_models,
+) -> None:
+    kernel, _captured = kernel_env_nonstatic_models
+    token = await _token(kernel, _TENANT_A, "admin_a")
+
+    await _invoke(kernel, "kortex.ai.provider.configure", token, _TENANT_A, provider_id="openai", api_key=_API_KEY_A)
+    test_result = await _invoke(kernel, "kortex.ai.provider.test", token, _TENANT_A, provider_id="openai")
+    assert test_result["connected"] is True
+
+    # A completely separate capability call, simulating the user navigating
+    # away and back (or reloading) -- nothing here reuses the test's response.
+    models = await _invoke(kernel, "kortex.ai.model.list", token, _TENANT_A)
+
+    openai_model_ids = {m.model_id for m in models if m.provider_id == "openai"}
+    assert openai_model_ids == {"gpt-9-alpha", "gpt-9-beta"}
+
+
+@pytest.mark.asyncio
+async def test_model_list_is_tenant_scoped_for_persisted_catalogs(kernel_env_nonstatic_models) -> None:
+    """Tenant A's persisted discovery must never leak into tenant B's model list."""
+    kernel, _captured = kernel_env_nonstatic_models
+    token_a = await _token(kernel, _TENANT_A, "admin_a")
+    token_b = await _token(kernel, _TENANT_B, "admin_b")
+
+    await _invoke(kernel, "kortex.ai.provider.configure", token_a, _TENANT_A, provider_id="openai", api_key=_API_KEY_A)
+    await _invoke(kernel, "kortex.ai.provider.test", token_a, _TENANT_A, provider_id="openai")
+
+    models_b = await _invoke(kernel, "kortex.ai.model.list", token_b, _TENANT_B)
+    openai_model_ids_b = {m.model_id for m in models_b if m.provider_id == "openai"}
+
+    # Tenant B never discovered anything -- it must see the static fallback,
+    # never tenant A's discovered gpt-9-alpha/gpt-9-beta catalog.
+    assert openai_model_ids_b == set(SUPPORTED_OPENAI_MODELS)
+
+
+@pytest.mark.asyncio
+async def test_ad_hoc_key_test_never_persists_a_catalog_or_a_configuration(kernel_env_nonstatic_models) -> None:
+    """The configuration-dialog "test before save" flow: an `api_key` passed
+    directly to `kortex.ai.provider.test` must validate that exact candidate
+    key without writing anything durable -- not a provider configuration
+    (`kortex.ai.provider.configure` is a separate, later, explicit call) and
+    not a model catalog entry (persisting one would attribute a catalog to a
+    credential the tenant never actually committed to saving).
+    """
+    kernel, captured = kernel_env_nonstatic_models
+    token = await _token(kernel, _TENANT_A, "admin_a")
+
+    result = await _invoke(
+        kernel, "kortex.ai.provider.test", token, _TENANT_A, provider_id="openai", api_key=_API_KEY_A
+    )
+
+    assert result["connected"] is True
+    assert {m["model_id"] for m in result["models"]} == {"gpt-9-alpha", "gpt-9-beta"}
+    assert captured[-1].headers["Authorization"] == f"Bearer {_API_KEY_A}"
+
+    configs = await _invoke(kernel, "kortex.ai.provider.config.list", token, _TENANT_A)
+    assert configs == []
+
+    models = await _invoke(kernel, "kortex.ai.model.list", token, _TENANT_A)
+    openai_model_ids = {m.model_id for m in models if m.provider_id == "openai"}
+    assert openai_model_ids == set(SUPPORTED_OPENAI_MODELS)
+
+
+@pytest.fixture
+async def kernel_env_second_discovery_fails(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[Kernel, Any]]:
+    """Same wiring as `kernel_env`, except the mock transport succeeds for
+    the first THREE calls -- one full `kortex.ai.provider.test` round trip
+    (`test_connection` + `discover_models`, calls 1-2) plus the second test's
+    own `test_connection` (call 3) -- and fails from call 4 onward, which is
+    the second test's `discover_models`. This lets a test run one
+    fully-successful `kortex.ai.provider.test` (to persist a real catalog)
+    followed by a second one whose connection succeeds but discovery fails."""
+    db_path = (tmp_path / f"kortex_second_fails_{uuid4().hex[:8]}.db").as_posix()
+    db_manager = DatabaseEngineManager(connection_url=f"sqlite+aiosqlite:///{db_path}")
+    await db_manager.connect()
+    await db_manager.create_all_tables()
+
+    kernel = Kernel()
+    kernel._db_manager = db_manager
+    data_store = RelationalDataStore(db_manager)
+
+    storage_engine = StorageEngine(base_directory=str(tmp_path / f"storage_second_fails_{uuid4().hex[:8]}"))
+    security_engine = SecurityEngine(master_key=_TEST_MASTER_KEY, signing_private_key=_TEST_SIGNING_KEY)
+    kernel.register_engine(storage_engine)
+    kernel.register_engine(security_engine)
+
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if call_count["n"] <= 3:
+            return httpx.Response(200, json={"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]})
+        return httpx.Response(429, json={"error": {"message": "synthetic later-call failure"}})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    resolver = TenantCredentialResolver(AIProviderConfigStore(data_store), security_engine.get_secret)
+    mock_openai = OpenAIProvider(credential_resolver=resolver, client=mock_client)
+
+    bootstrap = KernelProductionBootstrap(
+        config=AIEngineRuntimeConfig(environment="production", storage_backend="sqlite", enable_cloud_models=False)
+    )
+    ai_engine = bootstrap.create_ai_engine(
+        kernel_bridge=KernelBridgeAdapter(kernel),  # type: ignore[arg-type]
+        data_store=data_store,
+        custom_providers=[mock_openai],
+        registered_engines=list(kernel.get_all_engines().keys()),
+        secret_getter=security_engine.get_secret,
+        secret_putter=security_engine.put_secret,
+    )
+    kernel.register_engine(ai_engine)
+
+    hasher = PasswordHasher()
+
+    async def _seed(session: AsyncSession) -> None:
+        for permission in ("ai:manage", "ai:read"):
+            session.add(RolePermissionRecord(id=str(uuid4()), role=_ROLE, permission=permission))
+        session.add(
+            PrincipalRecord(
+                id=str(uuid4()),
+                tenant_id=_TENANT_A,
+                principal_id="admin_a",
+                principal_type="USER",
+                credential_hash=hasher.hash("pass-admin_a"),
+                roles=[_ROLE],
+                attributes={"clearance_level": "RESTRICTED"},
+            )
+        )
+        await session.flush()
+
+    await kernel.boot()
+    assert kernel.state == KernelState.RUNNING
+    await storage_engine.data.execute_in_transaction(_seed)
+
+    try:
+        yield kernel, call_count
+    finally:
+        if kernel.state == KernelState.RUNNING:
+            await kernel.shutdown()
+        await mock_client.aclose()
+        await db_manager.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_discovery_does_not_erase_the_previously_persisted_catalog(
+    kernel_env_second_discovery_fails,
+) -> None:
+    """First test: both round trips succeed, catalog persists. Second test:
+    `test_connection` succeeds again but `discover_models` fails -- the
+    catalog from the first test must remain exactly as it was, per the
+    product requirement that a transient discovery failure must never erase
+    a previously known catalog."""
+    kernel, call_count = kernel_env_second_discovery_fails
+    token = await _token(kernel, _TENANT_A, "admin_a")
+    await _invoke(kernel, "kortex.ai.provider.configure", token, _TENANT_A, provider_id="openai", api_key=_API_KEY_A)
+
+    first = await _invoke(kernel, "kortex.ai.provider.test", token, _TENANT_A, provider_id="openai")
+    assert first["connected"] is True
+    assert {m["model_id"] for m in first["models"]} == {"gpt-4o", "gpt-4o-mini"}
+
+    models_before = await _invoke(kernel, "kortex.ai.model.list", token, _TENANT_A)
+    ids_before = {m.model_id for m in models_before if m.provider_id == "openai"}
+    assert ids_before == {"gpt-4o", "gpt-4o-mini"}
+
+    second = await _invoke(kernel, "kortex.ai.provider.test", token, _TENANT_A, provider_id="openai")
+    assert second["connected"] is True
+    assert second["models"] == []
+    assert second["detail"] is not None
+    assert call_count["n"] == 4  # two full test_provider_connection round trips
+
+    models_after = await _invoke(kernel, "kortex.ai.model.list", token, _TENANT_A)
+    ids_after = {m.model_id for m in models_after if m.provider_id == "openai"}
+
+    assert ids_after == ids_before

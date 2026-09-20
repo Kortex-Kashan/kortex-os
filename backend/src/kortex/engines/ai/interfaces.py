@@ -258,8 +258,17 @@ class IKernelBridge(Protocol):
         requires_authentication: bool = True,
         security_classification: str = "INTERNAL",
         requires_execution_context: bool = False,
+        is_read_only: bool | None = None,
+        is_idempotent: bool | None = None,
     ) -> object:
-        """Register a canonical system capability with the Kernel Registry."""
+        """Register a canonical system capability with the Kernel Registry.
+
+        `is_read_only`/`is_idempotent` (KORTEX OS -- Automation + Integration
+        Fabric, Milestone F1) default to `None` so a caller that omits them
+        falls back to the Registry's own legacy classification table --
+        mirroring `Kernel.register_capability`'s own contract exactly, since
+        that is the concrete object actually passed to `initialize()` here.
+        """
         ...
 
     async def publish_event(

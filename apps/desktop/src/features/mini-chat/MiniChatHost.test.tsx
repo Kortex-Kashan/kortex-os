@@ -1,7 +1,73 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createMemoryRouter, Outlet, RouterProvider } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Same jsdom scroll-geometry mocking technique as `MessageList.test.tsx`
+ * (see that file's own comment for the full rationale) -- needed here too
+ * because Phase D's actual claim is that `MessageList`'s scroll state
+ * survives a collapse/reopen of the HOST around it, which can only be
+ * proven by giving its scroll container real (mocked) geometry to move
+ * within.
+ */
+let nextScrollDefaults = { scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
+const scrollState = new WeakMap<Element, { scrollTop: number; scrollHeight: number; clientHeight: number }>();
+
+function scrollStateFor(el: Element) {
+  let state = scrollState.get(el);
+  if (!state) {
+    state = { ...nextScrollDefaults };
+    scrollState.set(el, state);
+  }
+  return state;
+}
+
+function setScrollMetrics(
+  el: Element,
+  patch: Partial<{ scrollTop: number; scrollHeight: number; clientHeight: number }>,
+) {
+  Object.assign(scrollStateFor(el), patch);
+}
+
+let originalScrollDescriptors: Record<string, PropertyDescriptor | undefined>;
+
+beforeAll(() => {
+  originalScrollDescriptors = {
+    scrollTop: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop"),
+    scrollHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight"),
+    clientHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight"),
+  };
+  Object.defineProperty(HTMLElement.prototype, "scrollTop", {
+    configurable: true,
+    get(this: Element) {
+      return scrollStateFor(this).scrollTop;
+    },
+    set(this: Element, value: number) {
+      scrollStateFor(this).scrollTop = value;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get(this: Element) {
+      return scrollStateFor(this).scrollHeight;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get(this: Element) {
+      return scrollStateFor(this).clientHeight;
+    },
+  });
+});
+
+afterAll(() => {
+  for (const [prop, descriptor] of Object.entries(originalScrollDescriptors)) {
+    if (descriptor) {
+      Object.defineProperty(HTMLElement.prototype, prop, descriptor);
+    }
+  }
+});
 
 const {
   getConversationHistoryMock,
@@ -82,6 +148,7 @@ beforeEach(() => {
   navigateToApplicationMock.mockReset();
   useAuthMock.mockReset();
   window.localStorage.clear();
+  nextScrollDefaults = { scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
 });
 
 function renderMiniChat() {
@@ -126,6 +193,31 @@ describe("MiniChatHost", () => {
     expect(screen.queryByRole("region", { name: "KORTEX AI assistant" })).not.toBeInTheDocument();
   });
 
+  it("makes the collapsed panel's (and, symmetrically, the open launcher's) descendants unreachable via [inert], not merely aria-hidden", async () => {
+    // Closeout code-review fix: aria-hidden + pointer-events:none alone do
+    // not remove a subtree from keyboard tab order, so a keyboard user
+    // could previously Tab into the invisible Composer while the panel
+    // was collapsed. `inert` is the actual fix; this proves it is applied
+    // to the right side at every state, not just that content is visually
+    // hidden (already covered by the aria-hidden-driven role queries in
+    // the tests around this one).
+    getConversationHistoryMock.mockResolvedValue([]);
+
+    renderMiniChat();
+    const collapsedRegion = screen.getByRole("region", { name: "KORTEX AI assistant", hidden: true });
+    expect(collapsedRegion.closest("[inert]")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+    const openRegion = await screen.findByRole("region", { name: "KORTEX AI assistant" });
+    expect(openRegion.closest("[inert]")).toBeNull();
+    const hiddenLauncher = screen.getByRole("button", { name: "Open KORTEX AI assistant", hidden: true });
+    expect(hiddenLauncher.closest("[inert]")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse KORTEX AI assistant" }));
+    const reopenedLauncher = await screen.findByRole("button", { name: "Open KORTEX AI assistant" });
+    expect(reopenedLauncher.closest("[inert]")).toBeNull();
+  });
+
   it("fetches conversation history exactly once regardless of open/collapse toggling", async () => {
     getConversationHistoryMock.mockResolvedValue([]);
 
@@ -140,6 +232,101 @@ describe("MiniChatHost", () => {
     // opened. `useConversation`/`useAgentStatus` are called unconditionally
     // at the top of `MiniChatHost`, independent of `open`.
     expect(getConversationHistoryMock).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase D: the panel (and MessageList's scroll state inside it) is never
+  // torn down by collapsing -- proven directly, not just inferred from the
+  // history-fetch-count test above.
+  // ---------------------------------------------------------------------------
+
+  describe("scroll/state persistence across collapse and reopen", () => {
+    function getLog(): HTMLElement {
+      return screen.getByRole("log", { name: "Chat transcript" });
+    }
+
+    it("keeps the conversation transcript intact across a collapse and reopen", async () => {
+      getConversationHistoryMock.mockResolvedValueOnce([
+        { sequence: 1, userContent: "Hello", assistantContent: "Hi there", createdAt: "2026-01-01T00:00:00Z" },
+      ]);
+
+      renderMiniChat();
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+      await screen.findByText("Hello");
+
+      fireEvent.click(screen.getByRole("button", { name: "Collapse KORTEX AI assistant" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Open KORTEX AI assistant" }));
+
+      expect(await screen.findByText("Hello")).toBeInTheDocument();
+      expect(screen.getByText("Hi there")).toBeInTheDocument();
+    });
+
+    it("preserves scroll position across a collapse and reopen when the user had scrolled away from the bottom", async () => {
+      getConversationHistoryMock.mockResolvedValueOnce([
+        { sequence: 1, userContent: "Hello", assistantContent: "Hi there", createdAt: "2026-01-01T00:00:00Z" },
+      ]);
+
+      renderMiniChat();
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+      await screen.findByText("Hello");
+
+      const log = getLog();
+      setScrollMetrics(log, { scrollTop: 150, scrollHeight: 2000, clientHeight: 300 });
+      fireEvent.scroll(log);
+      expect(screen.getByRole("button", { name: "Scroll to latest" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Collapse KORTEX AI assistant" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+
+      // The same log element (never unmounted) still reports the scroll
+      // position the user left it at, and "Scroll to latest" is still
+      // showing -- reopening must not silently snap back to the bottom.
+      expect(getLog()).toBe(log);
+      expect(getLog().scrollTop).toBe(150);
+      expect(screen.getByRole("button", { name: "Scroll to latest" })).toBeInTheDocument();
+    });
+
+    it("stays at the latest message across a collapse and reopen when the user was following", async () => {
+      getConversationHistoryMock.mockResolvedValueOnce([
+        { sequence: 1, userContent: "Hello", assistantContent: "Hi there", createdAt: "2026-01-01T00:00:00Z" },
+      ]);
+      nextScrollDefaults = { scrollTop: 0, scrollHeight: 300, clientHeight: 300 }; // fits fully -- "at the bottom"
+
+      renderMiniChat();
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+      await screen.findByText("Hello");
+
+      expect(screen.queryByRole("button", { name: "Scroll to latest" })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Collapse KORTEX AI assistant" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+
+      // Still following -- no "Scroll to latest" affordance appears just
+      // because the panel was collapsed and reopened.
+      expect(screen.queryByRole("button", { name: "Scroll to latest" })).not.toBeInTheDocument();
+    });
+
+    it('"Scroll to latest" still restores follow mode after a collapse/reopen cycle', async () => {
+      getConversationHistoryMock.mockResolvedValueOnce([
+        { sequence: 1, userContent: "Hello", assistantContent: "Hi there", createdAt: "2026-01-01T00:00:00Z" },
+      ]);
+
+      renderMiniChat();
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+      await screen.findByText("Hello");
+
+      const log = getLog();
+      setScrollMetrics(log, { scrollTop: 0, scrollHeight: 2000, clientHeight: 300 });
+      fireEvent.scroll(log);
+      fireEvent.click(screen.getByRole("button", { name: "Collapse KORTEX AI assistant" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+      expect(screen.getByRole("button", { name: "Scroll to latest" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Scroll to latest" }));
+
+      expect(getLog().scrollTop).toBe(2000);
+      expect(screen.queryByRole("button", { name: "Scroll to latest" })).not.toBeInTheDocument();
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -252,6 +439,102 @@ describe("MiniChatHost", () => {
     expect(await screen.findByText(/Could not load prior conversation history/)).toBeInTheDocument();
     expect(screen.getByLabelText("Message")).not.toBeDisabled();
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase C: Mini Chat resumes the SHARED active-conversation pointer, not a
+  // fixed id of its own -- proving it was updated to the multi-conversation
+  // model rather than left assuming there is only ever one conversation.
+  // ---------------------------------------------------------------------------
+
+  it("resumes whichever conversation is active in localStorage, e.g. one selected from AI Studio's Recent Conversations", async () => {
+    // Simulates the user having previously selected a non-default
+    // conversation in the AI Studio Chat tab's Recent Conversations panel
+    // (`chat-conversation-id.ts::setActiveConversationId`) -- Mini Chat
+    // must resume that SAME conversation, not silently fall back to
+    // generating/using a different one of its own.
+    window.localStorage.setItem(
+      "kortex.ai-studio.chat.conversation-id:tenant-a:user-a",
+      "conv-selected-in-ai-studio",
+    );
+    getConversationHistoryMock.mockResolvedValueOnce([
+      {
+        sequence: 1,
+        userContent: "a question asked from the AI Studio tab",
+        assistantContent: "its answer",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    renderMiniChat();
+    fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+
+    expect(await screen.findByText("a question asked from the AI Studio tab")).toBeInTheDocument();
+    expect(screen.getByText("its answer")).toBeInTheDocument();
+    expect(getConversationHistoryMock).toHaveBeenCalledWith("tenant-a", "conv-selected-in-ai-studio");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase B regression coverage: Mini Chat reuses the exact same MessageList
+  // (scroll container + auto-scroll) and Composer (typing-vs-sending split)
+  // components ChatPanel.tsx exercises directly -- no separate
+  // implementation to verify or keep in sync here.
+  // ---------------------------------------------------------------------------
+
+  it("keeps the transcript as the scroll container, with the composer outside it", async () => {
+    getConversationHistoryMock.mockResolvedValueOnce([
+      { sequence: 1, userContent: "Hello", assistantContent: "Hi there", createdAt: "2026-01-01T00:00:00Z" },
+    ]);
+
+    renderMiniChat();
+    fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+    await screen.findByText("Hello");
+
+    const log = screen.getByRole("log", { name: "Chat transcript" });
+    const textarea = screen.getByLabelText("Message");
+    const sendButton = screen.getByRole("button", { name: "Send" });
+
+    expect(log.contains(textarea)).toBe(false);
+    expect(log.contains(sendButton)).toBe(false);
+  });
+
+  it("keeps the textarea usable while a response is generating, same as the AI Studio Chat tab", async () => {
+    getConversationHistoryMock.mockResolvedValueOnce([]);
+    let resolveSend!: (value: unknown) => void;
+    sendAgentMessageMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    renderMiniChat();
+    fireEvent.click(screen.getByRole("button", { name: "Open KORTEX AI assistant" }));
+    await screen.findByText("No messages yet. Say hello to get started.");
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeDisabled());
+    const textarea = screen.getByLabelText("Message");
+    expect(textarea).not.toBeDisabled();
+
+    fireEvent.change(textarea, { target: { value: "queued follow-up" } });
+    expect(textarea).toHaveValue("queued follow-up");
+
+    resolveSend({
+      taskId: "task-1",
+      tenantId: "tenant-a",
+      status: "COMPLETED",
+      finalResponse: "Hi! How can I help?",
+      totalSteps: 1,
+      errorMessage: null,
+      pendingToolCalls: [],
+      degraded: false,
+    });
+
+    expect(await screen.findByText("Hi! How can I help?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -317,16 +600,18 @@ describe("MiniChatHost route persistence", () => {
 });
 
 // ---------------------------------------------------------------------------
-// K. AI Workflow Builder entry point (AI Workflow Builder milestone)
+// K. AI Workflow Builder entry point (AI Workflow Builder milestone;
+// retargeted by AI Studio functional stabilization Phase E)
 //
 // Mini Chat renders no Workflow Builder UI of its own and calls no builder
-// API -- it is a pure navigation trigger onto AI Studio's own, single
-// `workflowBuilder` tab (the same `WorkflowBuilderPanel`/`useWorkflowBuilder`
-// AI Studio already renders). These tests prove exactly that: the button
-// exists, is reachable once the panel is open, and its only effect is one
-// call to the existing `navigateToApplication` bridge with the deep-link
-// AiStudioApp.tsx's own `?tab=` reader consumes -- never a second builder
-// implementation, never a draft/publish call of its own.
+// API -- it is a pure navigation trigger onto the Workflow Engine app's "AI
+// Automation" tab (the same `WorkflowBuilderPanel`/`useWorkflowBuilder`,
+// relocated there from AI Studio in Phase E). These tests prove exactly
+// that: the button exists, is reachable once the panel is open, and its
+// only effect is one call to the existing `navigateToApplication` bridge
+// with the deep-link `WorkflowApp.tsx`'s own `?tab=` reader consumes --
+// never a second builder implementation, never a draft/publish call of its
+// own.
 // ---------------------------------------------------------------------------
 
 describe("MiniChatHost Workflow Builder entry point", () => {
@@ -345,7 +630,7 @@ describe("MiniChatHost Workflow Builder entry point", () => {
     expect(await screen.findByRole("button", { name: "Open AI Workflow Builder" })).toBeInTheDocument();
   });
 
-  it("activating the entry point deep-links to AI Studio's existing workflowBuilder tab, and nothing else", async () => {
+  it("activating the entry point deep-links to the Workflow Engine app's AI Automation tab, and nothing else", async () => {
     getConversationHistoryMock.mockResolvedValue([]);
 
     renderMiniChat();
@@ -354,8 +639,8 @@ describe("MiniChatHost Workflow Builder entry point", () => {
 
     expect(navigateToApplicationMock).toHaveBeenCalledTimes(1);
     expect(navigateToApplicationMock).toHaveBeenCalledWith({
-      applicationId: "ai-studio",
-      search: "?tab=workflowBuilder",
+      applicationId: "workflow-engine",
+      search: "?tab=aiAutomation",
     });
     // Reuse, not duplication: Mini Chat never renders builder content of its own
     // (no node list, no "Create Draft"/"Approve & Publish" controls here).
@@ -370,9 +655,9 @@ describe("MiniChatHost Workflow Builder entry point", () => {
     const source = fs.readFileSync(path.resolve(__dirname, "MiniChatHost.tsx"), "utf-8");
 
     for (const forbidden of [
-      "ai-workflow-builder/hooks/useWorkflowBuilder",
-      "ai-workflow-builder/api",
-      "ai-workflow-builder/components/WorkflowBuilderPanel",
+      "ai-automation/hooks/useWorkflowBuilder",
+      "ai-automation/api",
+      "ai-automation/components/WorkflowBuilderPanel",
       "generateWorkflowProposal",
       "createWorkflowDraft",
       "publishWorkflowDraft",

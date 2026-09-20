@@ -42,9 +42,14 @@ def create_sqlite_database(path: Path, table_name: str, sample_text: str) -> Non
     table rather than only `CREATE TABLE` new ones -- `apply_staged_migration`
     forward-migrating this fixture to head now requires the table it alters
     to actually exist, exactly as a real database stamped at `81d6d64c51ba`
-    always would (the baseline revision creates it). No other real
-    baseline table is added here; none of them is targeted by an
-    `ALTER TABLE` migration today.
+    always would (the baseline revision creates it).
+
+    `ai_conversation_turns` is included (empty) for the identical reason,
+    one migration later: AI Studio functional stabilization Phase C's
+    `a1b2c9d3e4f5` migration adds an index to this already-existing table
+    rather than creating a new one, so it too must actually be present here.
+    No other real baseline table is added; none of the others is targeted
+    by an `ALTER TABLE`/`CREATE INDEX`-on-an-existing-table migration today.
     """
     conn = sqlite3.connect(path)
     cur = conn.cursor()
@@ -60,6 +65,20 @@ def create_sqlite_database(path: Path, table_name: str, sample_text: str) -> Non
         "credential_hash VARCHAR(512), "
         "roles TEXT NOT NULL, "
         "attributes TEXT NOT NULL, "
+        "created_at DATETIME, "
+        "updated_at DATETIME"
+        ");"
+    )
+    cur.execute(
+        "CREATE TABLE ai_conversation_turns ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "tenant_id VARCHAR(64) NOT NULL, "
+        "conversation_id VARCHAR(64) NOT NULL, "
+        "sequence INTEGER NOT NULL, "
+        "user_content TEXT NOT NULL, "
+        "assistant_content TEXT NOT NULL, "
+        "request_id VARCHAR(64) NOT NULL, "
+        "user_id VARCHAR(64) NOT NULL, "
         "created_at DATETIME, "
         "updated_at DATETIME"
         ");"

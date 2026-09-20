@@ -13,6 +13,11 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 
 const PROXY_PREFIX = "/dev-ipc";
 const SESSION_KEY = "kortex_desktop_dev_session_token";
+// Phase F security correction: a distinct dev-mode storage slot mirroring
+// Rust's own separate keychain entry for the refresh token -- never read
+// by the generic `invoke_capability` case below, only by `refresh_session`.
+const REFRESH_SESSION_KEY = "kortex_desktop_dev_refresh_token";
+const REFRESH_CAPABILITY_NAME = "kortex.security.auth.refresh";
 
 export function initDevBrowserBridge(): void {
   if (!import.meta.env.DEV || typeof window === "undefined") {
@@ -42,6 +47,9 @@ export function initDevBrowserBridge(): void {
 
         case "logout": {
           sessionStorage.removeItem(SESSION_KEY);
+          // Phase F: logout must end both credentials' usefulness, not
+          // just the access token's -- mirrors Rust's `logout` command.
+          sessionStorage.removeItem(REFRESH_SESSION_KEY);
           return;
         }
 
@@ -66,6 +74,10 @@ export function initDevBrowserBridge(): void {
               sessionStorage.setItem(SESSION_KEY, envelope.sessionToken);
               delete envelope.sessionToken;
             }
+            if (envelope.refreshToken) {
+              sessionStorage.setItem(REFRESH_SESSION_KEY, envelope.refreshToken);
+              delete envelope.refreshToken;
+            }
             return envelope;
           } catch (e) {
             return {
@@ -78,6 +90,79 @@ export function initDevBrowserBridge(): void {
                   category: "SERVICE_UNAVAILABLE",
                   message: `Backend unreachable: ${(e as Error).message}`,
                   correlationId: "dev-error",
+                },
+              ],
+              warnings: [],
+              executionDurationMs: 0,
+              httpStatus: undefined,
+            };
+          }
+        }
+
+        // Phase F security correction: mirrors Rust's `refresh_session`
+        // command -- exchanges the dev-stored refresh token for a fresh
+        // access token via the same `kortex.security.auth.refresh`
+        // capability, never attaching the refresh token as a Bearer
+        // credential. Returns a synthetic FAILURE envelope without any
+        // network call when no refresh token is held, matching Rust's own
+        // "nothing to exchange" short-circuit.
+        case "refresh_session": {
+          const refreshToken = sessionStorage.getItem(REFRESH_SESSION_KEY);
+          if (!refreshToken) {
+            return {
+              requestId: "dev-refresh-no-token",
+              correlationId: "dev-refresh-no-token",
+              status: "FAILURE",
+              payload: null,
+              errors: [
+                {
+                  category: "PERMISSION_DENIED",
+                  message: "No refresh token is held.",
+                  correlationId: "dev-refresh-no-token",
+                },
+              ],
+              warnings: [],
+              executionDurationMs: 0,
+              httpStatus: undefined,
+            };
+          }
+          const accessToken = sessionStorage.getItem(SESSION_KEY);
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (accessToken) {
+            headers["Authorization"] = `Bearer ${accessToken}`;
+          }
+          try {
+            const res = await fetch(`${PROXY_PREFIX}/capabilities/invoke`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                requestId: "dev-refresh",
+                capabilityName: REFRESH_CAPABILITY_NAME,
+                parameters: { refresh_token: refreshToken },
+              }),
+            });
+            const envelope = await res.json();
+            envelope.httpStatus = res.status;
+            if (envelope.sessionToken) {
+              sessionStorage.setItem(SESSION_KEY, envelope.sessionToken);
+              delete envelope.sessionToken;
+            }
+            if (envelope.refreshToken) {
+              sessionStorage.setItem(REFRESH_SESSION_KEY, envelope.refreshToken);
+              delete envelope.refreshToken;
+            }
+            return envelope;
+          } catch (e) {
+            return {
+              requestId: "dev-refresh-error",
+              correlationId: "dev-refresh-error",
+              status: "FAILURE",
+              payload: null,
+              errors: [
+                {
+                  category: "SERVICE_UNAVAILABLE",
+                  message: `Backend unreachable: ${(e as Error).message}`,
+                  correlationId: "dev-refresh-error",
                 },
               ],
               warnings: [],

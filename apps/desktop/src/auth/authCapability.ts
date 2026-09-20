@@ -6,6 +6,7 @@
 // constraint.
 
 import { invokeCapability, type IpcResultEnvelope } from "@/ipc/client";
+import { renewStoredSession } from "@/ipc/session";
 import type { AuthIdentity, LoginCredentials, PasswordResetInput, PasswordResetRequestInput } from "./authTypes";
 
 const AUTHENTICATE_CAPABILITY = "kortex.security.auth.authenticate";
@@ -153,6 +154,41 @@ export async function checkStoredSession(): Promise<SessionCheckResult> {
     return "VALID";
   }
   return "BACKEND_UNAVAILABLE";
+}
+
+/**
+ * Phase F security correction: exchanges the held refresh token for a
+ * fresh access token via the dedicated `refresh_session` Tauri command
+ * (`kortex.security.auth.refresh` on the backend) -- this is what replaces
+ * `checkStoredSession`'s old role as the heartbeat's renewal mechanism.
+ * `checkStoredSession` itself is unchanged and still used for the
+ * one-time startup validation ping; it no longer renews anything (ordinary
+ * capability calls, including `kortex.security.signature.verify`, never
+ * mint or extend a token post-Phase-F).
+ *
+ * "INVALID" covers every renewal failure that is not a transport problem —
+ * an expired/invalid refresh token, a refresh token past its absolute
+ * ceiling, or no refresh token held at all (e.g. never logged in via a
+ * flow that mints one) -- all of which mean the session cannot legitimately
+ * continue and the caller must force logout, mirroring `checkStoredSession`'s
+ * own INVALID handling.
+ */
+export async function renewSession(): Promise<SessionCheckResult> {
+  let envelope: IpcResultEnvelope;
+  try {
+    envelope = await renewStoredSession();
+  } catch {
+    return "BACKEND_UNAVAILABLE";
+  }
+
+  if (envelope.status === "SUCCESS") {
+    return "VALID";
+  }
+  const category = envelope.errors[0]?.category;
+  if (category === "SERVICE_UNAVAILABLE" || category === "TIMEOUT_EXCEEDED") {
+    return "BACKEND_UNAVAILABLE";
+  }
+  return "INVALID";
 }
 
 export type PasswordResetRequestOutcome =
