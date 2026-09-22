@@ -18,7 +18,7 @@ function defaultSession(): KortexSession {
   return {
     version: CURRENT_SESSION_VERSION,
     activeApplication: null,
-    theme: "light",
+    theme: "dark",
     preferences: { ...DEFAULT_SESSION_PREFERENCES },
     updatedAt: new Date().toISOString(),
   };

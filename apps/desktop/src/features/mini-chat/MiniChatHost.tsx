@@ -163,9 +163,9 @@ export function MiniChatHost() {
             className="flex h-[32rem] w-96 max-w-[calc(100vw-2rem)] flex-col shadow-high"
           >
             <CardHeader className="flex flex-row items-center justify-between space-y-0 border-b border-border py-3">
-              <CardTitle className="flex items-center gap-2 text-body">
-                <AiStudioIcon className="size-4" aria-hidden="true" />
-                KORTEX AI
+              <CardTitle className="flex items-center gap-2 font-display text-body">
+                <AiStudioIcon className="size-4 text-primary" aria-hidden="true" />
+                KORTEX <span className="text-primary">AI</span>
               </CardTitle>
               <div className="flex items-center gap-1">
                 <Button

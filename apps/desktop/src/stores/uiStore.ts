@@ -9,7 +9,7 @@ interface UiState {
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  theme: "light",
+  theme: "dark",
   toggleTheme: () =>
     set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
   // Explicit setter alongside toggleTheme — session/SessionProvider.tsx

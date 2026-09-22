@@ -14,11 +14,32 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  cn,
 } from "@kortex/design-system";
+
+import { useApplicationNavigation } from "@/navigation/navigationBridge";
+import { useWorkspace } from "@/workspace/WorkspaceProvider";
+import type { WorkspaceApplication } from "@/workspace/workspaceTypes";
 
 import { engineCapabilityCount, isEngineHealthy, type EngineHealthReport, type SystemHealthReport } from "../api";
 import { useSystemHealth } from "../hooks/useSystemHealth";
-import { AlertTriangleIcon, CheckCircleIcon, RefreshIcon, XCircleIcon } from "../icons";
+import {
+  ActivityIcon,
+  AlertTriangleIcon,
+  ArrowRightIcon,
+  BoltIcon,
+  BoxIcon,
+  BriefcaseIcon,
+  ChartIcon,
+  CheckCircleIcon,
+  DatabaseIcon,
+  LayersIcon,
+  PlayIcon,
+  RefreshIcon,
+  ServerIcon,
+  SparklesIcon,
+  XCircleIcon,
+} from "../icons";
 
 const STATUS_COPY: Record<string, { label: string; badgeVariant: "default" | "outline" }> = {
   healthy: { label: "All systems operational", badgeVariant: "default" },
@@ -76,12 +97,34 @@ function OverallStatusBanner({ report }: { report: SystemHealthReport }) {
   );
 }
 
-function StatTile({ label, value }: { label: string; value: React.ReactNode }) {
+function StatTile({
+  label,
+  value,
+  icon: Icon,
+  accent,
+}: {
+  label: string;
+  value: React.ReactNode;
+  icon?: React.ComponentType<React.SVGProps<SVGSVGElement>>;
+  accent?: string;
+}) {
   return (
     <Card>
       <CardHeader className="gap-1.5 pb-6">
-        <CardDescription>{label}</CardDescription>
-        <CardTitle>{value}</CardTitle>
+        <div className="flex items-center justify-between">
+          <CardDescription>{label}</CardDescription>
+          {Icon && (
+            <span
+              className={cn(
+                "grid size-7 shrink-0 place-items-center rounded-md bg-primary/10",
+                accent ?? "text-primary",
+              )}
+            >
+              <Icon className="size-4" aria-hidden="true" />
+            </span>
+          )}
+        </div>
+        <CardTitle className="font-display">{value}</CardTitle>
       </CardHeader>
     </Card>
   );
@@ -167,8 +210,270 @@ function DashboardSkeleton() {
   );
 }
 
+function useLiveClock(): string {
+  const [time, setTime] = React.useState("");
+  React.useEffect(() => {
+    const format = new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const update = () => setTime(format.format(new Date()));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return time;
+}
+
+const MODE_CHIPS = ["Manage", "Automate", "Communicate", "Analyze", "Grow"];
+
+/**
+ * Purely presentational — no `useSystemHealth`/`data` dependency — so it
+ * renders identically across the loading/error/success branches below and
+ * keeps the shell feeling alive even while the health check is in flight
+ * or unreachable (Section 8/9 of the visual transformation brief: "the
+ * shell should remain visually stable while users navigate").
+ */
+function Hero() {
+  const time = useLiveClock();
+  const dateLabel = React.useMemo(
+    () => new Intl.DateTimeFormat("en-US", { weekday: "long", day: "numeric", month: "long" }).format(new Date()),
+    [],
+  );
+
+  return (
+    <section className="relative overflow-hidden rounded-lg border border-border/70 bg-gradient-to-br from-primary/15 via-panel to-background p-6 shadow-panel sm:p-8">
+      <div
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_20%,hsl(var(--primary)/0.28),transparent_45%)]"
+        aria-hidden="true"
+      />
+      <div className="relative flex flex-wrap items-start justify-between gap-6">
+        <div className="max-w-xl">
+          <span className="inline-flex items-center gap-1.5 text-caption font-semibold uppercase tracking-[0.14em] text-cyan">
+            <span className="size-1.5 rounded-full bg-cyan shadow-[0_0_8px_hsl(var(--cyan))]" aria-hidden="true" />
+            Command center
+          </span>
+          <h1 className="mt-3 font-display text-3xl font-bold text-foreground sm:text-4xl">
+            Your business. Your AI. Your Operating System.
+          </h1>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {MODE_CHIPS.map((mode) => (
+              <span
+                key={mode}
+                className="rounded-full border border-border/70 bg-background/60 px-3 py-1 text-caption text-muted-foreground backdrop-blur-sm"
+              >
+                {mode}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="text-right" aria-hidden={time === ""}>
+          <div className="font-display text-2xl font-semibold tabular-nums text-foreground">{time}</div>
+          <div className="mt-1 text-caption text-muted-foreground">{dateLabel}</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+const COMING_SOON_TILES: {
+  label: string;
+  detail: string;
+  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
+}[] = [
+  { label: "CRM", detail: "Leads, customers & pipeline", icon: BriefcaseIcon },
+  { label: "ERP", detail: "Finance, inventory & people", icon: BoxIcon },
+  { label: "Analytics", detail: "Real-time business intelligence", icon: ChartIcon },
+];
+
+/**
+ * The real registered workspace applications (`WorkspaceRegistry`, via
+ * `useWorkspace()`) as a tile grid, plus a small number of clearly-marked
+ * "Coming soon" tiles for sections that don't exist yet — never fabricated
+ * as working destinations (Section 20 of the brief: don't fill the
+ * interface with empty pages pretending to be complete).
+ */
+function WorkspaceGrid({
+  apps,
+  onNavigate,
+}: {
+  apps: WorkspaceApplication[];
+  onNavigate: (applicationId: string) => void;
+}) {
+  const tiles = apps.filter((app) => app.id !== "dashboard");
+
+  return (
+    <section aria-label="Workspace applications">
+      <h2 className="mb-3 text-heading">Jump back in</h2>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+        {tiles.map((app) => {
+          const Icon = app.icon;
+          return (
+            <button
+              key={app.id}
+              type="button"
+              onClick={() => onNavigate(app.id)}
+              className="group flex items-center gap-3 rounded-lg border border-border/70 bg-card/80 p-3 text-left shadow-low backdrop-blur-md transition hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-glow"
+            >
+              <span className="grid size-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+                <Icon className="size-4" aria-hidden="true" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-body font-medium text-foreground">{app.name}</span>
+                <span className="block truncate text-caption text-muted-foreground">{app.description}</span>
+              </span>
+              <ArrowRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
+            </button>
+          );
+        })}
+        {COMING_SOON_TILES.map((tile) => (
+          <div
+            key={tile.label}
+            aria-disabled="true"
+            className="flex items-center gap-3 rounded-lg border border-dashed border-border/60 bg-muted/30 p-3 opacity-70"
+          >
+            <span className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+              <tile.icon className="size-4" aria-hidden="true" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-body font-medium text-foreground">{tile.label}</span>
+              <span className="block truncate text-caption text-muted-foreground">{tile.detail}</span>
+            </span>
+            <Badge variant="outline" className="ml-auto shrink-0 text-caption">
+              Soon
+            </Badge>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DemoBadge() {
+  return (
+    <Badge variant="outline" className="shrink-0 text-caption text-muted-foreground">
+      Demo data
+    </Badge>
+  );
+}
+
+const DEMO_ACTIVITY = [
+  { title: "New lead captured from web form", time: "2 minutes ago" },
+  { title: "Invoice INV-2031 generated", time: "15 minutes ago" },
+  { title: "Agent finished a research task", time: "32 minutes ago" },
+];
+
+const DEMO_AUTOMATIONS: { label: string; detail: string; status: "Running" | "Attention" }[] = [
+  { label: "Client onboarding", detail: "12 runs today", status: "Running" },
+  { label: "Daily sales digest", detail: "Next run 17:00", status: "Running" },
+  { label: "Inventory sync", detail: "Needs review", status: "Attention" },
+];
+
+const DEMO_TASKS = [
+  { label: "Review Q4 report", time: "09:00" },
+  { label: "Approve purchase request", time: "10:00" },
+  { label: "Team strategy sync", time: "14:00" },
+];
+
+/**
+ * No activity-log/automation-run/task API exists yet, so this renders
+ * clearly-labeled sample content ("Demo data" badge on every panel) rather
+ * than being omitted — the brief explicitly allows isolated typed mock
+ * data for not-yet-built backends, as long as it's never presented as live.
+ */
+function OperationsRow() {
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+          <CardTitle className="text-heading">Recent activity</CardTitle>
+          <DemoBadge />
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {DEMO_ACTIVITY.map((item) => (
+            <div key={item.title} className="flex items-center gap-2.5">
+              <ActivityIcon className="size-4 shrink-0 text-chart-2" aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate text-body">{item.title}</span>
+              <span className="shrink-0 text-caption text-muted-foreground">{item.time}</span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+          <CardTitle className="text-heading">Ongoing automations</CardTitle>
+          <DemoBadge />
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {DEMO_AUTOMATIONS.map((item) => (
+            <div key={item.label} className="flex items-center gap-2.5">
+              <PlayIcon className="size-3.5 shrink-0 text-success" aria-hidden="true" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-body">{item.label}</span>
+                <span className="block truncate text-caption text-muted-foreground">{item.detail}</span>
+              </span>
+              <Badge variant={item.status === "Attention" ? "outline" : "secondary"} className="shrink-0 text-caption">
+                {item.status}
+              </Badge>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+          <CardTitle className="text-heading">Today&rsquo;s focus</CardTitle>
+          <DemoBadge />
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {DEMO_TASKS.map((task) => (
+            <div key={task.label} className="flex items-center gap-2.5">
+              <span className="size-1.5 shrink-0 rounded-full bg-cyan" aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate text-body">{task.label}</span>
+              <span className="shrink-0 text-caption text-muted-foreground">{task.time}</span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function InsightPanel() {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+        <CardTitle className="text-heading">AI operational insight</CardTitle>
+        <DemoBadge />
+      </CardHeader>
+      <CardContent className="flex items-start gap-4">
+        <span className="grid size-11 shrink-0 place-items-center rounded-full border border-chart-4/40 text-chart-4 shadow-[0_0_20px_hsl(var(--chart-4)/0.25)]">
+          <SparklesIcon className="size-5" aria-hidden="true" />
+        </span>
+        <div>
+          <p className="text-body font-medium text-foreground">
+            KORTEX AI will surface trends and recommendations here once connected to live business data.
+          </p>
+          <p className="mt-1 text-caption text-muted-foreground">
+            This panel previews the experience with sample content.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function Dashboard() {
   const { data, error, isPending, isFetching, refetch } = useSystemHealth();
+  const { applications } = useWorkspace();
+  const { navigateToApplication } = useApplicationNavigation();
+  const goTo = React.useCallback(
+    (applicationId: string) => navigateToApplication({ applicationId }),
+    [navigateToApplication],
+  );
 
   if (isPending) {
     return <DashboardSkeleton />;
@@ -177,6 +482,9 @@ export function Dashboard() {
   if (error || !data) {
     return (
       <div className="flex flex-col gap-6 p-6">
+        <Hero />
+        <WorkspaceGrid apps={applications} onNavigate={goTo} />
+
         <header>
           <h1 className="text-display">Dashboard</h1>
           <p className="text-body text-muted-foreground">System overview and health at a glance</p>
@@ -207,6 +515,9 @@ export function Dashboard() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
+      <Hero />
+      <WorkspaceGrid apps={applications} onNavigate={goTo} />
+
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-display">Dashboard</h1>
@@ -221,11 +532,19 @@ export function Dashboard() {
       <OverallStatusBanner report={data} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Kernel" value={data.kernel_state} />
-        <StatTile label="Database" value={data.db_connected ? data.db_dialect : "Disconnected"} />
-        <StatTile label="Engines" value={Object.keys(engines).length} />
-        <StatTile label="Capabilities" value={capabilityCount ?? "—"} />
+        <StatTile label="Kernel" value={data.kernel_state} icon={ServerIcon} accent="text-primary" />
+        <StatTile
+          label="Database"
+          value={data.db_connected ? data.db_dialect : "Disconnected"}
+          icon={DatabaseIcon}
+          accent="text-cyan"
+        />
+        <StatTile label="Engines" value={Object.keys(engines).length} icon={LayersIcon} accent="text-chart-4" />
+        <StatTile label="Capabilities" value={capabilityCount ?? "—"} icon={BoltIcon} accent="text-warning" />
       </div>
+
+      <OperationsRow />
+      <InsightPanel />
 
       <Card>
         <CardHeader>

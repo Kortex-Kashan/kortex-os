@@ -34,6 +34,17 @@ beforeEach(() => {
   getConversationHistoryMock.mockResolvedValue([]);
 });
 
+/**
+ * `Brand.tsx` renders the wordmark as "KORTEX " plus a child `<span>OS</span>`
+ * (so "OS" can be styled in the primary color) — a plain `getByText("KORTEX
+ * OS")` string match can't find text split across elements, so this checks a
+ * node's own full text content instead of relying on it being one text node.
+ */
+function isBrandWordmark(_content: string, element: Element | null): boolean {
+  if (!element || element.textContent !== "KORTEX OS") return false;
+  return Array.from(element.children).every((child) => child.textContent !== "KORTEX OS");
+}
+
 // AppSidebar (M2.3) reads useWorkspace(), so the shell needs the same
 // WorkspaceProvider wrapping it gets in the real router (routes/index.tsx).
 // QueryClientProvider mirrors `app/App.tsx`'s real root position (above the
@@ -66,7 +77,7 @@ describe("DesktopShell", () => {
   it("renders the top bar, sidebar navigation, workspace, and status bar together", async () => {
     renderShell();
 
-    expect(await screen.findByText("KORTEX OS")).toBeInTheDocument();
+    expect(await screen.findByText(isBrandWordmark)).toBeInTheDocument();
     expect(screen.getByText("Core")).toBeInTheDocument();
     expect(screen.getByText("Intelligence")).toBeInTheDocument();
     expect(screen.getByText("No application mounted")).toBeInTheDocument();
@@ -81,7 +92,7 @@ describe("DesktopShell", () => {
     document.documentElement.classList.add("dark");
     try {
       renderShell();
-      expect(await screen.findByText("KORTEX OS")).toBeInTheDocument();
+      expect(await screen.findByText(isBrandWordmark)).toBeInTheDocument();
       expect(screen.getByText("No application mounted")).toBeInTheDocument();
     } finally {
       document.documentElement.classList.remove("dark");

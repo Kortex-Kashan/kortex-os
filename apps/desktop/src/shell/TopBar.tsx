@@ -23,6 +23,7 @@ import {
 import { useAuth } from "@/auth/AuthProvider";
 import { useUiStore } from "@/stores/uiStore";
 
+import { Brand } from "./Brand";
 import { SearchIcon, UserIcon } from "./icons";
 import { NAV_GROUPS } from "./navigation/navConfig";
 
@@ -48,29 +49,28 @@ export function TopBar() {
   }, []);
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-4">
-      <div className="flex items-center gap-3">
-        <span className="text-body font-semibold">KORTEX OS</span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-2 text-muted-foreground"
-              onClick={() => setCommandOpen(true)}
-            >
-              <SearchIcon className="size-4" />
-              Search
-              <kbd className="rounded border border-border px-1 text-caption">Ctrl K</kbd>
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Open the command palette</TooltipContent>
-        </Tooltip>
-      </div>
+    <header className="relative z-40 flex h-14 shrink-0 items-center gap-4 border-b border-border/70 bg-background/85 px-4 backdrop-blur-xl">
+      <Brand compact />
+
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mx-auto w-full max-w-md justify-start gap-2 text-muted-foreground"
+            onClick={() => setCommandOpen(true)}
+          >
+            <SearchIcon className="size-4 text-cyan" />
+            <span className="flex-1 text-left">Search KORTEX or run a command</span>
+            <kbd className="rounded border border-border px-1 text-caption">Ctrl K</kbd>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Open the command palette</TooltipContent>
+      </Tooltip>
 
       <div className="flex items-center gap-3">
-        <Badge variant="secondary" className="gap-1.5">
-          <span className="size-1.5 rounded-full bg-primary" aria-hidden="true" />
+        <Badge variant="secondary" className="gap-1.5 border border-success/25 bg-success/10 text-success">
+          <span className="size-1.5 rounded-full bg-success shadow-[0_0_8px_hsl(var(--success))]" aria-hidden="true" />
           System nominal
         </Badge>
 

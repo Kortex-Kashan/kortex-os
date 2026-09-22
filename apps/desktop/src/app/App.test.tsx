@@ -28,6 +28,17 @@ function healthyResponse() {
   return Promise.resolve({ ok: true, statusCode: 200, body: { bootstrap_required: false } });
 }
 
+/**
+ * `Brand.tsx` renders the wordmark as "KORTEX " plus a child `<span>OS</span>`
+ * (so "OS" can be styled in the primary color) — a plain `getByText("KORTEX
+ * OS")` string match can't find text split across elements, so this checks a
+ * node's own full text content instead of relying on it being one text node.
+ */
+function isBrandWordmark(_content: string, element: Element | null): boolean {
+  if (!element || element.textContent !== "KORTEX OS") return false;
+  return Array.from(element.children).every((child) => child.textContent !== "KORTEX OS");
+}
+
 describe("App", () => {
   it("renders the login screen, never the shell, when no session is stored", async () => {
     invokeMock.mockImplementation((command: string) => {
@@ -40,7 +51,7 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.queryByText("KORTEX OS")).not.toBeInTheDocument();
+    expect(screen.queryByText(isBrandWordmark)).not.toBeInTheDocument();
   });
 
   it("renders the desktop shell with its workspace empty state once a stored session validates", async () => {
@@ -68,7 +79,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("KORTEX OS")).toBeInTheDocument();
+    expect(await screen.findByText(isBrandWordmark)).toBeInTheDocument();
     expect(screen.getByText("No application mounted")).toBeInTheDocument();
   });
 });

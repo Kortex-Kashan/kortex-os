@@ -83,7 +83,8 @@ describe("TopBar", () => {
     // `AuthProvider.test.tsx` cover the real principal_id being shown once
     // AUTHENTICATED.
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
-    expect(screen.getByText("Switch to dark theme")).toBeInTheDocument();
+    // uiStore now defaults to "dark", so the menu offers to switch to light.
+    expect(screen.getByText("Switch to light theme")).toBeInTheDocument();
     // Phase A: "Profile" was renamed "Account" and wired to a real route —
     // no longer a permanent placeholder.
     expect(screen.getByText("Account").closest("[role=menuitem]")).not.toHaveAttribute(

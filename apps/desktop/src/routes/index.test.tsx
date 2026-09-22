@@ -65,6 +65,17 @@ function renderRouter() {
 // something else replaces it again; with no reset between tests in this
 // file, an earlier test calling `mockImplementation` would leak into every
 // test that runs after it — this pattern avoids that trap entirely.
+/**
+ * `Brand.tsx` renders the wordmark as "KORTEX " plus a child `<span>OS</span>`
+ * (so "OS" can be styled in the primary color) — a plain `getByText("KORTEX
+ * OS")` string match can't find text split across elements, so this checks a
+ * node's own full text content instead of relying on it being one text node.
+ */
+function isBrandWordmark(_content: string, element: Element | null): boolean {
+  if (!element || element.textContent !== "KORTEX OS") return false;
+  return Array.from(element.children).every((child) => child.textContent !== "KORTEX OS");
+}
+
 let hasSessionResponse = true;
 
 const { invokeMock } = vi.hoisted(() => ({
@@ -115,7 +126,7 @@ describe("routes/index provider composition", () => {
   it("mounts the desktop shell through the full provider stack at the workspace root", async () => {
     renderRouter();
 
-    expect(await screen.findByText("KORTEX OS")).toBeInTheDocument();
+    expect(await screen.findByText(isBrandWordmark)).toBeInTheDocument();
     expect(screen.getByText("No application mounted")).toBeInTheDocument();
   });
 
@@ -125,7 +136,7 @@ describe("routes/index provider composition", () => {
     renderRouter();
 
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.queryByText("KORTEX OS")).not.toBeInTheDocument();
+    expect(screen.queryByText(isBrandWordmark)).not.toBeInTheDocument();
   });
 
   it("routes a default application through the real singleton router and renders its content", async () => {
@@ -133,7 +144,7 @@ describe("routes/index provider composition", () => {
     // AuthGate (M4.1) gates the shell behind the mocked session check above
     // resolving — "KORTEX OS" (TopBar) does not render until then, so this
     // must be awaited before touching the router/shell below.
-    await screen.findByText("KORTEX OS");
+    await screen.findByText(isBrandWordmark);
     // AI Studio (Slice 4.6) was the last default application to become a
     // real feature (workspace/defaultApps.ts) — all five now render their
     // own real content instead of their `description` field verbatim the

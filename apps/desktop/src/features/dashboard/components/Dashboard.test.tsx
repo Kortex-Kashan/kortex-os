@@ -1,12 +1,35 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
+
+import { WorkspaceProvider } from "@/workspace/WorkspaceProvider";
+import type { WorkspaceApplication } from "@/workspace/workspaceTypes";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import { Dashboard } from "./Dashboard";
+
+// Dashboard now reads `useWorkspace()`/`useApplicationNavigation()` (visual
+// transformation milestone: the "Jump back in" tile grid links to other
+// real registered applications) — both require a WorkspaceProvider and a
+// Router ancestor, mirrored here the same way AppSidebar.test.tsx already
+// wraps its subject for the same two dependencies.
+function makeApps(): WorkspaceApplication[] {
+  return [
+    {
+      id: "ai-studio",
+      name: "AI Studio",
+      description: "Configure AI providers and chat with your assistant.",
+      icon: () => null,
+      route: "/ai-studio",
+      component: () => <div>AI Studio content</div>,
+      permissions: [],
+    },
+  ];
+}
 
 const HEALTHY_BODY = {
   kernel_state: "RUNNING",
@@ -41,7 +64,11 @@ function renderDashboard(client?: QueryClient) {
     client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <Dashboard />
+      <MemoryRouter>
+        <WorkspaceProvider initialApplications={makeApps()}>
+          <Dashboard />
+        </WorkspaceProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
