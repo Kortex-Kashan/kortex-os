@@ -9,8 +9,10 @@ vi.mock("@/ipc/client", () => ({
 import {
   AiChatAccessDeniedError,
   AiChatRequestError,
+  cancelAgentTask,
   getAgentStatus,
   getConversationHistory,
+  listAgentTasks,
   sendAgentMessage,
 } from "./chat-api";
 
@@ -232,3 +234,65 @@ describe("getConversationHistory", () => {
     await expect(getConversationHistory("tenant-1", "conv-1")).rejects.toBeInstanceOf(AiChatAccessDeniedError);
   });
 });
+
+describe("listAgentTasks and cancelAgentTask", () => {
+  it("calls kortex.ai.agent.list and maps records into AgentTaskSummaryDto", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(
+      successEnvelope([
+        {
+          task: {
+            task_id: "task-100",
+            tenant_id: "tenant-1",
+            user_id: "user-1",
+            conversation_id: "conv-1",
+            goal: "Analyze financials",
+            agent_role: "finance",
+            max_steps: 15,
+          },
+          status: "COMPLETED",
+          current_step: 3,
+          total_token_usage: { total_tokens: 1250 },
+          created_at: "2026-03-01T10:00:00Z",
+          updated_at: "2026-03-01T10:05:00Z",
+        },
+      ]),
+    );
+
+    const tasks = await listAgentTasks("tenant-1");
+    expect(invokeCapabilityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityName: "kortex.ai.agent.list",
+        parameters: { tenant_id: "tenant-1", status: null },
+      }),
+    );
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toEqual({
+      taskId: "task-100",
+      tenantId: "tenant-1",
+      userId: "user-1",
+      conversationId: "conv-1",
+      goal: "Analyze financials",
+      agentRole: "finance",
+      status: "COMPLETED",
+      currentStep: 3,
+      maxSteps: 15,
+      totalTokens: 1250,
+      createdAt: "2026-03-01T10:00:00Z",
+      updatedAt: "2026-03-01T10:05:00Z",
+    });
+  });
+
+  it("calls kortex.ai.agent.cancel and returns boolean", async () => {
+    invokeCapabilityMock.mockResolvedValueOnce(successEnvelope(true));
+
+    const ok = await cancelAgentTask("task-100", "tenant-1");
+    expect(invokeCapabilityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityName: "kortex.ai.agent.cancel",
+        parameters: { task_id: "task-100", tenant_id: "tenant-1" },
+      }),
+    );
+    expect(ok).toBe(true);
+  });
+});
+

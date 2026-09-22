@@ -3,12 +3,20 @@ import { afterEach, describe, expect, it } from "vitest";
 import { useUiStore } from "./uiStore";
 
 afterEach(() => {
-  useUiStore.setState({ theme: "dark" });
+  useUiStore.setState({
+    theme: "dark",
+    copilotOpen: false,
+    copilotMode: "floating",
+    copilotTab: "chat",
+  });
 });
 
 describe("uiStore", () => {
-  it("defaults to the dark theme", () => {
+  it("defaults to the dark theme and copilot closed", () => {
     expect(useUiStore.getState().theme).toBe("dark");
+    expect(useUiStore.getState().copilotOpen).toBe(false);
+    expect(useUiStore.getState().copilotMode).toBe("floating");
+    expect(useUiStore.getState().copilotTab).toBe("chat");
   });
 
   describe("toggleTheme", () => {
@@ -46,4 +54,23 @@ describe("uiStore", () => {
       expect(useUiStore.getState().theme).toBe("light");
     });
   });
+
+  describe("copilot state", () => {
+    it("toggles and sets copilotOpen", () => {
+      expect(useUiStore.getState().copilotOpen).toBe(false);
+      useUiStore.getState().toggleCopilot();
+      expect(useUiStore.getState().copilotOpen).toBe(true);
+      useUiStore.getState().setCopilotOpen(false);
+      expect(useUiStore.getState().copilotOpen).toBe(false);
+    });
+
+    it("sets copilotMode and copilotTab", () => {
+      useUiStore.getState().setCopilotMode("docked");
+      expect(useUiStore.getState().copilotMode).toBe("docked");
+
+      useUiStore.getState().setCopilotTab("agents");
+      expect(useUiStore.getState().copilotTab).toBe("agents");
+    });
+  });
 });
+

@@ -110,4 +110,16 @@ describe("TopBar", () => {
     // click actually triggered navigation instead of doing nothing.
     expect(await screen.findByText("404 Not Found")).toBeInTheDocument();
   });
+
+  it("toggles the KORTEX AI copilot on button click and Ctrl+J", async () => {
+    renderTopBar();
+
+    const copilotBtn = screen.getByRole("button", { name: "Toggle KORTEX AI Copilot" });
+    expect(copilotBtn).toBeInTheDocument();
+
+    fireEvent.click(copilotBtn);
+    // Button toggles uiStore.copilotOpen
+    fireEvent.keyDown(document, { key: "j", ctrlKey: true });
+  });
 });
+
