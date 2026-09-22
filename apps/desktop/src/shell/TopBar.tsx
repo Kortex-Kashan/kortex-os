@@ -128,6 +128,14 @@ export function TopBar() {
             >
               Toggle theme
             </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                toggleCopilot();
+                setCommandOpen(false);
+              }}
+            >
+              Toggle KORTEX AI Copilot
+            </CommandItem>
             {import.meta.env.DEV && (
               <CommandItem
                 onSelect={() => {
