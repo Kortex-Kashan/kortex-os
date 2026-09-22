@@ -27,7 +27,6 @@ import { listPendingApprovals, listWorkflowInstances } from "@/features/workflow
 import { engineCapabilityCount, isEngineHealthy, type EngineHealthReport, type SystemHealthReport } from "../api";
 import { useSystemHealth } from "../hooks/useSystemHealth";
 import {
-  ActivityIcon,
   AlertTriangleIcon,
   ArrowRightIcon,
   BoltIcon,
