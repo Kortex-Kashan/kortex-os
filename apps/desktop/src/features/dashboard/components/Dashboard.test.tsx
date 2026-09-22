@@ -180,4 +180,18 @@ describe("Dashboard", () => {
       expect(screen.getByText("No engines are currently registered.")).toBeInTheDocument(),
     );
   });
+
+  it("classifies data sources honestly with DERIVED and UNAVAILABLE badges", async () => {
+    invokeMock.mockResolvedValueOnce({ ok: true, statusCode: 200, body: HEALTHY_BODY });
+    renderDashboard();
+
+    await waitFor(() => expect(screen.getByText("All systems operational")).toBeInTheDocument());
+
+    expect(screen.getByText("Pending Approvals")).toBeInTheDocument();
+    expect(screen.getByText("Active Automations")).toBeInTheDocument();
+    expect(screen.getByText("System Attention")).toBeInTheDocument();
+    expect(screen.getByText("DERIVED")).toBeInTheDocument();
+    expect(screen.getAllByText("UNAVAILABLE").length).toBeGreaterThan(0);
+    expect(screen.getByText(/All registered system engines operating normally/i)).toBeInTheDocument();
+  });
 });

@@ -17,9 +17,12 @@ import {
   cn,
 } from "@kortex/design-system";
 
+import { useQuery } from "@tanstack/react-query";
+import { useOptionalAuth } from "@/auth/AuthProvider";
 import { useApplicationNavigation } from "@/navigation/navigationBridge";
 import { useWorkspace } from "@/workspace/WorkspaceProvider";
 import type { WorkspaceApplication } from "@/workspace/workspaceTypes";
+import { listPendingApprovals, listWorkflowInstances } from "@/features/workflow/api";
 
 import { engineCapabilityCount, isEngineHealthy, type EngineHealthReport, type SystemHealthReport } from "../api";
 import { useSystemHealth } from "../hooks/useSystemHealth";
@@ -351,91 +354,152 @@ function WorkspaceGrid({
   );
 }
 
-function DemoBadge() {
+function ClassificationBadge({ classification }: { classification: "REAL" | "DERIVED" | "UNAVAILABLE" }) {
+  const styles = {
+    REAL: "text-success border-success/30 bg-success/10",
+    DERIVED: "text-cyan border-cyan/30 bg-cyan/10",
+    UNAVAILABLE: "text-muted-foreground border-border/70 bg-muted/20",
+  };
   return (
-    <Badge variant="outline" className="shrink-0 text-caption text-muted-foreground">
-      Demo data
-    </Badge>
+    <span
+      className={cn(
+        "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wider uppercase",
+        styles[classification],
+      )}
+    >
+      {classification}
+    </span>
   );
 }
 
-const DEMO_ACTIVITY = [
-  { title: "New lead captured from web form", time: "2 minutes ago" },
-  { title: "Invoice INV-2031 generated", time: "15 minutes ago" },
-  { title: "Agent finished a research task", time: "32 minutes ago" },
-];
+function OperationsRow({ report, onNavigate }: { report: SystemHealthReport; onNavigate: (appId: string) => void }) {
+  const auth = useOptionalAuth();
+  const isAuthenticated = auth?.state.status === "AUTHENTICATED";
 
-const DEMO_AUTOMATIONS: { label: string; detail: string; status: "Running" | "Attention" }[] = [
-  { label: "Client onboarding", detail: "12 runs today", status: "Running" },
-  { label: "Daily sales digest", detail: "Next run 17:00", status: "Running" },
-  { label: "Inventory sync", detail: "Needs review", status: "Attention" },
-];
+  const { data: approvals = [] } = useQuery({
+    queryKey: ["dashboard", "pending-approvals"],
+    queryFn: () => listPendingApprovals(),
+    enabled: isAuthenticated,
+    staleTime: 15_000,
+  });
 
-const DEMO_TASKS = [
-  { label: "Review Q4 report", time: "09:00" },
-  { label: "Approve purchase request", time: "10:00" },
-  { label: "Team strategy sync", time: "14:00" },
-];
+  const { data: instances = [] } = useQuery({
+    queryKey: ["dashboard", "active-instances"],
+    queryFn: () => listWorkflowInstances({ state: "RUNNING" }),
+    enabled: isAuthenticated,
+    staleTime: 15_000,
+  });
 
-/**
- * No activity-log/automation-run/task API exists yet, so this renders
- * clearly-labeled sample content ("Demo data" badge on every panel) rather
- * than being omitted — the brief explicitly allows isolated typed mock
- * data for not-yet-built backends, as long as it's never presented as live.
- */
-function OperationsRow() {
+  const degradedEngines = Object.entries(report.system_health.engines).filter(
+    ([, engineReport]) => !isEngineHealthy(engineReport),
+  );
+
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      {/* 1. Pending Approvals */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-          <CardTitle className="text-heading">Recent activity</CardTitle>
-          <DemoBadge />
+          <CardTitle className="text-heading">Pending Approvals</CardTitle>
+          <ClassificationBadge classification={isAuthenticated ? "REAL" : "UNAVAILABLE"} />
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          {DEMO_ACTIVITY.map((item) => (
-            <div key={item.title} className="flex items-center gap-2.5">
-              <ActivityIcon className="size-4 shrink-0 text-chart-2" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate text-body">{item.title}</span>
-              <span className="shrink-0 text-caption text-muted-foreground">{item.time}</span>
+          {!isAuthenticated ? (
+            <p className="text-caption text-muted-foreground">Sign in to view real pending approvals.</p>
+          ) : approvals.length === 0 ? (
+            <div className="flex items-center gap-2.5">
+              <CheckCircleIcon className="size-4 shrink-0 text-success" aria-hidden="true" />
+              <p className="text-caption text-muted-foreground">No approvals requiring operator review.</p>
             </div>
-          ))}
+          ) : (
+            <div className="flex flex-col gap-2">
+              {approvals.slice(0, 3).map((req) => (
+                <div key={req.id} className="flex items-center justify-between gap-2.5 rounded border border-border/50 p-2 text-caption">
+                  <div className="min-w-0 flex-1 truncate">
+                    <span className="font-mono text-xs">{req.id.slice(0, 8)}...</span>
+                    {req.stepId && <span className="ml-1 text-muted-foreground">({req.stepId})</span>}
+                  </div>
+                  <Badge variant="outline" className="text-warning text-[10px]">
+                    {req.requiredRole}
+                  </Badge>
+                </div>
+              ))}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-1 justify-start p-0 text-caption text-primary hover:underline"
+                onClick={() => onNavigate("workflow-engine")}
+              >
+                Open Workflow Approvals &rarr;
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
+      {/* 2. Ongoing Automations */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-          <CardTitle className="text-heading">Ongoing automations</CardTitle>
-          <DemoBadge />
+          <CardTitle className="text-heading">Active Automations</CardTitle>
+          <ClassificationBadge classification={isAuthenticated ? "REAL" : "UNAVAILABLE"} />
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          {DEMO_AUTOMATIONS.map((item) => (
-            <div key={item.label} className="flex items-center gap-2.5">
-              <PlayIcon className="size-3.5 shrink-0 text-success" aria-hidden="true" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-body">{item.label}</span>
-                <span className="block truncate text-caption text-muted-foreground">{item.detail}</span>
-              </span>
-              <Badge variant={item.status === "Attention" ? "outline" : "secondary"} className="shrink-0 text-caption">
-                {item.status}
-              </Badge>
+          {!isAuthenticated ? (
+            <p className="text-caption text-muted-foreground">Sign in to monitor workflow executions.</p>
+          ) : instances.length === 0 ? (
+            <div className="flex items-center gap-2.5">
+              <PlayIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <p className="text-caption text-muted-foreground">No workflow instances currently executing.</p>
             </div>
-          ))}
+          ) : (
+            <div className="flex flex-col gap-2">
+              {instances.slice(0, 3).map((inst) => (
+                <div key={inst.id} className="flex items-center justify-between gap-2.5 rounded border border-border/50 p-2 text-caption">
+                  <div className="min-w-0 flex-1 truncate">
+                    <span className="font-mono text-xs">{inst.id.slice(0, 8)}...</span>
+                    <span className="ml-1 text-muted-foreground">step {inst.currentStepIndex}</span>
+                  </div>
+                  <Badge variant="secondary" className="text-[10px]">
+                    {inst.state}
+                  </Badge>
+                </div>
+              ))}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-1 justify-start p-0 text-caption text-primary hover:underline"
+                onClick={() => onNavigate("workflow-engine")}
+              >
+                View all runs in Workflows &rarr;
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
+      {/* 3. System Attention / Sentinel */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-          <CardTitle className="text-heading">Today&rsquo;s focus</CardTitle>
-          <DemoBadge />
+          <CardTitle className="text-heading">System Attention</CardTitle>
+          <ClassificationBadge classification="DERIVED" />
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          {DEMO_TASKS.map((task) => (
-            <div key={task.label} className="flex items-center gap-2.5">
-              <span className="size-1.5 shrink-0 rounded-full bg-cyan" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate text-body">{task.label}</span>
-              <span className="shrink-0 text-caption text-muted-foreground">{task.time}</span>
+          {degradedEngines.length === 0 ? (
+            <div className="flex items-center gap-2.5">
+              <CheckCircleIcon className="size-4 shrink-0 text-success" aria-hidden="true" />
+              <p className="text-caption text-muted-foreground">All registered system engines operating normally.</p>
             </div>
-          ))}
+          ) : (
+            <div className="flex flex-col gap-2">
+              {degradedEngines.map(([name, rep]) => (
+                <div key={name} className="flex items-center justify-between gap-2 text-caption text-destructive">
+                  <span className="font-medium capitalize">{formatEngineName(name)} engine</span>
+                  <Badge variant="destructive" className="text-[10px]">
+                    {rep.status ?? "Degraded"}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
@@ -446,8 +510,8 @@ function InsightPanel() {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-        <CardTitle className="text-heading">AI operational insight</CardTitle>
-        <DemoBadge />
+        <CardTitle className="text-heading">AI Operational Insight</CardTitle>
+        <ClassificationBadge classification="UNAVAILABLE" />
       </CardHeader>
       <CardContent className="flex items-start gap-4">
         <span className="grid size-11 shrink-0 place-items-center rounded-full border border-chart-4/40 text-chart-4 shadow-[0_0_20px_hsl(var(--chart-4)/0.25)]">
@@ -455,10 +519,10 @@ function InsightPanel() {
         </span>
         <div>
           <p className="text-body font-medium text-foreground">
-            KORTEX AI will surface trends and recommendations here once connected to live business data.
+            AI operational telemetry analysis is currently unavailable.
           </p>
           <p className="mt-1 text-caption text-muted-foreground">
-            This panel previews the experience with sample content.
+            KORTEX Sentinel will generate continuous business insights once operational activity streams are connected.
           </p>
         </div>
       </CardContent>
@@ -543,7 +607,7 @@ export function Dashboard() {
         <StatTile label="Capabilities" value={capabilityCount ?? "—"} icon={BoltIcon} accent="text-warning" />
       </div>
 
-      <OperationsRow />
+      <OperationsRow report={data} onNavigate={goTo} />
       <InsightPanel />
 
       <Card>
