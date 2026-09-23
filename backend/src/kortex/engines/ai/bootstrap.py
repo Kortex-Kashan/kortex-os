@@ -57,6 +57,11 @@ from kortex.engines.ai.memory import (
     InMemoryConversationStore,
 )
 from kortex.engines.ai.openai_provider import DEFAULT_OPENAI_MODEL, OpenAIProvider
+from kortex.engines.ai.openrouter_provider import (
+    DEFAULT_OPENROUTER_MODEL,
+    OPENROUTER_PROVIDER_ID,
+    OpenRouterProvider,
+)
 from kortex.engines.ai.persistence import (
     AIGovernanceStore,
     AIProviderConfigStore,
@@ -106,6 +111,7 @@ class AIEngineRuntimeConfig:
     openai_default_model: str = DEFAULT_OPENAI_MODEL
     gemini_default_model: str = DEFAULT_GEMINI_MODEL
     anthropic_default_model: str = DEFAULT_ANTHROPIC_MODEL
+    openrouter_default_model: str = DEFAULT_OPENROUTER_MODEL
     max_context_tokens: int = 8192
     max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES
     default_generation_timeout_seconds: float = 60.0
@@ -367,6 +373,10 @@ class KernelProductionBootstrap:
                 ANTHROPIC_PROVIDER_ID: lambda: AnthropicProvider(
                     credential_resolver=resolver,
                     default_model=self._config.anthropic_default_model,
+                ),
+                OPENROUTER_PROVIDER_ID: lambda: OpenRouterProvider(
+                    credential_resolver=resolver,
+                    default_model=self._config.openrouter_default_model,
                 ),
             }
             already_supplied = {p.provider_id for p in providers_to_register}

@@ -17,6 +17,7 @@ import enum
 import logging
 import random
 import time
+from collections.abc import Sequence
 from typing import Final
 
 from kortex.engines.ai.base_provider import BaseAIProvider
@@ -286,6 +287,11 @@ class ResilientAIProvider(BaseAIProvider):
     def underlying_provider(self) -> BaseAIProvider:
         """Access the inner wrapped BaseAIProvider instance."""
         return self._provider
+
+    def register_discovered_models(self, model_ids: Sequence[str]) -> None:
+        """Forward discovered model registration to the underlying provider."""
+        if hasattr(self._provider, "register_discovered_models"):
+            self._provider.register_discovered_models(model_ids)
 
     @property
     def circuit_breaker(self) -> CircuitBreaker:

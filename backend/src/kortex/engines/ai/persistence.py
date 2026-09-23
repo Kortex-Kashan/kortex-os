@@ -27,7 +27,19 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, delete, func, select, update
+from sqlalchemy import (
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    distinct,
+    func,
+    select,
+    update,
+)
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -917,6 +929,20 @@ class AIProviderModelCatalogStore:
             )
             for row in rows
         ]
+
+    async def list_distinct_models_for_provider(self, provider_id: str) -> list[str]:
+        """Every distinct model_id persisted for this provider across any tenant."""
+        require_identifier(provider_id, "provider_id")
+
+        async def _action(session: AsyncSession) -> list[str]:
+            stmt = (
+                select(distinct(AIProviderModelCatalogRow.model_id))
+                .where(AIProviderModelCatalogRow.provider_id == provider_id)
+                .order_by(AIProviderModelCatalogRow.model_id)
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+        return await self._data_store.execute_in_transaction(_action)
 
 
 class AIDecisionAuditRow(BaseModel):

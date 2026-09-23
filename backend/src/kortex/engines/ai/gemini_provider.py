@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -79,7 +80,7 @@ and reasoning as `ollama_provider`/`openai_provider`: this provider's own HTTP
 call should fail on its own terms rather than be cancelled mid-flight by the
 outer `asyncio.timeout` wrapper `ResilientAIProvider` already applies."""
 
-DEFAULT_GEMINI_MODEL: str = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL: str = "gemini-3.8-flash"
 """Used only when neither `request.model_id` nor the tenant's configured
 `AIProviderConfig.default_model` names one -- the last of three precedence
 levels (see `generate_text`). Chosen as the price-performance tier, mirroring
@@ -88,8 +89,11 @@ levels (see `generate_text`). Chosen as the price-performance tier, mirroring
 SUPPORTED_GEMINI_MODELS: tuple[str, ...] = (
     "gemini-3.8-flash",
     "gemini-3.7-flash",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
 )
 """The static, small, explicitly-validated allow-list `ModelRouter`'s D1
 `model_id` filter gates on (`AIProviderMetadata.supported_models`).
@@ -229,15 +233,23 @@ class GeminiProvider(BaseAIProvider):
                 list(supported_models) if supported_models is not None else list(SUPPORTED_GEMINI_MODELS)
             ),
         )
+        self._discovered_models: set[str] = set()
         # Own the client only if the caller didn't inject one -- tests inject a
         # mock transport; production constructs its own and is responsible for
         # closing it via `aclose()`.
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
 
+    def register_discovered_models(self, model_ids: Sequence[str]) -> None:
+        """Dynamically expand the provider's supported models with discovered catalog models."""
+        self._discovered_models.update(m for m in model_ids if m)
+
     @property
     def metadata(self) -> AIProviderMetadata:
-        return self._metadata
+        if not self._discovered_models:
+            return self._metadata
+        combined = list(dict.fromkeys(self._metadata.supported_models + sorted(self._discovered_models)))
+        return self._metadata.model_copy(update={"supported_models": combined})
 
     async def aclose(self) -> None:
         """Release the underlying HTTP client, if this instance owns one."""
@@ -436,8 +448,11 @@ class GeminiProvider(BaseAIProvider):
 
             next_token = payload.get("nextPageToken")
             if not isinstance(next_token, str) or not next_token:
+                self.register_discovered_models([s.model_id for s in summaries])
                 return summaries
             page_token = next_token
+
+        self.register_discovered_models([s.model_id for s in summaries])
 
         raise TransientProviderError(
             f"Gemini provider '{self.provider_id}' model discovery exceeded "
