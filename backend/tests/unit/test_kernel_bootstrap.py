@@ -475,6 +475,9 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
     factory loop in `bootstrap.py`, so this assertion is now the single
     place that pins down exactly which providers the real production boot
     path ends up with.
+
+    Phase B / OpenRouter: OpenRouter joins on the same terms as a first-class
+    credentialed cloud provider registered by the same generalized factory loop.
     """
     kernel = await build_and_boot_kernel()
     try:
@@ -482,7 +485,7 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
         assert isinstance(ai_engine, AIOrchestrationEngine)
 
         providers = {p.provider_id: p for p in ai_engine.list_providers()}
-        assert set(providers) == {"ollama-llama3", "openai", "gemini", "anthropic"}
+        assert set(providers) == {"ollama-llama3", "openai", "gemini", "anthropic", "openrouter"}
 
         ollama = providers["ollama-llama3"]
         assert ollama.vendor == "ollama"
@@ -492,7 +495,12 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
 
         # Every cloud provider is credentialed, tenant-resolved and carries
         # its own SecretStore handle naming convention.
-        for provider_id, vendor in (("openai", "openai"), ("gemini", "google"), ("anthropic", "anthropic")):
+        for provider_id, vendor in (
+            ("openai", "openai"),
+            ("gemini", "google"),
+            ("anthropic", "anthropic"),
+            ("openrouter", "openrouter"),
+        ):
             cloud = providers[provider_id]
             assert cloud.vendor == vendor
             assert cloud.endpoint_type == "cloud"
@@ -504,6 +512,7 @@ async def test_ai_provider_registry_has_real_ollama_provider_on_production_boot_
         assert models["gpt-4o"] == "openai"
         assert models["gemini-2.5-flash"] == "gemini"
         assert models["claude-opus-5"] == "anthropic"
+        assert models["google/gemini-3.1-pro-preview"] == "openrouter"
     finally:
         await kernel.shutdown()
 
