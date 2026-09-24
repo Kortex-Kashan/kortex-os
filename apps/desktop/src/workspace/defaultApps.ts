@@ -1,5 +1,6 @@
 import { AccountApp } from "@/features/account/components/AccountApp";
 import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
+import { BrowserApp } from "@/features/browser/components/BrowserApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { Dashboard } from "@/features/dashboard/components/Dashboard";
 import { DocumentKnowledgeApp } from "@/features/document-knowledge/components/DocumentKnowledgeApp";
@@ -8,6 +9,7 @@ import { WorkflowApp } from "@/features/workflow/components/WorkflowApp";
 import {
   AccountIcon,
   AiStudioIcon,
+  BrowserIcon,
   ConnectorIcon,
   DashboardIcon,
   DocumentKnowledgeIcon,
@@ -79,5 +81,14 @@ export const DEFAULT_APPLICATIONS: WorkspaceApplication[] = [
     route: "/account",
     component: AccountApp,
     permissions: ["kortex.account.view"],
+  },
+  {
+    id: "browser",
+    name: "Browser",
+    description: "Browser runtime foundation (Browser-B1) — a single proof-of-concept surface, not the full built-in browser.",
+    icon: BrowserIcon,
+    route: "/browser",
+    component: BrowserApp,
+    permissions: ["kortex.browser.view"],
   },
 ];

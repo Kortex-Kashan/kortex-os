@@ -28,6 +28,13 @@ export interface NavGroup {
  * have exactly one navigation identity, not two placeholders with the same
  * label — every other previously-existing item is unchanged and still
  * present, just consolidated under its original group.
+ *
+ * Browser-B1: `browser` was removed from here for the same reason AI Studio/
+ * Marketplace were in M2.3 — it now has a real, live destination in
+ * `defaultApps.ts`'s `DEFAULT_APPLICATIONS` (see
+ * `docs/architecture/browser_b1_preflight_report.md` §6). This is Browser-B1's
+ * own proof-of-concept surface, not the full built-in browser (Browser-B2
+ * onward).
  */
 export const NAV_GROUPS: NavGroup[] = [
   {
@@ -37,7 +44,6 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "crm", label: "CRM" },
       { id: "erp", label: "ERP" },
       { id: "analytics", label: "Analytics" },
-      { id: "browser", label: "Browser" },
       { id: "voice", label: "Voice" },
     ],
   },

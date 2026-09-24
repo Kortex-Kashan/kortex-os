@@ -13,7 +13,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.5", features = [] }
+# Browser-B1: `unstable` unlocks `Window::add_child` (embedded child-webview
+# creation), which the pinned 2.11.5 gates behind this Cargo feature — see
+# docs/architecture/browser_b1_preflight_report.md §3. `tauri-runtime-wry`'s
+# own `unstable` feature is `[]` (empty): this adds no new transitive
+# dependency, it only unlocks already-compiled, already-audited-upstream
+# code behind a cfg flag.
+tauri = { version = "=2.11.5", features = ["unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
@@ -65,6 +71,16 @@ windows-sys = { version = "0.59", features = [
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# Browser-B1: `tauri`'s `test` feature (`tauri::test::{mock_builder,
+# MockRuntime, ...}`) was evaluated for in-process `Window`/`Webview`
+# lifecycle tests, but enabling it alongside `unstable` reproducibly crashes
+# every test binary at process startup on this machine
+# (STATUS_ENTRYPOINT_NOT_FOUND / 0xC0000139) — confirmed via bisection that
+# `unstable` alone does not cause this (56/56 pre-existing tests still pass
+# with only `unstable` enabled). Root cause not further isolated within
+# Browser-B1's scope; see docs/architecture/browser_b1_implementation_report.md
+# TESTS section. `browser_runtime.rs`'s tests therefore cover pure logic
+# only (no live Window/Webview construction) — deliberately, not silently.
 
 [profile.release]
 panic = "abort"

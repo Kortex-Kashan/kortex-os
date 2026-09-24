@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-runtime",
+  "description": "Browser-B1: grants the trusted KORTEX frontend (the webview literally labeled \"main\") the five new browser_* runtime commands. Deliberately scoped via `webviews: [\"main\"]`, not `windows: [\"main\"]` — per tauri_utils::acl::capability::Capability's own documented semantics, a `windows` match would apply to EVERY webview embedded in that window, including any child browser surface `add_child` creates there, which must never receive these permissions. This capability also sets no `remote` field, so — independently of window/webview label matching — Tauri's own Local-vs-Remote origin check (`ipc::authority::Origin::matches`) unconditionally denies every command below to any webview whose content did not come from the local app origin; a `browser_*` surface always loads `WebviewUrl::External(...)` (a Remote origin) and can therefore never satisfy either grant path. Together these are the concrete mechanism behind this repository's 'an arbitrary website must never automatically gain access to native KORTEX capabilities' rule, for this capability file specifically.",
+  "webviews": ["main"],
+  "permissions": [
+    "allow-browser-create-surface",
+    "allow-browser-navigate",
+    "allow-browser-reload",
+    "allow-browser-query-state",
+    "allow-browser-destroy"
+  ]
+}

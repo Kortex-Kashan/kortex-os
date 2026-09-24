@@ -1,0 +1,24 @@
+[[permission]]
+identifier = "allow-browser-create-surface"
+description = "Allows the webview to create a new embedded browser surface (Browser-B1). Accepts only an opaque profile id (never a filesystem path — resolved to a sanitized directory entirely in Rust) and an initial URL. Grants no capability/governance layer of its own — see docs/architecture/browser_capability_model.md for the future kortex.browser.* actions this does not implement."
+commands.allow = ["browser_create_surface"]
+
+[[permission]]
+identifier = "allow-browser-navigate"
+description = "Allows the webview to navigate an existing browser surface (identified by an opaque surface id) to a new URL. Does not grant the calling webview any capability over any other surface, and does not itself grant network access to the caller — the request executes entirely in Rust against the target surface's own WebView2 instance."
+commands.allow = ["browser_navigate"]
+
+[[permission]]
+identifier = "allow-browser-reload"
+description = "Allows the webview to reload an existing browser surface."
+commands.allow = ["browser_reload"]
+
+[[permission]]
+identifier = "allow-browser-query-state"
+description = "Allows the webview to read a browser surface's current URL only — no page content, no cookies, no credentials."
+commands.allow = ["browser_query_state"]
+
+[[permission]]
+identifier = "allow-browser-destroy"
+description = "Allows the webview to destroy a browser surface it created."
+commands.allow = ["browser_destroy"]

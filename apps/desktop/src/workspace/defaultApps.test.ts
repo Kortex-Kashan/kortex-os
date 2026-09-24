@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { AccountApp } from "@/features/account/components/AccountApp";
 import { AiStudioApp } from "@/features/ai-studio/components/AiStudioApp";
+import { BrowserApp } from "@/features/browser/components/BrowserApp";
 import { ConnectorsApp } from "@/features/connectors/components/ConnectorsApp";
 import { DocumentKnowledgeApp } from "@/features/document-knowledge/components/DocumentKnowledgeApp";
 import { MarketplaceApp } from "@/features/marketplace/components/MarketplaceApp";
@@ -10,7 +11,7 @@ import { DEFAULT_APPLICATIONS } from "./defaultApps";
 import { WorkspaceRegistry } from "./WorkspaceRegistry";
 
 describe("DEFAULT_APPLICATIONS", () => {
-  it("registers exactly the seven required applications", () => {
+  it("registers exactly the eight required applications", () => {
     expect(DEFAULT_APPLICATIONS.map((app) => app.name)).toEqual([
       "Dashboard",
       "AI Studio",
@@ -19,6 +20,7 @@ describe("DEFAULT_APPLICATIONS", () => {
       "Marketplace",
       "Document & Knowledge",
       "Account",
+      "Browser",
     ]);
   });
 
@@ -67,11 +69,16 @@ describe("DEFAULT_APPLICATIONS", () => {
     expect(accountApp?.component).toBe(AccountApp);
   });
 
+  it("wires the Browser application to the real BrowserApp, not a placeholder", () => {
+    const browserApp = DEFAULT_APPLICATIONS.find((app) => app.id === "browser");
+    expect(browserApp?.component).toBe(BrowserApp);
+  });
+
   it("registers cleanly into a WorkspaceRegistry with no duplicate-ID conflicts", () => {
     const registry = new WorkspaceRegistry();
     for (const app of DEFAULT_APPLICATIONS) {
       expect(() => registry.register(app)).not.toThrow();
     }
-    expect(registry.list()).toHaveLength(7);
+    expect(registry.list()).toHaveLength(8);
   });
 });

@@ -10,6 +10,11 @@ mod backend_process;
 mod secure_keys;
 mod sidecar;
 
+// Browser-B1: the `BrowserRuntime` abstraction and its `WebView2RuntimeAdapter`
+// implementation — see the module's own docs for the exact scope boundary
+// (no capability/governance layer, no history, no tabs; just create/
+// navigate/reload/query/destroy through an embedded child webview).
+mod browser_runtime;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
 // transport contract. `ipc.rs` talks to the backend at a configured
@@ -21,6 +26,7 @@ mod ipc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use browser_runtime::{BrowserRuntime, BrowserRuntimeState, WebView2RuntimeAdapter};
 use events::EventRelayState;
 use ipc::{IpcClientState, KeyringTokenStore};
 use sidecar::SidecarSupervision;
@@ -98,12 +104,38 @@ pub fn run() {
             ipc::refresh_session,
             ipc::get_system_health,
             events::connect_event_stream,
+            browser_runtime::browser_create_surface,
+            browser_runtime::browser_navigate,
+            browser_runtime::browser_reload,
+            browser_runtime::browser_query_state,
+            browser_runtime::browser_destroy,
         ])
         .setup(|app| {
             app.manage(Mutex::new(SidecarSupervision::Disabled));
             app.manage(ShutdownIntentFlag::new(AtomicBool::new(false)));
             app.manage(Arc::new(IpcClientState::new(Arc::new(KeyringTokenStore))));
             app.manage(Arc::new(EventRelayState::default()));
+
+            // Browser-B1: one `WebView2RuntimeAdapter` for the whole app,
+            // embedding every browser surface as a child of the "main"
+            // window (Browser-B1 preflight §5 — Option A). `app_data_dir()`
+            // falling back to the current directory rather than failing
+            // app startup mirrors this file's own existing degrade-not-fail
+            // posture for non-essential setup (see `backend_process::
+            // spawn_and_monitor`'s doc) — a missing/unresolvable app-data
+            // directory means browser profiles fail later, at surface
+            // creation, not that KORTEX itself fails to start.
+            let profile_root = app
+                .path()
+                .app_data_dir()
+                .map(|dir| browser_runtime::default_profile_root(&dir))
+                .unwrap_or_else(|_| browser_runtime::default_profile_root(std::path::Path::new(".")));
+            let main_window = app
+                .get_window("main")
+                .expect("the \"main\" window is declared in tauri.conf.json and always exists at setup time");
+            let browser_runtime: Arc<dyn BrowserRuntime> =
+                Arc::new(WebView2RuntimeAdapter::new(main_window, profile_root));
+            app.manage(BrowserRuntimeState(browser_runtime));
 
             // Phase A: register the `kortex-auth://` scheme with the OS at
             // runtime (Windows/Linux only — macOS resolves schemes solely
@@ -147,6 +179,14 @@ pub fn run() {
                 if let Some(flag) = app_handle.try_state::<ShutdownIntentFlag>() {
                     flag.store(true, Ordering::SeqCst);
                 }
+                // Browser-B1: destroy every live browser surface before the
+                // main window (their parent) closes — the explicit "no
+                // orphaned browser runtime" requirement, not left to
+                // whatever implicit teardown a closing parent window might
+                // or might not cascade to its child webviews.
+                if let Some(state) = app_handle.try_state::<BrowserRuntimeState>() {
+                    state.0.destroy_all();
+                }
                 if let Some(state) = app_handle.try_state::<Mutex<SidecarSupervision>>() {
                     if let Ok(mut supervision) = state.lock() {
                         supervision.shutdown();
@@ -170,6 +210,13 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(flag) = app_handle.try_state::<ShutdownIntentFlag>() {
                     flag.store(true, Ordering::SeqCst);
+                }
+                // Browser-B1: `destroy_all` is idempotent (an already-empty
+                // runtime is a no-op — see its own test), so running it here
+                // even after `CloseRequested` already ran is harmless, same
+                // reasoning as `SidecarSupervision::shutdown` below.
+                if let Some(state) = app_handle.try_state::<BrowserRuntimeState>() {
+                    state.0.destroy_all();
                 }
                 if let Some(state) = app_handle.try_state::<Mutex<SidecarSupervision>>() {
                     if let Ok(mut supervision) = state.lock() {
