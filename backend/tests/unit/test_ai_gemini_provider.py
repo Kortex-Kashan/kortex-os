@@ -295,10 +295,10 @@ async def test_model_precedence_falls_back_to_provider_default() -> None:
         return httpx.Response(200, json=_generate_response("ok"))
 
     resolver, _g = _real_resolver(tenant_a_default_model=None)
-    provider = _make_provider(handler, resolver=resolver, default_model="gemini-3.8-flash")
+    provider = _make_provider(handler, resolver=resolver, default_model="gemini-3.7-flash")
     await provider.generate_text(_request())
-    assert "gemini-3.8-flash:generateContent" in seen["path"]
-    assert DEFAULT_GEMINI_MODEL != "gemini-3.8-flash"  # proves the override, not the module default
+    assert "gemini-3.7-flash:generateContent" in seen["path"]
+    assert DEFAULT_GEMINI_MODEL != "gemini-3.7-flash"  # proves the override, not the module default
 
 
 # ---------------------------------------------------------------------------

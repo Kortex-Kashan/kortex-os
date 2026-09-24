@@ -25,7 +25,7 @@ describe("SessionManager", () => {
       expect(session).toEqual({
         version: CURRENT_SESSION_VERSION,
         activeApplication: null,
-        theme: "light",
+        theme: "dark",
         preferences: { sidebarCollapsed: false },
         updatedAt: expect.any(String),
       });

@@ -1092,6 +1092,15 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
     async def start(self) -> None:
         """Transition engine state to RUNNING."""
         self.ensure_state(EngineState.READY, EngineState.STOPPED)
+        if self._model_catalog_store is not None:
+            try:
+                for metadata in self._provider_registry.list_providers():
+                    provider = self._provider_registry.get(metadata.provider_id)
+                    if hasattr(provider, "register_discovered_models"):
+                        models = await self._model_catalog_store.list_distinct_models_for_provider(metadata.provider_id)
+                        provider.register_discovered_models(models)
+            except Exception:
+                self.logger.warning("Failed to hydrate discovered model catalog on start.", exc_info=True)
         self._set_state(EngineState.RUNNING)
         self.logger.info("AI Orchestration Engine is RUNNING.")
 
@@ -2081,6 +2090,8 @@ class AIOrchestrationEngine(BaseEngine, IEngineDiagnostics):
                     # as it was (see AIProviderModelCatalogRow's docstring).
                     try:
                         await self._model_catalog_store.replace_catalog(tenant_id, provider_id, discovered)
+                        if hasattr(provider, "register_discovered_models"):
+                            provider.register_discovered_models([m.model_id for m in discovered])
                     except Exception:
                         logger.exception(
                             "Failed to persist discovered model catalog for tenant=%s provider=%s. "

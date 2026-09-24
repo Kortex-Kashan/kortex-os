@@ -70,6 +70,37 @@ export function ExecStatusBadge({ status }: { status: ExternalExecutionStatus })
   return <Badge variant={statusToVariant(status)}>{status.replace(/_/g, " ")}</Badge>;
 }
 
+export type GovernedActionStage =
+  | "APPROVAL_REQUIRED"
+  | "AWAITING_APPROVAL"
+  | "AUTHORIZED"
+  | "EXECUTING"
+  | "COMPLETED"
+  | "FAILED"
+  | "DENIED";
+
+const GOVERNED_STAGE_CONFIG: Record<
+  GovernedActionStage,
+  { label: string; variant: BadgeVariant }
+> = {
+  APPROVAL_REQUIRED: { label: "Approval Required", variant: "outline" },
+  AWAITING_APPROVAL: { label: "Awaiting Approval", variant: "destructive" },
+  AUTHORIZED: { label: "Authorized", variant: "default" },
+  EXECUTING: { label: "Executing", variant: "secondary" },
+  COMPLETED: { label: "Completed", variant: "default" },
+  FAILED: { label: "Failed", variant: "destructive" },
+  DENIED: { label: "Denied", variant: "destructive" },
+};
+
+export function GovernedLifecycleBadge({ stage }: { stage: GovernedActionStage | string }) {
+  const norm = stage.toUpperCase().replace(/\s+/g, "_") as GovernedActionStage;
+  const conf = GOVERNED_STAGE_CONFIG[norm] ?? {
+    label: stage.replace(/_/g, " "),
+    variant: "outline" as const,
+  };
+  return <Badge variant={conf.variant}>{conf.label}</Badge>;
+}
+
 /** Format an ISO datetime string for display: relative-from-now alongside
  * the absolute local time, so an operator on a surface that polls every
  * 10-30s doesn't have to do date math to tell "3 minutes ago" from "3 hours

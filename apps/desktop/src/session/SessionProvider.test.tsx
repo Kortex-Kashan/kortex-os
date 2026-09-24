@@ -122,7 +122,7 @@ describe("SessionProvider", () => {
     render(<RouterProvider router={buildTestRouter(makeApps(), [], ["/"])} />);
 
     expect(screen.getByTestId("session-active")).toHaveTextContent("none");
-    expect(screen.getByTestId("live-theme")).toHaveTextContent("light");
+    expect(screen.getByTestId("live-theme")).toHaveTextContent("dark");
   });
 
   it("persists session updates to localStorage as workspace state changes", () => {
@@ -201,7 +201,7 @@ describe("session persistence of live changes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Toggle Theme" }));
 
-    expect(screen.getByTestId("live-theme")).toHaveTextContent("dark");
-    expect(loadSession()?.theme).toBe("dark");
+    expect(screen.getByTestId("live-theme")).toHaveTextContent("light");
+    expect(loadSession()?.theme).toBe("light");
   });
 });

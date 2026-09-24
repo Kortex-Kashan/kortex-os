@@ -22,13 +22,15 @@ import {
 } from "@kortex/design-system";
 import { useAuth } from "@/auth/AuthProvider";
 import { useUiStore } from "@/stores/uiStore";
+import { AiStudioIcon } from "@/workspace/icons";
 
+import { Brand } from "./Brand";
 import { SearchIcon, UserIcon } from "./icons";
 import { NAV_GROUPS } from "./navigation/navConfig";
 
 export function TopBar() {
   const [commandOpen, setCommandOpen] = React.useState(false);
-  const { theme, toggleTheme } = useUiStore();
+  const { theme, toggleTheme, copilotOpen, toggleCopilot } = useUiStore();
   const auth = useAuth();
   const navigate = useNavigate();
   const identityLabel =
@@ -41,36 +43,57 @@ export function TopBar() {
       if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         setCommandOpen((open) => !open);
+      } else if (event.key === "j" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        toggleCopilot();
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [toggleCopilot]);
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-4">
+    <header className="relative z-40 flex h-14 shrink-0 items-center gap-4 border-b border-border/70 bg-background/85 px-4 backdrop-blur-xl">
+      <Brand compact />
+
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mx-auto w-full max-w-md justify-start gap-2 text-muted-foreground"
+            onClick={() => setCommandOpen(true)}
+          >
+            <SearchIcon className="size-4 text-cyan" />
+            <span className="flex-1 text-left">Search KORTEX or run a command</span>
+            <kbd className="rounded border border-border px-1 text-caption">Ctrl K</kbd>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Open the command palette</TooltipContent>
+      </Tooltip>
+
       <div className="flex items-center gap-3">
-        <span className="text-body font-semibold">KORTEX OS</span>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              variant="outline"
+              variant={copilotOpen ? "default" : "outline"}
               size="sm"
-              className="gap-2 text-muted-foreground"
-              onClick={() => setCommandOpen(true)}
+              className="gap-2 border-primary/40 hover:border-primary"
+              onClick={toggleCopilot}
+              aria-label="Toggle KORTEX AI Copilot"
             >
-              <SearchIcon className="size-4" />
-              Search
-              <kbd className="rounded border border-border px-1 text-caption">Ctrl K</kbd>
+              <AiStudioIcon className="size-4 text-primary" aria-hidden="true" />
+              <span className="hidden font-medium sm:inline">KORTEX AI</span>
+              <kbd className="hidden rounded border border-border px-1 text-caption text-muted-foreground md:inline">
+                Ctrl J
+              </kbd>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Open the command palette</TooltipContent>
+          <TooltipContent>Toggle persistent KORTEX AI Copilot (Ctrl+J)</TooltipContent>
         </Tooltip>
-      </div>
 
-      <div className="flex items-center gap-3">
-        <Badge variant="secondary" className="gap-1.5">
-          <span className="size-1.5 rounded-full bg-primary" aria-hidden="true" />
+        <Badge variant="secondary" className="gap-1.5 border border-success/25 bg-success/10 text-success">
+          <span className="size-1.5 rounded-full bg-success shadow-[0_0_8px_hsl(var(--success))]" aria-hidden="true" />
           System nominal
         </Badge>
 
@@ -104,6 +127,14 @@ export function TopBar() {
               }}
             >
               Toggle theme
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                toggleCopilot();
+                setCommandOpen(false);
+              }}
+            >
+              Toggle KORTEX AI Copilot
             </CommandItem>
             {import.meta.env.DEV && (
               <CommandItem

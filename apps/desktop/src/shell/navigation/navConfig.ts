@@ -20,8 +20,35 @@ export interface NavGroup {
  * identically-labeled disabled entries here would put two elements with
  * the same accessible name in the same sidebar — one functional, one a
  * permanent dead end.
+ *
+ * Visual transformation milestone: added `business` and `ai` groups so the
+ * sidebar reads as a business-facing product (CRM/ERP/Analytics/Browser/
+ * Voice, AI Agents/MCP) rather than only exposing engine-internal concepts
+ * up top. `Analytics` moved out of `intelligence` into `business` — it must
+ * have exactly one navigation identity, not two placeholders with the same
+ * label — every other previously-existing item is unchanged and still
+ * present, just consolidated under its original group.
  */
 export const NAV_GROUPS: NavGroup[] = [
+  {
+    id: "business",
+    label: "Business",
+    items: [
+      { id: "crm", label: "CRM" },
+      { id: "erp", label: "ERP" },
+      { id: "analytics", label: "Analytics" },
+      { id: "browser", label: "Browser" },
+      { id: "voice", label: "Voice" },
+    ],
+  },
+  {
+    id: "ai",
+    label: "AI",
+    items: [
+      { id: "ai-agents", label: "AI Agents" },
+      { id: "mcp", label: "MCP" },
+    ],
+  },
   {
     id: "core",
     label: "Core",
@@ -57,7 +84,6 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Intelligence",
     items: [
       { id: "knowledge", label: "Knowledge" },
-      { id: "analytics", label: "Analytics" },
       { id: "insights", label: "Insights" },
     ],
   },

@@ -15,19 +15,20 @@ This file proves the chain B4 exists to deliver, end to end:
              -> agent.orchestrate -> trusted routing -> provider invocation
 
 **Every registered provider is cloud, and no local provider exists.**
-`bootstrap.py` registers OpenAI, Gemini and Anthropic whenever a credential
-resolver is available -- which B4 requires -- so all three are present. With
-no local provider to fall back to, "did cloud routing happen?" is answered
-unambiguously by whether the request succeeded, rather than by inspecting a
-routing decision that a test could assert while the decision was ignored
-downstream.
+`bootstrap.py` registers OpenAI, Gemini, Anthropic, and OpenRouter whenever
+a credential resolver is available -- which B4 requires -- so all four are
+present. With no local provider to fall back to, "did cloud routing happen?"
+is answered unambiguously by whether the request succeeded, rather than by
+inspecting a routing decision that a test could assert while the decision
+was ignored downstream.
 
-Only Gemini's mock transport ever succeeds; OpenAI's and Anthropic's answer
-`401` to everything. That is not decoration. All three are cloud, so they
-are all ranked candidates, and `ProviderFallbackChain` walks the list -- an
-unmocked provider in that chain would attempt a **real network call** the
-moment Gemini failed. Pinning them to a deterministic offline failure keeps
-"Gemini answered" unambiguous and keeps the suite hermetic.
+Only Gemini's mock transport ever succeeds; OpenAI's, Anthropic's, and
+OpenRouter's answer `401` to everything. That is not decoration. All four
+are cloud, so they are all ranked candidates, and `ProviderFallbackChain`
+walks the list -- an unmocked provider in that chain would attempt a **real
+network call** the moment Gemini failed. Pinning them to a deterministic
+offline failure keeps "Gemini answered" unambiguous and keeps the suite
+hermetic.
 
 `enable_cloud_models` is left `False` throughout, exactly as
 `kernel_bootstrap.py` leaves it in production. Every success below is
@@ -60,6 +61,7 @@ from kortex.engines.ai.exceptions import (
 )
 from kortex.engines.ai.gemini_provider import GEMINI_PROVIDER_ID, GeminiProvider
 from kortex.engines.ai.openai_provider import OpenAIProvider
+from kortex.engines.ai.openrouter_provider import OPENROUTER_PROVIDER_ID, OpenRouterProvider
 from kortex.engines.ai.persistence import AIProviderConfigStore
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.models import PrincipalRecord, RolePermissionRecord
@@ -140,6 +142,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, Any, list[ht
     inert_transport = httpx.MockTransport(_always_unauthorized)
     openai_client = httpx.AsyncClient(transport=inert_transport)
     anthropic_client = httpx.AsyncClient(transport=inert_transport)
+    openrouter_client = httpx.AsyncClient(transport=inert_transport)
     resolver = TenantCredentialResolver(AIProviderConfigStore(data_store), security_engine.get_secret)
 
     bootstrap = KernelProductionBootstrap(
@@ -158,6 +161,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, Any, list[ht
             GeminiProvider(credential_resolver=resolver, client=client),
             OpenAIProvider(credential_resolver=resolver, client=openai_client),
             AnthropicProvider(credential_resolver=resolver, client=anthropic_client),
+            OpenRouterProvider(credential_resolver=resolver, client=openrouter_client),
         ],
         registered_engines=list(kernel.get_all_engines().keys()),
         secret_getter=security_engine.get_secret,
@@ -196,6 +200,7 @@ async def kernel_env(tmp_path: Path) -> AsyncIterator[tuple[Kernel, Any, list[ht
         await client.aclose()
         await openai_client.aclose()
         await anthropic_client.aclose()
+        await openrouter_client.aclose()
         await db_manager.disconnect()
 
 
@@ -284,14 +289,11 @@ async def test_every_registered_provider_is_cloud_and_the_authority_is_wired(ker
     _kernel, ai_engine, _seen = kernel_env
     metadata = ai_engine.provider_registry.list_providers()
 
-    assert {m.provider_id for m in metadata} == {GEMINI_PROVIDER_ID, "openai", "anthropic"}
+    expected_cloud_providers = {GEMINI_PROVIDER_ID, "openai", "anthropic", OPENROUTER_PROVIDER_ID}
+    assert {m.provider_id for m in metadata} == expected_cloud_providers
     assert {m.endpoint_type for m in metadata} == {"cloud"}
     assert ai_engine.cloud_routing_authority is not None
-    assert ai_engine.cloud_routing_authority.cloud_provider_ids() == {
-        GEMINI_PROVIDER_ID,
-        "openai",
-        "anthropic",
-    }
+    assert ai_engine.cloud_routing_authority.cloud_provider_ids() == expected_cloud_providers
 
 
 # ---------------------------------------------------------------------------

@@ -73,7 +73,7 @@ const Sidebar = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement>>
         ref={ref}
         data-collapsed={collapsed}
         className={cn(
-          "flex h-full flex-col border-r border-border bg-card text-card-foreground transition-[width] duration-200",
+          "flex h-full flex-col border-r border-border/60 bg-gradient-to-b from-panel-strong/95 to-background text-card-foreground backdrop-blur-xl transition-[width] duration-200",
           collapsed ? "w-14" : "w-64",
           className,
         )}
@@ -150,7 +150,7 @@ const sidebarMenuButtonVariants = cva(
   {
     variants: {
       active: {
-        true: "bg-accent font-medium text-accent-foreground",
+        true: "bg-accent font-medium text-accent-foreground shadow-[inset_2px_0_0_0_hsl(var(--cyan))]",
         false: "",
       },
     },

@@ -12,6 +12,13 @@ afterEach(() => {
 
 describe("useThemeSync", () => {
   it("does not add the dark class to the document root when the theme is light", () => {
+    // uiStore now defaults to "dark" — set the precondition explicitly
+    // rather than relying on the store's own default, mirroring the
+    // "theme is dark on mount" case below.
+    act(() => {
+      useUiStore.setState({ theme: "light" });
+    });
+
     renderHook(() => useThemeSync());
 
     expect(document.documentElement.classList.contains("dark")).toBe(false);

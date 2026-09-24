@@ -208,3 +208,58 @@ export async function listConversations(): Promise<ConversationSummaryDto[]> {
   const arr = Array.isArray(raw) ? raw : [];
   return (arr as RawConversationSummary[]).map(toConversationSummary);
 }
+
+export interface AgentTaskSummaryDto {
+  taskId: string;
+  tenantId: string;
+  userId: string;
+  conversationId: string;
+  goal: string;
+  agentRole: string;
+  status: AgentTaskStatus;
+  currentStep: number;
+  maxSteps: number;
+  totalTokens: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Calls `kortex.ai.agent.list` to retrieve persisted agent reasoning tasks. */
+export async function listAgentTasks(
+  tenantId: string,
+  status?: AgentTaskStatus,
+): Promise<AgentTaskSummaryDto[]> {
+  const raw = await invoke("kortex.ai.agent.list", {
+    tenant_id: tenantId,
+    status: status ?? null,
+  });
+  const arr = Array.isArray(raw) ? raw : [];
+  return (arr as Array<Record<string, unknown>>).map((r) => {
+    const task = (r.task as Record<string, unknown>) ?? {};
+    const usage = (r.total_token_usage as Record<string, unknown>) ?? {};
+    return {
+      taskId: String(task.task_id ?? r.task_id ?? ""),
+      tenantId: String(task.tenant_id ?? r.tenant_id ?? ""),
+      userId: String(task.user_id ?? r.user_id ?? ""),
+      conversationId: String(task.conversation_id ?? r.conversation_id ?? ""),
+      goal: String(task.goal ?? ""),
+      agentRole: String(task.agent_role ?? "general"),
+      status: (r.status as AgentTaskStatus) ?? "COMPLETED",
+      currentStep: Number(r.current_step ?? 0),
+      maxSteps: Number(task.max_steps ?? 10),
+      totalTokens: Number(usage.total_tokens ?? 0),
+      createdAt: String(r.created_at ?? ""),
+      updatedAt: String(r.updated_at ?? ""),
+    };
+  });
+}
+
+/** Calls `kortex.ai.agent.cancel` to abort an active reasoning task. */
+export async function cancelAgentTask(taskId: string, tenantId: string): Promise<boolean> {
+  const raw = await invoke("kortex.ai.agent.cancel", {
+    task_id: taskId,
+    tenant_id: tenantId,
+  });
+  return Boolean(raw);
+}
+

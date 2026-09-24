@@ -2,60 +2,114 @@
  * KORTEX design tokens — single source of truth for semantic color roles.
  * Consumed by design-system/tailwind.config.js and, through it, by every
  * app that extends that preset (ADR-0002 §10.2, §10.4).
+ *
+ * Palette: KORTEX's dark "command center" identity is the default surface
+ * (`.dark`, applied by default — see apps/desktop/src/stores/uiStore.ts);
+ * `:root` is the light counterpart, kept fully coherent (bright surfaces,
+ * navy-blue accents), not an afterthought. All values are HSL triplets
+ * (no `hsl()` wrapper) to match the existing `hsl(var(--x))` convention
+ * every consumer already relies on — swapping this file's values restyles
+ * the whole app without touching component code.
  */
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 222 47% 11%;
+  --background: 220 32% 97%;
+  --foreground: 224 42% 13%;
 
-  --card: 0 0% 100%;
-  --card-foreground: 222 47% 11%;
+  --card: 220 40% 99%;
+  --card-foreground: 224 42% 13%;
 
-  --primary: 221 83% 53%;
+  --popover: 220 38% 99%;
+  --popover-foreground: 224 42% 13%;
+
+  --primary: 221 78% 46%;
   --primary-foreground: 210 40% 98%;
 
-  --secondary: 210 40% 96%;
-  --secondary-foreground: 222 47% 11%;
+  --secondary: 220 26% 93%;
+  --secondary-foreground: 224 30% 20%;
 
-  --muted: 210 40% 96%;
-  --muted-foreground: 215 16% 45%;
+  --muted: 220 24% 93%;
+  --muted-foreground: 222 15% 42%;
 
-  --accent: 210 40% 96%;
-  --accent-foreground: 222 47% 11%;
+  --accent: 220 32% 90%;
+  --accent-foreground: 224 30% 20%;
 
-  --destructive: 0 84% 48%;
+  --destructive: 0 75% 48%;
   --destructive-foreground: 210 40% 98%;
 
-  --border: 214 32% 91%;
-  --input: 214 32% 91%;
-  --ring: 221 83% 53%;
+  --border: 220 20% 85%;
+  --input: 220 22% 82%;
+  --ring: 221 72% 50%;
+
+  --cyan: 195 78% 38%;
+  --success: 152 55% 36%;
+  --warning: 35 78% 44%;
+
+  --chart-1: 221 78% 50%;
+  --chart-2: 195 70% 42%;
+  --chart-3: 280 55% 52%;
+  --chart-4: 258 60% 54%;
+  --chart-5: 35 80% 52%;
+
+  --panel: 220 40% 99%;
+  --panel-strong: 220 34% 96%;
+  --glow-primary: 221 78% 46%;
+
+  --shadow-low: 0 1px 2px 0 rgb(15 23 42 / 0.06);
+  --shadow-medium: 0 6px 16px -4px rgb(15 23 42 / 0.12);
+  --shadow-high: 0 18px 45px -12px rgb(15 23 42 / 0.18);
+  --shadow-panel: 0 18px 50px -14px rgb(30 58 138 / 0.14);
+  --shadow-glow: 0 0 0 1px hsl(var(--primary) / 0.16), 0 8px 24px -6px hsl(var(--primary) / 0.28);
 
   --radius: 0.5rem;
 }
 
 .dark {
-  --background: 222 47% 11%;
-  --foreground: 210 40% 98%;
+  --background: 230 38% 7%;
+  --foreground: 220 25% 95%;
 
-  --card: 222 47% 14%;
-  --card-foreground: 210 40% 98%;
+  --card: 228 32% 10%;
+  --card-foreground: 220 22% 96%;
 
-  --primary: 217 91% 60%;
-  --primary-foreground: 222 47% 11%;
+  --popover: 228 34% 9%;
+  --popover-foreground: 220 22% 96%;
 
-  --secondary: 217 33% 17%;
-  --secondary-foreground: 210 40% 98%;
+  --primary: 217 91% 63%;
+  --primary-foreground: 224 45% 10%;
 
-  --muted: 217 33% 17%;
-  --muted-foreground: 215 20% 65%;
+  --secondary: 226 26% 16%;
+  --secondary-foreground: 220 16% 88%;
 
-  --accent: 217 33% 17%;
-  --accent-foreground: 210 40% 98%;
+  --muted: 226 24% 14%;
+  --muted-foreground: 220 13% 65%;
 
-  --destructive: 0 63% 31%;
+  --accent: 226 36% 20%;
+  --accent-foreground: 220 22% 96%;
+
+  --destructive: 0 68% 34%;
   --destructive-foreground: 210 40% 98%;
 
-  --border: 217 33% 20%;
-  --input: 217 33% 20%;
-  --ring: 224 76% 48%;
+  --border: 226 28% 24%;
+  --input: 226 26% 26%;
+  --ring: 199 89% 63%;
+
+  --cyan: 189 82% 62%;
+  --success: 160 62% 55%;
+  --warning: 38 88% 60%;
+
+  --chart-1: 217 85% 66%;
+  --chart-2: 189 78% 58%;
+  --chart-3: 280 68% 68%;
+  --chart-4: 258 74% 68%;
+  --chart-5: 35 85% 65%;
+
+  --panel: 228 32% 10%;
+  --panel-strong: 228 34% 13%;
+  --glow-primary: 217 91% 63%;
+
+  --shadow-low: 0 1px 2px 0 rgb(2 6 23 / 0.4);
+  --shadow-medium: 0 8px 24px -6px rgb(2 6 23 / 0.5);
+  --shadow-high: 0 24px 60px -16px rgb(2 6 23 / 0.6);
+  --shadow-panel: 0 20px 55px -14px rgb(2 6 23 / 0.55);
+  --shadow-glow: 0 0 0 1px hsl(var(--primary) / 0.35), 0 0 32px -4px hsl(var(--primary) / 0.45);
 }
