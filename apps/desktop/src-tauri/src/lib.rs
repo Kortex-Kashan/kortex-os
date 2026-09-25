@@ -10,10 +10,10 @@ mod backend_process;
 mod secure_keys;
 mod sidecar;
 
-// Browser-B1: the `BrowserRuntime` abstraction and its `WebView2RuntimeAdapter`
+// Browser-B1/B2: the `BrowserRuntime` abstraction and its `WebView2RuntimeAdapter`
 // implementation — see the module's own docs for the exact scope boundary
-// (no capability/governance layer, no history, no tabs; just create/
-// navigate/reload/query/destroy through an embedded child webview).
+// (no capability/governance layer, no persistent profiles; create/navigate/
+// reload/back/forward/resize/query/destroy through embedded child webviews).
 mod browser_runtime;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
@@ -107,6 +107,9 @@ pub fn run() {
             browser_runtime::browser_create_surface,
             browser_runtime::browser_navigate,
             browser_runtime::browser_reload,
+            browser_runtime::browser_go_back,
+            browser_runtime::browser_go_forward,
+            browser_runtime::browser_set_bounds,
             browser_runtime::browser_query_state,
             browser_runtime::browser_destroy,
         ])

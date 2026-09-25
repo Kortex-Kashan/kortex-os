@@ -42,11 +42,12 @@ The desktop shell's existing webview is scoped by `apps/desktop/src-tauri/capabi
 `IKortexBrowserRuntime` is responsible for exactly the primitive operations a concrete browser engine must supply — nothing about policy, capability governance, or AI observation belongs in this interface:
 
 - Lifecycle: create/dispose a browsing surface bound to a given profile.
-- Navigation: navigate to a URL, go back/forward/reload, report loading state.
-- Content access: read the DOM/rendered text, take a screenshot, execute a constrained content read (never raw arbitrary script injection from an untrusted caller — see `browser_security_model.md`).
-- Input: dispatch a click/type at a given target.
-- Downloads: intercept and report a download request (the runtime reports, Browser Policy decides — see `browser_security_model.md` §5).
-- Profile binding: which on-disk profile (cookies/storage/history) this surface reads/writes.
+- Navigation: navigate to a URL, go back/forward/reload, report loading state. **Implemented in Browser-B2** (`go_back`/`go_forward`/`BrowserSurfaceState.loading`) via raw `ICoreWebView2` COM calls — wry's stable `Webview` API has no session-history or navigation-event surface; see §2.6.
+- Positioning: reposition/resize a surface within the window (`set_bounds`, Browser-B2 — used for both window-resize tracking and tab-switching, see §2.6).
+- Content access: read the DOM/rendered text, take a screenshot, execute a constrained content read (never raw arbitrary script injection from an untrusted caller — see `browser_security_model.md`). Not yet implemented — Browser-B5's job.
+- Input: dispatch a click/type at a given target. Not yet implemented — Browser-B5's job.
+- Downloads: intercept and report a download request (the runtime reports, Browser Policy decides — see `browser_security_model.md` §5). Not yet implemented.
+- Profile binding: which on-disk profile (cookies/storage/history) this surface reads/writes. Browser-B2's tabs all share one process-lifetime, non-persisted profile id; real per-tenant persistence is Browser-B3's job.
 
 This interface is deliberately primitive/mechanical. Everything about *whether* an action is allowed (a website's own JS trying to call it vs. a governed AI action vs. a direct human click) is Browser Policy's responsibility, layered above the runtime, never inside it.
 
@@ -68,6 +69,14 @@ Implements `IKortexBrowserRuntime` against the Microsoft Edge WebView2 runtime. 
 ### 2.4 Future adapters
 
 `CefRuntimeAdapter` and `ChromiumRuntimeAdapter` (or a platform-native equivalent for a future macOS/Linux desktop build) are anticipated but explicitly out of scope until a concrete platform/portability need arises. Any future adapter must satisfy the same `IKortexBrowserRuntime` contract and must not require changes to Browser Policy, Browser Capabilities, or the AI Browser Agent — those layers depend only on the interface.
+
+### 2.5 Platform boundary — raw WebView2 COM (Browser-B2)
+
+Back/forward navigation and real event-driven loading state (§2.2) required going beneath wry's stable `Webview` wrapper to raw `ICoreWebView2` COM calls, reached via `Webview::with_webview()` → `PlatformWebview.controller().CoreWebView2()`. This is Windows-only machinery (`webview2-com`/`windows` crates, promoted from transitive to direct dependencies — `browser_decision_log.md` D15). Every such call is `#[cfg(windows)]`-gated with an explicit, safe `#[cfg(not(windows))]` fallback, so `apps/desktop/src-tauri` keeps compiling on the non-Windows target this repository's own CI (`rust` job) already builds against — confirming the crate compiles there at all was not possible from this Windows development session (`browser_decision_log.md` OD-B6) and is deferred to that CI job's next real run.
+
+### 2.6 Browser-B2 UI: tabs without a new runtime concept
+
+`apps/desktop/src/features/browser/hooks/useBrowserTabs.ts` is the single place tab state lives. Every tab is a real `BrowserSurfaceId` (created via `create_surface`) — there is no frontend-only placeholder tab. Only the active tab's surface is positioned inside the real content-area rect (tracked via `ResizeObserver`, not polling); every other open tab's surface is parked at a fixed off-screen `SurfaceBounds` via the same `set_bounds` primitive used for resize-tracking (`browser_decision_log.md` D16) — deliberately not a second "active"/"visible" concept on `BrowserRuntime`. Switching tabs therefore never reloads or discards a tab's state, and closing a tab calls `destroy` on its real surface. `BrowserToolbar`/`BrowserTabBar` are presentational; all Tauri IPC goes through `features/browser/api.ts`, matching every other feature's convention.
 
 ## 3. Browser ↔ AI Engine boundary
 

@@ -14,6 +14,21 @@ description = "Allows the webview to reload an existing browser surface."
 commands.allow = ["browser_reload"]
 
 [[permission]]
+identifier = "allow-browser-go-back"
+description = "Allows the webview to navigate an existing browser surface one step back in its own session history (Browser-B2)."
+commands.allow = ["browser_go_back"]
+
+[[permission]]
+identifier = "allow-browser-go-forward"
+description = "Allows the webview to navigate an existing browser surface one step forward in its own session history (Browser-B2)."
+commands.allow = ["browser_go_forward"]
+
+[[permission]]
+identifier = "allow-browser-set-bounds"
+description = "Allows the webview to reposition/resize an existing browser surface within the main window (Browser-B2 — window-resize tracking and tab-switching). Grants no capability over any other surface and no filesystem/native access — this only moves/resizes an already-created WebView2 child surface."
+commands.allow = ["browser_set_bounds"]
+
+[[permission]]
 identifier = "allow-browser-query-state"
 description = "Allows the webview to read a browser surface's current URL only — no page content, no cookies, no credentials."
 commands.allow = ["browser_query_state"]

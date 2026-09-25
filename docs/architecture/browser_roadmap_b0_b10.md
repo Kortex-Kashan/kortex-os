@@ -57,16 +57,16 @@ NEXT PHASE: Browser-B2 — Browser UI. Recommended prerequisite: resolve OD-B5 f
 ## Browser-B2 — Browser UI
 
 PHASE: B2
-STATUS: NOT STARTED
+STATUS: **COMPLETE**
 OBJECTIVE: Tabs, address/navigation bar, loading state, back/forward/reload, basic browser controls — a human-usable browser surface with no AI involvement and no persistent profile yet.
-ARCHITECTURE: New frontend feature module `apps/desktop/src/features/browser/{components,hooks,api.ts}`, wired to the existing but unwired `{ id: "browser" }` nav entry at `apps/desktop/src/shell/navigation/navConfig.ts:40`.
-IMPLEMENTATION: To be filled when B2 starts.
-SECURITY: No new capability surface — UI only, driving B1's runtime directly through its own `api.ts`, following the same feature-module isolation rule every other feature already follows.
-TESTS: To be filled when B2 starts.
-EVIDENCE: To be filled when B2 completes.
-KNOWN LIMITATIONS: No persistent sessions yet (B3).
-DECISIONS: To be filled as B2 makes them.
-NEXT PHASE: Browser-B3 — Profiles + Persistent Sessions.
+ARCHITECTURE: `BrowserRuntime` extended with `go_back`/`go_forward`/`set_bounds` (D15, D16); `apps/desktop/src/features/browser/{api.ts, hooks/useBrowserTabs.ts, components/{BrowserApp,BrowserToolbar,BrowserTabBar}.tsx}`. Tab switching parks inactive surfaces off-screen via `set_bounds` rather than destroying them (D16) — every visible tab is a real `BrowserSurfaceId`. Wired through `DEFAULT_APPLICATIONS` (unchanged from Browser-B1; the `id: "browser"` entry was already live).
+IMPLEMENTATION: Complete — see `docs/architecture/browser_b2_implementation_report.md` for the full file-by-file account. Rust: `browser_runtime.rs` extended (`SurfaceBounds`, `SurfaceEntry`, `go_back`/`go_forward`/`set_bounds`, real event-driven `loading` via `NavigationStarting`/`NavigationCompleted`), 3 new commands, `Cargo.toml` (`webview2-com`/`windows` promoted to direct dependencies — no new crate/version). Frontend: toolbar, tab bar, tab-management hook, resize tracking via `ResizeObserver`.
+SECURITY: Unchanged security boundary from Browser-B1 — `capabilities/browser.json` still scopes via `"webviews": ["main"]` (never `"windows"`), still declares no `remote` field. Three new commands added to the same capability, with matching new `permissions/browser-runtime.toml` entries; no existing permission was widened. No new native/filesystem/shell access introduced.
+TESTS: Rust `cargo test --lib`: 68 passed (66 pre-existing + 2 new), 0 failed, 2 ignored. `cargo clippy --lib`: 0 new warnings. Frontend `pnpm typecheck`: clean. `pnpm test` (full suite): 830 passed across 101 files (0 failed) — 21 new tests across `BrowserToolbar.test.tsx` (incl. `normalizeAddress`), `BrowserTabBar.test.tsx`, and a full rewrite of `BrowserApp.test.tsx` for the tab-based UI. **Honest gap, larger than Browser-B1's**: the new raw WebView2 COM code (`GoBack`/`GoForward`/`CanGoBack`/`CanGoForward`/navigation events) has no automated test at all (same OD-B5 environment limitation), and the `#[cfg(not(windows))]` fallback path could not be confirmed by an actual Linux compiler run from this Windows machine (OD-B6) — only by manual review of deliberately trivial code.
+EVIDENCE: `docs/architecture/browser_b2_implementation_report.md` §Evidence.
+KNOWN LIMITATIONS: See `browser_known_limitations.md`'s "As of Browser-B2" section — no automated test for the new COM code, no Linux-target compile confirmation (OD-B6), no visual/interactive confirmation of real back/forward/loading/resize behavior, tabs share one non-persisted profile, no persistent profiles/sessions (B3), no capability layer (B5).
+DECISIONS: D15 (raw COM for back/forward/loading, cfg-gated), D16 (tab switching via `set_bounds`, no new "active" concept) — see `browser_decision_log.md`. OD-B6 opened (Linux-target compile confirmation pending real CI).
+NEXT PHASE: Browser-B3 — Profiles + Persistent Sessions. Recommended prerequisites: resolve OD-B5 and OD-B6 first; a human should manually verify real back/forward/loading/resize/tab-switching behavior in the actual running app before B3 builds further on this.
 
 ---
 

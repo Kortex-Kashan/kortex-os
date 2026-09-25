@@ -2017,6 +2017,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "tokio-tungstenite",
+ "webview2-com",
+ "windows",
  "windows-sys 0.59.0",
 ]
 

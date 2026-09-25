@@ -66,6 +66,17 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_Security",
 ] }
+# Browser-B2: direct access to raw WebView2 COM interfaces
+# (`ICoreWebView2::GoBack`/`GoForward`/`CanGoBack`/`CanGoForward`, and the
+# `NavigationStarting`/`NavigationCompleted` events real loading state is
+# derived from — see `browser_runtime.rs`'s module doc). Both crates are
+# already present in Cargo.lock, transitively, via `tauri`'s own `wry`
+# feature — this promotes them to a direct dependency, at the exact
+# already-resolved versions (`webview2-com` 0.38, `windows` 0.61, matching
+# `tauri-2.11.5`'s own Cargo.toml pins exactly), so this crate's own code can
+# name their types. No new crate or version enters the dependency graph.
+webview2-com = "0.38"
+windows = "0.61"
 
 [dev-dependencies]
 hyper = { version = "1", features = ["server", "http1"] }
