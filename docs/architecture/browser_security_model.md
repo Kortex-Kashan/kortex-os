@@ -16,9 +16,11 @@ Browser Policy should be modeled as a **fifth, independent enforcement point ana
 - Any native-capability request whose origin traces back to page content is routed through the same `CapabilityDispatcher.dispatch()` path used everywhere else, with Browser Policy acting as an additional, mandatory authorization check that runs before capability projection — **default-deny for page-initiated calls**, allow-listed per profile/origin only.
 - This mirrors, and reuses, `SecurityEngine.authorize()`'s existing role — it does not replace or duplicate it.
 
+**Correction from the Browser-B4 architecture gate**: the framing above describes a FUTURE state — B5/B6's governed, AI-invocable `kortex.browser.*` capabilities, which really do reach `CapabilityDispatcher`. It does not describe B4's own scope. A human click or a page-triggered navigation/redirect/popup/download/permission-request never produces a capability call at all, and — decisively — `ICoreWebView2NavigationStartingEventArgs` (the WebView2 event B4's navigation policy hooks into) has no `GetDeferral` method, confirmed directly against the pinned `webview2-com-sys-0.38.2` bindings (D28). The allow/deny decision for these four action kinds is therefore made by `BrowserPolicyEngine` (`browser_policy.rs`) — local, synchronous, in-process, with zero I/O and no backend round-trip — never by routing through `CapabilityDispatcher`. This section's "fifth enforcement point" design remains the right target for B5/B6's governed AI actions; it was simply never reachable for B4's own, structurally different action kinds.
+
 ## 3. Domain & navigation policy
 
-Deferred to B4 design, but must define: which domains a given profile/tab may navigate to by default, how a governed AI action's `browser.navigate` differs in allowed scope from a human-driven navigation, and how redirects/cross-origin navigations inside a single page load are treated (a page redirecting itself is not a new "navigation policy decision" in the same sense as a fresh `browser.navigate` call).
+**Implemented in Browser-B4** (`apps/desktop/src-tauri/src/browser_policy.rs`): a single, fixed, global V1 policy (no per-tenant/per-profile variation — see the module's own doc comment on why). Only `http`/`https` navigation schemes are potentially allowed — every other scheme (`file:`, `javascript:`, `data:`, `about:`, `blob:`, any custom scheme including `kortex-auth:`) is denied via `DenyReason::SchemeNotAllowed`. Destination safety is evaluated independently: local/private-network destinations (loopback, RFC1918, link-local, "this network", carrier-grade NAT, IPv6 unique-local/link-local, the `localhost` hostname, including the trailing-dot FQDN form and numeric-encoding bypass variants — D33) are denied via the first-class `DenyReason::PrivateNetworkAccess`. A malformed URI, or one that parses but produces no host at all for an http(s) scheme, fails closed (`DenyReason::Malformed`). `is_user_initiated`/`is_redirected` do not change the decision — a dangerous destination is dangerous regardless of whether a human clicked it or a script redirected to it, so B0's question of "how a governed AI action's `browser.navigate` differs in allowed scope from a human-driven navigation" does not arise in V1: there is no governed AI action yet (B5+), and the one navigation policy that exists applies identically regardless of trigger source. Known, disclosed gap: no DNS resolution is performed, so a DNS-rebinding-style bypass is not caught (OD-B16).
 
 ## 4. JavaScript / native bridge policy
 
@@ -32,7 +34,7 @@ This means the *base* "page-loaded JavaScript has no bridge to any native capabi
 
 ## 5. Download / upload policy
 
-Deferred to B4. The runtime (`IKortexBrowserRuntime`) only *reports* a download/upload request; Browser Policy decides whether it proceeds, at what destination, and whether it requires the durable human-approval flow (§7) rather than a simple client-side confirm dialog.
+**Implemented in Browser-B4, as a V1 baseline only**: every `DownloadStarting` event is denied unconditionally (`ICoreWebView2DownloadStartingEventArgs::SetCancel(true)`) — there is no save-path confirmation UI, and no policy evaluation of the destination or the requesting origin, since the decision is a constant in V1 (OD-B14). Live-confirmed (D32) that the file genuinely never reaches disk, not merely that the audit log records a denial. Upload policy is not addressed by B4 at all — this crate has no upload-interception hook yet. `browser.download` as a real, governed, confirmed capability remains a later milestone's responsibility, per the original B4 brief.
 
 ## 6. AI action policy
 
@@ -69,7 +71,9 @@ Page content that reaches the AI Browser Agent (via `browser.read`/`.extract`) i
 
 ## 12. Permission escalation rules & external trust boundaries
 
-A website's own requested permission (e.g. clipboard, camera, geolocation, via WebView2's native permission-request APIs) is a request to Browser Policy, never an automatic grant, and never conflated with a KORTEX capability grant — a website being allowed to read the clipboard (a WebView2-native permission) must never be treated as equivalent to a KORTEX AI action being allowed to invoke `browser.read`. These are two different permission systems that must not be allowed to escalate into each other. Full rules deferred to B4.
+A website's own requested permission (e.g. clipboard, camera, geolocation, via WebView2's native permission-request APIs) is a request to Browser Policy, never an automatic grant, and never conflated with a KORTEX capability grant — a website being allowed to read the clipboard (a WebView2-native permission) must never be treated as equivalent to a KORTEX AI action being allowed to invoke `browser.read`. These are two different permission systems that must not be allowed to escalate into each other.
+
+**Implemented in Browser-B4, as a V1 baseline only**: every `PermissionRequested` event is denied unconditionally (`ICoreWebView2PermissionRequestedEventArgs::SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)`), regardless of `PermissionKind` (geolocation, camera, microphone, notifications, clipboard, etc.) — there is no per-permission-kind policy and no human-confirmation UI yet (OD-B15). `ICoreWebView2PermissionRequestedEventArgs::GetDeferral` is confirmed present in the pinned bindings, so a future milestone can add a real confirmation flow without restructuring this enforcement point — but that flow does not exist today.
 
 ## 13. Not yet answered (explicitly, per Browser-B0 scope)
 

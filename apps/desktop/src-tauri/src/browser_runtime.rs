@@ -58,12 +58,23 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{LogicalPosition, LogicalSize, Runtime, Webview, WebviewUrl, Window};
+use tauri::{Emitter, LogicalPosition, LogicalSize, Runtime, Webview, WebviewUrl, Window};
+
+use crate::browser_policy::{
+    self, DenyReason, NavigationRequest, PolicyAction, PolicyAuditEvent, PolicyDecision,
+    PolicyDeniedEvent, POLICY_DENIED_EVENT_NAME,
+};
 
 #[cfg(windows)]
-use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Settings4};
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2, ICoreWebView2NavigationStartingEventArgs, ICoreWebView2Settings4,
+    ICoreWebView2_4, COREWEBVIEW2_PERMISSION_STATE_DENY,
+};
 #[cfg(windows)]
-use webview2_com::{NavigationCompletedEventHandler, NavigationStartingEventHandler};
+use webview2_com::{
+    DownloadStartingEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
+};
 #[cfg(windows)]
 use windows::core::Interface;
 
@@ -252,6 +263,17 @@ struct SurfaceEntry<R: Runtime> {
 pub struct WebView2RuntimeAdapter<R: Runtime> {
     window: Window<R>,
     surfaces: Mutex<HashMap<BrowserSurfaceId, SurfaceEntry<R>>>,
+    /// Browser-B4: where policy-denial audit events are appended — the
+    /// SAME file `browser_profile_store.rs` already writes its own
+    /// lifecycle audit entries to (`<profiles_root>/audit.log`), so
+    /// operators have one place to look. A plain `PathBuf`, not a
+    /// `BrowserProfileStore` reference: this keeps `WebView2RuntimeAdapter`
+    /// profile-AGNOSTIC in the sense that matters (no tenant/profile
+    /// concept, no dependency on that module's types) while still writing
+    /// to the same physical location — no different in spirit from the
+    /// crash-log path `lib.rs`'s own panic hook already writes to
+    /// unconditionally.
+    policy_audit_log_path: PathBuf,
 }
 
 impl<R: Runtime> WebView2RuntimeAdapter<R> {
@@ -259,11 +281,13 @@ impl<R: Runtime> WebView2RuntimeAdapter<R> {
     /// into as a child webview (Browser-B1 preflight §5 — Option A,
     /// confirmed supported by the pinned Tauri version). No longer takes a
     /// profile root (Browser-B3): this adapter is profile-agnostic — see
-    /// the module's own doc comment.
-    pub fn new(window: Window<R>) -> Self {
+    /// the module's own doc comment. `policy_audit_log_path` is Browser-B4's
+    /// addition — see the field's own doc comment.
+    pub fn new(window: Window<R>, policy_audit_log_path: PathBuf) -> Self {
         Self {
             window,
             surfaces: Mutex::new(HashMap::new()),
+            policy_audit_log_path,
         }
     }
 
@@ -309,39 +333,98 @@ impl<R: Runtime> WebView2RuntimeAdapter<R> {
 const DEFAULT_SURFACE_WIDTH: f64 = 1024.0;
 const DEFAULT_SURFACE_HEIGHT: f64 = 720.0;
 
-/// Registers WebView2 `NavigationStarting`/`NavigationCompleted` handlers
-/// that flip `loading` true/false — the one genuinely event-driven piece of
-/// state this runtime tracks, rather than guessing from command completion
-/// (posting a navigate/reload/back/forward command only proves the request
-/// was dispatched, not that the resulting page load has finished).
+/// Registers WebView2's `NavigationStarting`/`NavigationCompleted`/
+/// `NewWindowRequested`/`DownloadStarting`/`PermissionRequested` handlers.
+/// `NavigationCompleted` still only flips `loading` true/false, as before.
+/// `NavigationStarting` does two things: (1) Browser-B4's navigation
+/// policy check — reads `Uri`/`IsUserInitiated`/`IsRedirected`, calls
+/// `browser_policy::evaluate_navigation`, and calls `SetCancel(true)` to
+/// actually block a denied navigation (the ONLY mechanism available: this
+/// event does not support `GetDeferral`, confirmed against the pinned
+/// `webview2-com-sys-0.38.2` bindings, so the decision must be synchronous
+/// — see `browser_policy.rs`'s own module doc for why this can never be a
+/// backend round-trip); (2) the original `loading` flag, now set only when
+/// the navigation is ALLOWED — a denied navigation never truly "loads"
+/// anything, so it should not report `loading: true` even momentarily.
 ///
-/// Tokens are intentionally not retained for explicit `remove_*` calls: both
-/// handlers' lifetime is tied to the underlying WebView2 instance, which is
-/// torn down wholesale on `destroy`/`destroy_all` — a token-tracking
-/// abstraction here would manage cleanup this runtime already gets for
-/// free, and the task brief explicitly asks not to introduce unnecessary
-/// abstractions.
+/// `NewWindowRequested`/`DownloadStarting`/`PermissionRequested` each deny
+/// unconditionally, per the B4 approval decision ("DENY all... do not
+/// implement popup-to-tab conversion yet", "BLOCK all downloads... do not
+/// implement save-path confirmation", "DENY by default... do not implement
+/// human confirmation UI yet"): no policy evaluation is needed since the
+/// decision is a constant, unlike navigation's per-request evaluation. Each
+/// still goes through the same audit+frontend-event plumbing as a denied
+/// navigation (`record_and_emit_policy_denial`), reusing
+/// `DenyReason::NotYetSupported` (see its own doc comment on why "not yet"
+/// rather than "denied").
+///
+/// Tokens are intentionally not retained for explicit `remove_*` calls: all
+/// five handlers' lifetime is tied to the underlying WebView2 instance,
+/// which is torn down wholesale on `destroy`/`destroy_all` — a
+/// token-tracking abstraction here would manage cleanup this runtime
+/// already gets for free, and the task brief explicitly asks not to
+/// introduce unnecessary abstractions.
 ///
 /// Registration failure is swallowed deliberately: it can only fail if the
 /// WebView2 controller/environment isn't ready immediately after
 /// `add_child` returns, which Tauri's own synchronous wait inside
 /// `add_child` is documented to guarantee against. If it ever did fail,
-/// `loading` simply stays `false` forever for that surface — a degraded-
-/// but-safe outcome, never a crash or a hang.
+/// `loading` simply stays `false` forever for that surface, and — more
+/// importantly for B4 — none of the five policy enforcement points above
+/// would ever run for that surface at all: a popup, a download, or a
+/// permission request would fall through to WebView2's own default
+/// behavior instead of being blocked. This degrade-but-safe-for-`loading`
+/// outcome is NOT safe for policy enforcement; see the known-limitations
+/// doc for this disclosed gap (registration failure is only theoretically
+/// reachable per the reasoning above, but "theoretically unreachable" is
+/// not the same claim as "verified enforced").
 #[cfg(windows)]
 fn register_navigation_loading_handlers<R: Runtime>(
     webview: &Webview<R>,
     loading: Arc<AtomicBool>,
+    surface_id: BrowserSurfaceId,
+    policy_audit_log_path: PathBuf,
 ) {
     let loading_for_start = loading.clone();
     let loading_for_complete = loading;
+    let emit_webview = webview.clone();
     let _ = webview.with_webview(move |platform_webview| {
         let core = unsafe { platform_webview.controller().CoreWebView2() };
         let Ok(core) = core else { return };
 
+        let policy_surface_id = surface_id.clone();
+        let policy_audit_log_path_for_start = policy_audit_log_path.clone();
+        let emit_webview_for_nav = emit_webview.clone();
         let start_handler =
-            NavigationStartingEventHandler::create(Box::new(move |_sender, _args| {
-                loading_for_start.store(true, Ordering::Relaxed);
+            NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
+                let Some(args) = args else { return Ok(()) };
+                match evaluate_navigation_args(&args) {
+                    Ok(PolicyDecision::Allow) => {
+                        loading_for_start.store(true, Ordering::Relaxed);
+                    }
+                    Ok(PolicyDecision::Deny(reason)) => {
+                        unsafe { args.SetCancel(true) }?;
+                        deny_navigation(
+                            &emit_webview_for_nav,
+                            &policy_audit_log_path_for_start,
+                            &policy_surface_id,
+                            reason,
+                        );
+                    }
+                    Err(_) => {
+                        // `Uri`/`IsUserInitiated`/`IsRedirected` themselves
+                        // failed (an unexpected COM failure, not a policy
+                        // question) — fail closed: cancel rather than let an
+                        // un-evaluatable navigation proceed unchecked.
+                        unsafe { args.SetCancel(true) }?;
+                        deny_navigation(
+                            &emit_webview_for_nav,
+                            &policy_audit_log_path_for_start,
+                            &policy_surface_id,
+                            DenyReason::Malformed,
+                        );
+                    }
+                }
                 Ok(())
             }));
         let mut start_token: i64 = 0;
@@ -354,13 +437,189 @@ fn register_navigation_loading_handlers<R: Runtime>(
             }));
         let mut complete_token: i64 = 0;
         let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
+
+        let policy_surface_id_popup = surface_id.clone();
+        let policy_audit_log_path_for_popup = policy_audit_log_path.clone();
+        let emit_webview_for_popup = emit_webview.clone();
+        let popup_handler =
+            NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
+                let Some(args) = args else { return Ok(()) };
+                // Leaving `NewWindow` unset (never calling `SetNewWindow`) and
+                // marking the event `Handled` is the documented way to refuse a
+                // popup outright — verified live in B4.8, not merely assumed
+                // from documentation.
+                unsafe { args.SetHandled(true) }?;
+                deny_popup_download_or_permission(
+                    &emit_webview_for_popup,
+                    &policy_audit_log_path_for_popup,
+                    &policy_surface_id_popup,
+                    PolicyAction::Popup,
+                    PolicyAuditEvent::PopupBlocked,
+                );
+                Ok(())
+            }));
+        let mut popup_token: i64 = 0;
+        let _ = unsafe { core.add_NewWindowRequested(&popup_handler, &mut popup_token) };
+
+        // `DownloadStarting` is declared on the versioned `ICoreWebView2_4`
+        // interface, not the base `ICoreWebView2` (confirmed against the
+        // pinned `webview2-com-sys-0.38.2` bindings) — unlike
+        // `NewWindowRequested`/`PermissionRequested`, which both live on the
+        // base interface. Best-effort cast, matching
+        // `disable_password_and_autofill`'s own precedent: on a WebView2
+        // runtime old enough not to implement `ICoreWebView2_4`, downloads
+        // would not be blocked by this handler at all — a disclosed gap
+        // (see the known-limitations doc), not a silently-assumed-safe
+        // simplification.
+        if let Ok(core4) = core.cast::<ICoreWebView2_4>() {
+            let policy_surface_id_download = surface_id.clone();
+            let policy_audit_log_path_for_download = policy_audit_log_path.clone();
+            let emit_webview_for_download = emit_webview.clone();
+            let download_handler =
+                DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
+                    let Some(args) = args else { return Ok(()) };
+                    unsafe { args.SetCancel(true) }?;
+                    deny_popup_download_or_permission(
+                        &emit_webview_for_download,
+                        &policy_audit_log_path_for_download,
+                        &policy_surface_id_download,
+                        PolicyAction::Download,
+                        PolicyAuditEvent::DownloadBlocked,
+                    );
+                    Ok(())
+                }));
+            let mut download_token: i64 = 0;
+            let _ = unsafe { core4.add_DownloadStarting(&download_handler, &mut download_token) };
+        }
+
+        let policy_surface_id_permission = surface_id.clone();
+        let policy_audit_log_path_for_permission = policy_audit_log_path.clone();
+        let emit_webview_for_permission = emit_webview.clone();
+        let permission_handler =
+            PermissionRequestedEventHandler::create(Box::new(move |_sender, args| {
+                let Some(args) = args else { return Ok(()) };
+                unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) }?;
+                deny_popup_download_or_permission(
+                    &emit_webview_for_permission,
+                    &policy_audit_log_path_for_permission,
+                    &policy_surface_id_permission,
+                    PolicyAction::Permission,
+                    PolicyAuditEvent::PermissionDenied,
+                );
+                Ok(())
+            }));
+        let mut permission_token: i64 = 0;
+        let _ = unsafe { core.add_PermissionRequested(&permission_handler, &mut permission_token) };
     });
+}
+
+/// Reads `Uri`/`IsUserInitiated`/`IsRedirected` off a real
+/// `NavigationStarting` event and evaluates Browser-B4's policy — a thin
+/// adapter between raw COM out-parameters and `browser_policy`'s pure,
+/// COM-free `evaluate_navigation`, kept separate specifically so the
+/// policy logic itself never needs to be `unsafe` or WebView2-aware (see
+/// `browser_policy.rs`'s own module doc on why it never references a
+/// WebView2/wry type).
+#[cfg(windows)]
+fn evaluate_navigation_args(
+    args: &ICoreWebView2NavigationStartingEventArgs,
+) -> windows::core::Result<PolicyDecision> {
+    let mut uri_pwstr = windows::core::PWSTR::null();
+    unsafe { args.Uri(&mut uri_pwstr) }?;
+    let uri = unsafe { uri_pwstr.to_string() }.unwrap_or_default();
+
+    let mut is_user_initiated = windows::core::BOOL(0);
+    unsafe { args.IsUserInitiated(&mut is_user_initiated) }?;
+    let mut is_redirected = windows::core::BOOL(0);
+    unsafe { args.IsRedirected(&mut is_redirected) }?;
+
+    Ok(browser_policy::evaluate_navigation(&NavigationRequest {
+        uri,
+        is_user_initiated: is_user_initiated.as_bool(),
+        is_redirected: is_redirected.as_bool(),
+    }))
+}
+
+/// Records the audit entry and notifies the trusted frontend (`"main"`
+/// only — never the browser surface itself, which has no reason to
+/// receive this and, being untrusted content, must never be trusted with
+/// it either) that a policy action was blocked. Deliberately minimal
+/// payload — see `browser_policy::PolicyDeniedEvent`'s own doc comment on
+/// why the full URI is never included. Shared by `deny_navigation` (which
+/// has a genuine per-request `reason`) and `deny_popup_download_or_permission`
+/// (whose `reason` is always the fixed `DenyReason::NotYetSupported`).
+#[cfg(windows)]
+fn record_and_emit_policy_denial<R: Runtime>(
+    webview: &Webview<R>,
+    policy_audit_log_path: &std::path::Path,
+    surface_id: &BrowserSurfaceId,
+    action: PolicyAction,
+    audit_event: PolicyAuditEvent,
+    reason: DenyReason,
+) {
+    browser_policy::record_policy_audit_event(
+        policy_audit_log_path,
+        audit_event,
+        surface_id.as_label(),
+        Some(&reason),
+    );
+    let _ = webview.emit_to(
+        "main",
+        POLICY_DENIED_EVENT_NAME,
+        PolicyDeniedEvent {
+            surface_id: surface_id.as_label().to_string(),
+            action,
+            reason,
+        },
+    );
+}
+
+#[cfg(windows)]
+fn deny_navigation<R: Runtime>(
+    webview: &Webview<R>,
+    policy_audit_log_path: &std::path::Path,
+    surface_id: &BrowserSurfaceId,
+    reason: DenyReason,
+) {
+    record_and_emit_policy_denial(
+        webview,
+        policy_audit_log_path,
+        surface_id,
+        PolicyAction::Navigation,
+        PolicyAuditEvent::NavigationBlocked,
+        reason,
+    );
+}
+
+/// Popups, downloads, and native permission requests are denied
+/// unconditionally in Browser-B4 V1 — see `DenyReason::NotYetSupported`'s
+/// own doc comment — so, unlike `deny_navigation`, there is only ever one
+/// possible `reason` to report here; callers supply only which action kind
+/// and which audit event this particular denial is for.
+#[cfg(windows)]
+fn deny_popup_download_or_permission<R: Runtime>(
+    webview: &Webview<R>,
+    policy_audit_log_path: &std::path::Path,
+    surface_id: &BrowserSurfaceId,
+    action: PolicyAction,
+    audit_event: PolicyAuditEvent,
+) {
+    record_and_emit_policy_denial(
+        webview,
+        policy_audit_log_path,
+        surface_id,
+        action,
+        audit_event,
+        DenyReason::NotYetSupported,
+    );
 }
 
 #[cfg(not(windows))]
 fn register_navigation_loading_handlers<R: Runtime>(
     _webview: &Webview<R>,
     _loading: Arc<AtomicBool>,
+    _surface_id: BrowserSurfaceId,
+    _policy_audit_log_path: PathBuf,
 ) {
     // No non-Windows `BrowserRuntime` adapter exists yet (ADR-0019 §5) —
     // `loading` simply never flips from its initial `false` on this
@@ -486,7 +745,12 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
             })?;
 
         let loading = Arc::new(AtomicBool::new(false));
-        register_navigation_loading_handlers(&webview, loading.clone());
+        register_navigation_loading_handlers(
+            &webview,
+            loading.clone(),
+            surface_id.clone(),
+            self.policy_audit_log_path.clone(),
+        );
         disable_password_and_autofill(&webview);
 
         let mut surfaces = self.surfaces.lock().unwrap();

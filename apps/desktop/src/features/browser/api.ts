@@ -13,6 +13,7 @@
 // `BrowserRuntimeError` shape below, rather than resolving to an envelope.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Opaque handle to a live browser surface — never a WebView2 handle,
  * never anything the frontend can use to reach the surface except through
@@ -184,4 +185,70 @@ export async function queryBrowserSurfaceState(surfaceId: BrowserSurfaceId): Pro
 
 export async function destroyBrowserSurface(surfaceId: BrowserSurfaceId): Promise<void> {
   await invoke("browser_destroy", { surfaceId });
+}
+
+/** Browser-B4: coarse network classification for a denied destination —
+ * mirrors `browser_policy::NetworkClassification` exactly. Deliberately
+ * never the raw host/IP — see `PolicyDeniedEvent`'s own doc comment. */
+export type NetworkClassification =
+  | "loopback"
+  | "privateIpv4"
+  | "linkLocalIpv4"
+  | "thisNetworkIpv4"
+  | "carrierGradeNat"
+  | "uniqueLocalIpv6"
+  | "linkLocalIpv6"
+  | "localHostname";
+
+export type PolicyDenyReason =
+  | { kind: "malformed" }
+  | { kind: "schemeNotAllowed"; scheme: string }
+  | { kind: "privateNetworkAccess"; classification: NetworkClassification }
+  | { kind: "notYetSupported" };
+
+export type PolicyAction = "navigation" | "popup" | "download" | "permission";
+
+/** Browser-B4: emitted (to the trusted "main" webview only — never the
+ * browser surface itself) whenever navigation policy blocks an action.
+ * Deliberately minimal: never the full URI, never a path/query/fragment —
+ * see `browser_policy::PolicyDeniedEvent`'s own doc comment on why. */
+export interface PolicyDeniedEvent {
+  surfaceId: BrowserSurfaceId;
+  action: PolicyAction;
+  reason: PolicyDenyReason;
+}
+
+const POLICY_DENIED_EVENT_NAME = "browser://policy-denied";
+
+export function onBrowserPolicyDenied(handler: (event: PolicyDeniedEvent) => void): Promise<UnlistenFn> {
+  return listen<PolicyDeniedEvent>(POLICY_DENIED_EVENT_NAME, (event) => handler(event.payload));
+}
+
+/** Human-readable summary for `PolicyDeniedEvent.reason` — used by the
+ * frontend's error banner. Never surfaces a URI/host (there isn't one in
+ * the payload to surface — see the event's own doc comment). `action` is
+ * only consulted for `"notYetSupported"`, whose message would otherwise be
+ * too vague to be useful ("this action is not yet supported" says nothing
+ * a user could act on) — every other reason is self-describing regardless
+ * of which action triggered it. */
+export function policyDenyReasonMessage(reason: PolicyDenyReason, action: PolicyAction): string {
+  switch (reason.kind) {
+    case "malformed":
+      return "the destination could not be understood";
+    case "schemeNotAllowed":
+      return `the "${reason.scheme}:" scheme is not allowed`;
+    case "privateNetworkAccess":
+      return "local/private network destinations are not allowed";
+    case "notYetSupported":
+      switch (action) {
+        case "popup":
+          return "popups are not yet supported";
+        case "download":
+          return "downloads are not yet supported";
+        case "permission":
+          return "this site's permission request is not yet supported";
+        case "navigation":
+          return "this action is not yet supported";
+      }
+  }
 }

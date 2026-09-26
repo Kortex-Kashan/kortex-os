@@ -19,6 +19,10 @@ mod browser_runtime;
 // identity/storage/locking/lifecycle. Sits alongside `browser_runtime`,
 // never inside it — see that module's own doc for the boundary.
 mod browser_profile_store;
+// Browser-B4: `BrowserPolicyEngine` — local, synchronous, deterministic
+// navigation policy (scheme + local/private-network destination checks).
+// See that module's own doc for why this cannot be a backend round-trip.
+mod browser_policy;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
 // transport contract. `ipc.rs` talks to the backend at a configured
@@ -128,32 +132,44 @@ pub fn run() {
             app.manage(Arc::new(IpcClientState::new(Arc::new(KeyringTokenStore))));
             app.manage(Arc::new(EventRelayState::default()));
 
-            // Browser-B1: one `WebView2RuntimeAdapter` for the whole app,
-            // embedding every browser surface as a child of the "main"
-            // window (Browser-B1 preflight §5 — Option A). Profile-agnostic
-            // as of Browser-B3 — see that module's own doc comment.
-            let main_window = app
-                .get_window("main")
-                .expect("the \"main\" window is declared in tauri.conf.json and always exists at setup time");
-            let browser_runtime: Arc<dyn BrowserRuntime> = Arc::new(WebView2RuntimeAdapter::new(main_window));
-            app.manage(BrowserRuntimeState(browser_runtime));
-
-            // Browser-B3: `BrowserProfileStore` owns tenant-scoped profile
-            // identity/storage/locking — `app_data_dir()` falling back to
-            // the current directory rather than failing app startup mirrors
-            // this file's own existing degrade-not-fail posture (see
-            // `backend_process::spawn_and_monitor`'s doc); a missing/
-            // unresolvable app-data directory means browser profiles fail
-            // later, at profile creation, not that KORTEX itself fails to
-            // start. `BrowserProfileStore::new` also performs the one-time,
-            // idempotent legacy-default-profile quarantine check (Browser-B1/
-            // B2's non-tenant-scoped `browser-profiles/default`, if it
-            // exists) — see that function's own doc comment.
+            // `app_data_dir()` falling back to the current directory rather
+            // than failing app startup mirrors this file's own existing
+            // degrade-not-fail posture (see `backend_process::
+            // spawn_and_monitor`'s doc). Computed once, up front, since both
+            // the profile store (Browser-B3) and the policy audit log
+            // (Browser-B4) live under it.
             let profiles_root = app
                 .path()
                 .app_data_dir()
                 .map(|dir| browser_profile_store::browser_profiles_root(&dir))
                 .unwrap_or_else(|_| browser_profile_store::browser_profiles_root(std::path::Path::new(".")));
+
+            // Browser-B1: one `WebView2RuntimeAdapter` for the whole app,
+            // embedding every browser surface as a child of the "main"
+            // window (Browser-B1 preflight §5 — Option A). Profile-agnostic
+            // as of Browser-B3 — see that module's own doc comment.
+            // Browser-B4: also given the policy audit log path (the SAME
+            // file `BrowserProfileStore` writes its own audit entries to,
+            // below) — see `WebView2RuntimeAdapter::policy_audit_log_path`'s
+            // own doc comment for why this is a plain path, not a
+            // dependency on `BrowserProfileStore` itself.
+            let main_window = app
+                .get_window("main")
+                .expect("the \"main\" window is declared in tauri.conf.json and always exists at setup time");
+            let policy_audit_log_path = profiles_root.join("audit.log");
+            let browser_runtime: Arc<dyn BrowserRuntime> =
+                Arc::new(WebView2RuntimeAdapter::new(main_window, policy_audit_log_path));
+            app.manage(BrowserRuntimeState(browser_runtime));
+
+            // Browser-B3: `BrowserProfileStore` owns tenant-scoped profile
+            // identity/storage/locking. Never fails app startup (same
+            // degrade-not-fail posture as above) — a missing/unresolvable
+            // app-data directory means browser profiles fail later, at
+            // profile creation, not that KORTEX itself fails to start.
+            // `BrowserProfileStore::new` also performs the one-time,
+            // idempotent legacy-default-profile quarantine check (Browser-B1/
+            // B2's non-tenant-scoped `browser-profiles/default`, if it
+            // exists) — see that function's own doc comment.
             match BrowserProfileStore::new(profiles_root) {
                 Ok(store) => {
                     app.manage(BrowserProfileStoreState(Arc::new(store)));

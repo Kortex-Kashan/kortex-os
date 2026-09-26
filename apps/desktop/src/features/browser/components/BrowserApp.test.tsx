@@ -14,6 +14,7 @@ const {
   createProfileMock,
   renameProfileMock,
   deleteProfileMock,
+  onPolicyDeniedMock,
 } = vi.hoisted(() => ({
   createMock: vi.fn(),
   navigateMock: vi.fn(),
@@ -27,6 +28,13 @@ const {
   createProfileMock: vi.fn(),
   renameProfileMock: vi.fn(),
   deleteProfileMock: vi.fn(),
+  // Real `onBrowserPolicyDenied` wraps `@tauri-apps/api/event`'s `listen()`,
+  // which reaches into `window.__TAURI_INTERNALS__` — never present in this
+  // jsdom test environment (no other test in this file mocks the Tauri IPC
+  // bridge either). Mocked here the same way every other `../api` call is,
+  // to a resolved no-op unlisten, so `useBrowserTabs`'s policy-denied
+  // subscription effect never touches the real bridge.
+  onPolicyDeniedMock: vi.fn(),
 }));
 
 vi.mock("../api", async () => {
@@ -45,6 +53,7 @@ vi.mock("../api", async () => {
     createBrowserProfile: createProfileMock,
     renameBrowserProfile: renameProfileMock,
     deleteBrowserProfile: deleteProfileMock,
+    onBrowserPolicyDenied: onPolicyDeniedMock,
   };
 });
 
@@ -80,7 +89,9 @@ beforeEach(() => {
   createProfileMock.mockReset();
   renameProfileMock.mockReset();
   deleteProfileMock.mockReset();
+  onPolicyDeniedMock.mockReset();
   setBoundsMock.mockResolvedValue(undefined);
+  onPolicyDeniedMock.mockResolvedValue(() => {});
   // A single already-existing, available profile by default — most tests
   // exercise tab behavior, not profile auto-creation/switching, so they
   // don't need `useBrowserProfiles` to take the auto-create path.

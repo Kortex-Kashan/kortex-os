@@ -8,6 +8,8 @@ import {
   isBrowserProfileError,
   isBrowserRuntimeError,
   navigateBrowserSurface,
+  onBrowserPolicyDenied,
+  policyDenyReasonMessage,
   queryBrowserSurfaceState,
   reloadBrowserSurface,
   setBrowserSurfaceBounds,
@@ -136,6 +138,23 @@ export function useBrowserTabs(profileId: BrowserProfileId | null) {
       window.removeEventListener("resize", applyActiveBounds);
     };
   }, [applyActiveBounds]);
+
+  // Browser-B4: surfaces a policy-denied navigation (scheme not allowed,
+  // local/private-network destination, or a malformed URI), popup,
+  // download, or native permission request as the same error banner every
+  // other operation's failure already uses — a denied action must never be
+  // silent. The event payload deliberately never carries the actual
+  // URI/host (see `PolicyDeniedEvent`'s own doc comment), so this message
+  // is necessarily coarse ("this destination is not allowed"), never a
+  // specific address.
+  useEffect(() => {
+    const unlistenPromise = onBrowserPolicyDenied((event) => {
+      setError(`Blocked: ${policyDenyReasonMessage(event.reason, event.action)}.`);
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   const refreshTabState = useCallback(async (id: BrowserSurfaceId) => {
     try {

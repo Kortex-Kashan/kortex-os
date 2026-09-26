@@ -56,6 +56,13 @@ tauri-plugin-shell = "2"
 # existing dependencies); added directly here rather than relying on that
 # implicitly, since this crate now calls it itself.
 getrandom = "0.2"
+# Browser-B4: `url::Host` (Domain/Ipv4/Ipv6) — `tauri::Url` is a flat
+# re-export of `url::Url` only, not the `url` crate's own `Host` type this
+# module needs for `Url::host()`. Already present transitively (pulled in
+# by `tauri`/`reqwest`) at 2.5.8 — promoted to a direct dependency at the
+# exact already-resolved version, same precedent as D15's `webview2-com`/
+# `windows` promotion: no new crate or version enters the dependency graph.
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 # Win32 Job Object support for sidecar child process lifecycle binding
