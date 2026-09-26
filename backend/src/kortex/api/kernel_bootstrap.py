@@ -36,6 +36,7 @@ from kortex.engines.ai.identity import AI_SYSTEM_PRINCIPAL_ID, AI_SYSTEM_ROLE, A
 from kortex.engines.ai.ollama_provider import OllamaProvider
 from kortex.engines.ai.tools import ToolDefinition, ToolRegistry
 from kortex.engines.backup.engine import BackupEngine
+from kortex.engines.browser.engine import BROWSER_CAPABILITY_NAMES, BrowserCapabilityEngine
 from kortex.engines.configuration.engine import SystemSettings
 from kortex.engines.connector.actions import ConnectorActionBootstrapEngine, ConnectorActionDescriptor
 from kortex.engines.connector.drivers import DummyConnectorDriver, HttpRestConnectorDriver
@@ -308,6 +309,15 @@ async def build_and_boot_kernel() -> Kernel:
     # `DesktopAutomationEngine.start()`.
     kernel.register_engine(DesktopAutomationEngine())
 
+    # Browser-B5.0-B5.4: `kortex.browser.*` capability foundation. Same
+    # pre-boot registration point as `DesktopAutomationEngine` immediately
+    # above, and the same "no gateway/no real execution yet" degrade-safe
+    # posture — every capability is registered and dispatchable, but every
+    # handler mints a Capability Execution Grant (or, for `browser.download`,
+    # unconditionally refuses) rather than reaching a live WebView2 surface.
+    # See `docs/architecture/browser_b5_architecture_gate.md`.
+    kernel.register_engine(BrowserCapabilityEngine())
+
     # Phase 7 — Production Hardening — Backup Engine: Snapshot capture, packaging, encryption, validation, retention.
     kernel.register_engine(BackupEngine())
 
@@ -353,6 +363,18 @@ async def build_and_boot_kernel() -> Kernel:
     # (kortex.engines.ai.capability_tool_bridge) -- additive to, and independent
     # of, the M7.3 hand-authored connector tools registered just above.
     register_connector_action_ai_tools(kernel, ai_engine.tool_registry, REFERENCE_ACTION_DESCRIPTORS)
+
+    # Browser-B5.2: generate + register AI tool definitions for the
+    # `kortex.browser.*` capabilities (already registered pre-boot by
+    # BrowserCapabilityEngine above), reading each one's own real
+    # `parameters_schema`/`is_read_only` back from the live Kernel Registry —
+    # never a hand-typed, parallel schema. `is_mutation` is therefore
+    # `not is_read_only`, exactly as `capability_tool_bridge` already
+    # derives for every other F5-bridged capability: `navigate`/`click`/
+    # `type`/`download` come out `is_mutation=True` (approval-gated by the
+    # existing `ToolGovernanceEvaluator`/`DurableAIApprovalPolicy` chain,
+    # unchanged); `read`/`extract`/`screenshot` come out `is_mutation=False`.
+    register_browser_ai_tools(kernel, ai_engine.tool_registry)
 
     return kernel
 
@@ -529,6 +551,26 @@ def register_connector_action_ai_tools(
             tool = generate_tool_definition_from_capability(capability)
         except CapabilityToolBridgeError as exc:
             logger.warning("Skipping AI tool generation for '%s': %s", descriptor.capability_name, exc)
+            continue
+        _register_tool_if_absent(tool_registry, tool)
+
+
+def register_browser_ai_tools(kernel: Kernel, tool_registry: ToolRegistry) -> None:
+    """Browser-B5.2: generate and register an AI tool for each
+    `kortex.browser.*` capability, via the same `capability_tool_bridge`
+    path `register_connector_action_ai_tools` above already established —
+    not a new registration mechanism. `BROWSER_CAPABILITY_NAMES` excludes
+    `kortex.browser.grant_verification_key` deliberately (desktop-process
+    infrastructure, never an AI-invocable tool). Idempotent via the same
+    `_register_tool_if_absent` guard every other `register_*_ai_tools`
+    function uses.
+    """
+    for capability_name in BROWSER_CAPABILITY_NAMES:
+        capability = kernel.get_capability(capability_name)
+        try:
+            tool = generate_tool_definition_from_capability(capability)
+        except CapabilityToolBridgeError as exc:
+            logger.warning("Skipping AI tool generation for '%s': %s", capability_name, exc)
             continue
         _register_tool_if_absent(tool_registry, tool)
 

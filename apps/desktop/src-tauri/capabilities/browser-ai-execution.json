@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-ai-execution",
+  "description": "Browser-B5.4: a separate, narrow capability from browser-runtime.json's human-facing browser_* commands — grants only browser_execute_granted_action, the single AI-originated redeem path for a backend-minted Capability Execution Grant. Scoped identically to browser-runtime.json (webviews: [\"main\"], no windows match, no remote field) for the same reason: a child browser surface (WebviewUrl::External, a Remote origin) can never satisfy either the webview-label match or Tauri's own Local-vs-Remote origin check, so an arbitrary website loaded in a Browser surface can never reach this command regardless of what it attempts. Deliberately never merged into browser-runtime.json — human UI actions and AI capability actions must remain on structurally separate Tauri command/permission paths (docs/architecture/browser_b5_architecture_gate.md §19).",
+  "webviews": ["main"],
+  "permissions": ["allow-browser-execute-granted-action"]
+}

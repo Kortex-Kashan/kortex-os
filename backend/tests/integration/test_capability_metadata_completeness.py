@@ -79,6 +79,18 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.backup.get": (True, True),
     "kortex.backup.list": (True, True),
     "kortex.backup.verify": (True, True),
+    # Browser-B5.2: `kortex.browser.*` — mints a Capability Execution
+    # Grant (or, for `.download`, always refuses) rather than executing;
+    # see `docs/architecture/browser_b5_architecture_gate.md` §3 for the
+    # is_read_only rationale per capability.
+    "kortex.browser.click": (False, False),
+    "kortex.browser.download": (False, False),
+    "kortex.browser.extract": (True, True),
+    "kortex.browser.grant_verification_key": (True, True),
+    "kortex.browser.navigate": (False, False),
+    "kortex.browser.read": (True, True),
+    "kortex.browser.screenshot": (True, False),
+    "kortex.browser.type": (False, False),
     "kortex.connector.action.execute": (False, False),
     "kortex.connector.driver.list": (True, True),
     "kortex.connector.driver.register": (False, False),

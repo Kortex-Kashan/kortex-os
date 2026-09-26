@@ -1,0 +1,18 @@
+[[permission]]
+identifier = "allow-browser-execute-granted-action"
+description = """
+Browser-B5.4: allows the webview to redeem a backend-minted Capability
+Execution Grant against a Browser surface. Deliberately a separate
+permission/capability from `browser-runtime.toml`'s human-facing
+`browser_*` commands (`browser_navigate`/`.click`-equivalent/etc. do not
+exist for AI callers) — this is the one and only AI-originated action path,
+and it accepts a signed, short-lived, single-use Grant object, never a raw
+URL, script, selector-free command, or filesystem path. The command itself
+independently re-verifies the Grant's signature, expiry, single-use status,
+and live tenant/profile/surface/generation binding before doing anything —
+see `browser_grant.rs` and `docs/architecture/browser_b5_architecture_gate.md`
+§6/§19. In the Browser-B5.0-B5.4 foundation phase, a fully-verified Grant
+still does not reach `BrowserRuntime`'s mutating methods — see
+`browser_execute_granted_action`'s own doc comment in `lib.rs`.
+"""
+commands.allow = ["browser_execute_granted_action"]

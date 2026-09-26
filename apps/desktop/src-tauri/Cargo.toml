@@ -63,6 +63,28 @@ getrandom = "0.2"
 # exact already-resolved version, same precedent as D15's `webview2-com`/
 # `windows` promotion: no new crate or version enters the dependency graph.
 url = "2"
+# Browser-B5.4: independent, local verification of a backend-minted
+# Capability Execution Grant's Ed25519 signature — the desktop must never
+# trust "it arrived over an authenticated connection" alone
+# (`docs/architecture/browser_b5_architecture_gate.md` §6). No existing
+# dependency in this crate exposes raw Ed25519 signature verification
+# (`webview2-com`/`windows`/`keyring` don't touch it); the backend's own
+# equivalent primitive (`kortex.engines.security.providers.local_crypto.
+# LocalCrypto`) is built on Python's `cryptography` library, which itself
+# wraps the same underlying Ed25519 algorithm this crate now verifies —
+# reusing the algorithm, not inventing a new one. `ed25519-dalek` is the
+# de facto standard, pure-Rust implementation; `zeroize`'s `derive`
+# feature (an `ed25519-dalek` dependency already) is left at its default.
+ed25519-dalek = "2"
+# Browser-B5.4: parses the Grant's `issued_at`/`expires_at` RFC3339
+# timestamps (as produced by the backend's `datetime.now(UTC).isoformat()`)
+# for the expiry check — never for the signature payload itself, which
+# uses these two fields as opaque, already-received strings (see
+# `browser_grant.rs`'s own doc comment on why: reformatting a parsed
+# datetime back to text risks a byte-for-byte mismatch against what the
+# backend actually signed). No existing dependency in this crate parses
+# calendar dates at all.
+time = { version = "0.3", features = ["parsing", "formatting"] }
 
 [target.'cfg(windows)'.dependencies]
 # Win32 Job Object support for sidecar child process lifecycle binding

@@ -23,6 +23,11 @@ mod browser_profile_store;
 // navigation policy (scheme + local/private-network destination checks).
 // See that module's own doc for why this cannot be a backend round-trip.
 mod browser_policy;
+// Browser-B5.4: Capability Execution Grant verification/single-use
+// tracking — the desktop-side counterpart to
+// `backend/src/kortex/engines/browser/grant.py`. See that module's own
+// doc for why it never invokes `BrowserRuntime` itself.
+mod browser_grant;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
 // transport contract. `ipc.rs` talks to the backend at a configured
@@ -125,6 +130,7 @@ pub fn run() {
             browser_profile_store::browser_create_profile,
             browser_profile_store::browser_rename_profile,
             browser_profile_store::browser_delete_profile,
+            browser_grant::browser_execute_granted_action,
         ])
         .setup(|app| {
             app.manage(Mutex::new(SidecarSupervision::Disabled));
@@ -184,6 +190,17 @@ pub fn run() {
                 }
             }
             app.manage(ActiveProfileSurfaces::default());
+
+            // Browser-B5.4: the AI-only redeem command's own state —
+            // independent of anything B4's WebView2RuntimeAdapter owns.
+            // `GrantVerificationKeyCache`/`RedeemedGrantTracker`/
+            // `SurfaceRedeemLocks` are all process-lifetime, in-memory
+            // only (no persistence) — see `browser_grant.rs`'s own doc
+            // comments on why that's the correct, disclosed posture, not
+            // an oversight.
+            app.manage(browser_grant::GrantVerificationKeyCache::new());
+            app.manage(browser_grant::RedeemedGrantTracker::new());
+            app.manage(browser_grant::SurfaceRedeemLocks::new());
 
             // Phase A: register the `kortex-auth://` scheme with the OS at
             // runtime (Windows/Linux only — macOS resolves schemes solely

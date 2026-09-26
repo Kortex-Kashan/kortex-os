@@ -1,10 +1,10 @@
 # KORTEX Browser — Capability Model
 
-**Status**: Living document — established Browser-B0 (design only; no capabilities registered yet). Implemented starting Browser-B5.
+**Status**: Living document — established Browser-B0 (design only). **Registered as of Browser-B5.0-B5.4** (`backend/src/kortex/engines/browser/`) — every capability below mints a Capability Execution Grant (or, for `.download`, always refuses); none of them execute a real browser action yet. See `docs/architecture/browser_b5_architecture_gate.md` and `browser_decision_log.md` D34-D39 for the full account of what changed between this document's original B0 sketch and what B5 actually implemented.
 
 ## 1. Governed actions (target set, per the task brief)
 
-`browser.navigate`, `browser.read`, `browser.click`, `browser.type`, `browser.extract`, `browser.download`, `browser.screenshot`. None of these are implemented in B0. This document records where and how they should register once B5 begins.
+`browser.navigate`, `browser.read`, `browser.click`, `browser.type`, `browser.extract`, `browser.download`, `browser.screenshot` — plus one infrastructure capability B0 did not anticipate, `browser.grant_verification_key` (lets the desktop fetch the public key it needs to verify a Grant's signature; never itself an AI-invocable tool). All eight are registered as of B5.0-B5.4; none execute yet (D36).
 
 ## 2. Where they plug into the existing capability system
 
@@ -15,6 +15,8 @@ KORTEX already has one uniform capability-registration pattern, proven identical
 3. Register idempotently into the shared `ToolRegistry` via `_register_tool_if_absent()` (`api/kernel_bootstrap.py:381-397`), following `register_connector_action_ai_tools`'s existing loop (`kernel_bootstrap.py:514-533`) as the template.
 
 No new approval engine, no new throttler, no new orchestration path is needed — `DurableAIApprovalPolicy`, `AIOrchestrationEngine._on_approval_decided`, and `TenantConcurrencyThrottler` (`ai/engine.py:2410-2520`, `ai/throttling.py`) already handle every governed mutating action in KORTEX today and should handle Browser's identically.
+
+**Implemented exactly as sketched above, as of Browser-B5.0-B5.4** (`backend/src/kortex/engines/browser/engine.py`, `backend/src/kortex/api/kernel_bootstrap.py::register_browser_ai_tools`) — steps 1-3 are real, tested code, not merely a plan. **The one thing this B0-era sketch did not anticipate**: a capability handler executing entirely backend-side has no way to reach a WebView2 surface, which lives in the desktop process. The B5 architecture gate (§6) resolved this with the Capability Execution Grant — every handler mints a signed, short-lived authorization artifact and returns it rather than executing directly; see `browser_b5_architecture_gate.md` and `browser_decision_log.md` D36-D37 for the full mechanism and a real cross-language bug it caught.
 
 ## 3. Read-only classification — deliberately conservative
 
@@ -48,4 +50,6 @@ Conceptually similar (both are "act on a UI on the user's behalf" capabilities) 
 
 ## 8. Not yet answered
 
-Exact `parameters_schema` per action, exact target-selector format for `browser.click`/`.type` (CSS selector? accessibility-tree reference?), and the exact approval UX shown to a human when a `browser.navigate` requires approval. Deferred to B5 design.
+**Resolved by Browser-B5.0-B5.4**: `parameters_schema` per action (real JSON schemas, `engine.py`, derived from `models.py`'s typed contracts); target-selector format for `.click`/`.type`/`.extract` (`BrowserElementSelector` — role/accessible-name/node-ref, deterministic, never a raw CSS/XPath selector or pixel coordinate; see `browser_b5_architecture_gate.md` §7/§12).
+
+**Still open, deferred to Browser-B5.5+**: the exact approval UX shown to a human when a mutating `kortex.browser.*` call requires approval; wiring real `BrowserRuntime` execution behind a verified Grant, per capability (OD-B17); real implementation of `browser.download` (OD-B14).

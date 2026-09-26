@@ -1209,6 +1209,19 @@ impl ActiveProfileSurfaces {
         self.bindings.lock().unwrap().remove(surface_id)
     }
 
+    /// Non-destructive counterpart to `take` — Browser-B5.4's redeem
+    /// command (`browser_execute_granted_action`, `lib.rs`) needs to
+    /// verify a Capability Execution Grant's claimed `tenant_id`/
+    /// `browser_profile_id` against this surface's real, live binding
+    /// without disturbing it (unlike `browser_destroy`, redemption never
+    /// tears the surface down).
+    pub fn lookup(
+        &self,
+        surface_id: &crate::browser_runtime::BrowserSurfaceId,
+    ) -> Option<(String, BrowserProfileId)> {
+        self.bindings.lock().unwrap().get(surface_id).cloned()
+    }
+
     /// Every currently-tracked binding, removing them all — used by the
     /// app-shutdown handlers (`lib.rs`'s `CloseRequested`/`ExitRequested`)
     /// to release every held profile lock alongside

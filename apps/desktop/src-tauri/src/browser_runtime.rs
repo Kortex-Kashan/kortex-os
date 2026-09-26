@@ -94,6 +94,19 @@ pub struct BrowserSurfaceId(String);
 static SURFACE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl BrowserSurfaceId {
+    /// Browser-B5.4: wraps an already-received, opaque surface id string —
+    /// used only to turn a Capability Execution Grant's own `surface_id:
+    /// String` field (`browser_grant::CapabilityExecutionGrant`) into the
+    /// typed id the `BrowserRuntime` trait's methods require, so the
+    /// redeem command (`lib.rs`) never needs its own parallel "surface id"
+    /// concept. Never used to *mint* a new id — that remains `generate()`'s
+    /// sole responsibility; a caller-supplied string here is only ever
+    /// looked up against already-live surfaces, never inserted as a new
+    /// key, so there is no risk of this becoming a second id-minting path.
+    pub(crate) fn from_string(id: String) -> Self {
+        Self(id)
+    }
+
     /// Not a real UUID (mirrors `ipc.rs::uuid_like_id`'s own reasoning — no
     /// extra crate pulled in for one call site); only needs to be unique
     /// enough to key an in-process `HashMap`, never parsed as a UUID.
@@ -236,6 +249,21 @@ pub trait BrowserRuntime: Send + Sync {
     ) -> Result<BrowserSurfaceState, BrowserRuntimeError>;
     fn destroy(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError>;
 
+    /// Browser-B5.4: whether `surface_id` is currently a live, open
+    /// surface — the redeem command's first live-state check, before any
+    /// tenant/profile/generation comparison.
+    fn surface_exists(&self, surface_id: &BrowserSurfaceId) -> bool;
+
+    /// Browser-B5.4: the live `navigation_generation` for a still-open
+    /// surface — the redeem command's live-binding check compares this
+    /// against a Capability Execution Grant's claimed generation, never
+    /// trusting the Grant's own claim alone
+    /// (`browser_b5_architecture_gate.md` §8).
+    fn navigation_generation(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<u64, BrowserRuntimeError>;
+
     /// Destroys every live surface this runtime owns. Called from this
     /// crate's existing app-shutdown sequence (`lib.rs`'s `CloseRequested`/
     /// `ExitRequested` handlers, alongside `SidecarSupervision::shutdown()`)
@@ -254,6 +282,15 @@ pub trait BrowserRuntime: Send + Sync {
 struct SurfaceEntry<R: Runtime> {
     webview: Webview<R>,
     loading: Arc<AtomicBool>,
+    /// Browser-B5.4: bumped exactly once per *allowed* navigation (see
+    /// `register_navigation_loading_handlers`'s `PolicyDecision::Allow`
+    /// arm) — never on a denied navigation, which never actually changes
+    /// what page is loaded. Lets a Capability Execution Grant bind itself
+    /// to "this specific loaded page" (e.g. a `.click`/`.type` targeting a
+    /// selector obtained from an earlier `.read`/`.extract`) and fail
+    /// closed with `StaleReference` if the page has since navigated away,
+    /// rather than silently operating against whatever loaded next.
+    navigation_generation: Arc<AtomicU64>,
 }
 
 /// V1 concrete implementation of [`BrowserRuntime`], against the Microsoft
@@ -382,6 +419,7 @@ const DEFAULT_SURFACE_HEIGHT: f64 = 720.0;
 fn register_navigation_loading_handlers<R: Runtime>(
     webview: &Webview<R>,
     loading: Arc<AtomicBool>,
+    navigation_generation: Arc<AtomicU64>,
     surface_id: BrowserSurfaceId,
     policy_audit_log_path: PathBuf,
 ) {
@@ -395,12 +433,21 @@ fn register_navigation_loading_handlers<R: Runtime>(
         let policy_surface_id = surface_id.clone();
         let policy_audit_log_path_for_start = policy_audit_log_path.clone();
         let emit_webview_for_nav = emit_webview.clone();
+        let navigation_generation_for_start = navigation_generation.clone();
         let start_handler =
             NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
                 let Some(args) = args else { return Ok(()) };
                 match evaluate_navigation_args(&args) {
                     Ok(PolicyDecision::Allow) => {
                         loading_for_start.store(true, Ordering::Relaxed);
+                        // Browser-B5.4: bumped only here — an allowed
+                        // navigation is the one event that can actually
+                        // change what page is loaded, so this is the
+                        // exact point a `navigation_generation`-bound
+                        // Grant/selector reference must be invalidated
+                        // from. A denied navigation (below) never reaches
+                        // this arm at all.
+                        navigation_generation_for_start.fetch_add(1, Ordering::Relaxed);
                     }
                     Ok(PolicyDecision::Deny(reason)) => {
                         unsafe { args.SetCancel(true) }?;
@@ -618,12 +665,16 @@ fn deny_popup_download_or_permission<R: Runtime>(
 fn register_navigation_loading_handlers<R: Runtime>(
     _webview: &Webview<R>,
     _loading: Arc<AtomicBool>,
+    _navigation_generation: Arc<AtomicU64>,
     _surface_id: BrowserSurfaceId,
     _policy_audit_log_path: PathBuf,
 ) {
     // No non-Windows `BrowserRuntime` adapter exists yet (ADR-0019 §5) —
     // `loading` simply never flips from its initial `false` on this
     // platform, a degraded-but-safe default, not a compile-time gap.
+    // `navigation_generation` likewise never advances — every redeem
+    // attempt on this platform would see generation 0 forever, a safe
+    // (if permanently stale-looking) default, never a compile-time gap.
 }
 
 /// Dispatches `f` onto WebView2's COM apartment thread via `with_webview`
@@ -745,9 +796,11 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
             })?;
 
         let loading = Arc::new(AtomicBool::new(false));
+        let navigation_generation = Arc::new(AtomicU64::new(0));
         register_navigation_loading_handlers(
             &webview,
             loading.clone(),
+            navigation_generation.clone(),
             surface_id.clone(),
             self.policy_audit_log_path.clone(),
         );
@@ -766,7 +819,14 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
             let _ = webview.close();
             return Err(BrowserRuntimeError::AlreadyExists { surface_id });
         }
-        surfaces.insert(surface_id.clone(), SurfaceEntry { webview, loading });
+        surfaces.insert(
+            surface_id.clone(),
+            SurfaceEntry {
+                webview,
+                loading,
+                navigation_generation,
+            },
+        );
         Ok(surface_id)
     }
 
@@ -886,6 +946,23 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
         // clear`'s "already gone is an acceptable outcome" precedent.
         let _ = entry.webview.close();
         Ok(())
+    }
+
+    fn surface_exists(&self, surface_id: &BrowserSurfaceId) -> bool {
+        self.surfaces.lock().unwrap().contains_key(surface_id)
+    }
+
+    fn navigation_generation(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<u64, BrowserRuntimeError> {
+        let surfaces = self.surfaces.lock().unwrap();
+        surfaces
+            .get(surface_id)
+            .map(|entry| entry.navigation_generation.load(Ordering::Relaxed))
+            .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound {
+                surface_id: surface_id.clone(),
+            })
     }
 
     fn destroy_all(&self) {
