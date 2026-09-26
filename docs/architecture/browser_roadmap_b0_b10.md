@@ -73,15 +73,15 @@ NEXT PHASE: Browser-B3 — Profiles + Persistent Sessions. Recommended prerequis
 ## Browser-B3 — Profiles + Persistent Sessions
 
 PHASE: B3
-STATUS: NOT STARTED
+STATUS: **COMPLETE**
 OBJECTIVE: KORTEX browser profile, persistent user data, per-tenant isolation, profile lifecycle.
-ARCHITECTURE: New `BrowserProfileStore` construct — one exclusive on-disk WebView2 user-data folder per tenant/profile, sitting alongside (not inside) KORTEX's existing four storage facades. See `browser_security_model.md` §10.
-IMPLEMENTATION: To be filled when B3 starts.
-SECURITY: Profile directories must be tenant-exclusive at the OS filesystem level, since WebView2 profile data cannot be decomposed into KORTEX's existing row-level tenant isolation.
-TESTS: To be filled when B3 starts — at minimum: cross-tenant profile-directory isolation, matching the spirit of `test_capability_projection_security.py`'s existing cross-tenant tests.
-EVIDENCE: To be filled when B3 completes.
-KNOWN LIMITATIONS: To be filled.
-DECISIONS: To be filled as B3 makes them.
+ARCHITECTURE: `BrowserProfileStore` (`apps/desktop/src-tauri/src/browser_profile_store.rs`) — one exclusive on-disk WebView2 user-data folder per tenant/profile, sitting alongside (not inside) KORTEX's existing four storage facades, exactly as `browser_security_model.md` §10 called for. `browser_runtime.rs`'s `BrowserRuntime`/`WebView2RuntimeAdapter` remain profile-agnostic; the Tauri command layer orchestrates between the two. See `browser_architecture.md` §2.7 and `browser_decision_log.md` D18–D26.
+IMPLEMENTATION: Complete. Rust: new `browser_profile_store.rs` module (identity, storage, path containment, locking, ACL, legacy quarantine, audit logging, 4 new Tauri commands); `browser_runtime.rs` modified (`CreateSurfaceRequest` now takes an already-resolved `data_directory`, profile-agnostic; `browser_create_surface`/`browser_destroy` orchestrate profile open/close; WebView2 password/autofill hardening added); `ipc.rs` modified (OD-B7 tenant-identity bridge in `IpcClientState`); `lib.rs` wired (new app state, commands, shutdown-path lock release); `capabilities/browser.json` + `permissions/browser-runtime.toml` (4 new permission entries, same narrow scoping). Frontend: `features/browser/{api.ts, hooks/useBrowserProfiles.ts, hooks/useBrowserTabs.ts (profile-aware), components/ProfileSwitcher.tsx}`.
+SECURITY: Profile directories are tenant-exclusive via hardened, containment-checked path resolution (ported from `PathSandboxValidator`'s algorithm) plus a baseline OS-user `icacls` ACL restriction (D26). Tenant identity for every profile operation is resolved server-side (`IpcClientState::current_tenant_id()`, OD-B7) — no command anywhere accepts a tenant id as a parameter. `capabilities/browser.json` still scopes via `"webviews": ["main"]` (never `"windows"`), still declares no `remote` field — 4 new commands added to the same capability, no existing grant widened.
+TESTS: Rust `cargo test --lib`: **107 passed** (was 68 after B2; +39 net new across B3, after removing 6 tests for code Browser-B3 superseded), 0 failed, 2 ignored (pre-existing). `cargo clippy --lib --tests`: 0 new warnings (1 pre-existing, confirmed via A/B comparison against the pre-B3 baseline, unrelated to Browser). `cargo fmt --check`: clean for every B3-touched file. Frontend `pnpm typecheck`: clean. `pnpm test` (full suite): **839 passed** across 101 files (0 failed) — 5 new profile-switcher tests plus fixes to existing `BrowserApp.test.tsx` mocks. Live (non-unit) verification: two temporary, disposable preflight harnesses (both removed after verification, never shipped) confirmed (1) distinct WebView2 profile directories coexist simultaneously in one process and destroy-then-recreate against the same directory works (OD-B9), and (2) WebView2 password-autosave/general-autofill settings actually read back `false` after being set on a real instance (D22), plus a live `icacls` read-back confirming a created profile directory's ACL is actually restricted, not just "the call returned Ok."
+EVIDENCE: See `docs/architecture/browser_b3_implementation_report.md`.
+KNOWN LIMITATIONS: See `browser_known_limitations.md`'s "As of Browser-B3" section — local-only audit logging (interim, D23), baseline (not AppContainer) ACL, no disk quotas, no encryption-at-rest, OD-B5's live-WebView2-lifecycle test gap continues (most new B3 logic is unaffected, being pure Rust).
+DECISIONS: D18–D27 — see `browser_decision_log.md` for the full account, including one pre-existing, unrelated defect discovered and flagged (not fixed) rather than silently left undocumented (D27).
 NEXT PHASE: Browser-B4 — Browser Security + Browser Policy.
 
 ---

@@ -17,8 +17,8 @@ KORTEX OS
 ├── KORTEX Browser  (new — this project)
 │   ├── Browser UI              (B2)
 │   ├── Browser Runtime
-│   │   └── WebView2RuntimeAdapter  (V1, B1)
-│   ├── Profiles / Sessions     (B3)
+│   │   └── WebView2RuntimeAdapter  (V1, B1) — profile-agnostic, see §2.7
+│   ├── Profiles / Sessions     (B3 — implemented; BrowserProfileStore, see §2.7)
 │   ├── Browser Policy          (B4 — the security boundary, see browser_security_model.md)
 │   ├── Browser Capabilities    (B5 — see browser_capability_model.md)
 │   └── AI Browser Agent        (B6)
@@ -77,6 +77,20 @@ Back/forward navigation and real event-driven loading state (§2.2) required goi
 ### 2.6 Browser-B2 UI: tabs without a new runtime concept
 
 `apps/desktop/src/features/browser/hooks/useBrowserTabs.ts` is the single place tab state lives. Every tab is a real `BrowserSurfaceId` (created via `create_surface`) — there is no frontend-only placeholder tab. Only the active tab's surface is positioned inside the real content-area rect (tracked via `ResizeObserver`, not polling); every other open tab's surface is parked at a fixed off-screen `SurfaceBounds` via the same `set_bounds` primitive used for resize-tracking (`browser_decision_log.md` D16) — deliberately not a second "active"/"visible" concept on `BrowserRuntime`. Switching tabs therefore never reloads or discards a tab's state, and closing a tab calls `destroy` on its real surface. `BrowserToolbar`/`BrowserTabBar` are presentational; all Tauri IPC goes through `features/browser/api.ts`, matching every other feature's convention.
+
+### 2.7 Browser-B3: `BrowserProfileStore` — tenant-scoped, persistent profiles
+
+`apps/desktop/src-tauri/src/browser_profile_store.rs` owns everything about profile identity, storage, locking, and lifecycle — `browser_runtime.rs`'s `BrowserRuntime`/`WebView2RuntimeAdapter` remain completely profile-agnostic, taking only an already-resolved `data_directory: PathBuf` in `CreateSurfaceRequest`. The Tauri command layer (`browser_create_surface`/`browser_destroy`) is the sole orchestration point between the two independent subsystems.
+
+- **Identity**: `BrowserProfileId` is a 128-bit CSPRNG-random, `profile-`-prefixed opaque string — never a timestamp, never derived from `display_name`. `tenant_id` is resolved exclusively from `IpcClientState::current_tenant_id()` (OD-B7, below), never accepted as a frontend parameter anywhere.
+- **Storage**: `<app_data_dir>/browser-profiles/<tenant_id>/<profile_id>/{profile.json, .lock, webview2-data/}`. No separate registry/index file — `list_profiles` scans the tenant directory and reads each profile's own `profile.json` directly (`browser_decision_log.md` D20), avoiding a dual-write consistency hazard a registry file would introduce.
+- **Path safety**: `resolve_child_directory` ports `backend/.../storage/sandbox.py`'s `PathSandboxValidator` canonicalize-then-verify-containment principle to Rust — charset sanitization plus a second, independent containment check that also defeats a pre-planted symlink/junction at the expected path.
+- **Locking**: a per-profile `.lock` file, PID-liveness-checked (`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`), atomic-create-or-atomic-recover — the primary, user-legible control. WebView2's own folder-exclusivity (confirmed live — see OD-B9 below) is an independent second layer, never the sole mechanism relied on.
+- **ACL**: each profile directory is restricted to the current OS user via `icacls` (baseline isolation; full AppContainer-SID isolation is explicitly out of scope — `browser_decision_log.md` D26).
+- **Legacy migration**: Browser-B1/B2's single, non-tenant-scoped `browser-profiles/default` directory, if one exists on a machine that already ran a live UI session, is quarantined (moved, never deleted or parsed) to `_legacy-quarantine/` on first launch — deterministic, idempotent, never assigned to any tenant.
+- **Tenant identity bridge (OD-B7)**: the Tauri/Rust process holds only an opaque, undecoded session-token blob — deliberately, per `token_codec.py`'s own documented "the Tauri/Rust layer must never evaluate business rules" principle. `ipc.rs`'s `IpcClientState` now additionally captures `tenant_id` from the login/refresh response's own already-disclosed `SecurityPrincipal` payload (the exact same response that already carries `sessionToken`) — no backend change, no new capability, no token decoding. See `browser_decision_log.md` D25 for the full mechanism and rejected alternatives.
+- **Distinct-profile coexistence (OD-B9)**: confirmed via a temporary, live preflight harness (removed after verification) against the real pinned stack: two distinct profile directories coexist simultaneously in one process, and destroy-then-recreate against the same directory works cleanly. See `browser_decision_log.md` D21/D24.
+- **Audit**: an interim, local, structured (JSON-Lines) lifecycle log — not yet routed through the backend's real `AuditManager`, since Browser has no backend hop at all today (`browser_decision_log.md` D23).
 
 ## 3. Browser ↔ AI Engine boundary
 

@@ -15,6 +15,10 @@ mod sidecar;
 // (no capability/governance layer, no persistent profiles; create/navigate/
 // reload/back/forward/resize/query/destroy through embedded child webviews).
 mod browser_runtime;
+// Browser-B3: `BrowserProfileStore` — persistent, tenant-scoped profile
+// identity/storage/locking/lifecycle. Sits alongside `browser_runtime`,
+// never inside it — see that module's own doc for the boundary.
+mod browser_profile_store;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
 // transport contract. `ipc.rs` talks to the backend at a configured
@@ -26,6 +30,7 @@ mod ipc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use browser_profile_store::{ActiveProfileSurfaces, BrowserProfileStore, BrowserProfileStoreState};
 use browser_runtime::{BrowserRuntime, BrowserRuntimeState, WebView2RuntimeAdapter};
 use events::EventRelayState;
 use ipc::{IpcClientState, KeyringTokenStore};
@@ -112,6 +117,10 @@ pub fn run() {
             browser_runtime::browser_set_bounds,
             browser_runtime::browser_query_state,
             browser_runtime::browser_destroy,
+            browser_profile_store::browser_list_profiles,
+            browser_profile_store::browser_create_profile,
+            browser_profile_store::browser_rename_profile,
+            browser_profile_store::browser_delete_profile,
         ])
         .setup(|app| {
             app.manage(Mutex::new(SidecarSupervision::Disabled));
@@ -121,24 +130,44 @@ pub fn run() {
 
             // Browser-B1: one `WebView2RuntimeAdapter` for the whole app,
             // embedding every browser surface as a child of the "main"
-            // window (Browser-B1 preflight §5 — Option A). `app_data_dir()`
-            // falling back to the current directory rather than failing
-            // app startup mirrors this file's own existing degrade-not-fail
-            // posture for non-essential setup (see `backend_process::
-            // spawn_and_monitor`'s doc) — a missing/unresolvable app-data
-            // directory means browser profiles fail later, at surface
-            // creation, not that KORTEX itself fails to start.
-            let profile_root = app
-                .path()
-                .app_data_dir()
-                .map(|dir| browser_runtime::default_profile_root(&dir))
-                .unwrap_or_else(|_| browser_runtime::default_profile_root(std::path::Path::new(".")));
+            // window (Browser-B1 preflight §5 — Option A). Profile-agnostic
+            // as of Browser-B3 — see that module's own doc comment.
             let main_window = app
                 .get_window("main")
                 .expect("the \"main\" window is declared in tauri.conf.json and always exists at setup time");
-            let browser_runtime: Arc<dyn BrowserRuntime> =
-                Arc::new(WebView2RuntimeAdapter::new(main_window, profile_root));
+            let browser_runtime: Arc<dyn BrowserRuntime> = Arc::new(WebView2RuntimeAdapter::new(main_window));
             app.manage(BrowserRuntimeState(browser_runtime));
+
+            // Browser-B3: `BrowserProfileStore` owns tenant-scoped profile
+            // identity/storage/locking — `app_data_dir()` falling back to
+            // the current directory rather than failing app startup mirrors
+            // this file's own existing degrade-not-fail posture (see
+            // `backend_process::spawn_and_monitor`'s doc); a missing/
+            // unresolvable app-data directory means browser profiles fail
+            // later, at profile creation, not that KORTEX itself fails to
+            // start. `BrowserProfileStore::new` also performs the one-time,
+            // idempotent legacy-default-profile quarantine check (Browser-B1/
+            // B2's non-tenant-scoped `browser-profiles/default`, if it
+            // exists) — see that function's own doc comment.
+            let profiles_root = app
+                .path()
+                .app_data_dir()
+                .map(|dir| browser_profile_store::browser_profiles_root(&dir))
+                .unwrap_or_else(|_| browser_profile_store::browser_profiles_root(std::path::Path::new(".")));
+            match BrowserProfileStore::new(profiles_root) {
+                Ok(store) => {
+                    app.manage(BrowserProfileStoreState(Arc::new(store)));
+                }
+                Err(e) => {
+                    // Never fails app startup (same posture as above) — a
+                    // browser profile store that couldn't even initialize
+                    // its root directory means every profile operation
+                    // fails closed later, at first use, with a clear error;
+                    // it does not mean KORTEX itself fails to start.
+                    eprintln!("KORTEX: browser profile store failed to initialize: {e}");
+                }
+            }
+            app.manage(ActiveProfileSurfaces::default());
 
             // Phase A: register the `kortex-auth://` scheme with the OS at
             // runtime (Windows/Linux only — macOS resolves schemes solely
@@ -190,6 +219,13 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<BrowserRuntimeState>() {
                     state.0.destroy_all();
                 }
+                // Browser-B3: release every profile lock the just-destroyed
+                // surfaces held — extends the identical "no orphaned
+                // browser runtime" guarantee to profile locks, so a clean
+                // shutdown never leaves a profile reporting `Locked` on the
+                // next launch (only an actual crash should ever need the
+                // stale-lock PID-liveness recovery path).
+                release_all_profile_locks(app_handle);
                 if let Some(state) = app_handle.try_state::<Mutex<SidecarSupervision>>() {
                     if let Ok(mut supervision) = state.lock() {
                         supervision.shutdown();
@@ -221,6 +257,7 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<BrowserRuntimeState>() {
                     state.0.destroy_all();
                 }
+                release_all_profile_locks(app_handle);
                 if let Some(state) = app_handle.try_state::<Mutex<SidecarSupervision>>() {
                     if let Ok(mut supervision) = state.lock() {
                         supervision.shutdown();
@@ -228,4 +265,23 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// Releases every profile lock any surface this process ever created still
+/// holds — see the two call sites' own comments. `try_state` (not plain
+/// `State`) because this runs from window-event/run-event closures, not a
+/// command, and both states are optional here for the same reason
+/// `BrowserRuntimeState`'s own lookup above already is (e.g. `.setup()`
+/// could in principle not have reached the point where these were managed
+/// if an earlier step returned an error first).
+fn release_all_profile_locks(app_handle: &tauri::AppHandle) {
+    let (Some(bindings), Some(profile_store)) = (
+        app_handle.try_state::<ActiveProfileSurfaces>(),
+        app_handle.try_state::<BrowserProfileStoreState>(),
+    ) else {
+        return;
+    };
+    for (tenant_id, profile_id) in bindings.take_all() {
+        let _ = profile_store.0.close_profile(&tenant_id, &profile_id);
+    }
 }

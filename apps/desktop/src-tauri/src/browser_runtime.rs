@@ -16,11 +16,22 @@
 //! **Scope boundary (Browser-B1+B2)**: this module proves that KORTEX can
 //! create, navigate, reload, go back/forward, reposition/resize, query, and
 //! destroy a WebView2 child webview through this abstraction — nothing more.
-//! It deliberately does not implement: persistent profiles/sessions
-//! (Browser-B3), any capability/governance layer (`kortex.browser.*`,
-//! Browser-B5), or an AI Browser Agent (Browser-B6). There is deliberately
-//! no bridge from page-loaded JavaScript to any command in this module or
-//! elsewhere in this crate.
+//! It deliberately does not implement: any capability/governance layer
+//! (`kortex.browser.*`, Browser-B5), or an AI Browser Agent (Browser-B6).
+//! There is deliberately no bridge from page-loaded JavaScript to any
+//! command in this module or elsewhere in this crate.
+//!
+//! **Browser-B3 boundary**: this module remains profile-agnostic — it has
+//! no concept of tenants, `BrowserProfileId`s, or profile lifecycle at all.
+//! `CreateSurfaceRequest::data_directory` is an already-resolved, already-
+//! validated path handed to it by the caller; resolving WHICH directory a
+//! given tenant/profile maps to is entirely `browser_profile_store::
+//! BrowserProfileStore`'s job (see that module's own doc comment). The
+//! `browser_create_surface`/`browser_destroy` Tauri commands below are the
+//! orchestration point between the two — they resolve a profile via
+//! `BrowserProfileStore`, then call this module's `BrowserRuntime` with the
+//! result — but the `BrowserRuntime` trait and `WebView2RuntimeAdapter`
+//! themselves never reach into `BrowserProfileStore` or `IpcClientState`.
 //!
 //! **Platform boundary**: back/forward navigation and real event-driven
 //! loading state require raw `ICoreWebView2` COM calls (`webview2_com`),
@@ -32,22 +43,16 @@
 //! job, `ubuntu-latest`) already builds against — see
 //! `docs/architecture/browser_b2_implementation_report.md`.
 //!
-//! **Profile-directory boundary**: `CreateSurfaceRequest::profile_id` is an
-//! opaque identifier, never a filesystem path — the frontend
-//! (`apps/desktop/src/features/browser/api.ts`) must never be able to steer
-//! WebView2's on-disk user-data folder to an arbitrary location.
-//! [`WebView2RuntimeAdapter::resolve_profile_directory`] is the sole place a
-//! `profile_id` is turned into a `PathBuf`, and it sanitizes the id first.
-//! This is a minimal stand-in for the full `BrowserProfileStore` design
-//! (`docs/architecture/browser_security_model.md` §10) — Browser-B3 owns
-//! per-tenant allocation, lifecycle, and cross-tenant isolation guarantees;
-//! this module only proves the underlying `WebviewBuilder::data_directory()`
-//! hook works. Browser-B2's tabs all share one process-lifetime, non-
-//! persisted profile — real per-tenant/per-profile persistence remains
-//! Browser-B3's job.
+//! **Profile-directory boundary**: `CreateSurfaceRequest::data_directory` is
+//! a `PathBuf` this module trusts verbatim — it never accepts a raw,
+//! frontend-supplied path itself (the frontend still only ever supplies an
+//! opaque `BrowserProfileId`; see `browser_profile_store.rs`'s own
+//! containment-checked resolution, which runs BEFORE this module is ever
+//! called). This module's only remaining responsibility is handing that
+//! already-validated path to `WebviewBuilder::data_directory()`.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,9 +61,11 @@ use serde::{Deserialize, Serialize};
 use tauri::{LogicalPosition, LogicalSize, Runtime, Webview, WebviewUrl, Window};
 
 #[cfg(windows)]
-use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
+use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Settings4};
 #[cfg(windows)]
 use webview2_com::{NavigationCompletedEventHandler, NavigationStartingEventHandler};
+#[cfg(windows)]
+use windows::core::Interface;
 
 /// Opaque handle to a live browser surface. Crosses the Tauri IPC boundary
 /// as a plain string — the webview itself is never exposed to the frontend.
@@ -93,12 +100,14 @@ impl BrowserSurfaceId {
     }
 }
 
-/// Request to create a new browser surface. `profile_id` is opaque — see
-/// this module's own doc comment for why it is never a path.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Request to create a new browser surface. `data_directory` is already
+/// resolved and containment-checked by the caller (`browser_create_surface`,
+/// via `browser_profile_store::BrowserProfileStore::open_profile`) — this
+/// type is constructed only in Rust, never deserialized directly from a
+/// frontend-supplied value, so it deliberately has no `Deserialize` impl.
+#[derive(Debug, Clone)]
 pub struct CreateSurfaceRequest {
-    pub profile_id: String,
+    pub data_directory: PathBuf,
     pub initial_url: String,
 }
 
@@ -135,12 +144,25 @@ pub struct BrowserSurfaceState {
     pub can_go_forward: bool,
 }
 
+/// `#[serde(rename_all = "camelCase")]` on an enum only renames VARIANT
+/// names (the `"kind"` tag, here) — it does NOT cascade into a struct-like
+/// variant's own field names, so `surface_id` is renamed explicitly on each
+/// variant below (see `browser_profile_store::BrowserProfileError`'s own
+/// doc comment, which documents the identical fix for the identical bug).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BrowserRuntimeError {
-    SurfaceNotFound { surface_id: BrowserSurfaceId },
-    AlreadyExists { surface_id: BrowserSurfaceId },
-    Platform { message: String },
+    SurfaceNotFound {
+        #[serde(rename = "surfaceId")]
+        surface_id: BrowserSurfaceId,
+    },
+    AlreadyExists {
+        #[serde(rename = "surfaceId")]
+        surface_id: BrowserSurfaceId,
+    },
+    Platform {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for BrowserRuntimeError {
@@ -150,7 +172,11 @@ impl std::fmt::Display for BrowserRuntimeError {
                 write!(f, "no browser surface with id {:?}", surface_id.0)
             }
             Self::AlreadyExists { surface_id } => {
-                write!(f, "a browser surface with id {:?} already exists", surface_id.0)
+                write!(
+                    f,
+                    "a browser surface with id {:?} already exists",
+                    surface_id.0
+                )
             }
             Self::Platform { message } => write!(f, "browser runtime error: {message}"),
         }
@@ -179,13 +205,24 @@ impl std::error::Error for BrowserRuntimeError {}
 /// tab-switching — an inactive tab is parked at an off-screen `SurfaceBounds`
 /// via this same primitive, not a second concept).
 pub trait BrowserRuntime: Send + Sync {
-    fn create_surface(&self, request: CreateSurfaceRequest) -> Result<BrowserSurfaceId, BrowserRuntimeError>;
-    fn navigate(&self, surface_id: &BrowserSurfaceId, url: &str) -> Result<(), BrowserRuntimeError>;
+    fn create_surface(
+        &self,
+        request: CreateSurfaceRequest,
+    ) -> Result<BrowserSurfaceId, BrowserRuntimeError>;
+    fn navigate(&self, surface_id: &BrowserSurfaceId, url: &str)
+        -> Result<(), BrowserRuntimeError>;
     fn reload(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError>;
     fn go_back(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError>;
     fn go_forward(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError>;
-    fn set_bounds(&self, surface_id: &BrowserSurfaceId, bounds: SurfaceBounds) -> Result<(), BrowserRuntimeError>;
-    fn query_state(&self, surface_id: &BrowserSurfaceId) -> Result<BrowserSurfaceState, BrowserRuntimeError>;
+    fn set_bounds(
+        &self,
+        surface_id: &BrowserSurfaceId,
+        bounds: SurfaceBounds,
+    ) -> Result<(), BrowserRuntimeError>;
+    fn query_state(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<BrowserSurfaceState, BrowserRuntimeError>;
     fn destroy(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError>;
 
     /// Destroys every live surface this runtime owns. Called from this
@@ -196,32 +233,6 @@ pub trait BrowserRuntime: Send + Sync {
     /// which now also covers every open Browser-B2 tab, not just one
     /// surface.
     fn destroy_all(&self);
-}
-
-/// Keeps only ASCII alphanumerics, `-`, and `_` from `profile_id`, and caps
-/// its length — defense in depth on top of the fact that `profile_id` is
-/// already documented as opaque and is never accepted as a path. An empty
-/// or fully-invalid input degrades to a fixed fallback name rather than
-/// producing an empty path segment.
-fn sanitize_profile_id(profile_id: &str) -> String {
-    let cleaned: String = profile_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(128)
-        .collect();
-    if cleaned.is_empty() {
-        "default".to_string()
-    } else {
-        cleaned
-    }
-}
-
-/// Free function (not a method) specifically so this — the actual
-/// path-construction logic the security model depends on — is unit-testable
-/// without constructing a live `WebView2RuntimeAdapter`/`Window`. See this
-/// module's own doc comment on `profile_id` never being a path.
-fn resolve_profile_directory(profile_root: &Path, profile_id: &str) -> PathBuf {
-    profile_root.join(sanitize_profile_id(profile_id))
 }
 
 /// One live browser surface's Rust-side state: the webview handle itself,
@@ -240,27 +251,20 @@ struct SurfaceEntry<R: Runtime> {
 /// private to this module — see the module doc comment.
 pub struct WebView2RuntimeAdapter<R: Runtime> {
     window: Window<R>,
-    profile_root: PathBuf,
     surfaces: Mutex<HashMap<BrowserSurfaceId, SurfaceEntry<R>>>,
 }
 
 impl<R: Runtime> WebView2RuntimeAdapter<R> {
     /// `window` is the KORTEX main window every browser surface is embedded
     /// into as a child webview (Browser-B1 preflight §5 — Option A,
-    /// confirmed supported by the pinned Tauri version). `profile_root` is
-    /// the base directory under which per-profile WebView2 user-data
-    /// folders are allocated; Browser-B3 owns the real allocation policy —
-    /// this adapter only proves the mechanism.
-    pub fn new(window: Window<R>, profile_root: PathBuf) -> Self {
+    /// confirmed supported by the pinned Tauri version). No longer takes a
+    /// profile root (Browser-B3): this adapter is profile-agnostic — see
+    /// the module's own doc comment.
+    pub fn new(window: Window<R>) -> Self {
         Self {
             window,
-            profile_root,
             surfaces: Mutex::new(HashMap::new()),
         }
-    }
-
-    fn resolve_profile_directory(&self, profile_id: &str) -> PathBuf {
-        resolve_profile_directory(&self.profile_root, profile_id)
     }
 
     fn with_surface<T>(
@@ -269,9 +273,12 @@ impl<R: Runtime> WebView2RuntimeAdapter<R> {
         f: impl FnOnce(&Webview<R>) -> Result<T, BrowserRuntimeError>,
     ) -> Result<T, BrowserRuntimeError> {
         let surfaces = self.surfaces.lock().unwrap();
-        let entry = surfaces
-            .get(surface_id)
-            .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound { surface_id: surface_id.clone() })?;
+        let entry =
+            surfaces
+                .get(surface_id)
+                .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound {
+                    surface_id: surface_id.clone(),
+                })?;
         f(&entry.webview)
     }
 
@@ -281,12 +288,17 @@ impl<R: Runtime> WebView2RuntimeAdapter<R> {
     /// impossible while still borrowing from the `MutexGuard`. `Webview<R>`
     /// is a cheap handle/dispatcher clone (the same pattern `Window<R>` uses
     /// inside Tauri's own `add_child`), not a second live webview.
-    fn cloned_surface(&self, surface_id: &BrowserSurfaceId) -> Result<(Webview<R>, Arc<AtomicBool>), BrowserRuntimeError> {
+    fn cloned_surface(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<(Webview<R>, Arc<AtomicBool>), BrowserRuntimeError> {
         let surfaces = self.surfaces.lock().unwrap();
         surfaces
             .get(surface_id)
             .map(|entry| (entry.webview.clone(), entry.loading.clone()))
-            .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound { surface_id: surface_id.clone() })
+            .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound {
+                surface_id: surface_id.clone(),
+            })
     }
 }
 
@@ -317,31 +329,39 @@ const DEFAULT_SURFACE_HEIGHT: f64 = 720.0;
 /// `loading` simply stays `false` forever for that surface — a degraded-
 /// but-safe outcome, never a crash or a hang.
 #[cfg(windows)]
-fn register_navigation_loading_handlers<R: Runtime>(webview: &Webview<R>, loading: Arc<AtomicBool>) {
+fn register_navigation_loading_handlers<R: Runtime>(
+    webview: &Webview<R>,
+    loading: Arc<AtomicBool>,
+) {
     let loading_for_start = loading.clone();
     let loading_for_complete = loading;
     let _ = webview.with_webview(move |platform_webview| {
         let core = unsafe { platform_webview.controller().CoreWebView2() };
         let Ok(core) = core else { return };
 
-        let start_handler = NavigationStartingEventHandler::create(Box::new(move |_sender, _args| {
-            loading_for_start.store(true, Ordering::Relaxed);
-            Ok(())
-        }));
+        let start_handler =
+            NavigationStartingEventHandler::create(Box::new(move |_sender, _args| {
+                loading_for_start.store(true, Ordering::Relaxed);
+                Ok(())
+            }));
         let mut start_token: i64 = 0;
         let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
 
-        let complete_handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, _args| {
-            loading_for_complete.store(false, Ordering::Relaxed);
-            Ok(())
-        }));
+        let complete_handler =
+            NavigationCompletedEventHandler::create(Box::new(move |_sender, _args| {
+                loading_for_complete.store(false, Ordering::Relaxed);
+                Ok(())
+            }));
         let mut complete_token: i64 = 0;
         let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
     });
 }
 
 #[cfg(not(windows))]
-fn register_navigation_loading_handlers<R: Runtime>(_webview: &Webview<R>, _loading: Arc<AtomicBool>) {
+fn register_navigation_loading_handlers<R: Runtime>(
+    _webview: &Webview<R>,
+    _loading: Arc<AtomicBool>,
+) {
     // No non-Windows `BrowserRuntime` adapter exists yet (ADR-0019 §5) —
     // `loading` simply never flips from its initial `false` on this
     // platform, a degraded-but-safe default, not a compile-time gap.
@@ -371,10 +391,13 @@ where
                 .map_err(|e| e.to_string());
             let _ = tx.send(outcome);
         })
-        .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })?;
+        .map_err(|e| BrowserRuntimeError::Platform {
+            message: e.to_string(),
+        })?;
     rx.recv()
         .map_err(|_| BrowserRuntimeError::Platform {
-            message: "browser runtime internal error: with_webview callback did not respond".to_string(),
+            message: "browser runtime internal error: with_webview callback did not respond"
+                .to_string(),
         })?
         .map_err(|message| BrowserRuntimeError::Platform { message })
 }
@@ -382,7 +405,9 @@ where
 /// Reads `CanGoBack`/`CanGoForward` fresh from WebView2. Windows only — see
 /// the module's platform-boundary doc; both are `false` everywhere else.
 #[cfg(windows)]
-fn navigation_capability<R: Runtime>(webview: &Webview<R>) -> Result<(bool, bool), BrowserRuntimeError> {
+fn navigation_capability<R: Runtime>(
+    webview: &Webview<R>,
+) -> Result<(bool, bool), BrowserRuntimeError> {
     with_core_webview2(webview, |core| unsafe {
         let mut can_go_back = windows::core::BOOL(0);
         let mut can_go_forward = windows::core::BOOL(0);
@@ -393,22 +418,61 @@ fn navigation_capability<R: Runtime>(webview: &Webview<R>) -> Result<(bool, bool
 }
 
 #[cfg(not(windows))]
-fn navigation_capability<R: Runtime>(_webview: &Webview<R>) -> Result<(bool, bool), BrowserRuntimeError> {
+fn navigation_capability<R: Runtime>(
+    _webview: &Webview<R>,
+) -> Result<(bool, bool), BrowserRuntimeError> {
     Ok((false, false))
 }
 
+/// Browser-B3 (D22): disables WebView2's own built-in password-autosave
+/// and general-autofill UI for a surface — verified against the pinned
+/// `webview2-com-sys-0.38.2` bindings before implementation (not guessed):
+/// `ICoreWebView2Settings4::SetIsPasswordAutosaveEnabled`/
+/// `SetIsGeneralAutofillEnabled` are real, generated methods, reachable via
+/// `ICoreWebView2::Settings()` cast to the versioned `Settings4` interface.
+/// Consistent with "no provider password collection inside KORTEX forms"
+/// extended to "no browser-native password capture either" — a password
+/// saved into WebView2's own password manager inside a KORTEX-hosted
+/// surface is a feature surface nobody has designed isolation/audit for.
+///
+/// Best-effort: a failure here (e.g. an older WebView2 runtime that
+/// doesn't implement `Settings4`) degrades to WebView2's own default
+/// behavior for that one surface rather than failing surface creation
+/// outright — the surface remains fully usable, just without this
+/// hardening applied. `#[cfg(windows)]`-gated with a `#[cfg(not(windows))]`
+/// no-op, matching every other raw-COM call in this module.
+#[cfg(windows)]
+fn disable_password_and_autofill<R: Runtime>(webview: &Webview<R>) {
+    let _ = with_core_webview2(webview, |core| unsafe {
+        let settings = core.Settings()?;
+        let settings4: ICoreWebView2Settings4 = settings.cast()?;
+        settings4.SetIsPasswordAutosaveEnabled(false)?;
+        settings4.SetIsGeneralAutofillEnabled(false)?;
+        Ok(())
+    });
+}
+
+#[cfg(not(windows))]
+fn disable_password_and_autofill<R: Runtime>(_webview: &Webview<R>) {}
+
 impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
-    fn create_surface(&self, request: CreateSurfaceRequest) -> Result<BrowserSurfaceId, BrowserRuntimeError> {
-        let url: tauri::Url = request
-            .initial_url
-            .parse()
-            .map_err(|e| BrowserRuntimeError::Platform { message: format!("invalid initial_url: {e}") })?;
+    fn create_surface(
+        &self,
+        request: CreateSurfaceRequest,
+    ) -> Result<BrowserSurfaceId, BrowserRuntimeError> {
+        let url: tauri::Url =
+            request
+                .initial_url
+                .parse()
+                .map_err(|e| BrowserRuntimeError::Platform {
+                    message: format!("invalid initial_url: {e}"),
+                })?;
 
         let surface_id = BrowserSurfaceId::generate();
-        let data_directory = self.resolve_profile_directory(&request.profile_id);
 
-        let builder = tauri::webview::WebviewBuilder::new(surface_id.as_label(), WebviewUrl::External(url))
-            .data_directory(data_directory);
+        let builder =
+            tauri::webview::WebviewBuilder::new(surface_id.as_label(), WebviewUrl::External(url))
+                .data_directory(request.data_directory);
 
         let webview = self
             .window
@@ -417,10 +481,13 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(DEFAULT_SURFACE_WIDTH, DEFAULT_SURFACE_HEIGHT),
             )
-            .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })?;
+            .map_err(|e| BrowserRuntimeError::Platform {
+                message: e.to_string(),
+            })?;
 
         let loading = Arc::new(AtomicBool::new(false));
         register_navigation_loading_handlers(&webview, loading.clone());
+        disable_password_and_autofill(&webview);
 
         let mut surfaces = self.surfaces.lock().unwrap();
         // `BrowserSurfaceId::generate()`'s monotonic sequence (see
@@ -439,22 +506,28 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
         Ok(surface_id)
     }
 
-    fn navigate(&self, surface_id: &BrowserSurfaceId, url: &str) -> Result<(), BrowserRuntimeError> {
-        let parsed: tauri::Url = url
-            .parse()
-            .map_err(|e| BrowserRuntimeError::Platform { message: format!("invalid url: {e}") })?;
+    fn navigate(
+        &self,
+        surface_id: &BrowserSurfaceId,
+        url: &str,
+    ) -> Result<(), BrowserRuntimeError> {
+        let parsed: tauri::Url = url.parse().map_err(|e| BrowserRuntimeError::Platform {
+            message: format!("invalid url: {e}"),
+        })?;
         self.with_surface(surface_id, |webview| {
             webview
                 .navigate(parsed)
-                .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })
+                .map_err(|e| BrowserRuntimeError::Platform {
+                    message: e.to_string(),
+                })
         })
     }
 
     fn reload(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError> {
         self.with_surface(surface_id, |webview| {
-            webview
-                .reload()
-                .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })
+            webview.reload().map_err(|e| BrowserRuntimeError::Platform {
+                message: e.to_string(),
+            })
         })
     }
 
@@ -472,7 +545,8 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
         // boundary doc.
         self.cloned_surface(surface_id)?;
         Err(BrowserRuntimeError::Platform {
-            message: "back navigation is only implemented for the Windows WebView2RuntimeAdapter".to_string(),
+            message: "back navigation is only implemented for the Windows WebView2RuntimeAdapter"
+                .to_string(),
         })
     }
 
@@ -486,27 +560,42 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
     fn go_forward(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError> {
         self.cloned_surface(surface_id)?;
         Err(BrowserRuntimeError::Platform {
-            message: "forward navigation is only implemented for the Windows WebView2RuntimeAdapter".to_string(),
+            message:
+                "forward navigation is only implemented for the Windows WebView2RuntimeAdapter"
+                    .to_string(),
         })
     }
 
-    fn set_bounds(&self, surface_id: &BrowserSurfaceId, bounds: SurfaceBounds) -> Result<(), BrowserRuntimeError> {
+    fn set_bounds(
+        &self,
+        surface_id: &BrowserSurfaceId,
+        bounds: SurfaceBounds,
+    ) -> Result<(), BrowserRuntimeError> {
         self.with_surface(surface_id, |webview| {
             webview
                 .set_position(LogicalPosition::new(bounds.x, bounds.y))
-                .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })?;
+                .map_err(|e| BrowserRuntimeError::Platform {
+                    message: e.to_string(),
+                })?;
             webview
                 .set_size(LogicalSize::new(bounds.width, bounds.height))
-                .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })
+                .map_err(|e| BrowserRuntimeError::Platform {
+                    message: e.to_string(),
+                })
         })
     }
 
-    fn query_state(&self, surface_id: &BrowserSurfaceId) -> Result<BrowserSurfaceState, BrowserRuntimeError> {
+    fn query_state(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<BrowserSurfaceState, BrowserRuntimeError> {
         let (webview, loading_flag) = self.cloned_surface(surface_id)?;
         let loading = loading_flag.load(Ordering::Relaxed);
         let url = webview
             .url()
-            .map_err(|e| BrowserRuntimeError::Platform { message: e.to_string() })?
+            .map_err(|e| BrowserRuntimeError::Platform {
+                message: e.to_string(),
+            })?
             .to_string();
         let (can_go_back, can_go_forward) = navigation_capability(&webview)?;
         Ok(BrowserSurfaceState {
@@ -520,9 +609,12 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
 
     fn destroy(&self, surface_id: &BrowserSurfaceId) -> Result<(), BrowserRuntimeError> {
         let mut surfaces = self.surfaces.lock().unwrap();
-        let entry = surfaces
-            .remove(surface_id)
-            .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound { surface_id: surface_id.clone() })?;
+        let entry =
+            surfaces
+                .remove(surface_id)
+                .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound {
+                    surface_id: surface_id.clone(),
+                })?;
         // A close failure (e.g. the webview was already gone) must not
         // leave the removed entry un-removed above — this method's
         // postcondition ("this id is no longer valid") already holds by
@@ -540,19 +632,37 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
     }
 }
 
-/// Resolves the base directory Browser-B1 allocates per-profile WebView2
-/// user-data folders under. Not `BrowserProfileStore` itself (Browser-B3) —
-/// just enough to prove `WebviewBuilder::data_directory()` works against a
-/// real, KORTEX-owned directory rather than an ad hoc temp path.
-pub fn default_profile_root(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("browser-profiles")
-}
-
 /// Tauri-managed app state wrapping the single, process-wide
 /// [`BrowserRuntime`]. Boxed as `dyn BrowserRuntime` (never
 /// `WebView2RuntimeAdapter` directly) so every command below depends only on
 /// the abstraction, matching this module's own boundary rule.
 pub struct BrowserRuntimeState(pub Arc<dyn BrowserRuntime>);
+
+/// Every failure `browser_create_surface` can produce — either resolving
+/// the profile (before any surface exists at all) or creating the surface
+/// itself (after the profile was already opened/locked). `#[serde(untagged)]`
+/// so the JSON on the wire is exactly whichever inner error's own `{"kind":
+/// ...}` shape — the frontend's existing `isBrowserRuntimeError()`-style
+/// guard is extended (Browser-B3) to also recognize `BrowserProfileError`'s
+/// kind strings, rather than this type introducing a second wrapper shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum BrowserSurfaceCreationError {
+    Profile(crate::browser_profile_store::BrowserProfileError),
+    Runtime(BrowserRuntimeError),
+}
+
+impl From<crate::browser_profile_store::BrowserProfileError> for BrowserSurfaceCreationError {
+    fn from(error: crate::browser_profile_store::BrowserProfileError) -> Self {
+        Self::Profile(error)
+    }
+}
+
+impl From<BrowserRuntimeError> for BrowserSurfaceCreationError {
+    fn from(error: BrowserRuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
 
 /// Browser-B1/B2 commands: plain, direct Tauri IPC (frontend ↔ Rust), the
 /// same transport `ipc::has_session`/`.logout` already use — deliberately
@@ -562,12 +672,51 @@ pub struct BrowserRuntimeState(pub Arc<dyn BrowserRuntime>);
 /// `WebviewBuilder::new`'s own documented deadlock warning for
 /// `create_surface`, and kept uniform across every command for the same
 /// reason `ipc.rs`'s command wrappers are.
+///
+/// **Browser-B3 orchestration**: this command is the one place a tenant's
+/// authoritative identity (`IpcClientState::current_tenant_id()`, OD-B7)
+/// and a profile's on-disk directory (`BrowserProfileStore::open_profile`)
+/// are resolved BEFORE this module's own `BrowserRuntime::create_surface`
+/// is ever called — neither `BrowserRuntime` nor `WebView2RuntimeAdapter`
+/// gains any knowledge of tenants or profiles as a result (see the module's
+/// own doc comment). Fails closed with `ProfileIdentityUnavailable` if no
+/// tenant identity is available yet — never falls back to a default/shared
+/// directory.
 #[tauri::command]
 pub async fn browser_create_surface(
-    state: tauri::State<'_, BrowserRuntimeState>,
-    request: CreateSurfaceRequest,
-) -> Result<BrowserSurfaceId, BrowserRuntimeError> {
-    state.0.create_surface(request)
+    runtime_state: tauri::State<'_, BrowserRuntimeState>,
+    profile_state: tauri::State<'_, crate::browser_profile_store::BrowserProfileStoreState>,
+    bindings: tauri::State<'_, crate::browser_profile_store::ActiveProfileSurfaces>,
+    ipc_state: tauri::State<'_, Arc<crate::ipc::IpcClientState>>,
+    profile_id: crate::browser_profile_store::BrowserProfileId,
+    initial_url: String,
+) -> Result<BrowserSurfaceId, BrowserSurfaceCreationError> {
+    let tenant_id = crate::browser_profile_store::resolve_tenant_or_deny(
+        &ipc_state,
+        &profile_state.0,
+        "browser_create_surface",
+    )?;
+
+    let data_directory = profile_state.0.open_profile(&tenant_id, &profile_id)?;
+
+    let creation_result = runtime_state.0.create_surface(CreateSurfaceRequest {
+        data_directory,
+        initial_url,
+    });
+    match creation_result {
+        Ok(surface_id) => {
+            bindings.record(surface_id.clone(), tenant_id, profile_id);
+            Ok(surface_id)
+        }
+        Err(runtime_error) => {
+            // The profile's lock was already acquired above, but no
+            // surface ended up using it — release it rather than leave
+            // the profile stuck reporting `Locked` for a surface that
+            // was never actually created.
+            let _ = profile_state.0.close_profile(&tenant_id, &profile_id);
+            Err(runtime_error.into())
+        }
+    }
 }
 
 #[tauri::command]
@@ -620,12 +769,28 @@ pub async fn browser_query_state(
     state.0.query_state(&surface_id)
 }
 
+/// Browser-B3: also releases the surface's profile lock (if it was created
+/// through `browser_create_surface` and therefore has a recorded binding),
+/// after the surface itself is gone. A lock-release failure is swallowed
+/// (`let _ =`) for the same reason `destroy`'s own webview-close failure
+/// already is — "already released" and "release failed" both leave the
+/// profile in the same observable state (unlocked at the next stale-lock
+/// check, since this process holding a lock it just tried and failed to
+/// remove is itself an internally-inconsistent state that can't actually
+/// arise from `std::fs::remove_file`'s own failure modes on a file this
+/// process just created).
 #[tauri::command]
 pub async fn browser_destroy(
-    state: tauri::State<'_, BrowserRuntimeState>,
+    runtime_state: tauri::State<'_, BrowserRuntimeState>,
+    profile_state: tauri::State<'_, crate::browser_profile_store::BrowserProfileStoreState>,
+    bindings: tauri::State<'_, crate::browser_profile_store::ActiveProfileSurfaces>,
     surface_id: BrowserSurfaceId,
 ) -> Result<(), BrowserRuntimeError> {
-    state.0.destroy(&surface_id)
+    runtime_state.0.destroy(&surface_id)?;
+    if let Some((tenant_id, profile_id)) = bindings.take(&surface_id) {
+        let _ = profile_state.0.close_profile(&tenant_id, &profile_id);
+    }
+    Ok(())
 }
 
 /// Deliberately pure-logic only — no live `tauri::Window`/`Webview` is
@@ -651,46 +816,12 @@ pub async fn browser_destroy(
 mod tests {
     use super::*;
 
-    #[test]
-    fn sanitize_profile_id_keeps_only_safe_characters() {
-        assert_eq!(sanitize_profile_id("tenant-42_abc"), "tenant-42_abc");
-        assert_eq!(sanitize_profile_id("../../etc/passwd"), "etcpasswd");
-        assert_eq!(sanitize_profile_id(""), "default");
-        assert_eq!(sanitize_profile_id("../"), "default");
-    }
-
-    #[test]
-    fn resolve_profile_directory_never_escapes_the_profile_root() {
-        let root = PathBuf::from("test-profiles");
-        let resolved = resolve_profile_directory(&root, "../../../windows/system32");
-        assert_eq!(resolved, root.join("windowssystem32"));
-        assert!(resolved.starts_with(&root));
-    }
-
-    #[test]
-    fn resolve_profile_directory_is_stable_for_the_same_profile_id() {
-        let root = PathBuf::from("test-profiles");
-        assert_eq!(
-            resolve_profile_directory(&root, "tenant-1"),
-            resolve_profile_directory(&root, "tenant-1"),
-        );
-    }
-
-    #[test]
-    fn resolve_profile_directory_keeps_distinct_tenants_in_distinct_directories() {
-        let root = PathBuf::from("test-profiles");
-        assert_ne!(
-            resolve_profile_directory(&root, "tenant-1"),
-            resolve_profile_directory(&root, "tenant-2"),
-        );
-    }
-
-    #[test]
-    fn default_profile_root_is_a_dedicated_subdirectory_of_the_app_data_dir() {
-        let app_data_dir = PathBuf::from("C:/fake/app-data");
-        let root = default_profile_root(&app_data_dir);
-        assert_eq!(root, app_data_dir.join("browser-profiles"));
-    }
+    // Browser-B3: `sanitize_profile_id`/`resolve_profile_directory`/
+    // `default_profile_root` were removed from this module entirely — this
+    // module is now profile-agnostic (see the module's own doc comment).
+    // Their hardened successors (`sanitize_path_component`,
+    // `resolve_child_directory`, `browser_profiles_root`) live in, and are
+    // tested by, `browser_profile_store.rs`.
 
     #[test]
     fn browser_surface_id_generate_never_collides_across_many_sequential_calls() {
@@ -700,9 +831,14 @@ mod tests {
         // proves ids are unique without needing a live `Window`/`Webview`
         // (the crashing `tauri::test` harness this crate cannot use; see
         // this module's own doc comment on its test module).
-        let ids: Vec<BrowserSurfaceId> = (0..10_000).map(|_| BrowserSurfaceId::generate()).collect();
+        let ids: Vec<BrowserSurfaceId> =
+            (0..10_000).map(|_| BrowserSurfaceId::generate()).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "every generated id must be distinct");
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "every generated id must be distinct"
+        );
     }
 
     #[test]
@@ -712,14 +848,24 @@ mod tests {
         // sequence counter truly serializes across threads, not just
         // within one.
         let handles: Vec<_> = (0..8)
-            .map(|_| std::thread::spawn(|| (0..2_000).map(|_| BrowserSurfaceId::generate()).collect::<Vec<_>>()))
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..2_000)
+                        .map(|_| BrowserSurfaceId::generate())
+                        .collect::<Vec<_>>()
+                })
+            })
             .collect();
         let mut all_ids = Vec::new();
         for handle in handles {
             all_ids.extend(handle.join().expect("generator thread must not panic"));
         }
         let unique: std::collections::HashSet<_> = all_ids.iter().collect();
-        assert_eq!(unique.len(), all_ids.len(), "every generated id must be distinct even across threads");
+        assert_eq!(
+            unique.len(),
+            all_ids.len(),
+            "every generated id must be distinct even across threads"
+        );
     }
 
     #[test]
@@ -738,27 +884,60 @@ mod tests {
     #[test]
     fn surface_not_found_error_serializes_with_the_offending_id() {
         let id = BrowserSurfaceId::generate();
-        let error = BrowserRuntimeError::SurfaceNotFound { surface_id: id.clone() };
+        let error = BrowserRuntimeError::SurfaceNotFound {
+            surface_id: id.clone(),
+        };
         assert!(error.to_string().contains(id.as_label()));
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["kind"], "surfaceNotFound");
     }
 
+    /// `#[serde(rename_all = "camelCase")]` on an enum only renames the
+    /// `"kind"` tag itself — it does NOT cascade into a struct-like
+    /// variant's own field names (the identical latent bug was found and
+    /// fixed the same way in `browser_profile_store::BrowserProfileError`;
+    /// see that type's own doc comment). The frontend's `BrowserRuntimeError`
+    /// TypeScript type (`apps/desktop/src/features/browser/api.ts`) expects
+    /// `surfaceId`, not `surface_id`.
     #[test]
-    fn create_surface_request_deserializes_from_the_frontends_camel_case_shape() {
-        let request: CreateSurfaceRequest = serde_json::from_str(
-            r#"{"profileId":"tenant-1","initialUrl":"https://example.invalid/start"}"#,
-        )
-        .unwrap();
-        assert_eq!(request.profile_id, "tenant-1");
-        assert_eq!(request.initial_url, "https://example.invalid/start");
+    fn browser_runtime_error_variants_serialize_surface_id_as_camel_case() {
+        let id = BrowserSurfaceId::generate();
+
+        let error = BrowserRuntimeError::SurfaceNotFound {
+            surface_id: id.clone(),
+        };
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["surfaceId"], serde_json::to_value(&id).unwrap());
+        assert!(
+            json.get("surface_id").is_none(),
+            "must not ALSO emit the raw snake_case key"
+        );
+
+        let error = BrowserRuntimeError::AlreadyExists {
+            surface_id: id.clone(),
+        };
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["surfaceId"], serde_json::to_value(&id).unwrap());
+        assert!(
+            json.get("surface_id").is_none(),
+            "must not ALSO emit the raw snake_case key"
+        );
     }
+
+    // Browser-B3: `CreateSurfaceRequest` no longer derives `Deserialize` at
+    // all (it now carries an already-resolved `data_directory: PathBuf`,
+    // constructed only by `browser_create_surface`'s own orchestration
+    // logic — see the module's own doc comment) — there is no longer a
+    // frontend-facing JSON shape for this type to round-trip.
 
     #[test]
     fn surface_bounds_deserializes_from_the_frontends_camel_case_shape() {
         let bounds: SurfaceBounds =
             serde_json::from_str(r#"{"x":12.5,"y":48.0,"width":800.0,"height":600.0}"#).unwrap();
-        assert_eq!((bounds.x, bounds.y, bounds.width, bounds.height), (12.5, 48.0, 800.0, 600.0));
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+            (12.5, 48.0, 800.0, 600.0)
+        );
     }
 
     #[test]

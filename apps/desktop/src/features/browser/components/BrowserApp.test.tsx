@@ -1,7 +1,20 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createMock, navigateMock, reloadMock, goBackMock, goForwardMock, setBoundsMock, queryMock, destroyMock } = vi.hoisted(() => ({
+const {
+  createMock,
+  navigateMock,
+  reloadMock,
+  goBackMock,
+  goForwardMock,
+  setBoundsMock,
+  queryMock,
+  destroyMock,
+  listProfilesMock,
+  createProfileMock,
+  renameProfileMock,
+  deleteProfileMock,
+} = vi.hoisted(() => ({
   createMock: vi.fn(),
   navigateMock: vi.fn(),
   reloadMock: vi.fn(),
@@ -10,6 +23,10 @@ const { createMock, navigateMock, reloadMock, goBackMock, goForwardMock, setBoun
   setBoundsMock: vi.fn(),
   queryMock: vi.fn(),
   destroyMock: vi.fn(),
+  listProfilesMock: vi.fn(),
+  createProfileMock: vi.fn(),
+  renameProfileMock: vi.fn(),
+  deleteProfileMock: vi.fn(),
 }));
 
 vi.mock("../api", async () => {
@@ -24,13 +41,30 @@ vi.mock("../api", async () => {
     setBrowserSurfaceBounds: setBoundsMock,
     queryBrowserSurfaceState: queryMock,
     destroyBrowserSurface: destroyMock,
+    listBrowserProfiles: listProfilesMock,
+    createBrowserProfile: createProfileMock,
+    renameBrowserProfile: renameProfileMock,
+    deleteBrowserProfile: deleteProfileMock,
   };
 });
 
 import { BrowserApp } from "./BrowserApp";
 
+const TEST_PROFILE_ID = "profile-test-1";
+
 function stateFor(surfaceId: string, overrides: Partial<import("../api").BrowserSurfaceState> = {}) {
   return { surfaceId, url: "https://example.com/", loading: false, canGoBack: false, canGoForward: false, ...overrides };
+}
+
+function testProfile(overrides: Partial<import("../api").ProfileSummary> = {}) {
+  return {
+    profileId: TEST_PROFILE_ID,
+    displayName: "Default",
+    createdAt: 0,
+    lastOpenedAt: null,
+    availability: { kind: "available" as const },
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -42,7 +76,15 @@ beforeEach(() => {
   setBoundsMock.mockReset();
   queryMock.mockReset();
   destroyMock.mockReset();
+  listProfilesMock.mockReset();
+  createProfileMock.mockReset();
+  renameProfileMock.mockReset();
+  deleteProfileMock.mockReset();
   setBoundsMock.mockResolvedValue(undefined);
+  // A single already-existing, available profile by default — most tests
+  // exercise tab behavior, not profile auto-creation/switching, so they
+  // don't need `useBrowserProfiles` to take the auto-create path.
+  listProfilesMock.mockResolvedValue([testProfile()]);
 });
 
 describe("BrowserApp", () => {
@@ -53,7 +95,7 @@ describe("BrowserApp", () => {
     render(<BrowserApp />);
 
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
-    expect(createMock).toHaveBeenCalledWith("default", "https://example.com");
+    expect(createMock).toHaveBeenCalledWith(TEST_PROFILE_ID, "https://example.com");
     expect(await screen.findAllByRole("tab")).toHaveLength(1);
   });
 
@@ -276,5 +318,115 @@ describe("BrowserApp", () => {
     await waitFor(() => expect(navigateMock).toHaveBeenCalled());
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  describe("Browser-B3 profiles", () => {
+    it("auto-creates a Default profile when the current tenant has none yet", async () => {
+      listProfilesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([testProfile({ displayName: "Default" })]);
+      createProfileMock.mockResolvedValueOnce(TEST_PROFILE_ID);
+      createMock.mockResolvedValueOnce("browser-surface-1");
+      queryMock.mockResolvedValueOnce(stateFor("browser-surface-1"));
+
+      render(<BrowserApp />);
+
+      await waitFor(() => expect(createProfileMock).toHaveBeenCalledWith("Default"));
+      expect(await screen.findByRole("radio", { name: /Default/ })).toBeInTheDocument();
+    });
+
+    it("switching profiles closes every existing tab and opens exactly one fresh tab against the new profile", async () => {
+      listProfilesMock.mockResolvedValue([testProfile({ displayName: "Work" }), testProfile({
+        profileId: "profile-test-2",
+        displayName: "Personal",
+      })]);
+      createMock
+        .mockResolvedValueOnce("browser-surface-1")
+        .mockResolvedValueOnce("browser-surface-2")
+        .mockResolvedValueOnce("browser-surface-3");
+      queryMock.mockResolvedValue(stateFor("browser-surface-1"));
+      destroyMock.mockResolvedValue(undefined);
+
+      render(<BrowserApp />);
+      // Initial tab against the default-active profile ("Work", first in
+      // the list — both have `lastOpenedAt: null`, and the tie-break
+      // keeps input order).
+      await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+      expect(createMock).toHaveBeenNthCalledWith(1, TEST_PROFILE_ID, "https://example.com");
+
+      // A second tab, still on "Work" — proves the switch closes BOTH.
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      await waitFor(() => expect(createMock).toHaveBeenCalledTimes(2));
+
+      // The switch handler lives on the profile chip's own inner button
+      // (its accessible name is the profile's display name) — the outer
+      // `role="radio"` element itself has no click handler.
+      fireEvent.click(screen.getByRole("button", { name: "Personal" }));
+
+      await waitFor(() => {
+        const destroyed = destroyMock.mock.calls.map(([id]) => id);
+        expect(destroyed).toContain("browser-surface-1");
+        expect(destroyed).toContain("browser-surface-2");
+      });
+      await waitFor(() => expect(createMock).toHaveBeenCalledTimes(3));
+      expect(createMock).toHaveBeenNthCalledWith(3, "profile-test-2", "https://example.com");
+      expect(await screen.findAllByRole("tab")).toHaveLength(1);
+    });
+
+    it("creating a new profile through the switcher calls createBrowserProfile and makes it active", async () => {
+      listProfilesMock.mockResolvedValue([testProfile()]);
+      createMock.mockResolvedValue("browser-surface-1");
+      queryMock.mockResolvedValue(stateFor("browser-surface-1"));
+      createProfileMock.mockResolvedValueOnce("profile-new");
+
+      render(<BrowserApp />);
+      await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+
+      fireEvent.click(screen.getByTestId("new-profile-button"));
+      fireEvent.change(screen.getByTestId("new-profile-name-input"), { target: { value: "Shopping" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+      await waitFor(() => expect(createProfileMock).toHaveBeenCalledWith("Shopping"));
+    });
+
+    it("deleting a profile calls deleteBrowserProfile after confirmation", async () => {
+      listProfilesMock.mockResolvedValue([testProfile({ displayName: "Work" }), testProfile({
+        profileId: "profile-test-2",
+        displayName: "Personal",
+      })]);
+      createMock.mockResolvedValue("browser-surface-1");
+      queryMock.mockResolvedValue(stateFor("browser-surface-1"));
+      deleteProfileMock.mockResolvedValueOnce(undefined);
+
+      render(<BrowserApp />);
+      await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+
+      // Only the INACTIVE profile ("Personal") exposes a delete control —
+      // the active one is being used by the visible tab(s).
+      fireEvent.click(screen.getByRole("button", { name: /Delete Personal/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+      await waitFor(() => expect(deleteProfileMock).toHaveBeenCalledWith("profile-test-2"));
+    });
+
+    it("shows a locked/corrupted badge for profiles reporting that availability", async () => {
+      listProfilesMock.mockResolvedValue([
+        testProfile({ displayName: "Work" }),
+        testProfile({ profileId: "profile-test-2", displayName: "Locked One", availability: { kind: "locked" } }),
+        testProfile({
+          profileId: "profile-test-3",
+          displayName: "Broken One",
+          availability: { kind: "corrupted", reason: "profile.json is malformed" },
+        }),
+      ]);
+      createMock.mockResolvedValue("browser-surface-1");
+      queryMock.mockResolvedValue(stateFor("browser-surface-1"));
+
+      render(<BrowserApp />);
+      await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+
+      expect(await screen.findByText("In use")).toBeInTheDocument();
+      expect(await screen.findByText("Corrupted")).toBeInTheDocument();
+    });
   });
 });

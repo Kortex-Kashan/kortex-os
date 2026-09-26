@@ -19,6 +19,12 @@ import { invoke } from "@tauri-apps/api/core";
  * these commands. */
 export type BrowserSurfaceId = string;
 
+/** Browser-B3: opaque, persisted profile identifier. The frontend never
+ * constructs one itself (only `createBrowserProfile`'s response ever
+ * mints one) and never supplies a tenant id anywhere — the backend
+ * resolves the current tenant itself (OD-B7); see `browser_profile_store.rs`. */
+export type BrowserProfileId = string;
+
 /** A surface's on-screen placement in the KORTEX main window's own logical
  * (DPI-independent) coordinate space — matches the CSS pixel values
  * `getBoundingClientRect()` already reports at 100% scale. Browser-B2 uses
@@ -47,22 +53,103 @@ export type BrowserRuntimeError =
   | { kind: "alreadyExists"; surfaceId: BrowserSurfaceId }
   | { kind: "platform"; message: string };
 
+const BROWSER_RUNTIME_ERROR_KINDS = ["surfaceNotFound", "alreadyExists", "platform"];
+
 export function isBrowserRuntimeError(value: unknown): value is BrowserRuntimeError {
   return (
     typeof value === "object" &&
     value !== null &&
     "kind" in value &&
-    ["surfaceNotFound", "alreadyExists", "platform"].includes((value as { kind: unknown }).kind as string)
+    BROWSER_RUNTIME_ERROR_KINDS.includes((value as { kind: unknown }).kind as string)
   );
 }
 
-/** `profileId` is opaque — Rust resolves it to a sanitized directory under
- * its own profile root; this module must never construct or accept a
- * filesystem path itself (see `browser_runtime.rs`'s own doc comment). */
-export async function createBrowserSurface(profileId: string, initialUrl: string): Promise<BrowserSurfaceId> {
-  return invoke<BrowserSurfaceId>("browser_create_surface", {
-    request: { profileId, initialUrl },
-  });
+/** Browser-B3: mirrors `browser_profile_store::BrowserProfileError`'s
+ * `#[serde(tag = "kind")]` shape exactly — every field is renamed to
+ * camelCase explicitly on the Rust side (serde's `rename_all` on an enum
+ * does NOT cascade into a struct-variant's own fields, confirmed while
+ * building that type; every field below was verified against the real
+ * serialized shape, not assumed). */
+export type BrowserProfileError =
+  | { kind: "profileIdentityUnavailable" }
+  | { kind: "profileStorageUnavailable"; message: string }
+  | { kind: "profileNotFound"; profileId: BrowserProfileId }
+  | { kind: "profilePathViolation"; profileId: BrowserProfileId }
+  | { kind: "profileLocked"; profileId: BrowserProfileId }
+  | { kind: "profileCorrupted"; profileId: BrowserProfileId; reason: string }
+  | { kind: "alreadyExists"; profileId: BrowserProfileId }
+  | { kind: "platform"; message: string };
+
+const BROWSER_PROFILE_ERROR_KINDS = [
+  "profileIdentityUnavailable",
+  "profileStorageUnavailable",
+  "profileNotFound",
+  "profilePathViolation",
+  "profileLocked",
+  "profileCorrupted",
+  "alreadyExists",
+  "platform",
+];
+
+export function isBrowserProfileError(value: unknown): value is BrowserProfileError {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    BROWSER_PROFILE_ERROR_KINDS.includes((value as { kind: unknown }).kind as string)
+  );
+}
+
+/** Browser-B3: `browser_create_surface` can fail resolving the profile
+ * (before any surface exists) OR creating the surface itself — Rust's
+ * `#[serde(untagged)]` `BrowserSurfaceCreationError` means the JSON on the
+ * wire is exactly whichever inner error's own shape, so this is a plain
+ * union rather than a second wrapper shape. `"alreadyExists"` and
+ * `"platform"` appear in both halves with different sibling fields
+ * (`surfaceId` vs `profileId`); narrowing on `kind` alone still works,
+ * checking for the `profileId`/`surfaceId` field distinguishes the rest. */
+export type BrowserSurfaceCreationError = BrowserRuntimeError | BrowserProfileError;
+
+/** Browser-B3: every non-deleted profile for the current tenant, merged
+ * with its current (never-persisted) availability — mirrors
+ * `browser_profile_store::ProfileSummary`. */
+export interface ProfileSummary {
+  profileId: BrowserProfileId;
+  displayName: string;
+  createdAt: number;
+  lastOpenedAt: number | null;
+  availability: ProfileAvailability;
+}
+
+export type ProfileAvailability =
+  | { kind: "available" }
+  | { kind: "locked" }
+  | { kind: "corrupted"; reason: string };
+
+export async function listBrowserProfiles(): Promise<ProfileSummary[]> {
+  return invoke<ProfileSummary[]>("browser_list_profiles");
+}
+
+export async function createBrowserProfile(displayName: string): Promise<BrowserProfileId> {
+  return invoke<BrowserProfileId>("browser_create_profile", { displayName });
+}
+
+export async function renameBrowserProfile(profileId: BrowserProfileId, displayName: string): Promise<void> {
+  await invoke("browser_rename_profile", { profileId, displayName });
+}
+
+/** Refused (as `ProfileLocked`) while any tab is still open against this
+ * profile — the caller must close every tab using it first. */
+export async function deleteBrowserProfile(profileId: BrowserProfileId): Promise<void> {
+  await invoke("browser_delete_profile", { profileId });
+}
+
+/** `profileId` is opaque — Rust resolves it, via `BrowserProfileStore`,
+ * to a containment-checked, tenant-scoped directory; this module must
+ * never construct or accept a filesystem path itself (see
+ * `browser_runtime.rs`'s own doc comment). */
+export async function createBrowserSurface(profileId: BrowserProfileId, initialUrl: string): Promise<BrowserSurfaceId> {
+  return invoke<BrowserSurfaceId>("browser_create_surface", { profileId, initialUrl });
 }
 
 export async function navigateBrowserSurface(surfaceId: BrowserSurfaceId, url: string): Promise<void> {

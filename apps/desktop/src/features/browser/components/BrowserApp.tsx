@@ -1,22 +1,37 @@
+import { useBrowserProfiles } from "../hooks/useBrowserProfiles";
 import { useBrowserTabs } from "../hooks/useBrowserTabs";
 import { BrowserTabBar } from "./BrowserTabBar";
 import { BrowserToolbar } from "./BrowserToolbar";
+import { ProfileSwitcher } from "./ProfileSwitcher";
 
-/** Browser-B2: tabs, a toolbar (back/forward/reload/address), and the
- * content area the active tab's real WebView2 surface is positioned into
- * (`useBrowserTabs`' `containerRef`, tracked via `ResizeObserver` — no
- * polling). Deliberately does not implement: persistent profiles/sessions
- * (Browser-B3), downloads/bookmarks/history, provider authentication, or
- * any AI/automation capability — see `docs/architecture/
- * browser_known_limitations.md`. */
+/** Browser-B2/B3: profiles, tabs, a toolbar (back/forward/reload/address),
+ * and the content area the active tab's real WebView2 surface is
+ * positioned into (`useBrowserTabs`' `containerRef`, tracked via
+ * `ResizeObserver` — no polling). `useBrowserProfiles` owns the profile
+ * list/selection; `useBrowserTabs(activeProfileId)` reacts to the active
+ * profile changing (decision D24: closes every tab, opens one fresh tab
+ * against the new profile). Deliberately does not implement: downloads/
+ * bookmarks/history, provider authentication, or any AI/automation
+ * capability — see `docs/architecture/browser_known_limitations.md`. */
 export function BrowserApp() {
+  const {
+    profiles,
+    activeProfileId,
+    isLoading: isLoadingProfiles,
+    error: profileError,
+    switchProfile,
+    createProfile,
+    renameProfile,
+    deleteProfile,
+  } = useBrowserProfiles();
+
   const {
     tabs,
     activeTabId,
     activeTab,
     containerRef,
     isBusy,
-    error,
+    error: tabError,
     openTab,
     closeTab,
     switchTab,
@@ -24,10 +39,21 @@ export function BrowserApp() {
     reload,
     goBack,
     goForward,
-  } = useBrowserTabs();
+  } = useBrowserTabs(activeProfileId);
+
+  const error = tabError ?? profileError;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/70 bg-background/40 shadow-low backdrop-blur-xl">
+      <ProfileSwitcher
+        profiles={profiles}
+        activeProfileId={activeProfileId}
+        disabled={isBusy || isLoadingProfiles}
+        onSwitch={switchProfile}
+        onCreate={(displayName) => void createProfile(displayName)}
+        onRename={(profileId, displayName) => void renameProfile(profileId, displayName)}
+        onDelete={(profileId) => void deleteProfile(profileId)}
+      />
       <BrowserTabBar
         tabs={tabs}
         activeTabId={activeTabId}

@@ -37,3 +37,29 @@ commands.allow = ["browser_query_state"]
 identifier = "allow-browser-destroy"
 description = "Allows the webview to destroy a browser surface it created."
 commands.allow = ["browser_destroy"]
+
+# Browser-B3: profile lifecycle. Every command below resolves the
+# authoritative tenant identity itself (IpcClientState::current_tenant_id(),
+# OD-B7) — none of them accept a tenant id as a parameter, so granting them
+# to the trusted "main" webview cannot be used to reach another tenant's
+# profiles regardless of what the caller supplies.
+
+[[permission]]
+identifier = "allow-browser-list-profiles"
+description = "Allows the webview to list the current tenant's own browser profiles (id, display name, timestamps, availability only — never profile contents)."
+commands.allow = ["browser_list_profiles"]
+
+[[permission]]
+identifier = "allow-browser-create-profile"
+description = "Allows the webview to create a new browser profile for the current tenant, given only a display name. The resulting BrowserProfileId is opaque and CSPRNG-random; this permission grants no filesystem path control."
+commands.allow = ["browser_create_profile"]
+
+[[permission]]
+identifier = "allow-browser-rename-profile"
+description = "Allows the webview to change an existing profile's display name (presentation metadata only — never used to construct a filesystem path)."
+commands.allow = ["browser_rename_profile"]
+
+[[permission]]
+identifier = "allow-browser-delete-profile"
+description = "Allows the webview to delete a profile it owns (via the current tenant). Refused by the store itself while a live process holds that profile's lock."
+commands.allow = ["browser_delete_profile"]

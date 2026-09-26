@@ -23,7 +23,7 @@
 //! sidecar binary, auto-spawned — the latter is not implemented by this
 //! module).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -206,6 +206,36 @@ pub struct IpcClientState {
     http: reqwest::Client,
     base_url: String,
     pub token_store: Arc<dyn TokenStore>,
+    /// Browser-B3 (OD-B7): the current session's authoritative `tenant_id`,
+    /// captured opaquely from the `SecurityPrincipal` payload the backend
+    /// already discloses alongside every freshly-minted session token
+    /// (login, OAuth login completion, or `auth.refresh` — see
+    /// `backend/src/kortex/api/main.py::_invoke`, whose own invariant is
+    /// that a token is minted only when the dispatched capability's raw
+    /// result IS a `SecurityPrincipal`, placed at `payload.result` by
+    /// `_jsonable`). This is the ONLY authoritative source: nothing in
+    /// this module ever reads a caller-supplied `tenant_id` out of an
+    /// outgoing request's `parameters`, and no command accepts one as an
+    /// argument — a Browser-B3 profile command must read this field
+    /// Rust-side, never accept a `tenant_id` the frontend supplies.
+    ///
+    /// In-memory only, deliberately not persisted to the OS keychain
+    /// alongside the session token: this value is not itself a secret,
+    /// and keeping it out of persistent storage bounds its lifetime to
+    /// the current process, which is the simplest way to guarantee it
+    /// never outlives what "cleared on logout" promises. A session
+    /// merely restored from a keyring-persisted token at app startup —
+    /// before any fresh login/refresh happens in this process — leaves
+    /// this `None` until one does; Browser-B3 must fail closed in that
+    /// window, never fall back to a default/shared/OS-user-scoped
+    /// directory.
+    ///
+    /// Replaced atomically (never merged) every time a fresh token is
+    /// minted, so a session replacement (e.g. a second login as a
+    /// different tenant, in the same running process) can never leave a
+    /// stale, previously-cached tenant_id behind — see
+    /// `forward_capability_request`'s capture logic.
+    tenant_id: Mutex<Option<String>>,
 }
 
 impl IpcClientState {
@@ -216,6 +246,7 @@ impl IpcClientState {
             http: reqwest::Client::new(),
             base_url,
             token_store,
+            tenant_id: Mutex::new(None),
         }
     }
 
@@ -231,8 +262,32 @@ impl IpcClientState {
         self.token_store.load().is_some()
     }
 
+    /// Browser-B3 (OD-B7): the authoritative current tenant identity, or
+    /// `None` if no fresh login/refresh has occurred yet in this
+    /// process's lifetime (see the field's own doc comment). Treated as
+    /// an opaque scoping value by every caller — never parsed,
+    /// interpreted, or used for any authorization decision here; that
+    /// remains exclusively the backend's job. Callers that need a
+    /// tenant-scoped filesystem path (Browser-B3's profile store) must
+    /// treat `None` as "no authoritative tenant identity available" and
+    /// fail closed.
+    pub fn current_tenant_id(&self) -> Option<String> {
+        self.tenant_id.lock().unwrap().clone()
+    }
+
+    fn set_tenant_id(&self, tenant_id: Option<String>) {
+        *self.tenant_id.lock().unwrap() = tenant_id;
+    }
+
     pub fn clear_token(&self) {
         self.token_store.clear();
+        // The cached tenant identity was only ever meaningful alongside
+        // the access token that disclosed it — clearing one without the
+        // other would let a stale tenant_id outlive the session it came
+        // from. Every existing call site of `clear_token` is already a
+        // logout/session-end point (`logout` below), so this adds no new
+        // behavior beyond what "the session is over" already implies.
+        self.set_tenant_id(None);
     }
 }
 
@@ -317,6 +372,27 @@ pub async fn forward_capability_request(
 
     if let Some(token) = &raw.session_token {
         state.token_store.store(token);
+        // Browser-B3 (OD-B7): every response that mints a fresh session
+        // token also carries a `SecurityPrincipal` at `payload.result`
+        // (`main.py::_invoke`'s own invariant — minting only happens when
+        // the dispatched capability's raw result IS a `SecurityPrincipal`).
+        // Gated on "did the backend mint a token just now", exactly like
+        // the token capture above — never on `capability_name` (this
+        // module's own stated design rule: "It never branches on
+        // capability_name"). Replaced unconditionally: if the expected
+        // shape is ever absent (a malformed/unexpected response), the
+        // cache is cleared to `None` rather than left holding a PRIOR
+        // session's value — a session replacement must never leave a
+        // stale tenant_id behind.
+        let fresh_tenant_id = raw
+            .envelope
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("result"))
+            .and_then(|result| result.get("tenant_id"))
+            .and_then(|value| value.as_str())
+            .map(|s| s.to_string());
+        state.set_tenant_id(fresh_tenant_id);
     }
     if let Some(refresh_token) = &raw.refresh_token {
         state.token_store.store_refresh(refresh_token);
@@ -474,7 +550,13 @@ const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// session token is read or required for this call.
 pub async fn fetch_system_health(state: &IpcClientState) -> SystemHealthOutcome {
     let url = format!("{}/health", state.base_url);
-    let response = match state.http.get(&url).timeout(HEALTH_REQUEST_TIMEOUT).send().await {
+    let response = match state
+        .http
+        .get(&url)
+        .timeout(HEALTH_REQUEST_TIMEOUT)
+        .send()
+        .await
+    {
         Ok(resp) => resp,
         Err(err) => {
             return SystemHealthOutcome {
@@ -617,9 +699,7 @@ mod tests {
                         let headers = req
                             .headers()
                             .iter()
-                            .map(|(k, v)| {
-                                (k.to_string(), v.to_str().unwrap_or("").to_string())
-                            })
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                             .collect();
                         let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
                         let body_json: Value =
@@ -627,8 +707,7 @@ mod tests {
                         *captured.lock().unwrap() = Some((headers, body_json));
                         let mut response =
                             HyperResponse::new(Full::new(Bytes::from(response_body)));
-                        *response.status_mut() =
-                            hyper::StatusCode::from_u16(status).unwrap();
+                        *response.status_mut() = hyper::StatusCode::from_u16(status).unwrap();
                         Ok::<_, Infallible>(response)
                     }
                 });
@@ -662,6 +741,7 @@ mod tests {
             http: reqwest::Client::new(),
             base_url,
             token_store,
+            tenant_id: Mutex::new(None),
         }
     }
 
@@ -716,7 +796,9 @@ mod tests {
         let _ = forward_capability_request(&state, sample_request()).await;
 
         let (headers, _) = server.last_request.lock().unwrap().clone().unwrap();
-        assert!(!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
+        assert!(!headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
     }
 
     #[tokio::test]
@@ -848,10 +930,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_system_health_returns_backend_body_verbatim_without_auth_header() {
-        let server = start_recording_server(
-            r#"{"kernelState":"RUNNING","systemHealthPlaceholder":true}"#,
-        )
-        .await;
+        let server =
+            start_recording_server(r#"{"kernelState":"RUNNING","systemHealthPlaceholder":true}"#)
+                .await;
         // A token IS stored, proving the omission of the Authorization
         // header below is deliberate (health is unauthenticated by
         // contract), not just "no token was available to attach".
@@ -868,7 +949,9 @@ mod tests {
 
         let (headers, _) = server.last_request.lock().unwrap().clone().unwrap();
         assert!(
-            !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
             "GET /health must never carry an Authorization header"
         );
     }
@@ -942,7 +1025,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ordinary_call_response_with_no_refresh_token_field_leaves_any_stored_refresh_token_untouched() {
+    async fn an_ordinary_call_response_with_no_refresh_token_field_leaves_any_stored_refresh_token_untouched(
+    ) {
         // Mirrors the backend's own Phase F contract: an ordinary
         // capability response never carries `refreshToken` at all. This
         // proves the Rust side does not, say, clear the refresh slot just
@@ -976,7 +1060,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_session_sends_the_refresh_token_as_a_body_parameter_never_as_the_bearer_header() {
+    async fn refresh_session_sends_the_refresh_token_as_a_body_parameter_never_as_the_bearer_header(
+    ) {
         let server = start_recording_server(
             r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"principalId":"alice"},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"fresh-access-blob"}"#,
         )
@@ -1023,5 +1108,196 @@ mod tests {
 
         assert_eq!(state.current_token(), None);
         assert_eq!(state.token_store.load_refresh(), None);
+    }
+
+    // -- Browser-B3 (OD-B7): authoritative tenant_id capture --------------
+
+    /// Same "spawn a real local HTTP server" approach as `RecordingServer`
+    /// above, but returns a DIFFERENT fixed body per call index (cycling if
+    /// exhausted) — needed to simulate a SECOND login response arriving
+    /// later against the SAME `IpcClientState`, which a single
+    /// fixed-body server can't represent.
+    async fn start_sequenced_recording_server(
+        response_bodies: Vec<&'static str>,
+    ) -> RecordingServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let last_request: CapturedRequest = Arc::new(Mutex::new(None));
+        let captured = last_request.clone();
+        let call_index = Arc::new(Mutex::new(0usize));
+        let bodies = Arc::new(response_bodies);
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                let io = TokioIo::new(stream);
+                let captured = captured.clone();
+                let call_index = call_index.clone();
+                let bodies = bodies.clone();
+                let svc = service_fn(move |req: HyperRequest<hyper::body::Incoming>| {
+                    let captured = captured.clone();
+                    let call_index = call_index.clone();
+                    let bodies = bodies.clone();
+                    async move {
+                        let headers = req
+                            .headers()
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect();
+                        let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
+                        let body_json: Value =
+                            serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
+                        *captured.lock().unwrap() = Some((headers, body_json));
+                        let index = {
+                            let mut i = call_index.lock().unwrap();
+                            let current = *i;
+                            *i += 1;
+                            current
+                        };
+                        let response_body = bodies[index % bodies.len()];
+                        let response = HyperResponse::new(Full::new(Bytes::from(response_body)));
+                        Ok::<_, Infallible>(response)
+                    }
+                });
+                tokio::spawn(async move {
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        RecordingServer {
+            base_url: format!("http://{addr}"),
+            last_request,
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_login_response_captures_tenant_id_from_the_security_principal_payload() {
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"result":{"principal_id":"alice","principal_type":"USER","tenant_id":"tenant-alpha","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"opaque-blob"}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let envelope = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(envelope.status, "SUCCESS");
+        assert_eq!(state.current_tenant_id(), Some("tenant-alpha".to_string()));
+        // The tenant_id must never leak onto the envelope returned to the
+        // caller either — same custody guarantee as the session token.
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            serialized.contains("tenant-alpha"),
+            "payload.result is legitimately part of the envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_login_response_replaces_the_previously_cached_tenant_id() {
+        let server = start_sequenced_recording_server(vec![
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"result":{"principal_id":"alice","principal_type":"USER","tenant_id":"tenant-alpha","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"blob-1"}"#,
+            r#"{"requestId":"req-2","correlationId":"c-2","status":"SUCCESS","payload":{"result":{"principal_id":"bob","principal_type":"USER","tenant_id":"tenant-beta","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"blob-2"}"#,
+        ])
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+        assert_eq!(state.current_tenant_id(), Some("tenant-alpha".to_string()));
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        // A session replacement (a second, different login) must fully
+        // overwrite the first tenant_id -- never leave it merged/stale.
+        assert_eq!(state.current_tenant_id(), Some("tenant-beta".to_string()));
+    }
+
+    #[tokio::test]
+    async fn logout_clears_the_cached_tenant_id() {
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"result":{"principal_id":"alice","principal_type":"USER","tenant_id":"tenant-alpha","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"opaque-blob"}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+        let _ = forward_capability_request(&state, sample_request()).await;
+        assert_eq!(state.current_tenant_id(), Some("tenant-alpha".to_string()));
+
+        // `logout`'s own body is `state.clear_token()` +
+        // `state.token_store.clear_refresh()` -- exercised directly here,
+        // matching this file's existing convention for testing `logout`'s
+        // behavior without a live Tauri harness.
+        state.clear_token();
+
+        assert_eq!(state.current_tenant_id(), None);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_call_with_no_minted_token_leaves_the_cached_tenant_id_untouched() {
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":null,"errors":[],"warnings":[],"executionDurationMs":1.0}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+        state.set_tenant_id(Some("tenant-preexisting".to_string()));
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(
+            state.current_tenant_id(),
+            Some("tenant-preexisting".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_minted_token_whose_payload_is_missing_tenant_id_clears_any_previously_cached_value()
+    {
+        // An unexpected/malformed shape (`main.py`'s own invariant says this
+        // should never happen alongside a minted token, but this proves the
+        // fail-closed side of that assumption rather than trusting it
+        // blindly): a session token is minted, yet `payload` carries no
+        // `result.tenant_id` at all.
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"result":{"principal_id":"alice"}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"opaque-blob"}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+        state.set_tenant_id(Some("tenant-stale".to_string()));
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        // Must NOT still read "tenant-stale" -- a token was minted, so
+        // whatever this response actually says (or fails to say) about
+        // tenant identity must win, never a leftover prior value.
+        assert_eq!(state.current_tenant_id(), None);
+    }
+
+    #[tokio::test]
+    async fn request_supplied_tenant_id_in_parameters_is_never_used_as_the_cached_tenant_id() {
+        // Proves the cache is populated ONLY from the backend's own minted-
+        // token response, never from anything the caller placed in the
+        // outgoing request -- an attempted "caller-controlled tenant
+        // scoping" request must have no effect at all.
+        let server = start_recording_server(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":null,"errors":[],"warnings":[],"executionDurationMs":1.0}"#,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let state = state_with(server.base_url, store);
+
+        let mut request = sample_request();
+        request.parameters =
+            serde_json::json!({"tenant_id": "attacker-tenant", "tenantId": "attacker-tenant"});
+        let _ = forward_capability_request(&state, request).await;
+
+        assert_eq!(state.current_tenant_id(), None);
     }
 }
