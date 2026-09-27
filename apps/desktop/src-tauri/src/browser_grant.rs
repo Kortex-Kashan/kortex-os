@@ -15,10 +15,15 @@
 //! `BrowserRuntime` through the EXACT SAME trait methods
 //! (`navigate`/`arm_navigation_waiter`/`capture_screenshot`) a human click
 //! already goes through — so B4's `BrowserPolicyEngine` remains the final,
-//! unbypassable gate regardless of anything decided in this file. Every
-//! OTHER registered `kortex.browser.*` capability still stops at
-//! `NotYetEnabled`, exactly as B5.0-B5.4 shipped it (see this module's own
-//! `execute_granted_action` doc comment).
+//! unbypassable gate regardless of anything decided in this file. As of the
+//! UIA execution phase, `READ_CAPABILITY`/`EXTRACT_CAPABILITY`/
+//! `CLICK_CAPABILITY`/`TYPE_CAPABILITY` are likewise fully executed, through
+//! the bounded `UiaWorkerPool` (`browser_uia.rs`) rather than
+//! `BrowserRuntime` directly. Every OTHER registered `kortex.browser.*`
+//! capability (e.g. `kortex.browser.download`, deliberately not
+//! implemented this phase) still stops at `NotYetEnabled`, exactly as
+//! B5.0-B5.4 shipped it (see this module's own `execute_granted_action` doc
+//! comment).
 //!
 //! **Signature payload reconstruction is byte-for-byte, not
 //! datetime-parsed-and-reformatted.** `issued_at`/`expires_at` are kept as
@@ -53,14 +58,27 @@ use crate::browser_runtime::{BrowserRuntime, BrowserSurfaceId, NavigationOutcome
 use crate::ipc::{forward_capability_request, IpcCapabilityRequest, IpcClientState};
 
 const GRANT_VERIFICATION_KEY_CAPABILITY: &str = "kortex.browser.grant_verification_key";
-/// Browser-B5 (navigate/screenshot execution): the two `capability_name`
-/// values this redeem command actually executes for real. Every other
-/// registered `kortex.browser.*` capability still redeems successfully
+/// Browser-B5: the six `capability_name` values this redeem command
+/// actually executes for real (navigate/screenshot directly through
+/// `BrowserRuntime`; read/extract/click/type through the bounded
+/// `UiaWorkerPool`, see `browser_uia.rs`). Every other registered
+/// `kortex.browser.*` capability (e.g. `kortex.browser.download`,
+/// deliberately not implemented this phase) still redeems successfully
 /// (every B5.0-B5.4 verification check still runs and still fails closed)
 /// but returns `NotYetEnabled` — unchanged from B5.0-B5.4's own posture,
 /// see this file's own module doc.
 const NAVIGATE_CAPABILITY: &str = "kortex.browser.navigate";
 const SCREENSHOT_CAPABILITY: &str = "kortex.browser.screenshot";
+const READ_CAPABILITY: &str = "kortex.browser.read";
+const EXTRACT_CAPABILITY: &str = "kortex.browser.extract";
+const CLICK_CAPABILITY: &str = "kortex.browser.click";
+const TYPE_CAPABILITY: &str = "kortex.browser.type";
+/// A fixed desktop-side bound for every UIA-backed capability — none of
+/// `.read`/`.extract`/`.click`/`.type`'s own Python parameter models carry a
+/// caller-supplied `timeout_ms` (unlike navigate's), so there is no
+/// caller-supplied value to clamp against; this constant is the entire
+/// bound.
+const UIA_OPERATION_MAX_TIMEOUT: Duration = Duration::from_secs(15);
 /// Mirrors `backend/src/kortex/engines/browser/engine.py`'s own
 /// `_DEFAULT_INTERACTION_TIMEOUT_SECONDS`-style bound for the screenshot
 /// capability specifically — `BrowserScreenshotParams` (Python) has no
@@ -105,6 +123,50 @@ pub enum BrowserCapabilityParamsWire {
     Navigate { url: String, timeout_ms: u64 },
     #[serde(rename = "kortex.browser.screenshot")]
     Screenshot { full_page: bool },
+    #[serde(rename = "kortex.browser.read")]
+    Read {},
+    #[serde(rename = "kortex.browser.extract")]
+    Extract {
+        schema_fields: std::collections::HashMap<String, SelectorWire>,
+    },
+    #[serde(rename = "kortex.browser.click")]
+    Click { selector: SelectorWire },
+    #[serde(rename = "kortex.browser.type")]
+    Type {
+        selector: SelectorWire,
+        ui_input_text: String,
+    },
+}
+
+/// Wire mirror of `backend/src/kortex/engines/browser/models.py::
+/// BrowserElementSelector` — all three fields are accepted on the wire (so
+/// the recomputed parameter hash matches whatever the backend actually
+/// hashed at mint time, `node_ref` included), but `to_uia_selector` below
+/// refuses a selector that supplies `node_ref` without `role`/
+/// `accessible_name` — V1 does not support `node_ref`-only resolution (see
+/// `browser_uia.rs`'s own module doc and
+/// `docs/architecture/browser_b5_master_plan.md` §5.5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectorWire {
+    pub role: Option<String>,
+    pub accessible_name: Option<String>,
+    pub node_ref: Option<String>,
+}
+
+impl SelectorWire {
+    /// Converts to the executor's own, deliberately narrower selector type —
+    /// `node_ref` is never carried past this point. Returns `None` (never
+    /// panics or silently substitutes a different selector) if the wire
+    /// selector supplies only `node_ref`.
+    fn to_uia_selector(&self) -> Option<crate::browser_uia::UiaSelectorSpec> {
+        if self.role.is_none() && self.accessible_name.is_none() {
+            return None;
+        }
+        Some(crate::browser_uia::UiaSelectorSpec {
+            role: self.role.clone(),
+            accessible_name: self.accessible_name.clone(),
+        })
+    }
 }
 
 /// Every way a Grant can be rejected. Deliberately as granular as B5.3's
@@ -238,6 +300,78 @@ fn screenshot_parameters_value(
             "navigation_generation": grant.navigation_generation,
         },
         "full_page": full_page,
+    })
+}
+
+/// Mirrors `backend/src/kortex/engines/browser/models.py::
+/// BrowserElementSelector.model_dump(mode="json")` field-for-field
+/// (including `node_ref`, present in the hashed shape even though it is
+/// never carried into `UiaSelectorSpec` — the hash must match what the
+/// backend actually minted the Grant against, regardless of which fields
+/// the executor later chooses to honor).
+fn selector_value(selector: &SelectorWire) -> serde_json::Value {
+    serde_json::json!({
+        "role": selector.role,
+        "accessible_name": selector.accessible_name,
+        "node_ref": selector.node_ref,
+    })
+}
+
+fn read_parameters_value(grant: &CapabilityExecutionGrant) -> serde_json::Value {
+    serde_json::json!({
+        "target": {
+            "browser_profile_id": grant.browser_profile_id,
+            "surface_id": grant.surface_id,
+            "navigation_generation": grant.navigation_generation,
+        },
+    })
+}
+
+fn extract_parameters_value(
+    grant: &CapabilityExecutionGrant,
+    schema_fields: &std::collections::HashMap<String, SelectorWire>,
+) -> serde_json::Value {
+    let fields: serde_json::Map<String, serde_json::Value> = schema_fields
+        .iter()
+        .map(|(k, v)| (k.clone(), selector_value(v)))
+        .collect();
+    serde_json::json!({
+        "target": {
+            "browser_profile_id": grant.browser_profile_id,
+            "surface_id": grant.surface_id,
+            "navigation_generation": grant.navigation_generation,
+        },
+        "schema_fields": fields,
+    })
+}
+
+fn click_parameters_value(
+    grant: &CapabilityExecutionGrant,
+    selector: &SelectorWire,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target": {
+            "browser_profile_id": grant.browser_profile_id,
+            "surface_id": grant.surface_id,
+            "navigation_generation": grant.navigation_generation,
+        },
+        "selector": selector_value(selector),
+    })
+}
+
+fn type_parameters_value(
+    grant: &CapabilityExecutionGrant,
+    selector: &SelectorWire,
+    ui_input_text: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target": {
+            "browser_profile_id": grant.browser_profile_id,
+            "surface_id": grant.surface_id,
+            "navigation_generation": grant.navigation_generation,
+        },
+        "selector": selector_value(selector),
+        "ui_input_text": ui_input_text,
     })
 }
 
@@ -502,6 +636,21 @@ pub enum BrowserGrantExecutionError {
     /// an UNKNOWN outcome, not a proof that nothing happened — a caller
     /// must not assume the underlying WebView2 operation did not occur.
     Timeout,
+    /// A selector supplied only `node_ref` (or neither `role` nor
+    /// `accessible_name`) — V1 does not support `node_ref`-only
+    /// resolution. Refused before ever touching the UIA worker pool, not
+    /// silently ignored. See `browser_uia.rs`'s own module doc.
+    NodeRefOnlyNotSupported,
+    /// Any typed failure from `browser_uia.rs`'s execution pipeline (root
+    /// unavailable, accessibility not ready, selector not found/ambiguous/
+    /// unsupported, containment failed, unsupported control pattern, a
+    /// mapped COM failure, or the worker pool itself being exhausted) — see
+    /// `UiaExecutionError`'s own doc comment for what each variant means.
+    /// Wrapped rather than flattened into this enum, so the full detail
+    /// survives without duplicating every UIA-specific error kind here.
+    UiaFailed {
+        detail: crate::browser_uia::UiaExecutionError,
+    },
 }
 
 impl From<GrantRejectionReason> for BrowserGrantExecutionError {
@@ -599,13 +748,16 @@ fn record_browser_execution_audit_event(
     }
 }
 
-/// Redemption result. `Success`/`Screenshot` are only ever returned for
-/// `NAVIGATE_CAPABILITY`/`SCREENSHOT_CAPABILITY` respectively — every
-/// other registered `kortex.browser.*` capability still redeems
-/// successfully (every check below still runs and still fails closed) but
-/// reports `NotYetEnabled`, unchanged from B5.0-B5.4's own deliberate,
-/// disclosed placeholder (see this file's own module doc) — never a
-/// silent no-op a caller could mistake for real execution.
+/// Redemption result. `Success`/`Screenshot`/`Read`/`Extract`/`Click`/`Type`
+/// are only ever returned for their own matching capability constants
+/// (`NAVIGATE_CAPABILITY`/`SCREENSHOT_CAPABILITY`/`READ_CAPABILITY`/
+/// `EXTRACT_CAPABILITY`/`CLICK_CAPABILITY`/`TYPE_CAPABILITY`) — every other
+/// registered `kortex.browser.*` capability (e.g. `kortex.browser.download`,
+/// deliberately not implemented this phase) still redeems successfully
+/// (every check below still runs and still fails closed) but reports
+/// `NotYetEnabled`, unchanged from B5.0-B5.4's own deliberate, disclosed
+/// placeholder (see this file's own module doc) — never a silent no-op a
+/// caller could mistake for real execution.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum BrowserGrantExecutionResult {
@@ -622,6 +774,24 @@ pub enum BrowserGrantExecutionResult {
         image_base64: String,
     },
     NotYetEnabled {
+        capability_name: String,
+    },
+    /// `text` is bounded accessible-name text collected from the surface's
+    /// current UIA tree — never raw DOM/COM objects, cookies, storage, or
+    /// filesystem data. See `browser_uia.rs::collect_bounded_text`.
+    Read {
+        capability_name: String,
+        text: String,
+        truncated: bool,
+    },
+    Extract {
+        capability_name: String,
+        fields: std::collections::HashMap<String, crate::browser_uia::ExtractedField>,
+    },
+    Click {
+        capability_name: String,
+    },
+    Type {
         capability_name: String,
     },
 }
@@ -653,6 +823,7 @@ pub async fn browser_execute_granted_action(
     redeemed_tracker: tauri::State<'_, RedeemedGrantTracker>,
     surface_locks: tauri::State<'_, SurfaceRedeemLocks>,
     audit_log_path: tauri::State<'_, crate::browser_runtime::PolicyAuditLogPath>,
+    uia_pool: tauri::State<'_, std::sync::Arc<crate::browser_uia::UiaWorkerPool>>,
     grant: CapabilityExecutionGrant,
     params: Option<BrowserCapabilityParamsWire>,
 ) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
@@ -679,6 +850,7 @@ pub async fn browser_execute_granted_action(
         &redeemed_tracker,
         &surface_locks,
         &audit_log_path.0,
+        &uia_pool,
         grant,
         params,
     )
@@ -712,6 +884,7 @@ async fn execute_granted_action(
     redeemed_tracker: &RedeemedGrantTracker,
     surface_locks: &SurfaceRedeemLocks,
     audit_log_path: &std::path::Path,
+    uia_pool: &std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
     grant: CapabilityExecutionGrant,
     params: Option<BrowserCapabilityParamsWire>,
 ) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
@@ -796,9 +969,392 @@ async fn execute_granted_action(
         SCREENSHOT_CAPABILITY => {
             execute_screenshot(runtime, audit_log_path, &grant, params, &surface_id).await
         }
+        READ_CAPABILITY => {
+            execute_read(
+                runtime,
+                uia_pool,
+                audit_log_path,
+                &grant,
+                params,
+                &surface_id,
+            )
+            .await
+        }
+        EXTRACT_CAPABILITY => {
+            execute_extract(
+                runtime,
+                uia_pool,
+                audit_log_path,
+                &grant,
+                params,
+                &surface_id,
+            )
+            .await
+        }
+        CLICK_CAPABILITY => {
+            execute_click(
+                runtime,
+                uia_pool,
+                audit_log_path,
+                &grant,
+                params,
+                &surface_id,
+            )
+            .await
+        }
+        TYPE_CAPABILITY => {
+            execute_type(
+                runtime,
+                uia_pool,
+                audit_log_path,
+                &grant,
+                params,
+                &surface_id,
+            )
+            .await
+        }
         _ => Ok(BrowserGrantExecutionResult::NotYetEnabled {
             capability_name: grant.capability_name,
         }),
+    }
+}
+
+/// Submits `operation` to `pool` (via `spawn_blocking`, since `submit` can
+/// block for up to 5s creating and warming up a new worker — see
+/// `UiaWorkerPool::submit`'s own doc comment) and awaits the result under
+/// `timeout`, retiring the assigned worker (never reusing it, never force-
+/// killing it) if the timeout elapses first. Shared by all four
+/// UIA-backed capabilities so the timeout/retire discipline lives in
+/// exactly one place.
+async fn submit_and_await_uia_operation(
+    pool: &std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
+    surface_hwnd: isize,
+    operation: crate::browser_uia::UiaOperationKind,
+    timeout: Duration,
+) -> Result<crate::browser_uia::UiaOutcome, BrowserGrantExecutionError> {
+    // `submit` is intentionally a blocking function (see its own doc
+    // comment) -- calling it directly from this async context would risk
+    // blocking a shared tokio runtime worker thread for up to 5s if a new
+    // UIA worker needs to be created. `spawn_blocking` moves that risk onto
+    // tokio's own dedicated blocking-thread pool instead. Cloning the `Arc`
+    // (cheap: one atomic increment) is what lets the closure be genuinely
+    // `'static`, with no unsafe/raw-pointer trick needed.
+    // The ORIGINAL `pool` parameter (a borrow) is left untouched -- `retire`
+    // below still needs it after this `.await` completes.
+    let pool_for_dispatch = pool.clone();
+    let dispatch = tokio::task::spawn_blocking(move || {
+        pool_for_dispatch.submit(surface_hwnd, operation, timeout)
+    })
+    .await
+    .map_err(|e| BrowserGrantExecutionError::InternalError {
+        message: format!("UIA dispatch task panicked: {e}"),
+    })?;
+    let (slot_id, receiver) =
+        dispatch.map_err(|e| BrowserGrantExecutionError::UiaFailed { detail: e })?;
+    match tokio::time::timeout(timeout, receiver).await {
+        Ok(Ok(Ok(outcome))) => Ok(outcome),
+        Ok(Ok(Err(e))) => Err(BrowserGrantExecutionError::UiaFailed { detail: e }),
+        Ok(Err(_)) => Err(BrowserGrantExecutionError::InternalError {
+            message: "UIA outcome channel closed unexpectedly".to_string(),
+        }),
+        Err(_) => {
+            pool.retire(slot_id);
+            Err(BrowserGrantExecutionError::Timeout)
+        }
+    }
+}
+
+async fn execute_read(
+    runtime: &dyn BrowserRuntime,
+    uia_pool: &std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
+    audit_log_path: &std::path::Path,
+    grant: &CapabilityExecutionGrant,
+    params: Option<BrowserCapabilityParamsWire>,
+    surface_id: &BrowserSurfaceId,
+) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+    if !matches!(params, Some(BrowserCapabilityParamsWire::Read {})) {
+        return Err(BrowserGrantExecutionError::ParametersRequired);
+    }
+    let expected_hash = canonicalize_and_hash(READ_CAPABILITY, &read_parameters_value(grant));
+    if expected_hash != grant.canonicalized_parameters_hash {
+        record_browser_execution_audit_event(
+            audit_log_path,
+            BrowserExecutionAuditEvent::BrowserGrantRejected,
+            &grant.surface_id,
+            &grant.capability_name,
+            Some("parameter_hash_mismatch".to_string()),
+        );
+        return Err(BrowserGrantExecutionError::GrantInvalid);
+    }
+    record_browser_execution_audit_event(
+        audit_log_path,
+        BrowserExecutionAuditEvent::BrowserExecutionStarted,
+        &grant.surface_id,
+        &grant.capability_name,
+        None,
+    );
+    let hwnd = runtime.uia_root_hwnd(surface_id).map_err(|e| {
+        BrowserGrantExecutionError::InternalError {
+            message: e.to_string(),
+        }
+    })?;
+    let timeout = UIA_OPERATION_MAX_TIMEOUT;
+    let outcome = submit_and_await_uia_operation(
+        uia_pool,
+        hwnd,
+        crate::browser_uia::UiaOperationKind::Read,
+        timeout,
+    )
+    .await;
+    finish_uia_operation(audit_log_path, grant, outcome, |outcome| match outcome {
+        crate::browser_uia::UiaOutcome::Read { text, truncated } => {
+            Ok(BrowserGrantExecutionResult::Read {
+                capability_name: grant.capability_name.clone(),
+                text,
+                truncated,
+            })
+        }
+        other => unexpected_outcome(other),
+    })
+}
+
+async fn execute_extract(
+    runtime: &dyn BrowserRuntime,
+    uia_pool: &std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
+    audit_log_path: &std::path::Path,
+    grant: &CapabilityExecutionGrant,
+    params: Option<BrowserCapabilityParamsWire>,
+    surface_id: &BrowserSurfaceId,
+) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+    let Some(BrowserCapabilityParamsWire::Extract { schema_fields }) = params else {
+        return Err(BrowserGrantExecutionError::ParametersRequired);
+    };
+    let expected_hash = canonicalize_and_hash(
+        EXTRACT_CAPABILITY,
+        &extract_parameters_value(grant, &schema_fields),
+    );
+    if expected_hash != grant.canonicalized_parameters_hash {
+        record_browser_execution_audit_event(
+            audit_log_path,
+            BrowserExecutionAuditEvent::BrowserGrantRejected,
+            &grant.surface_id,
+            &grant.capability_name,
+            Some("parameter_hash_mismatch".to_string()),
+        );
+        return Err(BrowserGrantExecutionError::GrantInvalid);
+    }
+    let mut fields = Vec::with_capacity(schema_fields.len());
+    for (name, wire_selector) in &schema_fields {
+        let Some(selector) = wire_selector.to_uia_selector() else {
+            return Err(BrowserGrantExecutionError::NodeRefOnlyNotSupported);
+        };
+        fields.push((name.clone(), selector));
+    }
+    record_browser_execution_audit_event(
+        audit_log_path,
+        BrowserExecutionAuditEvent::BrowserExecutionStarted,
+        &grant.surface_id,
+        &grant.capability_name,
+        None,
+    );
+    let hwnd = runtime.uia_root_hwnd(surface_id).map_err(|e| {
+        BrowserGrantExecutionError::InternalError {
+            message: e.to_string(),
+        }
+    })?;
+    let timeout = UIA_OPERATION_MAX_TIMEOUT;
+    let outcome = submit_and_await_uia_operation(
+        uia_pool,
+        hwnd,
+        crate::browser_uia::UiaOperationKind::Extract { fields },
+        timeout,
+    )
+    .await;
+    finish_uia_operation(audit_log_path, grant, outcome, |outcome| match outcome {
+        crate::browser_uia::UiaOutcome::Extract { fields } => {
+            Ok(BrowserGrantExecutionResult::Extract {
+                capability_name: grant.capability_name.clone(),
+                fields,
+            })
+        }
+        other => unexpected_outcome(other),
+    })
+}
+
+async fn execute_click(
+    runtime: &dyn BrowserRuntime,
+    uia_pool: &std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
+    audit_log_path: &std::path::Path,
+    grant: &CapabilityExecutionGrant,
+    params: Option<BrowserCapabilityParamsWire>,
+    surface_id: &BrowserSurfaceId,
+) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+    let Some(BrowserCapabilityParamsWire::Click {
+        selector: wire_selector,
+    }) = params
+    else {
+        return Err(BrowserGrantExecutionError::ParametersRequired);
+    };
+    let expected_hash = canonicalize_and_hash(
+        CLICK_CAPABILITY,
+        &click_parameters_value(grant, &wire_selector),
+    );
+    if expected_hash != grant.canonicalized_parameters_hash {
+        record_browser_execution_audit_event(
+            audit_log_path,
+            BrowserExecutionAuditEvent::BrowserGrantRejected,
+            &grant.surface_id,
+            &grant.capability_name,
+            Some("parameter_hash_mismatch".to_string()),
+        );
+        return Err(BrowserGrantExecutionError::GrantInvalid);
+    }
+    let Some(selector) = wire_selector.to_uia_selector() else {
+        return Err(BrowserGrantExecutionError::NodeRefOnlyNotSupported);
+    };
+    record_browser_execution_audit_event(
+        audit_log_path,
+        BrowserExecutionAuditEvent::BrowserExecutionStarted,
+        &grant.surface_id,
+        &grant.capability_name,
+        None,
+    );
+    let hwnd = runtime.uia_root_hwnd(surface_id).map_err(|e| {
+        BrowserGrantExecutionError::InternalError {
+            message: e.to_string(),
+        }
+    })?;
+    let timeout = UIA_OPERATION_MAX_TIMEOUT;
+    let outcome = submit_and_await_uia_operation(
+        uia_pool,
+        hwnd,
+        crate::browser_uia::UiaOperationKind::Click { selector },
+        timeout,
+    )
+    .await;
+    finish_uia_operation(audit_log_path, grant, outcome, |outcome| match outcome {
+        crate::browser_uia::UiaOutcome::Click => Ok(BrowserGrantExecutionResult::Click {
+            capability_name: grant.capability_name.clone(),
+        }),
+        other => unexpected_outcome(other),
+    })
+}
+
+async fn execute_type(
+    runtime: &dyn BrowserRuntime,
+    uia_pool: &std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
+    audit_log_path: &std::path::Path,
+    grant: &CapabilityExecutionGrant,
+    params: Option<BrowserCapabilityParamsWire>,
+    surface_id: &BrowserSurfaceId,
+) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+    let Some(BrowserCapabilityParamsWire::Type {
+        selector: wire_selector,
+        ui_input_text,
+    }) = params
+    else {
+        return Err(BrowserGrantExecutionError::ParametersRequired);
+    };
+    let expected_hash = canonicalize_and_hash(
+        TYPE_CAPABILITY,
+        &type_parameters_value(grant, &wire_selector, &ui_input_text),
+    );
+    if expected_hash != grant.canonicalized_parameters_hash {
+        record_browser_execution_audit_event(
+            audit_log_path,
+            BrowserExecutionAuditEvent::BrowserGrantRejected,
+            &grant.surface_id,
+            &grant.capability_name,
+            Some("parameter_hash_mismatch".to_string()),
+        );
+        return Err(BrowserGrantExecutionError::GrantInvalid);
+    }
+    // Deliberately NOT re-implementing `is_sensitive_type_target`/
+    // `looks_like_secret_value` here -- see `browser_uia.rs::
+    // execute_uia_operation`'s own doc comment on why the backend's
+    // Grant-mint-time refusal is the only check needed: this function is
+    // only ever reached via a Grant that already passed it, and the
+    // recomputed parameter hash above proves `ui_input_text` is EXACTLY
+    // what the backend evaluated, not a substituted value.
+    let Some(selector) = wire_selector.to_uia_selector() else {
+        return Err(BrowserGrantExecutionError::NodeRefOnlyNotSupported);
+    };
+    record_browser_execution_audit_event(
+        audit_log_path,
+        BrowserExecutionAuditEvent::BrowserExecutionStarted,
+        &grant.surface_id,
+        &grant.capability_name,
+        None,
+    );
+    let hwnd = runtime.uia_root_hwnd(surface_id).map_err(|e| {
+        BrowserGrantExecutionError::InternalError {
+            message: e.to_string(),
+        }
+    })?;
+    let timeout = UIA_OPERATION_MAX_TIMEOUT;
+    let outcome = submit_and_await_uia_operation(
+        uia_pool,
+        hwnd,
+        crate::browser_uia::UiaOperationKind::Type {
+            selector,
+            text: ui_input_text,
+        },
+        timeout,
+    )
+    .await;
+    finish_uia_operation(audit_log_path, grant, outcome, |outcome| match outcome {
+        crate::browser_uia::UiaOutcome::Type => Ok(BrowserGrantExecutionResult::Type {
+            capability_name: grant.capability_name.clone(),
+        }),
+        other => unexpected_outcome(other),
+    })
+}
+
+fn unexpected_outcome(
+    outcome: crate::browser_uia::UiaOutcome,
+) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+    Err(BrowserGrantExecutionError::InternalError {
+        message: format!("UIA worker returned an outcome shape that did not match the requested operation: {outcome:?}"),
+    })
+}
+
+/// Records the terminal audit event (succeeded/failed) for a UIA-backed
+/// capability and converts the raw `Result<UiaOutcome, ...>` into the
+/// capability's own typed result via `map_success`.
+fn finish_uia_operation(
+    audit_log_path: &std::path::Path,
+    grant: &CapabilityExecutionGrant,
+    outcome: Result<crate::browser_uia::UiaOutcome, BrowserGrantExecutionError>,
+    map_success: impl FnOnce(
+        crate::browser_uia::UiaOutcome,
+    ) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError>,
+) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+    match outcome {
+        Ok(outcome) => {
+            let result = map_success(outcome);
+            record_browser_execution_audit_event(
+                audit_log_path,
+                if result.is_ok() {
+                    BrowserExecutionAuditEvent::BrowserExecutionSucceeded
+                } else {
+                    BrowserExecutionAuditEvent::BrowserExecutionFailed
+                },
+                &grant.surface_id,
+                &grant.capability_name,
+                None,
+            );
+            result
+        }
+        Err(e) => {
+            record_browser_execution_audit_event(
+                audit_log_path,
+                BrowserExecutionAuditEvent::BrowserExecutionFailed,
+                &grant.surface_id,
+                &grant.capability_name,
+                Some(format!("{e:?}")),
+            );
+            Err(e)
+        }
     }
 }
 
@@ -1485,6 +2041,20 @@ mod tests {
             Ok(rx)
         }
 
+        fn uia_root_hwnd(
+            &self,
+            _surface_id: &BrowserSurfaceId,
+        ) -> Result<isize, BrowserRuntimeError> {
+            // Not exercised by these tests -- every test covering
+            // execute_read/extract/click/type reaches a hash-mismatch,
+            // missing-params, or node_ref-only rejection BEFORE this method
+            // would ever be called (see execute_read/execute_extract/
+            // execute_click/execute_type's own ordering). A test that
+            // accidentally reached this would need a real WebView2 surface
+            // regardless, which this fake cannot provide.
+            unimplemented!("not exercised by execute_granted_action tests")
+        }
+
         fn destroy_all(&self) {
             unimplemented!("not exercised by execute_granted_action tests")
         }
@@ -1499,6 +2069,7 @@ mod tests {
         redeemed_tracker: RedeemedGrantTracker,
         surface_locks: SurfaceRedeemLocks,
         audit_log_path: std::path::PathBuf,
+        uia_pool: std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
         signing_key: ed25519_dalek::SigningKey,
         verifying_key: [u8; 32],
     }
@@ -1526,6 +2097,7 @@ mod tests {
                 redeemed_tracker: RedeemedGrantTracker::new(),
                 surface_locks: SurfaceRedeemLocks::new(),
                 audit_log_path,
+                uia_pool: std::sync::Arc::new(crate::browser_uia::UiaWorkerPool::new(4, 64)),
                 signing_key,
                 verifying_key,
             }
@@ -1584,6 +2156,7 @@ mod tests {
                 &self.redeemed_tracker,
                 &self.surface_locks,
                 &self.audit_log_path,
+                &self.uia_pool,
                 grant,
                 params,
             )
@@ -2010,29 +2583,548 @@ mod tests {
         assert!(harness.runtime.navigate_calls.lock().unwrap().is_empty());
     }
 
+    /// Proves the navigation-generation invariant for a UIA-backed
+    /// capability specifically (`click`, representative of read/extract/
+    /// type too -- all four share the exact same `execute_granted_action`
+    /// dispatch path, which checks `grant.navigation_generation` against
+    /// the surface's LIVE generation strictly BEFORE the
+    /// `match grant.capability_name.as_str()` that reaches
+    /// `execute_click`/etc. at all). `FakeBrowserRuntime`'s own
+    /// `navigation_generation` defaults to 0; claiming `999` here must be
+    /// rejected as `StaleReference` -- and, critically, `uia_root_hwnd`
+    /// must never be called to reach it (`FakeBrowserRuntime::uia_root_hwnd`
+    /// panics via `unimplemented!()` if it ever were).
+    #[tokio::test]
+    async fn execute_click_rejects_stale_navigation_generation_before_touching_uia_pool() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let selector = SelectorWire {
+            role: Some("button".to_string()),
+            accessible_name: None,
+            node_ref: None,
+        };
+        let grant = harness.mint_grant(
+            "grant-click-stale-generation",
+            CLICK_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            Some(999),
+            &click_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                    g.navigation_generation = Some(999);
+                }),
+                &selector,
+            ),
+        );
+        let result = harness
+            .execute(grant, Some(BrowserCapabilityParamsWire::Click { selector }))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::StaleReference)
+        ));
+    }
+
     #[tokio::test]
     async fn unrecognized_capability_still_returns_not_yet_enabled() {
         let harness = Harness::new("surface-1", "tenant-a", "profile-1");
-        // `navigation_generation: None` deliberately — this test is only
-        // about capability dispatch, not generation binding (which every
-        // OTHER test above already covers); claiming `Some(_)` here would
-        // exercise the (correct, shared) generation-mismatch check instead
-        // of reaching the dispatch match this test targets, since the
-        // fake runtime's own generation defaults to 0.
+        // `kortex.browser.download` deliberately — of every registered
+        // `kortex.browser.*` capability, this is the one the current UIA
+        // execution phase explicitly does NOT implement (see this module's
+        // own doc comment), so it is the correct target for proving the
+        // dispatch match's fallback arm still reports `NotYetEnabled`
+        // rather than silently no-op'ing. `navigation_generation: None`
+        // deliberately — this test is only about capability dispatch, not
+        // generation binding (which every OTHER test above already
+        // covers); claiming `Some(_)` here would exercise the (correct,
+        // shared) generation-mismatch check instead of reaching the
+        // dispatch match this test targets, since the fake runtime's own
+        // generation defaults to 0.
         let grant = harness.mint_grant(
-            "grant-click",
-            "kortex.browser.click",
+            "grant-download",
+            "kortex.browser.download",
             "surface-1",
             "tenant-a",
             "profile-1",
             None,
-            &serde_json::json!({"target": {"browser_profile_id": "profile-1", "surface_id": "surface-1", "navigation_generation": null}, "selector": {"role": "button"}}),
+            &serde_json::json!({"target": {"browser_profile_id": "profile-1", "surface_id": "surface-1", "navigation_generation": null}}),
         );
         let result = harness.execute(grant, None).await;
         assert!(matches!(
             result,
             Ok(BrowserGrantExecutionResult::NotYetEnabled { .. })
         ));
+    }
+
+    // -- read/extract/click/type: params-required, hash-verification, and
+    // node_ref-only rejection. Every case below returns BEFORE
+    // `execute_granted_action` ever calls `BrowserRuntime::uia_root_hwnd` or
+    // touches the `UiaWorkerPool` -- `FakeBrowserRuntime::uia_root_hwnd`
+    // panics via `unimplemented!()` (see that impl's own comment), so a case
+    // that reached it would fail loudly, not silently pass. That ordering
+    // is itself the property under test: parameter-hash verification (and,
+    // for extract/click/type, node_ref-only rejection) must happen strictly
+    // before any UIA resolution is attempted.
+
+    #[tokio::test]
+    async fn execute_read_without_params_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let grant = harness.mint_grant(
+            "grant-read-noparams",
+            READ_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &read_parameters_value(&grant_with(|g| {
+                g.surface_id = "surface-1".to_string();
+                g.browser_profile_id = "profile-1".to_string();
+            })),
+        );
+        let result = harness.execute(grant, None).await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ParametersRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_read_with_wrong_shaped_params_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let grant = harness.mint_grant(
+            "grant-read-wrongshape",
+            READ_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &read_parameters_value(&grant_with(|g| {
+                g.surface_id = "surface-1".to_string();
+                g.browser_profile_id = "profile-1".to_string();
+            })),
+        );
+        let result = harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Screenshot { full_page: false }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ParametersRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_read_rejects_parameter_substitution_before_touching_runtime() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        // Grant was minted for surface-1/profile-1's read parameters, but a
+        // caller then redeems it against surface-2/profile-2 -- the
+        // recomputed hash (derived from the Grant's OWN fields, never the
+        // wire params) must not match, and the mismatch must be caught
+        // before `uia_root_hwnd` is ever called.
+        let grant = harness.mint_grant(
+            "grant-read-substituted",
+            READ_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &read_parameters_value(&grant_with(|g| {
+                g.surface_id = "surface-2".to_string();
+                g.browser_profile_id = "profile-2".to_string();
+            })),
+        );
+        let result = harness
+            .execute(grant, Some(BrowserCapabilityParamsWire::Read {}))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::GrantInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_extract_without_params_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let schema_fields = std::collections::HashMap::from([(
+            "heading".to_string(),
+            SelectorWire {
+                role: Some("text".to_string()),
+                accessible_name: None,
+                node_ref: None,
+            },
+        )]);
+        let grant = harness.mint_grant(
+            "grant-extract-noparams",
+            EXTRACT_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &extract_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &schema_fields,
+            ),
+        );
+        let result = harness.execute(grant, None).await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ParametersRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_extract_rejects_parameter_substitution_before_touching_runtime() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let authorized_fields = std::collections::HashMap::from([(
+            "heading".to_string(),
+            SelectorWire {
+                role: Some("text".to_string()),
+                accessible_name: None,
+                node_ref: None,
+            },
+        )]);
+        let substituted_fields = std::collections::HashMap::from([(
+            "password".to_string(),
+            SelectorWire {
+                role: Some("edit".to_string()),
+                accessible_name: None,
+                node_ref: None,
+            },
+        )]);
+        let grant = harness.mint_grant(
+            "grant-extract-substituted",
+            EXTRACT_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &extract_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &authorized_fields,
+            ),
+        );
+        let result = harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Extract {
+                    schema_fields: substituted_fields,
+                }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::GrantInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_extract_with_node_ref_only_selector_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let schema_fields = std::collections::HashMap::from([(
+            "mystery".to_string(),
+            SelectorWire {
+                role: None,
+                accessible_name: None,
+                node_ref: Some("opaque-ref-123".to_string()),
+            },
+        )]);
+        let grant = harness.mint_grant(
+            "grant-extract-noderef",
+            EXTRACT_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &extract_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &schema_fields,
+            ),
+        );
+        let result = harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Extract { schema_fields }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::NodeRefOnlyNotSupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_click_without_params_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let selector = SelectorWire {
+            role: Some("button".to_string()),
+            accessible_name: None,
+            node_ref: None,
+        };
+        let grant = harness.mint_grant(
+            "grant-click-noparams",
+            CLICK_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &click_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &selector,
+            ),
+        );
+        let result = harness.execute(grant, None).await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ParametersRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_click_rejects_parameter_substitution_before_touching_runtime() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let authorized_selector = SelectorWire {
+            role: Some("button".to_string()),
+            accessible_name: Some("Submit".to_string()),
+            node_ref: None,
+        };
+        let substituted_selector = SelectorWire {
+            role: Some("button".to_string()),
+            accessible_name: Some("Delete Account".to_string()),
+            node_ref: None,
+        };
+        let grant = harness.mint_grant(
+            "grant-click-substituted",
+            CLICK_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &click_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &authorized_selector,
+            ),
+        );
+        let result = harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Click {
+                    selector: substituted_selector,
+                }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::GrantInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_click_with_node_ref_only_selector_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let selector = SelectorWire {
+            role: None,
+            accessible_name: None,
+            node_ref: Some("opaque-ref-456".to_string()),
+        };
+        let grant = harness.mint_grant(
+            "grant-click-noderef",
+            CLICK_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &click_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &selector,
+            ),
+        );
+        let result = harness
+            .execute(grant, Some(BrowserCapabilityParamsWire::Click { selector }))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::NodeRefOnlyNotSupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_type_without_params_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let selector = SelectorWire {
+            role: Some("edit".to_string()),
+            accessible_name: None,
+            node_ref: None,
+        };
+        let grant = harness.mint_grant(
+            "grant-type-noparams",
+            TYPE_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &type_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &selector,
+                "hello",
+            ),
+        );
+        let result = harness.execute(grant, None).await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ParametersRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_type_rejects_text_substitution_before_touching_runtime() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        // The hash covers `ui_input_text` too -- a caller cannot redeem a
+        // Grant authorized for one string of text while actually supplying
+        // a different one.
+        let selector = SelectorWire {
+            role: Some("edit".to_string()),
+            accessible_name: None,
+            node_ref: None,
+        };
+        let grant = harness.mint_grant(
+            "grant-type-substituted",
+            TYPE_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &type_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &selector,
+                "authorized text",
+            ),
+        );
+        let result = harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Type {
+                    selector,
+                    ui_input_text: "substituted text".to_string(),
+                }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::GrantInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_type_with_node_ref_only_selector_is_rejected() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        let selector = SelectorWire {
+            role: None,
+            accessible_name: None,
+            node_ref: Some("opaque-ref-789".to_string()),
+        };
+        let grant = harness.mint_grant(
+            "grant-type-noderef",
+            TYPE_CAPABILITY,
+            "surface-1",
+            "tenant-a",
+            "profile-1",
+            None,
+            &type_parameters_value(
+                &grant_with(|g| {
+                    g.surface_id = "surface-1".to_string();
+                    g.browser_profile_id = "profile-1".to_string();
+                }),
+                &selector,
+                "hello",
+            ),
+        );
+        let result = harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Type {
+                    selector,
+                    ui_input_text: "hello".to_string(),
+                }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::NodeRefOnlyNotSupported)
+        ));
+    }
+
+    #[test]
+    fn to_uia_selector_returns_none_for_node_ref_only() {
+        let selector = SelectorWire {
+            role: None,
+            accessible_name: None,
+            node_ref: Some("opaque".to_string()),
+        };
+        assert!(selector.to_uia_selector().is_none());
+    }
+
+    #[test]
+    fn to_uia_selector_accepts_role_only() {
+        let selector = SelectorWire {
+            role: Some("button".to_string()),
+            accessible_name: None,
+            node_ref: None,
+        };
+        assert!(selector.to_uia_selector().is_some());
+    }
+
+    #[test]
+    fn to_uia_selector_accepts_accessible_name_only() {
+        let selector = SelectorWire {
+            role: None,
+            accessible_name: Some("Submit".to_string()),
+            node_ref: None,
+        };
+        assert!(selector.to_uia_selector().is_some());
+    }
+
+    #[test]
+    fn to_uia_selector_never_carries_node_ref_forward_even_when_role_is_present() {
+        let selector = SelectorWire {
+            role: Some("button".to_string()),
+            accessible_name: None,
+            node_ref: Some("opaque".to_string()),
+        };
+        let uia_selector = selector
+            .to_uia_selector()
+            .expect("role alone is sufficient");
+        // `UiaSelectorSpec` has no `node_ref` field at all -- this is a
+        // compile-time guarantee, not a runtime check, but asserting on the
+        // fields that DO exist documents the intent for a reader.
+        assert_eq!(uia_selector.role.as_deref(), Some("button"));
     }
 
     /// Proves the per-surface lock genuinely serializes two concurrent
@@ -2056,6 +3148,7 @@ mod tests {
         let audit_log_path = StdArc::new(
             std::env::temp_dir().join(format!("kortex-b5-concurrency-test-{}", unix_now())),
         );
+        let uia_pool = StdArc::new(crate::browser_uia::UiaWorkerPool::new(4, 64));
         let (signing_key, verifying_key) = signing_keypair();
         let verifying_key = StdArc::new(verifying_key);
 
@@ -2093,12 +3186,13 @@ mod tests {
         let grant_a = mint("grant-a", "https://example.com/a");
         let grant_b = mint("grant-b", "https://example.com/b");
 
-        let (runtime_a, profiles_a, tracker_a, locks_a, audit_a, key_a) = (
+        let (runtime_a, profiles_a, tracker_a, locks_a, audit_a, pool_a, key_a) = (
             runtime.clone(),
             active_profile_surfaces.clone(),
             redeemed_tracker.clone(),
             surface_locks.clone(),
             audit_log_path.clone(),
+            uia_pool.clone(),
             verifying_key.clone(),
         );
         let handle_a = tokio::spawn(async move {
@@ -2109,6 +3203,7 @@ mod tests {
                 &tracker_a,
                 &locks_a,
                 &audit_a,
+                &pool_a,
                 grant_a,
                 Some(BrowserCapabilityParamsWire::Navigate {
                     url: "https://example.com/a".to_string(),
@@ -2124,12 +3219,13 @@ mod tests {
         runtime.armed_notify.notified().await;
         assert_eq!(runtime.pending_navigate_senders.lock().unwrap().len(), 1);
 
-        let (runtime_b, profiles_b, tracker_b, locks_b, audit_b, key_b) = (
+        let (runtime_b, profiles_b, tracker_b, locks_b, audit_b, pool_b, key_b) = (
             runtime.clone(),
             active_profile_surfaces.clone(),
             redeemed_tracker.clone(),
             surface_locks.clone(),
             audit_log_path.clone(),
+            uia_pool.clone(),
             verifying_key.clone(),
         );
         let handle_b = tokio::spawn(async move {
@@ -2140,6 +3236,7 @@ mod tests {
                 &tracker_b,
                 &locks_b,
                 &audit_b,
+                &pool_b,
                 grant_b,
                 Some(BrowserCapabilityParamsWire::Navigate {
                     url: "https://example.com/b".to_string(),

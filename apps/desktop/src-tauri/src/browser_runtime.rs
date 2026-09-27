@@ -333,6 +333,17 @@ pub trait BrowserRuntime: Send + Sync {
         surface_id: &BrowserSurfaceId,
     ) -> Result<oneshot::Receiver<Result<Vec<u8>, String>>, BrowserRuntimeError>;
 
+    /// Browser-B5 (click/type/read/extract execution): the surface's
+    /// `ICoreWebView2Controller::ParentWindow` HWND, as a raw `isize` (safe
+    /// to move across threads and hand to `browser_uia.rs`'s worker pool,
+    /// which needs only the plain handle value, never a COM type). This is
+    /// the SAME HWND `browser_uia.rs::resolve_root_with_readiness` calls
+    /// `IUIAutomation::ElementFromHandle` against — confirmed, via the UIA
+    /// architecture gate's own live spike, to be a stable, per-surface-
+    /// unique handle, never shared with a sibling surface or the KORTEX
+    /// main window (`docs/architecture/browser_b5_master_plan.md` §5.4).
+    fn uia_root_hwnd(&self, surface_id: &BrowserSurfaceId) -> Result<isize, BrowserRuntimeError>;
+
     /// Destroys every live surface this runtime owns. Called from this
     /// crate's existing app-shutdown sequence (`lib.rs`'s `CloseRequested`/
     /// `ExitRequested` handlers, alongside `SidecarSupervision::shutdown()`)
@@ -1254,6 +1265,39 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
             message:
                 "screenshot capture is only implemented for the Windows WebView2RuntimeAdapter"
                     .to_string(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn uia_root_hwnd(&self, surface_id: &BrowserSurfaceId) -> Result<isize, BrowserRuntimeError> {
+        let (webview, _loading) = self.cloned_surface(surface_id)?;
+        let (tx, rx) = std::sync::mpsc::channel::<Result<isize, String>>();
+        webview
+            .with_webview(move |platform_webview| {
+                let outcome: windows::core::Result<isize> = (|| unsafe {
+                    let controller = platform_webview.controller();
+                    let mut hwnd = windows::Win32::Foundation::HWND::default();
+                    controller.ParentWindow(&mut hwnd)?;
+                    Ok(hwnd.0 as isize)
+                })();
+                let _ = tx.send(outcome.map_err(|e| e.to_string()));
+            })
+            .map_err(|e| BrowserRuntimeError::Platform {
+                message: e.to_string(),
+            })?;
+        rx.recv()
+            .map_err(|_| BrowserRuntimeError::Platform {
+                message: "uia_root_hwnd: with_webview callback did not respond".to_string(),
+            })?
+            .map_err(|message| BrowserRuntimeError::Platform { message })
+    }
+
+    #[cfg(not(windows))]
+    fn uia_root_hwnd(&self, surface_id: &BrowserSurfaceId) -> Result<isize, BrowserRuntimeError> {
+        self.cloned_surface(surface_id)?;
+        Err(BrowserRuntimeError::Platform {
+            message: "uia_root_hwnd is only implemented for the Windows WebView2RuntimeAdapter"
+                .to_string(),
         })
     }
 

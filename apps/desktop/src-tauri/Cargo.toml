@@ -136,6 +136,15 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    # Browser-B5 (click/type/read/extract execution): Windows UI Automation
+    # (`browser_uia.rs`) — `IUIAutomation`/`IUIAutomationElement`/
+    # `IUIAutomationTreeWalker`/`IUIAutomationInvokePattern`/
+    # `IUIAutomationValuePattern` and the `UIA_*ControlTypeId`/`UIA_*PatternId`
+    # constants, confirmed present under this exact feature in the pinned
+    # windows-0.61.3 crate (verified during the UIA architecture-gate live
+    # spikes, all of which were removed after evidence capture — this is the
+    # first time the feature is enabled for shipped code, not a leftover).
+    "Win32_UI_Accessibility",
 ] }
 
 [dev-dependencies]

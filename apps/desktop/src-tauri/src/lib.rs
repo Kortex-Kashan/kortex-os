@@ -28,6 +28,10 @@ mod browser_policy;
 // `backend/src/kortex/engines/browser/grant.py`. See that module's own
 // doc for why it never invokes `BrowserRuntime` itself.
 mod browser_grant;
+// Browser-B5 (click/type/read/extract execution): the bounded UIA worker
+// pool `browser_grant.rs`'s redeem command dispatches into. See that
+// module's own extensive doc comment for the full security/threading model.
+mod browser_uia;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
 // transport contract. `ipc.rs` talks to the backend at a configured
@@ -208,6 +212,21 @@ pub fn run() {
             app.manage(browser_grant::GrantVerificationKeyCache::new());
             app.manage(browser_grant::RedeemedGrantTracker::new());
             app.manage(browser_grant::SurfaceRedeemLocks::new());
+
+            // Browser-B5 (click/type/read/extract execution): the bounded
+            // UIA worker pool. Sizing is deliberate, not arbitrary — see
+            // `browser_uia.rs::UiaWorkerPool::new`'s own doc comment.
+            // `max_workers = 4`: this app's own scope (D34) is a single,
+            // interactive, desktop-originated AI session -- a handful of
+            // concurrent browser operations is the realistic ceiling, not a
+            // server-scale figure. `max_lifetime_creations = 64`: sixteen
+            // full pool replacements' worth of budget across the process's
+            // entire lifetime, generous enough to tolerate repeated
+            // legitimate timeouts over a long session without being
+            // effectively unbounded; once exhausted, every further UIA
+            // capability call fails closed for the rest of this process's
+            // life (an app restart is the disclosed recovery path).
+            app.manage(std::sync::Arc::new(browser_uia::UiaWorkerPool::new(4, 64)));
 
             // Phase A: register the `kortex-auth://` scheme with the OS at
             // runtime (Windows/Linux only — macOS resolves schemes solely
