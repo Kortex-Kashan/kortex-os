@@ -59,6 +59,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, LogicalPosition, LogicalSize, Runtime, Webview, WebviewUrl, Window};
+use tokio::sync::oneshot;
 
 use crate::browser_policy::{
     self, DenyReason, NavigationRequest, PolicyAction, PolicyAuditEvent, PolicyDecision,
@@ -67,16 +68,47 @@ use crate::browser_policy::{
 
 #[cfg(windows)]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2NavigationStartingEventArgs, ICoreWebView2Settings4,
-    ICoreWebView2_4, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    ICoreWebView2, ICoreWebView2NavigationCompletedEventArgs,
+    ICoreWebView2NavigationStartingEventArgs, ICoreWebView2Settings4, ICoreWebView2_4,
+    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, COREWEBVIEW2_PERMISSION_STATE_DENY,
 };
 #[cfg(windows)]
 use webview2_com::{
-    DownloadStartingEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
+    CapturePreviewCompletedHandler, DownloadStartingEventHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler,
 };
 #[cfg(windows)]
 use windows::core::Interface;
+#[cfg(windows)]
+use windows::Win32::Foundation::HGLOBAL;
+#[cfg(windows)]
+use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+#[cfg(windows)]
+use windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};
+
+/// Browser-B5 (navigate execution): the outcome of a navigation attempt,
+/// reported back to whoever armed the waiter (`arm_navigation_waiter`) via a
+/// one-shot channel — the ONLY way to observe `NavigationStarting`'s
+/// Allow/Deny decision or `NavigationCompleted`'s success/failure signal
+/// from outside the WebView2 COM callback that raises them (see this
+/// module's own `register_navigation_loading_handlers`, which is where
+/// every variant below is actually produced). Never constructed anywhere
+/// else.
+#[derive(Debug, Clone)]
+pub enum NavigationOutcome {
+    /// `NavigationCompleted` fired with `IsSuccess == true`.
+    Success,
+    /// `NavigationStarting` evaluated Browser-B4 policy as `Deny` — the
+    /// navigation never started at all, so `NavigationCompleted` will not
+    /// fire for it.
+    PolicyDenied(DenyReason),
+    /// `NavigationCompleted` fired with `IsSuccess == false` — the
+    /// navigation was policy-allowed and started, but failed at the
+    /// network/TLS/DNS layer (or was cancelled by WebView2 itself for a
+    /// reason other than Browser-B4's own policy).
+    Failed { web_error_status: i32 },
+}
 
 /// Opaque handle to a live browser surface. Crosses the Tauri IPC boundary
 /// as a plain string — the webview itself is never exposed to the frontend.
@@ -264,6 +296,43 @@ pub trait BrowserRuntime: Send + Sync {
         surface_id: &BrowserSurfaceId,
     ) -> Result<u64, BrowserRuntimeError>;
 
+    /// Browser-B5 (navigate execution): arms a fresh one-shot waiter for
+    /// `surface_id` — call this immediately BEFORE issuing `navigate()` on
+    /// the SAME surface (never after; see
+    /// `docs/architecture/browser_b5_5_architecture_gate.md` §7's ordering
+    /// requirement), then await the returned `Receiver` with a caller-
+    /// chosen timeout. Resolved by whichever of `NavigationStarting`'s
+    /// Deny arm or `NavigationCompleted` fires next for this surface — see
+    /// `SurfaceEntry::navigation_waiter`'s own doc comment. Overwrites
+    /// (drops) any previous, still-armed waiter for the same surface
+    /// without resolving it — callers are responsible for ensuring only
+    /// one navigation is ever in flight per surface at a time (the redeem
+    /// command's per-surface lock, held for the full arm-issue-await
+    /// sequence, is what actually guarantees this in practice).
+    fn arm_navigation_waiter(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<oneshot::Receiver<NavigationOutcome>, BrowserRuntimeError>;
+
+    /// Browser-B5 (screenshot execution): captures the surface's current
+    /// VIEWPORT ONLY as PNG bytes via `ICoreWebView2::CapturePreview` — WebView2
+    /// has no native full-scrollable-page capture API (confirmed against
+    /// the pinned `webview2-com-sys-0.38.2` bindings), so a caller wanting
+    /// `full_page` semantics must be refused explicitly rather than served
+    /// a silently-cropped image (see `browser_grant.rs`'s own handling of
+    /// `BrowserScreenshotParamsWire::full_page`). Returns immediately with
+    /// a `Receiver` the caller awaits with its own timeout, matching
+    /// `arm_navigation_waiter`'s own async-completion shape — WebView2's
+    /// `CapturePreview` is itself asynchronous (a completion handler, not
+    /// a synchronous return), so there is no way to make this call
+    /// genuinely block the issuing thread without risking a COM
+    /// re-entrancy deadlock (the completion handler fires on the same
+    /// apartment thread that would be blocked waiting for it).
+    fn capture_screenshot(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<oneshot::Receiver<Result<Vec<u8>, String>>, BrowserRuntimeError>;
+
     /// Destroys every live surface this runtime owns. Called from this
     /// crate's existing app-shutdown sequence (`lib.rs`'s `CloseRequested`/
     /// `ExitRequested` handlers, alongside `SidecarSupervision::shutdown()`)
@@ -291,6 +360,18 @@ struct SurfaceEntry<R: Runtime> {
     /// closed with `StaleReference` if the page has since navigated away,
     /// rather than silently operating against whatever loaded next.
     navigation_generation: Arc<AtomicU64>,
+    /// Browser-B5 (navigate execution): the one in-flight AI-originated
+    /// navigation waiter for this surface, if any — armed by
+    /// `arm_navigation_waiter` immediately before issuing `Navigate()`,
+    /// resolved (and *cleared*, via `.take()`) by whichever of
+    /// `NavigationStarting`'s Deny arm or `NavigationCompleted` fires next
+    /// for this surface. Clearing on take is what stops a stale, already-
+    /// resolved-or-abandoned waiter from ever being resolved a second time
+    /// by a later, unrelated navigation event on the same surface — see
+    /// `docs/architecture/browser_b5_5_architecture_gate.md` T12. A plain
+    /// `std::sync::Mutex` (not `tokio::sync::Mutex`): every access is a
+    /// brief, non-blocking take-or-set, never held across an `.await`.
+    navigation_waiter: Arc<Mutex<Option<oneshot::Sender<NavigationOutcome>>>>,
 }
 
 /// V1 concrete implementation of [`BrowserRuntime`], against the Microsoft
@@ -415,17 +496,42 @@ const DEFAULT_SURFACE_HEIGHT: f64 = 720.0;
 /// doc for this disclosed gap (registration failure is only theoretically
 /// reachable per the reasoning above, but "theoretically unreachable" is
 /// not the same claim as "verified enforced").
+/// Resolves this surface's in-flight AI-navigation waiter (if any) with
+/// `outcome`, clearing the slot atomically via `.take()` so a second,
+/// later event on the same surface can never resolve it again (Browser-B5
+/// navigate execution; see `SurfaceEntry::navigation_waiter`'s own doc
+/// comment and `browser_b5_5_architecture_gate.md` T12). A no-op if no
+/// waiter is currently armed — true for every ordinary human-driven
+/// navigation, and for an AI navigation whose waiter already timed out
+/// (the redeem command clears the slot itself on timeout; see
+/// `browser_grant.rs`).
+#[cfg(windows)]
+fn resolve_navigation_waiter(
+    navigation_waiter: &Mutex<Option<oneshot::Sender<NavigationOutcome>>>,
+    outcome: NavigationOutcome,
+) {
+    if let Some(sender) = navigation_waiter.lock().unwrap().take() {
+        // A `send` error means the receiving end was already dropped
+        // (the redeem command timed out and stopped awaiting) — outcome
+        // is simply discarded, matching a oneshot channel's own ordinary
+        // "nobody is listening anymore" semantics.
+        let _ = sender.send(outcome);
+    }
+}
+
 #[cfg(windows)]
 fn register_navigation_loading_handlers<R: Runtime>(
     webview: &Webview<R>,
     loading: Arc<AtomicBool>,
     navigation_generation: Arc<AtomicU64>,
+    navigation_waiter: Arc<Mutex<Option<oneshot::Sender<NavigationOutcome>>>>,
     surface_id: BrowserSurfaceId,
     policy_audit_log_path: PathBuf,
 ) {
     let loading_for_start = loading.clone();
     let loading_for_complete = loading;
     let emit_webview = webview.clone();
+    let navigation_waiter_for_complete = navigation_waiter.clone();
     let _ = webview.with_webview(move |platform_webview| {
         let core = unsafe { platform_webview.controller().CoreWebView2() };
         let Ok(core) = core else { return };
@@ -434,6 +540,7 @@ fn register_navigation_loading_handlers<R: Runtime>(
         let policy_audit_log_path_for_start = policy_audit_log_path.clone();
         let emit_webview_for_nav = emit_webview.clone();
         let navigation_generation_for_start = navigation_generation.clone();
+        let navigation_waiter_for_start = navigation_waiter.clone();
         let start_handler =
             NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -448,6 +555,10 @@ fn register_navigation_loading_handlers<R: Runtime>(
                         // from. A denied navigation (below) never reaches
                         // this arm at all.
                         navigation_generation_for_start.fetch_add(1, Ordering::Relaxed);
+                        // Deliberately does NOT resolve the waiter here —
+                        // an allowed navigation has only STARTED; whether
+                        // it actually succeeds is `NavigationCompleted`'s
+                        // own, separate signal, below.
                     }
                     Ok(PolicyDecision::Deny(reason)) => {
                         unsafe { args.SetCancel(true) }?;
@@ -455,7 +566,15 @@ fn register_navigation_loading_handlers<R: Runtime>(
                             &emit_webview_for_nav,
                             &policy_audit_log_path_for_start,
                             &policy_surface_id,
-                            reason,
+                            reason.clone(),
+                        );
+                        // Browser-B5 (navigate execution): a denied
+                        // navigation never reaches `NavigationCompleted`
+                        // at all, so THIS is the only place a waiter
+                        // armed for it can ever be resolved.
+                        resolve_navigation_waiter(
+                            &navigation_waiter_for_start,
+                            NavigationOutcome::PolicyDenied(reason),
                         );
                     }
                     Err(_) => {
@@ -470,6 +589,10 @@ fn register_navigation_loading_handlers<R: Runtime>(
                             &policy_surface_id,
                             DenyReason::Malformed,
                         );
+                        resolve_navigation_waiter(
+                            &navigation_waiter_for_start,
+                            NavigationOutcome::PolicyDenied(DenyReason::Malformed),
+                        );
                     }
                 }
                 Ok(())
@@ -478,8 +601,19 @@ fn register_navigation_loading_handlers<R: Runtime>(
         let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
 
         let complete_handler =
-            NavigationCompletedEventHandler::create(Box::new(move |_sender, _args| {
+            NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
                 loading_for_complete.store(false, Ordering::Relaxed);
+                // Browser-B5 (navigate execution): read the REAL outcome —
+                // previously discarded entirely (this handler only ever
+                // flipped `loading`). `IsSuccess`/`WebErrorStatus` are read
+                // best-effort: a failure to read them is treated as
+                // success-unknown-but-completed, never as a reason to
+                // leave an armed waiter hanging (a `Failed` with a
+                // sentinel status is still a resolved, typed outcome).
+                if let Some(args) = &args {
+                    let outcome = navigation_completed_outcome(args);
+                    resolve_navigation_waiter(&navigation_waiter_for_complete, outcome);
+                }
                 Ok(())
             }));
         let mut complete_token: i64 = 0;
@@ -587,6 +721,73 @@ fn evaluate_navigation_args(
     }))
 }
 
+/// Browser-B5 (navigate execution): reads `IsSuccess`/`WebErrorStatus` off
+/// a real `NavigationCompleted` event — previously discarded entirely (see
+/// `register_navigation_loading_handlers`'s own doc comment on this
+/// handler's B4-era scope). Best-effort: a COM failure reading either
+/// field is reported as `Failed` with a sentinel status rather than
+/// panicking or leaving the caller's waiter unresolved — the navigation
+/// DID complete (this event fired at all), only the fine-grained reason is
+/// unavailable.
+#[cfg(windows)]
+fn navigation_completed_outcome(
+    args: &ICoreWebView2NavigationCompletedEventArgs,
+) -> NavigationOutcome {
+    let mut is_success = windows::core::BOOL(0);
+    if unsafe { args.IsSuccess(&mut is_success) }.is_err() {
+        return NavigationOutcome::Failed {
+            web_error_status: -1,
+        };
+    }
+    if is_success.as_bool() {
+        return NavigationOutcome::Success;
+    }
+    let mut web_error_status =
+        webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_ERROR_STATUS(0);
+    let _ = unsafe { args.WebErrorStatus(&mut web_error_status) };
+    NavigationOutcome::Failed {
+        web_error_status: web_error_status.0,
+    }
+}
+
+/// Browser-B5 (screenshot execution): reads the completed `CapturePreview`
+/// call's outcome — `error_code` is the raw HRESULT the completion handler
+/// itself receives; a non-success value means the capture never happened
+/// at all (nothing to read from `stream`). On success, rewinds the stream
+/// (`CapturePreview` leaves the write position at the end) and reads its
+/// entire PNG-encoded contents into memory once, using `Stat`'s own
+/// reported size to size the buffer exactly rather than guessing/growing —
+/// `STATFLAG_NONAME` skips the stream's (irrelevant, CoTaskMemAlloc'd)
+/// display name, avoiding a second allocation this code would otherwise
+/// have to remember to free.
+#[cfg(windows)]
+fn read_capture_preview_stream(
+    error_code: windows::core::Result<()>,
+    stream: &IStream,
+) -> Result<Vec<u8>, String> {
+    error_code.map_err(|e| format!("CapturePreview reported failure: {e}"))?;
+    unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }
+        .map_err(|e| format!("failed to seek captured preview stream: {e}"))?;
+    let mut stat = STATSTG::default();
+    unsafe { stream.Stat(&mut stat, STATFLAG_NONAME) }
+        .map_err(|e| format!("failed to stat captured preview stream: {e}"))?;
+    let size = usize::try_from(stat.cbSize).unwrap_or(0);
+    let mut buffer = vec![0u8; size];
+    let mut bytes_read: u32 = 0;
+    let read_hr = unsafe {
+        stream.Read(
+            buffer.as_mut_ptr() as *mut core::ffi::c_void,
+            u32::try_from(size).unwrap_or(u32::MAX),
+            Some(&mut bytes_read),
+        )
+    };
+    read_hr
+        .ok()
+        .map_err(|e| format!("failed to read captured preview stream: {e}"))?;
+    buffer.truncate(bytes_read as usize);
+    Ok(buffer)
+}
+
 /// Records the audit entry and notifies the trusted frontend (`"main"`
 /// only — never the browser surface itself, which has no reason to
 /// receive this and, being untrusted content, must never be trusted with
@@ -666,6 +867,7 @@ fn register_navigation_loading_handlers<R: Runtime>(
     _webview: &Webview<R>,
     _loading: Arc<AtomicBool>,
     _navigation_generation: Arc<AtomicU64>,
+    _navigation_waiter: Arc<Mutex<Option<oneshot::Sender<NavigationOutcome>>>>,
     _surface_id: BrowserSurfaceId,
     _policy_audit_log_path: PathBuf,
 ) {
@@ -797,10 +999,12 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
 
         let loading = Arc::new(AtomicBool::new(false));
         let navigation_generation = Arc::new(AtomicU64::new(0));
+        let navigation_waiter = Arc::new(Mutex::new(None));
         register_navigation_loading_handlers(
             &webview,
             loading.clone(),
             navigation_generation.clone(),
+            navigation_waiter.clone(),
             surface_id.clone(),
             self.policy_audit_log_path.clone(),
         );
@@ -825,6 +1029,7 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
                 webview,
                 loading,
                 navigation_generation,
+                navigation_waiter,
             },
         );
         Ok(surface_id)
@@ -965,6 +1170,93 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
             })
     }
 
+    // Deliberately NOT `#[cfg(windows)]`-gated, unlike `capture_screenshot`
+    // below: arming a waiter is plain Rust (a `Mutex`/`oneshot::channel`),
+    // no WebView2 COM call at all. On a non-Windows build the returned
+    // `Receiver` is real and valid, it simply never resolves — the exact
+    // same "safe degraded default" already established for `loading`/
+    // `navigation_generation` on this platform (module's own platform-
+    // boundary doc) — a caller's own timeout is what surfaces that
+    // honestly, as `Timeout`, never as a silent hang.
+    fn arm_navigation_waiter(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<oneshot::Receiver<NavigationOutcome>, BrowserRuntimeError> {
+        let surfaces = self.surfaces.lock().unwrap();
+        let entry =
+            surfaces
+                .get(surface_id)
+                .ok_or_else(|| BrowserRuntimeError::SurfaceNotFound {
+                    surface_id: surface_id.clone(),
+                })?;
+        let (tx, rx) = oneshot::channel();
+        *entry.navigation_waiter.lock().unwrap() = Some(tx);
+        Ok(rx)
+    }
+
+    #[cfg(windows)]
+    fn capture_screenshot(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<oneshot::Receiver<Result<Vec<u8>, String>>, BrowserRuntimeError> {
+        let (webview, _loading) = self.cloned_surface(surface_id)?;
+        let (tx, rx) = oneshot::channel();
+        let dispatch_result = webview.with_webview(move |platform_webview| {
+            // Plain `Option`, not moved into the inner IIFE by value: on
+            // the success path the inner closure `.take()`s it (borrowing
+            // `tx` mutably) and moves the real sender into the completion
+            // handler; on any synchronous failure to even ISSUE the async
+            // capture, `tx` is still `Some` here afterward, and the
+            // failure branch below sends the error itself — so the
+            // `Receiver` always resolves, at latest by the caller's own
+            // timeout, never as a silent, unexplained hang.
+            let mut tx = Some(tx);
+            let issue_result: windows::core::Result<()> = (|| {
+                let core = unsafe { platform_webview.controller().CoreWebView2() }?;
+                let stream: windows::Win32::System::Com::IStream =
+                    unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }?;
+                let stream_for_handler = stream.clone();
+                let sender_for_handler = std::sync::Mutex::new(tx.take());
+                let handler = CapturePreviewCompletedHandler::create(Box::new(move |error_code| {
+                    let outcome = read_capture_preview_stream(error_code, &stream_for_handler);
+                    if let Some(sender) = sender_for_handler.lock().unwrap().take() {
+                        let _ = sender.send(outcome);
+                    }
+                    Ok(())
+                }));
+                unsafe {
+                    core.CapturePreview(
+                        COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                        &stream,
+                        &handler,
+                    )
+                }
+            })();
+            if let Err(e) = issue_result {
+                if let Some(sender) = tx.take() {
+                    let _ = sender.send(Err(format!("failed to issue CapturePreview: {e}")));
+                }
+            }
+        });
+        dispatch_result.map_err(|e| BrowserRuntimeError::Platform {
+            message: e.to_string(),
+        })?;
+        Ok(rx)
+    }
+
+    #[cfg(not(windows))]
+    fn capture_screenshot(
+        &self,
+        surface_id: &BrowserSurfaceId,
+    ) -> Result<oneshot::Receiver<Result<Vec<u8>, String>>, BrowserRuntimeError> {
+        self.cloned_surface(surface_id)?;
+        Err(BrowserRuntimeError::Platform {
+            message:
+                "screenshot capture is only implemented for the Windows WebView2RuntimeAdapter"
+                    .to_string(),
+        })
+    }
+
     fn destroy_all(&self) {
         let mut surfaces = self.surfaces.lock().unwrap();
         for (_, entry) in surfaces.drain() {
@@ -978,6 +1270,20 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
 /// `WebView2RuntimeAdapter` directly) so every command below depends only on
 /// the abstraction, matching this module's own boundary rule.
 pub struct BrowserRuntimeState(pub Arc<dyn BrowserRuntime>);
+
+/// Browser-B5 (navigate/screenshot execution): a second, independent
+/// Tauri-managed handle to the SAME path `WebView2RuntimeAdapter` itself
+/// holds privately as `policy_audit_log_path` — needed because
+/// `browser_grant.rs`'s redeem command must append its OWN execution-
+/// lifecycle audit events (`BrowserExecutionAuditEvent`) to that identical
+/// file (`docs/architecture/browser_b5_5_architecture_gate.md`'s "one
+/// place to look" requirement), but has no access to the adapter's private
+/// field through the `dyn BrowserRuntime` trait object it otherwise
+/// depends on exclusively. A cheap `PathBuf` clone at setup time (see
+/// `lib.rs`), never a second source of truth for WHERE the file lives —
+/// both this and the adapter's own field are derived from the identical
+/// `profiles_root.join("audit.log")` computation, once.
+pub struct PolicyAuditLogPath(pub PathBuf);
 
 /// Every failure `browser_create_surface` can produce — either resolving
 /// the profile (before any surface exists at all) or creating the surface

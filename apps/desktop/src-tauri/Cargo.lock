@@ -2080,6 +2080,7 @@ dependencies = [
 name = "kortex-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.17",
@@ -2090,6 +2091,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",

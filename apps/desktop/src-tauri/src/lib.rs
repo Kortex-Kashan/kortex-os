@@ -163,6 +163,13 @@ pub fn run() {
                 .get_window("main")
                 .expect("the \"main\" window is declared in tauri.conf.json and always exists at setup time");
             let policy_audit_log_path = profiles_root.join("audit.log");
+            // Browser-B5: cloned before the move below — `browser_grant.rs`'s
+            // redeem command needs its own handle to this identical path
+            // (see `PolicyAuditLogPath`'s own doc comment), and
+            // `WebView2RuntimeAdapter::new` takes the original by value.
+            app.manage(browser_runtime::PolicyAuditLogPath(
+                policy_audit_log_path.clone(),
+            ));
             let browser_runtime: Arc<dyn BrowserRuntime> =
                 Arc::new(WebView2RuntimeAdapter::new(main_window, policy_audit_log_path));
             app.manage(BrowserRuntimeState(browser_runtime));

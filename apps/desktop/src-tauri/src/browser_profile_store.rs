@@ -87,8 +87,13 @@ impl BrowserProfileId {
         }
     }
 
+    /// Browser-B5 (navigate/screenshot execution): `pub(crate)`, not
+    /// module-private — `browser_grant.rs`'s own redeem-orchestration
+    /// tests (a sibling module) need a `BrowserProfileId` fixture to seed
+    /// `ActiveProfileSurfaces::record` without going through a real
+    /// `browser_create_surface` call.
     #[cfg(test)]
-    fn from_raw_for_test(raw: &str) -> Self {
+    pub(crate) fn from_raw_for_test(raw: &str) -> Self {
         Self(raw.to_string())
     }
 }

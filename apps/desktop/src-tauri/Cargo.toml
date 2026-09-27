@@ -85,6 +85,23 @@ ed25519-dalek = "2"
 # backend actually signed). No existing dependency in this crate parses
 # calendar dates at all.
 time = { version = "0.3", features = ["parsing", "formatting"] }
+# Browser-B5 (navigate execution): SHA-256 for the desktop-side port of
+# `backend/src/kortex/engines/browser/grant.py::canonicalize_and_hash` — the
+# redeem command must independently recompute a Grant's parameter hash to
+# verify a caller cannot substitute different parameters than were actually
+# authorized (`browser_b5_5_architecture_gate.md` OD-01). Already present
+# transitively (an `ed25519-dalek` dependency, used internally by its own
+# hashing); promoted to a direct dependency at the exact already-resolved
+# version (0.10), same precedent as this file's other promoted transitive
+# dependencies — no new crate or version enters the dependency graph.
+sha2 = "0.10"
+# Browser-B5 (screenshot execution): encodes captured PNG bytes for the
+# Tauri IPC response (`browser_grant.rs`) — a plain `Vec<u8>` serializes as
+# a JSON array of numbers by default, which is both far larger on the wire
+# and not what any real consumer would expect for image bytes. Already
+# present transitively (0.22.1, via several existing dependencies);
+# promoted to a direct dependency at that exact already-resolved version.
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 # Win32 Job Object support for sidecar child process lifecycle binding
@@ -105,7 +122,21 @@ windows-sys = { version = "0.59", features = [
 # `tauri-2.11.5`'s own Cargo.toml pins exactly), so this crate's own code can
 # name their types. No new crate or version enters the dependency graph.
 webview2-com = "0.38"
-windows = "0.61"
+# Browser-B5 (screenshot execution): `Win32_System_Com` is added explicitly
+# for `IStream`/`CreateStreamOnHGlobal` (`browser_runtime.rs`'s
+# `capture_screenshot`, backing `ICoreWebView2::CapturePreview`'s own
+# required parameter type — confirmed against the pinned
+# `webview2-com-sys-0.38.2` bindings, which name this exact type). Not a
+# new crate or version: `webview2-com`/`webview2-com-sys` 0.38.2 already
+# request this identical feature for the same `windows` 0.61 resolution
+# (confirmed in their own published manifests), so this only makes an
+# already-unified feature an explicit, direct request rather than an
+# incidental one — matching this file's own "promote to a direct,
+# explicit dependency" precedent (D15).
+windows = { version = "0.61", features = [
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+] }
 
 [dev-dependencies]
 hyper = { version = "1", features = ["server", "http1"] }

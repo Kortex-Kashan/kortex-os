@@ -1,133 +1,126 @@
-# Browser-B5.0-B5.4 Implementation Report — Browser Capability Layer Foundation
+# Browser-B5 Implementation Report — Browser Capability Layer
 
-**Status**: COMPLETE for B5.0-B5.4 scope only. Not committed as of this report — commit/push authorization is separate and explicit, per this repository's milestone workflow and the B5.0-B5.4 authorization's own "DO NOT COMMIT OR PUSH YET."
+**Status**: COMPLETE for this cycle's scope (navigate + screenshot real execution, full capability-layer governance). Not committed as of this report — commit/push authorization is separate and explicit, per this repository's milestone workflow.
 
-## 1. Baseline
+The internal stage identifiers B5.0–B5.11 are retired per explicit owner direction ("KORTEX OS — B5 MASTER IMPLEMENTATION"); this report and `browser_b5_master_plan.md` are the only two B5-scoped documents, covering the entire B5 milestone to date (the B5.0-B5.4 foundation, previously reported separately, plus this cycle's navigate/screenshot execution).
 
-Continues directly from Browser-B4 (commit `10f1b4ccf2488b64aadbc2efc632dcd82bf9698a`, on `origin/main`, CLOSED). Implements the approved `KORTEX OS — Browser B5 Architecture Gate` (`browser_b5_architecture_gate.md`, verdict READY WITH CONDITIONS, conditions B5-C01 through B5-C07) under the explicit "KORTEX OS — B5 FOUNDATION IMPLEMENTATION, B5.0 → B5.4 ONLY" authorization.
+## 1. Scope
 
-## 2. Scope
+**Delivered this cycle**: real execution of `kortex.browser.navigate` and `kortex.browser.screenshot`, end to end, through the unmodified B4 `BrowserPolicyEngine` and the unmodified B5.0-B5.4 Grant/redeem foundation — plus the parameter-hash verification (OD-01) and navigation-event correlation (OD-02) mechanisms both capabilities' execution depends on.
 
-**In scope (delivered)**: B5.0 (decision lock, recorded in `browser_decision_log.md` D34-D39), B5.1 (typed capability contracts), B5.2 (registry/governance integration — all eight `kortex.browser.*` capabilities registered, authorized, audited, tool-bridged), B5.3 (Capability Execution Grant — mint, sign, verify, sensitive-input gate), B5.4 (desktop redeem command — signature/expiry/single-use/live-binding verification, per-surface serialization, navigation-generation counter).
+**Explicitly not delivered, and why** (see `browser_b5_master_plan.md` §5/§6 for full reasoning): `.read`/`.extract`/`.click`/`.type` execution (no approved, or even architecturally specified, access mechanism exists — building one under time pressure was judged higher-risk than reporting the gap honestly); `.download` execution (B4's own download policy is a full subsystem not yet built, unrelated to this cycle); B6-B11.
 
-**Explicitly out of scope, not implemented**: real execution of any capability (`browser.navigate` through `.screenshot` all mint a Grant and stop; `.download` never mints one); B5.5+; B6/B7/B8/B9/B10; graded autonomy tiers; a persisted Grant-signing key.
+## 2. Baseline
+
+- B4: `10f1b4ccf2488b64aadbc2efc632dcd82bf9698a`
+- B5 foundation (no execution): `fbddfab5d8fa698eb986ba501604475eae38241f` (`origin/main` at the start of this cycle)
+- `v1.0.0-rc.2`: `041084539f4c68a05db4ffa49903bf8c726c4300` — confirmed unchanged, untouched by this cycle.
 
 ## 3. Architecture
 
-See `browser_architecture.md` §2.9 (new) and `browser_b5_architecture_gate.md` for the full design. Summary: `kortex.browser.*` registers into the existing, unmodified `RegistryEngine`/`CapabilityDispatcher`/RBAC-ABAC/`ToolGovernanceEvaluator`/`DurableAIApprovalPolicy`/`AuditManager` framework (D35) — confirmed sufficient, no second dispatcher/authorization/approval engine created or found necessary. The one new abstraction, the Capability Execution Grant, exists because a backend capability handler has no channel to a live WebView2 surface; it mints a signed, short-lived authorization artifact instead of executing, which the desktop's new, AI-only `browser_execute_granted_action` command independently re-verifies before doing anything.
+See `browser_b5_master_plan.md` §2 for the full canonical execution path and §3/§4 for the OD-01/OD-02 resolutions. Summary: no second dispatcher, authorization engine, approval engine, or transport was created; `BrowserPolicyEngine` (B4) was not modified in any way — `execute_navigate` reaches `BrowserRuntime::navigate` (the identical trait method the human-facing `browser_navigate` command already calls), which triggers the identical `NavigationStarting`/`NavigationCompleted` WebView2 COM callback a human click already goes through.
 
-## 4. Security Model
+## 4. Implementation
 
-- Every capability: `requires_authentication=True`, `requires_execution_context=True`, `security_classification="CONFIDENTIAL"` (`"INTERNAL"` for `grant_verification_key`, a public key).
-- Mutation classification exactly per the locked table: `navigate`/`click`/`type`/`download` mutating (approval-gated by the existing, unmodified `ToolGovernanceEvaluator`); `read`/`extract`/`screenshot`/`grant_verification_key` read-only.
-- `browser.type` refuses outright (never merely logs) if the target field is labeled like a credential input or the value is shaped like a secret (`grant.py::is_sensitive_type_target`/`looks_like_secret_value`) — before a Grant is ever minted.
-- `browser.download`'s handler has no reference to grant-minting at all — verified structurally by inspecting its own source (`test_download_handler_has_no_reference_to_grant_minting`), not merely by its current return value.
-- The redeem command independently re-verifies, in order, signature (against a cached, separately-fetched public key — never trusting the Grant's own claim), expiry, single-use, live surface existence, live tenant/profile binding, and live navigation-generation binding, all under a per-surface lock.
-- B4's `BrowserPolicyEngine` is structurally unreachable to bypass: this phase never calls any `BrowserRuntime` mutating method at all, and when a later phase does, it will do so through the exact same trait methods a human click already uses.
+**Backend** (`backend/src/kortex/engines/browser/grant.py`): one targeted change — `canonicalize_and_hash`'s JSON encoding switched from Python's default spaced separators to `separators=(",", ":")` (compact), so it matches Rust's `serde_json` (compact, key-sorted — this crate does not enable `preserve_order`) byte-for-byte. No capability contract, handler, or registration changed; `engine.py`'s `navigate`/`screenshot` handlers already minted correctly-shaped Grants in B5.0-B5.4.
 
-## 5. Implementation
+**Desktop (Rust)**:
+- `browser_runtime.rs`: `NavigationOutcome` enum (`Success`/`PolicyDenied`/`Failed`); `SurfaceEntry.navigation_waiter: Arc<Mutex<Option<oneshot::Sender<NavigationOutcome>>>>`; `NavigationStarting`'s `Deny` arm and a rewritten `NavigationCompleted` handler (now reads `IsSuccess`/`WebErrorStatus` — previously discarded) both resolve it via a new `resolve_navigation_waiter` helper; two new `BrowserRuntime` trait methods, `arm_navigation_waiter` and `capture_screenshot` (the latter via `ICoreWebView2::CapturePreview` + `CreateStreamOnHGlobal`/`IStream::Read`, confirmed against the pinned `webview2-com-sys-0.38.2` bindings — `CapturePreview` lives on the base `ICoreWebView2` interface, no versioned-interface cast needed); a new `PolicyAuditLogPath` Tauri-managed state (a second handle to the same audit-log path `WebView2RuntimeAdapter` already holds privately).
+- `browser_grant.rs`: a Rust port of `canonicalize_and_hash` (SHA-256 over a `serde_json::json!`-built value); `navigate_parameters_value`/`screenshot_parameters_value` (reconstruct the exact hashed shape from the Grant's own live-verified fields plus caller-supplied wire params — never from a second, caller-supplied target); `BrowserCapabilityParamsWire` (tagged enum, `Navigate { url, timeout_ms }` / `Screenshot { full_page }`); five new `BrowserGrantExecutionError` variants (`ParametersRequired`, `FullPageNotYetSupported`, `PolicyDenied`, `NavigationFailed`, `ScreenshotFailed`, `Timeout`); `BrowserGrantExecutionResult` changed from a flat placeholder struct to a tagged enum (`Success`/`Screenshot`/`NotYetEnabled`); a new `BrowserExecutionAuditEvent` enum + writer, appending to the same local JSONL audit log B4's own policy enforcement already uses; the command itself refactored into a thin `#[tauri::command]` wrapper plus a plain, dependency-injected `execute_granted_action` (and its `execute_navigate`/`execute_screenshot` helpers) — the split that makes everything but the raw COM calls testable without a live Tauri/WebView2 process.
+- `browser_profile_store.rs`: `BrowserProfileId::from_raw_for_test` promoted to `pub(crate)` (test-only fixture reuse across sibling modules).
+- `Cargo.toml`: `sha2 = "0.10"`, `base64 = "0.22"` promoted from transitive to direct dependencies (both already resolved in `Cargo.lock` via existing dependents — no new crate or version enters the graph); `windows`'s feature list extended with `Win32_System_Com`/`Win32_System_Com_StructuredStorage` (for `IStream`/`CreateStreamOnHGlobal` — `webview2-com`/`webview2-com-sys` already request the former for the same resolved `windows` version).
 
-**Backend** (`backend/src/kortex/engines/browser/`, new package): `models.py` (typed contracts — `BrowserActionErrorCode`, `BrowserElementSelector`, `BrowserCapabilityTarget`, per-capability params, `BrowserCapabilityExecutionGrant`, `BrowserGrantVerificationKey`), `exceptions.py` (one exception type per error code, mirroring `desktop_automation.exceptions`'s convention), `grant.py` (canonicalization/hashing, mint/verify via the *existing* `SecurityEngine`-adjacent `VerificationService`/`ICryptoProvider`/`LocalCrypto`, sensitive-input detection), `audit.py` (shared six-event vocabulary, `BROWSER_GRANT_MINTED` wired to the real `AuditManager`), `engine.py` (`BrowserCapabilityEngine`, registering all eight capabilities and their handlers). `api/kernel_bootstrap.py` wired (pre-boot engine registration alongside `DesktopAutomationEngine`; post-boot `register_browser_ai_tools`, mirroring `register_connector_action_ai_tools`'s exact pattern).
+## 5. Security Model
 
-**Desktop** (Rust): new `browser_grant.rs` (`CapabilityExecutionGrant`, `verify_signature`/`verify_expiry` via `ed25519-dalek`/`time`, `RedeemedGrantTracker`, `GrantVerificationKeyCache`, `SurfaceRedeemLocks`, the `browser_execute_granted_action` command). `browser_runtime.rs` extended: `SurfaceEntry.navigation_generation: Arc<AtomicU64>` (bumped on every *allowed* navigation, including the surface's own initial load); `surface_exists`/`navigation_generation` added to the `BrowserRuntime` trait. `browser_profile_store.rs` extended: `ActiveProfileSurfaces::lookup` (non-destructive counterpart to the existing `take`). New `Cargo.toml` dependencies: `ed25519-dalek = "2"` (Ed25519 signature verification — no existing dependency exposes this), `time = { version = "0.3", features = ["parsing", "formatting"] }` (RFC3339 expiry parsing only — never used to reconstruct the signed payload, which stays byte-for-byte identical to what the backend sent). New capability/permission files: `capabilities/browser-ai-execution.json`, `permissions/browser-ai-execution.toml` — deliberately separate from `browser-runtime.json`'s human-facing commands.
+Unchanged invariants from B5.0-B5.4 (authentication, tenant binding, live surface/profile/generation re-verification, fail-closed) all still apply, unmodified, before either navigate or screenshot code is ever reached. New for this cycle:
 
-## 6. Threat Model / Security Invariant Verification
+- **Parameter integrity**: neither capability's execution touches `BrowserRuntime` until the recomputed parameter hash matches the Grant's own `canonicalized_parameters_hash` — a validly-signed, validly-bound Grant redeemed with substituted parameters is rejected as `GrantInvalid`, proven structurally (the fake runtime's `navigate` is asserted never-called on a mismatch).
+- **BrowserPolicyEngine remains the sole, unbypassable navigation authority** — `execute_navigate` never evaluates policy itself; it only observes B4's own decision via the waiter.
+- **Screenshot data minimization**: captured bytes are base64-encoded directly into the one IPC response and never written to disk; audit entries for screenshot execution carry only capability/surface/outcome metadata, never image bytes.
+- **Desktop-side timeout bound is independent of the wire value's trustworthiness**: `timeout_ms.clamp(100, 300_000)` — found and fixed during this cycle's own adversarial review (the original code clamped only the upper bound).
 
-| Invariant (from the B5 gate, §24) | How B5.0-B5.4 satisfies it |
-|---|---|
-| INV-B5-01 (no raw WebView2/JS/IPC to AI) | No capability contract accepts a script/selector-free command; the new Tauri command is one narrow, typed command |
-| INV-B5-02 (authenticated principal) | `requires_authentication=True` on all eight, no exception |
-| INV-B5-03 (tenant-bound) | `CapabilityExecutionContext.tenant_id`, never caller-supplied |
-| INV-B5-04 (explicit surface/profile binding, live re-resolved) | Redeem command re-checks `ActiveProfileSurfaces::lookup` against the *live* binding, never the Grant's own claim alone |
-| INV-B5-05 (BrowserPolicyEngine unbypassable) | This phase never calls `BrowserRuntime` at all; the architecture is shaped so it never can without going through the same trait |
-| INV-B5-06 (page content has no capability authority) | No contract accepts arbitrary page-originated input as an instruction |
-| INV-B5-07/08 (no secrets in extraction/audit) | `ui_input_text` never appears in `_mint_and_audit`'s audit context; `BROWSER_GRANT_MINTED`'s context carries only a hash, ids, and expiry |
-| INV-B5-09 (profile isolation, live re-checked) | Same as INV-B5-04 |
-| INV-B5-10 (fail-closed) | Every check (signature/expiry/single-use/binding/generation) fails closed; unknown tool → `ToolGovernanceEvaluator`'s own existing fail-closed default |
+## 6. Capability Matrix
 
-## 7. Adversarial Findings
+| Capability | Auth | Live surface/profile/generation binding | Parameter-hash verified | Policy-enforced | Real execution | Audited |
+|---|---|---|---|---|---|---|
+| `navigate` | ✓ (unchanged) | ✓ (unchanged) | ✓ (new) | ✓ (B4, unmodified) | ✓ (new) | ✓ (new: STARTED/SUCCEEDED/FAILED) |
+| `screenshot` | ✓ | ✓ | ✓ (new) | N/A (no navigation) | ✓ (new, viewport-only) | ✓ (new) |
+| `read`/`extract`/`click`/`type` | ✓ | ✓ | N/A (no params wired) | N/A | `NotYetEnabled` | Grant lifecycle only |
+| `download` | ✓ | ✓ | N/A | N/A (B4 denies unconditionally) | `NotYetEnabled` | Grant lifecycle only |
 
-- **CONFIRMED, fixed (D37)**: a real, would-have-shipped cross-language signature bug — `datetime.isoformat()` (`+00:00`) vs. Pydantic's JSON serialization of the same field (`Z`) — found by a genuine cross-language fixture test (a real Python-minted grant, verified in Rust), not by reasoning about the two languages' conventions in the abstract. Fixed by storing pre-formatted strings instead of `datetime` fields.
-- **CONFIRMED, fixed (D39)**: registering 8 new production capabilities correctly triggered an existing, independent completeness guard (`test_capability_metadata_completeness.py`'s `_EXPECTED_RISK` table) — updated with the correct values, all taken directly from the registration call sites.
-- Grant tamper tests (Rust and Python, parametrized): every single-field tamper (tenant, principal, capability, target, generation, parameter hash) independently fails signature verification — proven, not assumed.
-- Live preflight (D38) confirmed the two new `BrowserRuntime` trait methods behave correctly against a real WebView2 surface, including a subtlety a pure unit test could not have surfaced: the initial page load itself is a real, allowed navigation and correctly bumps the generation counter from 0 to 1 (not 0), which is the more semantically correct behavior.
+## 7. Threat Model / Adversarial Review
 
-## 8. Tests
+Formal review against the required attack categories, scoped to what this cycle actually built (navigate/screenshot execution) — categories specific to unbuilt capabilities (prompt injection into read content, click/type secret handling beyond the already-existing mint-time gate, download path traversal) are out of scope for this review, not silently passed.
 
-**Backend**: `test_browser_grant.py` (unit, 40 tests) — canonicalization, mint/verify roundtrip, tamper detection (parametrized across every field), sensitive-input detection (target-name and value-shape, both positive and negative cases). `test_browser_capability_dispatch.py` (integration vertical slice, 49 tests) — real `CapabilityDispatcher`/`SecurityEngine` boundary: registration completeness, authentication/authorization/tenant-isolation denial, all seven capabilities minting grants correctly, `browser.type` refusal, `browser.download` never executing (structurally), `ToolGovernanceEvaluator` correctly gating mutation vs. read-only, `action_fingerprint` changing on every relevant field change. **89/89 passed.** `ruff check`: clean.
+| Attack | Classification if unmitigated | Status |
+|---|---|---|
+| Forged / replayed / expired / tampered Grant | CRITICAL | Mitigated (B5.0-B5.4, unchanged), re-proven via `expired_grant_never_reaches_capability_dispatch` |
+| **Parameter substitution** (valid Grant, different URL/params redeemed) | CRITICAL | **Mitigated (new).** Proven by `execute_navigate_rejects_parameter_substitution_before_touching_runtime` — `BrowserRuntime::navigate` structurally never called |
+| Wrong surface / profile / tenant / generation | CRITICAL/HIGH | Mitigated (unchanged), re-proven via `unregistered_surface_never_reaches_capability_dispatch` |
+| Malformed/encoded-bypass URI, redirect to denied target (human path) | HIGH | Mitigated (B4, unchanged, extensively tested) |
+| **Redirect to denied target via the NEW AI-redeemed path specifically** | HIGH | Mitigated **by design/code inspection** (the waiter only ever resolves on `Deny`/`Completed`, never on `Allow`, so a multi-hop redirect chain falls through correctly regardless of who issued the original navigation) — **not proven by a live redirect-driving test.** Labeled UNVERIFIED-by-live-test, not silently assumed solved. |
+| DNS rebinding | HIGH | **Not mitigated.** Unchanged, disclosed B4 gap. Explicitly not claimed solved. |
+| **Waiter cross-talk / stale-event resolution (same-surface, AI-vs-AI)** | HIGH | **Mitigated (new).** `.take()` clears the slot atomically; full-duration per-surface lock. Proven by `concurrent_redemptions_on_same_surface_are_serialized` — two real concurrent redemptions on one surface, asserted strictly ordered, zero interleaving. |
+| **Waiter cross-talk (human-vs-AI, same surface, same moment)** | MEDIUM | **Not mitigated — disclosed.** See `browser_b5_master_plan.md` §4. Correctness/attribution issue, not a security-boundary break (no cross-tenant/authorization confusion results). |
+| Timeout used to hide a real outcome | MEDIUM | Mitigated: `Timeout` is a distinct, honest, typed outcome (never silently reported as failure or success); documented as "outcome unknown," not "did not happen" |
+| Screenshot data leakage (disk persistence, audit leakage) | MEDIUM | Mitigated (new): never written to disk; audit never carries image bytes — verified by inspection of every audit call site in `execute_screenshot` |
+| `full_page` silently served as a cropped image | LOW-MEDIUM (correctness/trust, not confidentiality) | Mitigated (new): explicit `FullPageNotYetSupported` refusal, checked before the hash comparison so it is never confused with a tamper rejection |
+| Tiny/zero `timeout_ms` causing a spurious near-instant failure | LOW | Mitigated (new, found during this review): `.clamp(100, 300_000)`, not just an upper bound |
+| Surface destroyed mid-navigate-and-wait | LOW (availability, not security) | Reasoned to degrade safely to `Timeout` — **not live-tested.** Disclosed as untested. |
+| Audit log manipulation/leakage of secrets or full URLs | MEDIUM | Mitigated (new writer follows the identical, already-audited redaction convention B4's own policy audit uses — capability/surface/outcome only, never a URL or parameter value) |
 
-Full backend suite (`pytest tests/`) was run twice. First run, before two fixes below: 27 failed / 4383 passed — investigated individually: 1 was a stale pre-fix snapshot, 1 was the real, expected `_EXPECTED_RISK` completeness gap, 24 were pre-existing Windows AppContainer sandbox tests in the completely unrelated `python_exec` engine (confirmed unrelated: different subsystem, zero code overlap, reproducible in isolation, unaffected by toggling this session's own sandbox setting), and 1 was a timing-flaky circuit-breaker test. Both real issues were fixed (D39, and reverting an accidental unrelated file change — see §11). Final run, after both fixes: **4386 passed, 24 failed, 4 skipped** — the delta (+3 passed / −3 failed) is exactly the stale snapshot, the completeness fix, and the flaky test now passing; the same 24 pre-existing/unrelated `python_exec` failures remain, unchanged. **The full backend suite is not "clean" and this report does not claim otherwise** — see §12.
+No BLOCKER finding. No unresolved CRITICAL/HIGH finding against what was actually built — the two HIGH items marked "not mitigated"/"UNVERIFIED-by-live-test" are pre-existing (DNS rebinding) or explicitly scoped-out-and-disclosed (redirect-via-AI-path live proof), never silently passed over.
 
-**Desktop (Rust)**: `browser_grant.rs`'s own test module, 13 tests — mint/verify roundtrip, every tamper case, expiry boundary conditions, single-use enforcement, and a real cross-language fixture test (D37) using an actual Python-minted grant. `cargo test --lib`: **155/155 passed** (was 142 after B4). `cargo clippy --lib --tests`: 0 new warnings (1 pre-existing, `sidecar.rs`, unchanged). `cargo fmt --check`: clean for every B5-touched file (`browser_grant.rs`, `browser_runtime.rs`, `browser_profile_store.rs`, `lib.rs`); `secure_keys.rs`'s pre-existing, out-of-scope drift confirmed untouched (an accidental reformat of it during this session was caught and reverted before it could enter any commit — see §11).
+## 8. Targeted Test Results
 
-## 9. Live Verification (D38)
+**Rust** (`cargo test --lib`, full crate): **169 passed, 0 failed, 2 ignored** (the 2 ignored are pre-existing, environment-gated real-Windows-Credential-Manager tests, unrelated to Browser). 27 of the 169 are `browser_grant`'s own tests — 12 pre-existing (unchanged) plus 15 new this cycle: the cross-language parameter-hash fixture (`real_rust_hash_matches_real_python_hash`, four digests captured from the real, currently-shipping Python function, including a substituted-URL fixture proving the hash changes), parameter-substitution rejection, missing/wrong-shaped params rejection, policy-denied/navigation-failed/success/timeout propagation (navigate), success/full-page-refusal (screenshot), expired-grant and unregistered-surface short-circuit proofs, unrecognized-capability-still-NotYetEnabled, and the concurrency-serialization test. `cargo clippy --lib --tests`: 0 new warnings (1 pre-existing, `sidecar.rs`, unrelated, unchanged from B5.0-B5.4). `cargo fmt --check`: clean for every touched file. `git diff --check`: clean.
 
-A temporary, disposable preflight (`run_b5_live_preflight`, gated behind `KORTEX_BROWSER_B5_LIVE_PREFLIGHT`, spawned on its own thread per `add_child`'s documented main-thread-deadlock warning, same convention as Browser-B4.8) confirmed, against the real pinned WebView2 runtime:
+**Backend** (targeted, per this milestone's own "do not run the full suite merely to obtain green" testing policy): `pytest tests/unit/test_browser_grant.py tests/integration/test_browser_capability_dispatch.py tests/integration/test_capability_metadata_completeness.py` — **97 passed** (unchanged from B5.0-B5.4; the `canonicalize_and_hash` separator change altered no test's assertions, since none of them assert an exact digest value, only relative properties — key-order independence, capability-name sensitivity, distinct parameters producing distinct hashes). `ruff check`/`ruff format --check` on the one modified file (`grant.py`): clean. The full backend regression suite was NOT re-run this cycle, per this milestone's own explicit testing policy (§17/§27) — deferred to the final Browser validation stage, exactly as directed.
 
-```
-[B5-PREFLIGHT] baseline: initial allowed navigation loaded = true
-[B5-PREFLIGHT] surface_exists after create = true; navigation_generation after create = Ok(1)
-[B5-PREFLIGHT] second allowed navigation completed = true; navigation_generation after navigate = Ok(2)
-[B5-PREFLIGHT] after destroy: surface_exists = false; navigation_generation = Err(SurfaceNotFound { .. })
-```
+## 9. Live Verification
 
-All observed values are correct (the initial load counting as generation 1, not 0, is the more semantically correct behavior — a `.read()` immediately after creation correctly sees "this specific loaded page," not a pre-navigation placeholder). All temporary preflight code and its on-disk WebView2 profile directory were removed after this run; confirmed absent from the current working tree (`grep` for its markers returns nothing).
-
-## 10. Documentation
-
-Updated: `browser_architecture.md` (new §2.9), `browser_capability_model.md` (marked implemented, Grant mechanism added as the one thing the B0-era sketch didn't anticipate, §8 updated), `browser_decision_log.md` (D34-D39 new; §29 Q1 marked resolved; OD-B17/B18/B19 new), `browser_known_limitations.md` (new "As of Browser-B5.0-B5.4" section), `browser_roadmap_b0_b10.md` (B5 marked complete for this scope with full evidence), this report.
-
-## 11. Git Diff (summary)
+A disposable, env-var-gated preflight (`KORTEX_BROWSER_B5_NAVIGATE_LIVE_PREFLIGHT`), spawned on its own thread, exercising `BrowserRuntime` directly (never through the Grant/backend round-trip, which would require a live backend process and is not what this preflight needs to prove), confirmed against the real, pinned WebView2 runtime:
 
 ```
- apps/desktop/src-tauri/Cargo.lock                                 |   ~
- apps/desktop/src-tauri/Cargo.toml                                 |  ~20 +
- apps/desktop/src-tauri/capabilities/browser-ai-execution.json     |   6 (new file)
- apps/desktop/src-tauri/permissions/browser-ai-execution.toml      |  15 (new file)
- apps/desktop/src-tauri/src/browser_grant.rs                       | ~600 (new file)
- apps/desktop/src-tauri/src/browser_profile_store.rs               |  13 +
- apps/desktop/src-tauri/src/browser_runtime.rs                     |  40 +
- apps/desktop/src-tauri/src/lib.rs                                 |   1 +
- backend/src/kortex/api/kernel_bootstrap.py                       |  20 +
- backend/src/kortex/engines/browser/                               | ~900 (new package: __init__, models, exceptions, grant, audit, engine)
- backend/tests/integration/test_browser_capability_dispatch.py     | ~410 (new file)
- backend/tests/integration/test_capability_metadata_completeness.py|   9 +
- backend/tests/unit/test_browser_grant.py                          | ~180 (new file)
- docs/architecture/browser_architecture.md                        |  13 +
- docs/architecture/browser_b5_architecture_gate.md                 | ~330 (new file, from the prior gate)
- docs/architecture/browser_b5_implementation_report.md             | (this file, new)
- docs/architecture/browser_capability_model.md                     |  10 +
- docs/architecture/browser_decision_log.md                        |  ~55 +
- docs/architecture/browser_known_limitations.md                   |  10 +
- docs/architecture/browser_roadmap_b0_b10.md                       |  20 ~
+[B5-PREFLIGHT] creating surface...
+[B5-PREFLIGHT] surface created: BrowserSurfaceId("browser-surface-18d900b624a093f4-0")
+[B5-PREFLIGHT] allowed navigate outcome: Success
+[B5-PREFLIGHT] denied navigate outcome: PolicyDenied(PrivateNetworkAccess { classification: Loopback })
+[B5-PREFLIGHT] screenshot: 11829 bytes, valid PNG magic header: true
+[B5-PREFLIGHT] done, surface destroyed.
 ```
 
-`git diff --check`: clean. Not staged or committed as of this report. Confirmed untouched: `.kortex/roadmap.md`, `CHANGELOG.md`, `docs/release/RELEASE_CANDIDATE_READINESS.md`, `scratch/`. **One accidental, out-of-scope change was caught and reverted before finalizing this report**: an unrelated formatting pass touched `apps/desktop/src-tauri/src/secure_keys.rs` (pre-existing `cargo fmt` drift this and the prior B4 session both deliberately left alone as out-of-scope) — reverted via `git checkout --`, confirmed absent from the current diff. A stray, empty, accidentally-created `backend/file` was also found and deleted before finalizing.
+All three observed outcomes are correct: a real, policy-allowed navigation to a second real destination resolved `Success`; a real, policy-denied (loopback) navigation resolved `PolicyDenied` with the correct classification — proving the single highest-risk new wiring (a bug here would silently hang until timeout rather than failing fast) actually works against real WebView2 COM events, not just a fake runtime; a real `CapturePreview` call produced 11,829 bytes with a valid PNG magic header, confirming the `IStream`/`CreateStreamOnHGlobal` read-back path is correct. All temporary preflight code was removed after this run; confirmed absent via `git diff --check`/inspection of the current `lib.rs`.
 
-## 12. CI-Readiness
+**Not live-tested** (see §7): a redirect chain through the AI-redeemed path specifically; surface destruction mid-navigate-and-wait; a real network-level navigation failure (`NavigationFailed`, as opposed to policy-denial) — this last one is covered deterministically by the fake-runtime unit test (`execute_navigate_failure_propagates_web_error_status`) but not against a real unreachable host, which would have required a slow, flaky, or infrastructure-dependent live scenario disproportionate to this cycle's scope.
 
-**B5-specific regression**: clean. Rust `cargo test --lib`: 155/155 passed. `cargo clippy --lib --tests`: 0 new warnings (1 pre-existing warning in `sidecar.rs`, unrelated, unchanged). `cargo fmt --check`: clean for every B5-touched file. Backend, the two new Browser test files (`test_browser_grant.py`, `test_browser_capability_dispatch.py`): 89/89 passed. `git diff --check`: clean.
+## 10. Graph/Architecture Evidence
 
-**Full backend suite**: NOT clean, and this report does not claim otherwise. Final run: **4386 passed, 24 failed, 4 skipped**. The 24 failures are the already-investigated Windows AppContainer `python_exec` sandbox tests (`test_python_execution_boundary.py`, `test_python_execution_vertical_slice.py`) and are pre-existing/unrelated to Browser-B5.0-B5.4 — individually investigated and confirmed to have no code overlap with anything this phase touched (different engine, different subsystem, reproducible in isolation, unaffected by this session's own sandbox setting). None of the 24 involve Browser code, and none were introduced by this phase.
+`graphify update .` was run against the full repository after implementation (23,239 nodes, 54,775 edges, 738 communities — up from the pre-B5-execution graph). Verified, not merely run: `graphify explain "arm_navigation_waiter"` correctly resolves to both the production implementation (`WebView2RuntimeAdapter`) and the test double (`FakeBrowserRuntime`), confirming the graph reflects the actual, current implementation rather than a stale or aspirational snapshot.
 
-Not yet pushed, so no real CI run exists for this phase yet.
+## 11. Known Limitations
 
-## 13. Known Limitations
+See `browser_b5_master_plan.md` §7 for the full, consolidated list (DNS rebinding; human-vs-AI waiter cross-talk; redirect-via-AI-path and surface-destruction-mid-wait unverified by live test; screenshot viewport-only; `.read`/`.extract`/`.click`/`.type`/`.download` execution not yet built).
 
-See `browser_known_limitations.md`'s new "As of Browser-B5.0-B5.4" section: no capability executes yet (deliberate); B5 V1 is desktop-session-scoped only, no autonomous backend-initiated execution path (D34); non-durable Grant-signing key (OD-B18); pattern-based (not exhaustive) sensitive-input detection (OD-B19); inherited, disclosed, not-fixed cross-cutting gaps (`action_fingerprint` optional-check skip condition, AI-path idempotency).
+## 12. Deferred Risks
 
-## 14. Deferred Risks
+- The `.read`/`.extract`/`.click`/`.type` access-mechanism decision (native UIA scoped to the WebView2 HWND, recommended but not approved — `browser_b5_master_plan.md` §5) — the single largest remaining architectural decision in the Browser capability layer.
+- A real download-policy subsystem, needed before `.download` can execute at all.
+- Human-vs-AI navigation waiter cross-talk (§7) — closing it would mean adding synchronization to the frozen B1/B2 human-facing command path, judged disproportionate to this cycle.
+- Live-testing redirect-through-the-AI-path and surface-destruction-mid-wait, ideally alongside whichever future phase next touches this code.
 
-OD-B17 (wiring real execution, B5.5+), OD-B18 (Grant-signing key persistence, future hardening if ever required), OD-B19 (sensitive-input detection completeness), OD-B13/B14/B15/B16 (all inherited unchanged from Browser-B4, untouched by this phase).
+## 13. Git Status
 
-## 15. Commit Recommendation
+Working tree, at the time of this report: the 25 files already committed in `fbddfab5d8fa698eb986ba501604475eae38241f` (verified via `git show --stat`) remain unchanged in that commit; this cycle's changes are unstaged, on top of it. Touched files: `apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/Cargo.lock`, `apps/desktop/src-tauri/src/browser_runtime.rs`, `apps/desktop/src-tauri/src/browser_grant.rs`, `apps/desktop/src-tauri/src/browser_profile_store.rs`, `backend/src/kortex/engines/browser/grant.py`, `docs/architecture/browser_b5_master_plan.md` (new), `docs/architecture/browser_b5_implementation_report.md` (this file, rewritten), plus the remaining documentation files listed in §14 of the master plan, not yet updated as of this report draft — see the final commit-authorization message for the exact, final file list. `.kortex/roadmap.md`, `CHANGELOG.md`, `docs/release/RELEASE_CANDIDATE_READINESS.md` confirmed untouched; `scratch/` confirmed untracked/unstaged. No force-push, amend, or history rewrite used at any point. `v1.0.0-rc.2` confirmed unchanged.
 
-No open BLOCKER/CRITICAL/HIGH findings against Browser-B5.0-B5.4 itself. B5-specific regression is clean: Rust 155/155, 0 new clippy warnings, fmt clean; backend 89/89 in the two new Browser test files; `git diff --check` clean.
+## 14. CI Status
 
-Full backend suite: 4386 passed, 24 pre-existing/unrelated Windows AppContainer `python_exec` failures, 4 skipped. The 24 failures were individually investigated and confirmed to have no code overlap with B5.0-B5.4.
+Not pushed as of this report — no CI run exists yet for this cycle's changes. Per this milestone's own CI policy (§18/§28): CI verification for B5-scoped work is not a blocking requirement; the authoritative, complete Backend + Desktop CI verification is deferred to the Browser Technical RC phase.
 
-One real, would-have-shipped security-relevant bug (D37) was found and fixed by genuine cross-language verification, not assumed away. One accidental, out-of-scope file change was caught and reverted before it could enter any commit.
+## 15. Final Verdict
 
-**B5.0-B5.4 is READY for commit.**
+**READY FOR COMMIT — for the scope actually delivered (navigate + screenshot execution).**
 
-Awaiting explicit user GO/NO-GO, commit authorization, and (separately) push authorization, per this repository's milestone workflow and the B5.0-B5.4 authorization's own explicit "DO NOT COMMIT OR PUSH YET."
+No BLOCKER or unresolved CRITICAL/HIGH finding against the delivered scope. Two genuine adversarial-review findings were made and fixed during this cycle itself (the timeout lower-bound clamp; the parameter-hash separator mismatch, caught before it could ever cause a real failure since no Grant had been redeemed-for-execution before this cycle). One substantial architectural question (`.read`/`.extract`/`.click`/`.type`'s access mechanism) was investigated thoroughly, found genuinely unresolved, and is reported — with a concrete, ready-to-approve recommendation — rather than silently built under time pressure or silently omitted.
+
+Awaiting explicit user review of this report and `browser_b5_master_plan.md`, and explicit commit/push authorization, per this repository's milestone workflow.

@@ -1,6 +1,6 @@
 # KORTEX Browser — Capability Model
 
-**Status**: Living document — established Browser-B0 (design only). **Registered as of Browser-B5.0-B5.4** (`backend/src/kortex/engines/browser/`) — every capability below mints a Capability Execution Grant (or, for `.download`, always refuses); none of them execute a real browser action yet. See `docs/architecture/browser_b5_architecture_gate.md` and `browser_decision_log.md` D34-D39 for the full account of what changed between this document's original B0 sketch and what B5 actually implemented.
+**Status**: Living document — established Browser-B0 (design only), registered Browser-B5.0-B5.4 (`backend/src/kortex/engines/browser/`). **As of Browser-B5, `navigate` and `screenshot` execute for real**; `read`/`extract`/`click`/`type` mint a Grant and stop (no approved execution mechanism yet); `download` always refuses. See `docs/architecture/browser_b5_master_plan.md` and `browser_decision_log.md` for the full account.
 
 ## 1. Governed actions (target set, per the task brief)
 
@@ -52,4 +52,6 @@ Conceptually similar (both are "act on a UI on the user's behalf" capabilities) 
 
 **Resolved by Browser-B5.0-B5.4**: `parameters_schema` per action (real JSON schemas, `engine.py`, derived from `models.py`'s typed contracts); target-selector format for `.click`/`.type`/`.extract` (`BrowserElementSelector` — role/accessible-name/node-ref, deterministic, never a raw CSS/XPath selector or pixel coordinate; see `browser_b5_architecture_gate.md` §7/§12).
 
-**Still open, deferred to Browser-B5.5+**: the exact approval UX shown to a human when a mutating `kortex.browser.*` call requires approval; wiring real `BrowserRuntime` execution behind a verified Grant, per capability (OD-B17); real implementation of `browser.download` (OD-B14).
+**Resolved by Browser-B5 (navigate/screenshot execution)**: `navigate`/`screenshot` now wire real `BrowserRuntime` execution behind a verified Grant, including independent parameter-hash re-verification (a Grant carries only a hash of its parameters, never the raw values) and correlation with the asynchronous WebView2 navigation-completion event — see `browser_b5_master_plan.md` §3/§4 (OD-01/OD-02).
+
+**Still open**: the exact approval UX shown to a human when a mutating `kortex.browser.*` call requires approval; the access mechanism `.read`/`.extract`/`.click`/`.type` execution would use to read/manipulate page content without arbitrary JavaScript — investigated, a native-UI-Automation-scoped-to-the-WebView2-HWND design is recommended but not yet approved (`browser_b5_master_plan.md` §5); real implementation of `browser.download` (a full policy subsystem, not yet built).

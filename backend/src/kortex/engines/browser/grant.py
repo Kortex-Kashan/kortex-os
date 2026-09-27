@@ -56,9 +56,25 @@ def canonicalize_and_hash(capability_name: str, parameters: dict[str, Any]) -> s
     `ui_input_text`'s secret-shaped text is hashed, never stored in the
     clear anywhere the hash itself is logged/audited (a SHA-256 digest does
     not expose its own preimage).
+
+    `separators=(",", ":")` — compact, no whitespace — is deliberate, not
+    cosmetic (Browser-B5 navigation execution): the desktop-side redeem
+    command (`browser_grant.rs`) must independently RECOMPUTE this exact
+    hash from the parameters it was given, to verify a caller cannot swap
+    in different parameters than a Grant actually authorized (see
+    `browser_b5_5_architecture_gate.md` OD-01). Rust's `serde_json`
+    serializes a `Map`/`Value` compactly and with keys already sorted (this
+    crate does not enable `preserve_order`) by construction — matching
+    Python's own default spaced separators here would require hand-rolling
+    a byte-for-byte-compatible spaced serializer in Rust for no benefit.
+    Standardizing on the compact form both sides already produce natively
+    closes that gap once, rather than risking the exact class of silent
+    cross-language mismatch already caught once in this Grant's signature
+    payload (D37) — proven, not assumed, by a cross-language fixture test
+    on the Rust side.
     """
     payload = {"capability": capability_name, "parameters": parameters}
-    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
