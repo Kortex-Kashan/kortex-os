@@ -14,6 +14,7 @@ vi.mock("../chat-api", async () => {
 });
 
 import { AiChatRequestError } from "../chat-api";
+import { TERMINAL_AGENT_STATUSES } from "../chat-types";
 import { useConversation } from "./useConversation";
 
 beforeEach(() => {
@@ -108,7 +109,36 @@ describe("useConversation", () => {
       taskId,
       goal: "Order a laptop",
       pendingToolCalls: [{ callId: "call-1", toolName: "create_order", arguments: { item: "Laptop" } }],
+      kind: "approval",
     });
+  });
+
+  it("keeps a PAUSED_FOR_BROWSER_EXECUTION task pending (non-terminal) as an in-progress Browser action", async () => {
+    getConversationHistoryMock.mockResolvedValueOnce([]);
+    sendAgentMessageMock.mockImplementationOnce((input: { taskId: string; tenantId: string }) =>
+      Promise.resolve({
+        taskId: input.taskId,
+        tenantId: input.tenantId,
+        status: "PAUSED_FOR_BROWSER_EXECUTION",
+        finalResponse: null,
+        totalSteps: 0,
+        errorMessage: null,
+        pendingToolCalls: [{ callId: "call-1", toolName: "kortex_browser_read", arguments: {} }],
+        degraded: false,
+      }),
+    );
+
+    const { result } = renderHook(() => useConversation({ tenantId: "tenant-1", userId: "user-1" }), { wrapper });
+    await waitFor(() => expect(result.current.isLoadingHistory).toBe(false));
+
+    act(() => result.current.sendMessage("Summarize the open page"));
+
+    await waitFor(() => expect(result.current.pendingTaskId).not.toBeNull());
+    const taskId = result.current.pendingTaskId as string;
+    const pending = result.current.messages.find((m) => m.pendingApproval?.taskId === taskId);
+    expect(pending?.pendingApproval?.kind).toBe("browserExecution");
+    expect(pending?.content).toBe("Carrying out a Browser action on this desktop.");
+    expect(TERMINAL_AGENT_STATUSES).not.toContain("PAUSED_FOR_BROWSER_EXECUTION");
   });
 
   it("appends a system message when sendAgentMessage rejects", async () => {

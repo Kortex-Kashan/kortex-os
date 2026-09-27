@@ -40,6 +40,7 @@ CANONICAL_CAPABILITIES: list[str] = [
     "kortex.ai.provider.list",
     "kortex.ai.model.list",
     "kortex.ai.agent.cancel",
+    "kortex.ai.agent.browser_execution.claim",
     "kortex.ai.agent.status",
     "kortex.ai.agent.list",
     "kortex.ai.provider.configure",

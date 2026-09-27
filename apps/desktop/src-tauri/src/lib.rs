@@ -32,6 +32,10 @@ mod browser_grant;
 // pool `browser_grant.rs`'s redeem command dispatches into. See that
 // module's own extensive doc comment for the full security/threading model.
 mod browser_uia;
+// Browser Completion Program (B6): the desktop half of the AI <-> Browser
+// execution bridge — reacts to `browser.grant.pending` relayed by `events.rs`,
+// claims, executes through `browser_grant.rs`, and reports the outcome.
+mod browser_bridge;
 // M3 IPC bridge (`invoke_capability`) and event relay
 // (`connect_event_stream`) — see each module's own docs for the exact
 // transport contract. `ipc.rs` talks to the backend at a configured
@@ -227,6 +231,7 @@ pub fn run() {
             // capability call fails closed for the rest of this process's
             // life (an app restart is the disclosed recovery path).
             app.manage(std::sync::Arc::new(browser_uia::UiaWorkerPool::new(4, 64)));
+            app.manage(std::sync::Arc::new(browser_bridge::BrowserBridgeState::default()));
 
             // Phase A: register the `kortex-auth://` scheme with the OS at
             // runtime (Windows/Linux only — macOS resolves schemes solely

@@ -10,21 +10,16 @@ unchanged), which continues to record the WebView2-COM-level enforcement
 facts it always has, entirely independent of whether a backend capability
 was ever involved (a human click never touches the backend at all).
 
-This module defines all six event names the B5 foundation establishes.
-Only `BROWSER_GRANT_MINTED` is actually recorded through the backend
-`AuditManager` by anything in this phase (`engine.py`'s handlers, which are
-the only backend-side code that runs in B5.0-B5.4) — `BROWSER_GRANT_REDEEMED`,
+Two events are recorded through the backend `AuditManager`:
+`BROWSER_GRANT_MINTED` (a capability handler minted a Grant) and, as of the
+Browser Completion Program's B6 bridge, `BROWSER_EXECUTION_REPORTED` (the
+desktop reported that Grant's outcome through `kortex.browser.report_execution`
+— a content-free summary only). `BROWSER_GRANT_REDEEMED`,
 `BROWSER_GRANT_REJECTED`, `BROWSER_EXECUTION_STARTED`,
-`BROWSER_EXECUTION_SUCCEEDED`, and `BROWSER_EXECUTION_FAILED` describe
-events that occur at Grant *redemption* time — desktop-side, inside the new
-Rust redeem command (Browser-B5.4) — and are recorded there, into the
-local `audit.log`, using these exact same string names for vocabulary
-consistency between the two logs. Routing those five into the backend
-`AuditManager` too requires a capability call the desktop can make to
-report its outcome back (`kortex.browser.report_execution` or equivalent)
-— explicitly out of scope for B5.0-B5.4 (see `browser_b5_architecture_gate.md`
-§29 Q1 and the B5.0-B5.4 authorization's own "DO NOT implement
-browser.navigate execution" instruction) and left to B5.5+.
+`BROWSER_EXECUTION_SUCCEEDED`, and `BROWSER_EXECUTION_FAILED` still describe
+events at Grant *redemption* time — desktop-side, inside the Rust redeem
+command — and are recorded there, into the local `audit.log`, using these
+exact same string names for vocabulary consistency between the two logs.
 """
 
 from __future__ import annotations
@@ -41,10 +36,15 @@ BROWSER_GRANT_REJECTED = "BROWSER_GRANT_REJECTED"
 BROWSER_EXECUTION_STARTED = "BROWSER_EXECUTION_STARTED"
 BROWSER_EXECUTION_SUCCEEDED = "BROWSER_EXECUTION_SUCCEEDED"
 BROWSER_EXECUTION_FAILED = "BROWSER_EXECUTION_FAILED"
+# Browser Completion Program (B6): the desktop's reported outcome for a
+# claimed Grant, recorded when `kortex.browser.report_execution` accepts it.
+# The backend now sees "an AI asked to do X" (MINTED) AND "the desktop says
+# X resulted in Y" (REPORTED) — the latter is the desktop's claim, recorded
+# as such; the desktop remains the execution authority.
+BROWSER_EXECUTION_REPORTED = "BROWSER_EXECUTION_REPORTED"
 
-# Recorded by the backend AuditManager as of B5.0-B5.4 (the only phase of
-# these six that runs backend-side today).
-BACKEND_RECORDED_EVENTS = frozenset({BROWSER_GRANT_MINTED})
+# Recorded by the backend AuditManager.
+BACKEND_RECORDED_EVENTS = frozenset({BROWSER_GRANT_MINTED, BROWSER_EXECUTION_REPORTED})
 # Recorded by the desktop's own local audit.log (Browser-B5.4, Rust side).
 DESKTOP_LOCAL_RECORDED_EVENTS = frozenset(
     {
@@ -65,6 +65,7 @@ async def record_browser_audit_event(
     actor_id: str,
     resource_id: str | None = None,
     context: dict[str, Any] | None = None,
+    actor_type: str = "AI_AGENT",
 ) -> None:
     """Record one Browser capability audit event through the backend
     `AuditManager`, using `record_event`'s own existing convention exactly
@@ -91,7 +92,7 @@ async def record_browser_audit_event(
         await audit_manager.record_event(
             action=event,
             actor_id=actor_id,
-            actor_type="AI_AGENT",
+            actor_type=actor_type,
             tenant_id=tenant_id,
             resource_id=resource_id,
             context=context or {},
@@ -105,6 +106,7 @@ async def record_browser_audit_event(
 __all__ = [
     "BACKEND_RECORDED_EVENTS",
     "BROWSER_EXECUTION_FAILED",
+    "BROWSER_EXECUTION_REPORTED",
     "BROWSER_EXECUTION_STARTED",
     "BROWSER_EXECUTION_SUCCEEDED",
     "BROWSER_GRANT_MINTED",

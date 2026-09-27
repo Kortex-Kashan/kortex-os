@@ -511,13 +511,16 @@ impl GrantVerificationKeyCache {
                 envelope.status
             ));
         }
-        let public_key_hex = envelope
-            .payload
-            .as_ref()
-            .and_then(|payload| payload.get("result"))
-            .and_then(|result| result.get("public_key_hex"))
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "grant_verification_key response missing public_key_hex".to_string())?;
+        // The backend returns a dict-valued handler result AS the payload
+        // (no `result` wrapper) — reading only `payload.result` here could
+        // never find the key against the real `/capabilities/invoke`.
+        let public_key_hex =
+            crate::browser_bridge::capability_result_object(envelope.payload.as_ref())
+                .and_then(|result| result.get("public_key_hex"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    "grant_verification_key response missing public_key_hex".to_string()
+                })?;
         let key_bytes = decode_hex(public_key_hex).map_err(|_| {
             "grant_verification_key response public_key_hex is not valid hex".to_string()
         })?;
@@ -877,7 +880,7 @@ pub async fn browser_execute_granted_action(
 /// navigation-outcome waiter slot (`browser_b5_5_architecture_gate.md`
 /// T11).
 #[allow(clippy::too_many_arguments)]
-async fn execute_granted_action(
+pub(crate) async fn execute_granted_action(
     runtime: &dyn BrowserRuntime,
     verification_public_key: &[u8; 32],
     active_profile_surfaces: &crate::browser_profile_store::ActiveProfileSurfaces,
@@ -1581,7 +1584,7 @@ async fn execute_screenshot(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Test-only keypair generation via `SigningKey::from_bytes` over a
@@ -1590,7 +1593,7 @@ mod tests {
     /// avoids `SigningKey::generate`, which requires a `rand_core` RNG
     /// trait bound this crate does not otherwise depend on for one
     /// test-only call site.
-    fn signing_keypair() -> (ed25519_dalek::SigningKey, [u8; 32]) {
+    pub(crate) fn signing_keypair() -> (ed25519_dalek::SigningKey, [u8; 32]) {
         let mut seed = [0u8; 32];
         getrandom::getrandom(&mut seed).expect("OS RNG must be available for a test-only keypair");
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
@@ -1906,7 +1909,7 @@ mod tests {
     /// `browser_runtime.rs`'s test-module doc on why the FULL command can
     /// only ever be live-preflighted, never automated end-to-end.
     #[derive(Default)]
-    struct FakeBrowserRuntime {
+    pub(crate) struct FakeBrowserRuntime {
         surface_exists: AtomicBool,
         navigation_generation: AtomicU64,
         navigate_calls: Mutex<Vec<String>>,
@@ -2063,19 +2066,40 @@ mod tests {
     /// Test harness: a fresh `FakeBrowserRuntime` plus every other piece
     /// `execute_granted_action` needs, with ONE surface already registered
     /// as live/existing/bound to `tenant_id`/`browser_profile_id`.
-    struct Harness {
-        runtime: FakeBrowserRuntime,
-        active_profile_surfaces: crate::browser_profile_store::ActiveProfileSurfaces,
-        redeemed_tracker: RedeemedGrantTracker,
-        surface_locks: SurfaceRedeemLocks,
-        audit_log_path: std::path::PathBuf,
-        uia_pool: std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
+    pub(crate) struct Harness {
+        pub(crate) runtime: FakeBrowserRuntime,
+        pub(crate) active_profile_surfaces: crate::browser_profile_store::ActiveProfileSurfaces,
+        pub(crate) redeemed_tracker: RedeemedGrantTracker,
+        pub(crate) surface_locks: SurfaceRedeemLocks,
+        pub(crate) audit_log_path: std::path::PathBuf,
+        pub(crate) uia_pool: std::sync::Arc<crate::browser_uia::UiaWorkerPool>,
         signing_key: ed25519_dalek::SigningKey,
-        verifying_key: [u8; 32],
+        pub(crate) verifying_key: [u8; 32],
+    }
+
+    /// The Grant exactly as the backend serializes it (`BrowserCapabilityExecutionGrant.model_dump(mode="json")`).
+    pub(crate) fn grant_json(grant: &CapabilityExecutionGrant) -> serde_json::Value {
+        serde_json::json!({
+            "grant_id": grant.grant_id,
+            "tenant_id": grant.tenant_id,
+            "principal_id": grant.principal_id,
+            "capability_name": grant.capability_name,
+            "browser_profile_id": grant.browser_profile_id,
+            "surface_id": grant.surface_id,
+            "navigation_generation": grant.navigation_generation,
+            "canonicalized_parameters_hash": grant.canonicalized_parameters_hash,
+            "issued_at": grant.issued_at,
+            "expires_at": grant.expires_at,
+            "signature": grant.signature,
+        })
     }
 
     impl Harness {
-        fn new(surface_id: &str, tenant_id: &str, browser_profile_id: &str) -> Self {
+        pub(crate) fn runtime_navigate_calls(&self) -> Vec<String> {
+            self.runtime.navigate_calls.lock().unwrap().clone()
+        }
+
+        pub(crate) fn new(surface_id: &str, tenant_id: &str, browser_profile_id: &str) -> Self {
             let (signing_key, verifying_key) = signing_keypair();
             let active_profile_surfaces =
                 crate::browser_profile_store::ActiveProfileSurfaces::default();
@@ -2113,7 +2137,7 @@ mod tests {
         /// consistent, exactly as a real caller's parameters either match
         /// or don't.
         #[allow(clippy::too_many_arguments)]
-        fn mint_grant(
+        pub(crate) fn mint_grant(
             &self,
             grant_id: &str,
             capability_name: &str,

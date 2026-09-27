@@ -60,6 +60,7 @@ from kortex.engines.ai.tools import (
     MAX_TOOL_ARGUMENTS_BYTES,
     AIToolInvoker,
     ToolCall,
+    ToolExecutionStatus,
     ToolResult,
 )
 
@@ -91,6 +92,10 @@ class AgentStatus(StrEnum):
     RUNNING = "RUNNING"
     RESUMING = "RESUMING"
     PAUSED_FOR_APPROVAL = "PAUSED_FOR_APPROVAL"
+    # Deliberately disjoint from PAUSED_FOR_APPROVAL: an approval decision can
+    # never resume a task waiting on a desktop Browser execution, and a
+    # Browser execution report can never resume a task waiting on approval.
+    PAUSED_FOR_BROWSER_EXECUTION = "PAUSED_FOR_BROWSER_EXECUTION"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -202,6 +207,68 @@ class AgentExecutionResult(BaseModel):
     """
 
 
+class BrowserGrantDeferral(BaseModel):
+    """What `IBrowserExecutionPort.prepare_pending` extracts from one
+    successful Browser capability result: the minted Grant (opaque to M7)
+    and everything needed to correlate, bound, and deliver its execution.
+
+    `execution_parameters` may carry user-entered text (`browser.type`'s
+    `ui_input_text`) and is therefore excluded from every default
+    serialization; only the task store persists it, explicitly."""
+
+    model_config = ConfigDict(frozen=True)
+
+    grant_id: str = Field(min_length=1)
+    capability_name: str = Field(min_length=1)
+    browser_profile_id: str = Field(min_length=1)
+    surface_id: str = Field(min_length=1)
+    grant_expires_at: datetime.datetime
+    report_deadline: datetime.datetime
+    grant: dict[str, Any]
+    execution_parameters: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+    placeholder_result: ToolResult
+
+
+class PendingBrowserExecution(BaseModel):
+    """Durable correlation for a task in `PAUSED_FOR_BROWSER_EXECUTION`.
+
+    Identity is `(tenant_id, grant_id)`, never `grant_id` alone. The Grant's
+    own expiry bounds when execution may *start* (claim is refused after
+    it); `report_deadline` bounds when a claimed execution's outcome may
+    still be reported. `claimed_by` is the one authenticated principal
+    allowed to report, and the durable proof that the desktop received the
+    execution parameters: unclaimed at Grant expiry means certainly not
+    executed; claimed but unreported at the deadline means outcome unknown.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str = Field(min_length=1)
+    grant_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    capability_name: str = Field(min_length=1)
+    browser_profile_id: str = Field(min_length=1)
+    surface_id: str = Field(min_length=1)
+    step_number: int = Field(ge=1)
+    grant_expires_at: datetime.datetime
+    report_deadline: datetime.datetime
+    # Both excluded from every default serialization (e.g. the
+    # `kortex.ai.agent.status` response): only the claim hands them out, to
+    # the task owner, once. The task store persists them explicitly.
+    grant: dict[str, Any] = Field(exclude=True, repr=False)
+    execution_parameters: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+    pending_step: AgentStep
+    claimed_by: str | None = None
+    claimed_at: datetime.datetime | None = None
+    reported_result: ToolResult | None = None
+    reported_at: datetime.datetime | None = None
+
+    def completed_step(self, result: ToolResult) -> AgentStep:
+        """The paused step with the pending call's placeholder replaced by `result`."""
+        results = [result if r.call_id == self.tool_call_id else r for r in self.pending_step.tool_results]
+        return self.pending_step.model_copy(update={"tool_results": results})
+
+
 class PersistedAgentTaskRecord(BaseModel):
     """Durable record representing the complete snapshot of an agent task."""
 
@@ -213,6 +280,7 @@ class PersistedAgentTaskRecord(BaseModel):
     steps: list[AgentStep] = Field(default_factory=list)
     pending_tool_calls: list[ToolCall] = Field(default_factory=list)
     resume_token: ResumeToken | None = None
+    browser_execution: PendingBrowserExecution | None = None
     total_token_usage: TokenUsage = Field(default_factory=TokenUsage)
     version: int = 1
     created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.UTC))
@@ -241,9 +309,23 @@ class IAgentTaskStore(Protocol):
         ...
 
     async def claim_task_for_resumption(
-        self, task_id: str, tenant_id: str, expected_version: int
+        self,
+        task_id: str,
+        tenant_id: str,
+        expected_version: int,
+        expected_status: AgentStatus = AgentStatus.PAUSED_FOR_APPROVAL,
     ) -> PersistedAgentTaskRecord:
-        """Atomically transition status from PAUSED_FOR_APPROVAL to RESUMING with version increment."""
+        """Atomically transition status from `expected_status` to RESUMING with version increment."""
+        ...
+
+    async def compare_and_update_task(
+        self,
+        record: PersistedAgentTaskRecord,
+        expected_version: int,
+        expected_status: AgentStatus,
+    ) -> bool:
+        """Persist `record` only if the stored row is still at `expected_version`
+        and `expected_status`. Returns False (writing nothing) otherwise."""
         ...
 
     async def cancel_task(self, task_id: str, tenant_id: str) -> bool:
@@ -254,6 +336,54 @@ class IAgentTaskStore(Protocol):
         self, tenant_id: str, status: AgentStatus | None = None, limit: int = 50
     ) -> list[PersistedAgentTaskRecord]:
         """List tasks for a tenant, optionally filtered by status."""
+        ...
+
+    async def list_tasks_by_status(self, status: AgentStatus, limit: int = 100) -> list[PersistedAgentTaskRecord]:
+        """Across all tenants, the least recently updated tasks in `status`.
+
+        System-internal (expiry/recovery sweeps only) — never exposed as a
+        capability, since it is deliberately not tenant-scoped."""
+        ...
+
+
+@runtime_checkable
+class IBrowserExecutionPort(Protocol):
+    """Port for the one Browser-specific decision M7 cannot make itself:
+    whether a tool result is a minted Browser Grant whose real outcome must
+    come from the desktop before the task may continue.
+
+    M7 owns the pause/claim/report/resume/expiry *workflow*; this port owns
+    the Browser *vocabulary* (Grant shape, execution bounds, outcome
+    classification, and the `browser.grant.pending` notification).
+    """
+
+    def is_deferred_tool(self, tool_name: str) -> bool:
+        """True if a call to `tool_name` mints a Grant executed on the desktop."""
+        ...
+
+    def prepare_pending(
+        self, task: AgentTask, tool_call: ToolCall, result: ToolResult
+    ) -> BrowserGrantDeferral | ToolResult | None:
+        """Classify one deferred-tool result.
+
+        Returns a `BrowserGrantDeferral` for a valid minted Grant, a
+        replacement fail-closed `ToolResult` for a result that claims
+        success but is not a valid Grant for this task, or `None` for a
+        result that did not mint anything (denied, refused, invalid) and
+        passes through unchanged."""
+        ...
+
+    def expired_result(self, pending: PendingBrowserExecution) -> ToolResult:
+        """The terminal result recorded when `pending` expires unreported."""
+        ...
+
+    def classify_outcome(self, pending: PendingBrowserExecution, outcome: object) -> ToolResult:
+        """Classify a desktop-reported outcome for `pending`. Raises
+        `ValueError` for any unrecognizable shape — never guesses."""
+        ...
+
+    async def notify_pending(self, task: AgentTask, pending: PendingBrowserExecution) -> None:
+        """Announce that `pending` awaits desktop execution (identifiers only)."""
         ...
 
 
@@ -422,14 +552,18 @@ class InMemoryAgentTaskStore(IAgentTaskStore):
             self._tasks[key] = record
 
     async def claim_task_for_resumption(
-        self, task_id: str, tenant_id: str, expected_version: int
+        self,
+        task_id: str,
+        tenant_id: str,
+        expected_version: int,
+        expected_status: AgentStatus = AgentStatus.PAUSED_FOR_APPROVAL,
     ) -> PersistedAgentTaskRecord:
         key = (tenant_id, task_id)
         async with self._lock:
             record = self._tasks.get(key)
             if record is None:
                 raise AgentNotFoundError(task_id, f"Agent task '{task_id}' not found.")
-            if record.status != AgentStatus.PAUSED_FOR_APPROVAL:
+            if record.status != expected_status:
                 raise AgentStateConflictError(
                     task_id,
                     f"Agent task '{task_id}' cannot be resumed: current status is '{record.status}'.",
@@ -449,6 +583,26 @@ class InMemoryAgentTaskStore(IAgentTaskStore):
             )
             self._tasks[key] = updated
             return updated
+
+    async def compare_and_update_task(
+        self,
+        record: PersistedAgentTaskRecord,
+        expected_version: int,
+        expected_status: AgentStatus,
+    ) -> bool:
+        key = (record.task.tenant_id, record.task.task_id)
+        async with self._lock:
+            current = self._tasks.get(key)
+            if current is None or current.version != expected_version or current.status != expected_status:
+                return False
+            self._tasks[key] = record
+            return True
+
+    async def list_tasks_by_status(self, status: AgentStatus, limit: int = 100) -> list[PersistedAgentTaskRecord]:
+        async with self._lock:
+            matching = [r for r in self._tasks.values() if r.status == status]
+        matching.sort(key=lambda r: r.updated_at)
+        return matching[:limit]
 
     async def cancel_task(self, task_id: str, tenant_id: str) -> bool:
         key = (tenant_id, task_id)
@@ -586,6 +740,21 @@ def _hash_tool_calls(calls: list[ToolCall]) -> str:
         ensure_ascii=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _not_executed_result(call: ToolCall) -> ToolResult:
+    return ToolResult(
+        call_id=call.call_id,
+        tool_name=call.tool_name,
+        status=ToolExecutionStatus.NOT_EXECUTED,
+        output={
+            "executed": "no",
+            "reason": (
+                "Not executed: an earlier Browser action in the same batch paused for desktop "
+                "execution. Re-issue this call only after reviewing that action's result."
+            ),
+        },
+    )
 
 
 _DEFAULT_SIGNING_SECRET: bytes = secrets.token_bytes(32)
@@ -753,6 +922,7 @@ class AgentOrchestrator:
         telemetry: object | None = None,
         signing_secret: bytes | None = None,
         task_store: IAgentTaskStore | None = None,
+        browser_execution_port: IBrowserExecutionPort | None = None,
     ) -> None:
         """Args:
         tool_invoker: M6 AIToolInvoker for tool schema validation and execution.
@@ -763,6 +933,9 @@ class AgentOrchestrator:
         telemetry: Optional Tier 2 telemetry emitter for agent events.
         signing_secret: Optional platform secret key used to HMAC-authenticate ResumeTokens.
         task_store: Optional IAgentTaskStore for durable persistence and crash recovery.
+        browser_execution_port: Optional; when absent, a Browser tool result is
+            returned to the model exactly as the capability produced it (the
+            pre-B6 behavior), and no task ever enters PAUSED_FOR_BROWSER_EXECUTION.
         """
         self._tool_invoker = tool_invoker
         self._llm_port = llm_port
@@ -772,6 +945,12 @@ class AgentOrchestrator:
         self._telemetry = telemetry
         self._signing_secret = signing_secret or _DEFAULT_SIGNING_SECRET
         self._task_store = task_store or InMemoryAgentTaskStore()
+        self._browser_port = browser_execution_port
+
+    @property
+    def browser_execution_port(self) -> IBrowserExecutionPort | None:
+        """Configured Browser execution port, if any."""
+        return self._browser_port
 
     @property
     def task_store(self) -> IAgentTaskStore:
@@ -912,6 +1091,321 @@ class AgentOrchestrator:
         """List persisted task records for a tenant, optionally filtered by status."""
         return await self._task_store.list_tasks(tenant_id, status, limit)
 
+    # -- Browser execution pause workflow (Browser Completion Program, B6) --
+
+    async def _load_browser_pause(self, task_id: str, tenant_id: str, grant_id: str) -> PersistedAgentTaskRecord:
+        """The stored record, if and only if it is paused on exactly this
+        `(tenant_id, grant_id)`. Every mismatch raises the same
+        `AgentNotFoundError`, so a same-tenant caller cannot probe which
+        task ids or grant ids exist."""
+        record = await self._task_store.get_task(task_id, tenant_id)
+        pending = record.browser_execution if record is not None else None
+        if (
+            record is None
+            or pending is None
+            or record.status != AgentStatus.PAUSED_FOR_BROWSER_EXECUTION
+            or pending.tenant_id != tenant_id
+            or pending.grant_id != grant_id
+        ):
+            raise AgentNotFoundError(task_id, "No Browser execution is pending for this task and grant.")
+        return record
+
+    async def claim_browser_execution(
+        self,
+        task_id: str,
+        tenant_id: str,
+        grant_id: str,
+        claimer_principal_id: str,
+        now: datetime.datetime | None = None,
+    ) -> PendingBrowserExecution:
+        """Hand a paused task's Grant and execution parameters to the desktop, once.
+
+        Only the task's own user may claim, only before the Grant expires,
+        and only once — the claim is a compare-and-set on the stored
+        version, so two concurrent claims cannot both succeed. The stored
+        execution parameters are cleared by the claim itself: they exist
+        durably only for as long as nobody has received them.
+
+        Returns the pending execution as it was before the claim, i.e.
+        still carrying `execution_parameters`.
+        """
+        now = now or _now_utc()
+        record = await self._load_browser_pause(task_id, tenant_id, grant_id)
+        pending = record.browser_execution
+        assert pending is not None
+        if record.task.user_id != claimer_principal_id:
+            raise AgentNotFoundError(task_id, "No Browser execution is pending for this task and grant.")
+        if pending.claimed_by is not None:
+            raise AgentStateConflictError(task_id, "This Browser execution has already been claimed.")
+        if now >= pending.grant_expires_at:
+            raise AgentStateConflictError(task_id, "This Browser execution's Grant has expired.")
+        claimed = pending.model_copy(
+            update={"claimed_by": claimer_principal_id, "claimed_at": now, "execution_parameters": {}}
+        )
+        updated = record.model_copy(
+            update={"browser_execution": claimed, "version": record.version + 1, "updated_at": now}
+        )
+        if not await self._task_store.compare_and_update_task(
+            updated, expected_version=record.version, expected_status=AgentStatus.PAUSED_FOR_BROWSER_EXECUTION
+        ):
+            raise AgentStateConflictError(task_id, "This Browser execution changed concurrently; claim refused.")
+        return pending
+
+    async def record_browser_execution_report(
+        self,
+        task_id: str,
+        tenant_id: str,
+        grant_id: str,
+        reporter_principal_id: str,
+        result: ToolResult,
+        now: datetime.datetime | None = None,
+    ) -> bool:
+        """Durably record a claimed execution's reported outcome.
+
+        Returns True when this call recorded it, False when an outcome was
+        already recorded (a duplicate report — never a second resume).
+        Raises for any other mismatch: wrong tenant/grant/task state, a
+        reporter other than the claimer, an unclaimed execution (the desktop
+        cannot have executed what it never received), or a report after
+        `report_deadline`. `result` is re-bound to the paused call's own
+        `call_id`/`tool_name` — a report can never retarget another call.
+        """
+        now = now or _now_utc()
+        record = await self._load_browser_pause(task_id, tenant_id, grant_id)
+        pending = record.browser_execution
+        assert pending is not None
+        if pending.claimed_by is None or pending.claimed_by != reporter_principal_id:
+            raise AgentNotFoundError(task_id, "No Browser execution is pending for this task and grant.")
+        if pending.reported_result is not None:
+            return False
+        if now > pending.report_deadline:
+            raise AgentStateConflictError(task_id, "This Browser execution's report deadline has passed.")
+        placeholder = next((r for r in pending.pending_step.tool_results if r.call_id == pending.tool_call_id), None)
+        if placeholder is None:
+            raise AgentStateConflictError(task_id, "Paused Browser step is missing its pending call; report refused.")
+        bound_result = result.model_copy(update={"call_id": placeholder.call_id, "tool_name": placeholder.tool_name})
+        reported = pending.model_copy(update={"reported_result": bound_result, "reported_at": now})
+        updated = record.model_copy(
+            update={"browser_execution": reported, "version": record.version + 1, "updated_at": now}
+        )
+        if not await self._task_store.compare_and_update_task(
+            updated, expected_version=record.version, expected_status=AgentStatus.PAUSED_FOR_BROWSER_EXECUTION
+        ):
+            raise AgentStateConflictError(task_id, "This Browser execution changed concurrently; report refused.")
+        return True
+
+    async def resume_with_browser_result(
+        self,
+        task_id: str,
+        tenant_id: str,
+        authorizer: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None,
+        cancellation_token: asyncio.Event | None = None,
+        step_callback: Callable[[AgentStep], Awaitable[None]] | None = None,
+    ) -> AgentExecutionResult:
+        """Continue a paused task with its REPORTED Browser outcome.
+
+        Never re-invokes the paused Browser call (unlike `resume_task`,
+        which exists to execute approved calls): the outcome already
+        happened on the desktop, so the step is completed with that result
+        and the loop continues from the next reasoning step. The
+        PAUSED_FOR_BROWSER_EXECUTION -> RESUMING transition is the atomic
+        single-resume guarantee; a concurrent second resume fails it.
+        """
+        record = await self._task_store.get_task(task_id, tenant_id)
+        pending = record.browser_execution if record is not None else None
+        if record is None or pending is None or record.status != AgentStatus.PAUSED_FOR_BROWSER_EXECUTION:
+            raise AgentStateConflictError(task_id, "Task is not paused for a Browser execution.")
+        if pending.reported_result is None:
+            raise AgentStateConflictError(task_id, "No Browser execution outcome has been reported yet.")
+        _validate_task_identifiers(record.task)
+        claimed = await self._task_store.claim_task_for_resumption(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            expected_version=record.version,
+            expected_status=AgentStatus.PAUSED_FOR_BROWSER_EXECUTION,
+        )
+        steps = [*claimed.steps, pending.completed_step(pending.reported_result)]
+        return await self._run_loop(
+            task=record.task,
+            initial_steps=steps,
+            step_count=len(steps),
+            authorizer=authorizer,
+            cancellation_token=cancellation_token,
+            step_callback=step_callback,
+            version=claimed.version,
+            total_token_usage=record.total_token_usage,
+        )
+
+    async def expire_browser_execution(
+        self, task_id: str, tenant_id: str, now: datetime.datetime | None = None
+    ) -> bool:
+        """Terminate a paused task whose Browser execution can no longer complete.
+
+        Unclaimed past Grant expiry: certainly never executed. Claimed but
+        unreported past `report_deadline`: outcome unknown. Either way the
+        paused call is recorded with the port's terminal classification,
+        the task becomes CANCELLED (the existing terminal state
+        `cancel_task` itself uses), nothing is executed, and nothing
+        resumes as a success. A task with a recorded outcome is never
+        expired — it is waiting only to be resumed. Returns True if this
+        call expired it.
+        """
+        now = now or _now_utc()
+        record = await self._task_store.get_task(task_id, tenant_id)
+        pending = record.browser_execution if record is not None else None
+        if record is None or pending is None or record.status != AgentStatus.PAUSED_FOR_BROWSER_EXECUTION:
+            return False
+        if pending.reported_result is not None or self._browser_port is None:
+            return False
+        deadline = pending.grant_expires_at if pending.claimed_by is None else pending.report_deadline
+        if now < deadline:
+            return False
+        steps = [*record.steps, pending.completed_step(self._browser_port.expired_result(pending))]
+        final = PersistedAgentTaskRecord(
+            task=record.task,
+            status=AgentStatus.CANCELLED,
+            current_step=len(steps),
+            steps=steps,
+            pending_tool_calls=[],
+            resume_token=None,
+            browser_execution=None,
+            total_token_usage=record.total_token_usage,
+            version=record.version + 1,
+            created_at=record.created_at,
+            updated_at=now,
+        )
+        return await self._task_store.compare_and_update_task(
+            final, expected_version=record.version, expected_status=AgentStatus.PAUSED_FOR_BROWSER_EXECUTION
+        )
+
+    async def list_paused_browser_executions(self, limit: int = 100) -> list[PersistedAgentTaskRecord]:
+        """System-internal: every task paused on a Browser execution, oldest first."""
+        return await self._task_store.list_tasks_by_status(AgentStatus.PAUSED_FOR_BROWSER_EXECUTION, limit)
+
+    async def _invoke_tools_deferring(
+        self,
+        task: AgentTask,
+        tool_calls: list[ToolCall],
+        authorizer: Callable[[str, dict[str, Any]], Awaitable[bool]] | None,
+    ) -> tuple[list[ToolResult], BrowserGrantDeferral | None]:
+        """Invoke a batch in order, stopping at the first minted Browser Grant.
+
+        A Browser call's real effect happens later, on the desktop, so any
+        call after it in the same batch would otherwise run against a page
+        state nobody has observed yet. Those calls are withheld
+        (`NOT_EXECUTED`) and the model re-issues whatever it still needs
+        once it has seen the Browser outcome — re-proposed mutations go
+        through approval again. A Browser call that mints nothing (denied,
+        refused, invalid) does not pause, and the batch continues.
+        """
+        port = self._browser_port
+        if port is None:
+            return await self._invoke_tools(
+                tool_calls, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
+            ), None
+
+        results: list[ToolResult] = []
+        remaining = list(tool_calls)
+        while remaining:
+            index = next((i for i, c in enumerate(remaining) if port.is_deferred_tool(c.tool_name)), None)
+            if index is None:
+                results.extend(
+                    await self._invoke_tools(
+                        remaining, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
+                    )
+                )
+                return results, None
+            head = remaining[: index + 1]
+            head_results = await self._invoke_tools(
+                head, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
+            )
+            prepared = port.prepare_pending(task, head[-1], head_results[-1])
+            if isinstance(prepared, BrowserGrantDeferral):
+                results.extend(head_results[:-1])
+                results.append(prepared.placeholder_result)
+                results.extend(_not_executed_result(c) for c in remaining[index + 1 :])
+                return results, prepared
+            if isinstance(prepared, ToolResult):
+                head_results[-1] = prepared
+            results.extend(head_results)
+            remaining = remaining[index + 1 :]
+        return results, None
+
+    async def _pause_for_browser_execution(
+        self,
+        task: AgentTask,
+        steps: list[AgentStep],
+        step_count: int,
+        thought: str | None,
+        tool_calls: list[ToolCall],
+        tool_results: list[ToolResult],
+        deferral: BrowserGrantDeferral,
+        version: int,
+        start: float,
+        total_token_usage: TokenUsage,
+    ) -> AgentExecutionResult:
+        """Persist PAUSED_FOR_BROWSER_EXECUTION, THEN announce it — never the
+        reverse, so a fast desktop can never try to claim a pause that is
+        not yet durable. A failed announcement leaves the task safely paused
+        until its Grant expires (never executed)."""
+        import time
+
+        assert self._browser_port is not None
+        deferred_call_id = deferral.placeholder_result.call_id
+        pending_step = AgentStep(
+            step_number=step_count + 1,
+            thought=thought,
+            tool_calls=tool_calls,
+            tool_results=tool_results,
+        )
+        pending = PendingBrowserExecution(
+            tenant_id=task.tenant_id,
+            grant_id=deferral.grant_id,
+            tool_call_id=deferred_call_id,
+            capability_name=deferral.capability_name,
+            browser_profile_id=deferral.browser_profile_id,
+            surface_id=deferral.surface_id,
+            step_number=step_count + 1,
+            grant_expires_at=deferral.grant_expires_at,
+            report_deadline=deferral.report_deadline,
+            grant=deferral.grant,
+            execution_parameters=deferral.execution_parameters,
+            pending_step=pending_step,
+        )
+        paused_record = PersistedAgentTaskRecord(
+            task=task,
+            status=AgentStatus.PAUSED_FOR_BROWSER_EXECUTION,
+            current_step=step_count,
+            steps=steps,
+            pending_tool_calls=[],
+            resume_token=None,
+            browser_execution=pending,
+            total_token_usage=total_token_usage,
+            version=version + 1,
+            created_at=datetime.datetime.now(datetime.UTC),
+            updated_at=datetime.datetime.now(datetime.UTC),
+        )
+        await self._task_store.update_task(paused_record)
+        try:
+            await self._browser_port.notify_pending(task, pending)
+        except Exception as exc:
+            logger.warning(
+                "Browser execution for task '%s' is paused but its pending notification failed (%s); "
+                "it will expire unexecuted unless a desktop claims it before the Grant expires.",
+                task.task_id,
+                type(exc).__name__,
+            )
+        return AgentExecutionResult(
+            task_id=task.task_id,
+            tenant_id=task.tenant_id,
+            status=AgentStatus.PAUSED_FOR_BROWSER_EXECUTION,
+            steps=steps,
+            total_steps=step_count,
+            total_token_usage=total_token_usage,
+            execution_time_ms=(time.monotonic() - start) * 1000.0,
+            pending_tool_calls=[c for c in tool_calls if c.call_id == deferred_call_id],
+        )
+
     async def _run_loop(
         self,
         task: AgentTask,
@@ -922,13 +1416,14 @@ class AgentOrchestrator:
         step_callback: Callable[[AgentStep], Awaitable[None]] | None,
         preapproved_calls: list[ToolCall] | None = None,
         version: int = 1,
+        total_token_usage: TokenUsage | None = None,
     ) -> AgentExecutionResult:
         """Internal bounded execution loop."""
         import time
 
         start = time.monotonic()
         steps: list[AgentStep] = list(initial_steps)
-        cumulative_tokens: TokenUsage = TokenUsage()
+        cumulative_tokens: TokenUsage = total_token_usage or TokenUsage()
         # Sliding window for loop detection: tracks the last LOOP_DETECTION_WINDOW
         # consecutive call-set hashes.
         recent_hashes: deque[str] = deque(maxlen=LOOP_DETECTION_WINDOW)
@@ -936,9 +1431,20 @@ class AgentOrchestrator:
         # --- Handle pre-approved calls from resume_task() ---
         if preapproved_calls:
             step_start = time.monotonic()
-            tool_results = await self._invoke_tools(
-                preapproved_calls, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
-            )
+            tool_results, deferral = await self._invoke_tools_deferring(task, preapproved_calls, authorizer)
+            if deferral is not None:
+                return await self._pause_for_browser_execution(
+                    task=task,
+                    steps=steps,
+                    step_count=step_count,
+                    thought=None,
+                    tool_calls=preapproved_calls,
+                    tool_results=tool_results,
+                    deferral=deferral,
+                    version=version,
+                    start=start,
+                    total_token_usage=cumulative_tokens,
+                )
             step_count += 1
             step = AgentStep(
                 step_number=step_count,
@@ -1149,9 +1655,20 @@ class AgentOrchestrator:
                 )
 
             # --- M6 tool invocation ---
-            tool_results = await self._invoke_tools(
-                tool_calls, authorizer, tenant_id=task.tenant_id, correlation_id=task.task_id
-            )
+            tool_results, deferral = await self._invoke_tools_deferring(task, tool_calls, authorizer)
+            if deferral is not None:
+                return await self._pause_for_browser_execution(
+                    task=task,
+                    steps=steps,
+                    step_count=step_count,
+                    thought=thought,
+                    tool_calls=tool_calls,
+                    tool_results=tool_results,
+                    deferral=deferral,
+                    version=version,
+                    start=start,
+                    total_token_usage=cumulative_tokens,
+                )
             step_count += 1
             step = AgentStep(
                 step_number=step_count,
@@ -1283,14 +1800,17 @@ __all__ = [
     "AgentValidationError",
     "AlwaysApprovePolicy",
     "AlwaysDenyPolicy",
+    "BrowserGrantDeferral",
     "IAgentContextPort",
     "IAgentTaskStore",
     "IApprovalPolicy",
+    "IBrowserExecutionPort",
     "ILLMExecutionPort",
     "InMemoryAgentContextPort",
     "InMemoryAgentTaskStore",
     "InMemoryLLMExecutionPort",
     "LLMOutputParser",
+    "PendingBrowserExecution",
     "PersistedAgentTaskRecord",
     "ResumeToken",
 ]

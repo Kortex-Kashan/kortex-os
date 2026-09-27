@@ -1219,8 +1219,10 @@ def test_agent_writes_only_through_the_task_store_port() -> None:
         "update_task",
         "get_task",
         "claim_task_for_resumption",
+        "compare_and_update_task",
         "cancel_task",
         "list_tasks",
+        "list_tasks_by_status",
     }, f"unexpected task-store method used: {sorted(set(write_calls))}"
     assert "update_task" in write_calls, "expected the orchestrator to persist task state"
 

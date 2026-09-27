@@ -51,6 +51,7 @@ from kortex.engines.ai.agent import (
     AgentStep,
     AgentTask,
     IAgentTaskStore,
+    PendingBrowserExecution,
     PersistedAgentTaskRecord,
     ResumeToken,
 )
@@ -344,6 +345,9 @@ class AIAgentTaskRow(BaseModel):
     pending_calls_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     resume_token_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_usage_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    # Browser Completion Program (B6): the PAUSED_FOR_BROWSER_EXECUTION
+    # correlation. NULL for every other state.
+    browser_execution_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -357,6 +361,32 @@ class AIAgentTaskRow(BaseModel):
     )
 
 
+def _serialize_browser_execution(pending: PendingBrowserExecution | None) -> str | None:
+    """`grant` and `execution_parameters` are excluded from the model's
+    default dump (the latter can carry user-typed text), so they are added
+    back here explicitly — this store is the one place they are persisted."""
+    if pending is None:
+        return None
+    data = pending.model_dump(mode="json")
+    data["grant"] = pending.grant
+    data["execution_parameters"] = pending.execution_parameters
+    return json.dumps(data)
+
+
+def _record_columns(record: PersistedAgentTaskRecord) -> dict[str, Any]:
+    return {
+        "status": record.status.value,
+        "version": record.version,
+        "task_json": record.task.model_dump_json(),
+        "steps_json": json.dumps([s.model_dump(mode="json") for s in record.steps]),
+        "pending_calls_json": json.dumps([c.model_dump(mode="json") for c in record.pending_tool_calls]),
+        "resume_token_json": record.resume_token.model_dump_json() if record.resume_token else None,
+        "token_usage_json": record.total_token_usage.model_dump_json(),
+        "browser_execution_json": _serialize_browser_execution(record.browser_execution),
+        "updated_at": record.updated_at,
+    }
+
+
 class StorageAgentTaskStore(IAgentTaskStore):
     """Production durable IAgentTaskStore backed by Storage Engine's IDataStore."""
 
@@ -365,25 +395,12 @@ class StorageAgentTaskStore(IAgentTaskStore):
 
     async def save_task(self, record: PersistedAgentTaskRecord) -> None:
         async def _action(session: AsyncSession) -> None:
-            task_json = record.task.model_dump_json()
-            steps_json = json.dumps([s.model_dump(mode="json") for s in record.steps])
-            pending_calls_json = json.dumps([c.model_dump(mode="json") for c in record.pending_tool_calls])
-            resume_token_json = record.resume_token.model_dump_json() if record.resume_token else None
-            token_usage_json = record.total_token_usage.model_dump_json()
-
             row = AIAgentTaskRow(
                 id=str(uuid.uuid4()),
                 tenant_id=record.task.tenant_id,
                 task_id=record.task.task_id,
-                status=record.status.value,
-                version=record.version,
-                task_json=task_json,
-                steps_json=steps_json,
-                pending_calls_json=pending_calls_json,
-                resume_token_json=resume_token_json,
-                token_usage_json=token_usage_json,
                 created_at=record.created_at,
-                updated_at=record.updated_at,
+                **_record_columns(record),
             )
             session.add(row)
 
@@ -421,44 +438,22 @@ class StorageAgentTaskStore(IAgentTaskStore):
 
     async def update_task(self, record: PersistedAgentTaskRecord) -> None:
         async def _action(session: AsyncSession) -> None:
-            task_json = record.task.model_dump_json()
-            steps_json = json.dumps([s.model_dump(mode="json") for s in record.steps])
-            pending_calls_json = json.dumps([c.model_dump(mode="json") for c in record.pending_tool_calls])
-            resume_token_json = record.resume_token.model_dump_json() if record.resume_token else None
-
-            token_usage_json = record.total_token_usage.model_dump_json()
-
+            columns = _record_columns(record)
             result = await session.execute(
                 update(AIAgentTaskRow)
                 .where(
                     AIAgentTaskRow.tenant_id == record.task.tenant_id,
                     AIAgentTaskRow.task_id == record.task.task_id,
                 )
-                .values(
-                    status=record.status.value,
-                    version=record.version,
-                    task_json=task_json,
-                    steps_json=steps_json,
-                    pending_calls_json=pending_calls_json,
-                    resume_token_json=resume_token_json,
-                    token_usage_json=token_usage_json,
-                    updated_at=record.updated_at,
-                )
+                .values(**columns)
             )
             if cast(CursorResult[Any], result).rowcount == 0:
                 row = AIAgentTaskRow(
                     id=str(uuid.uuid4()),
                     tenant_id=record.task.tenant_id,
                     task_id=record.task.task_id,
-                    status=record.status.value,
-                    version=record.version,
-                    task_json=task_json,
-                    steps_json=steps_json,
-                    pending_calls_json=pending_calls_json,
-                    resume_token_json=resume_token_json,
-                    token_usage_json=token_usage_json,
                     created_at=record.created_at,
-                    updated_at=record.updated_at,
+                    **columns,
                 )
                 session.add(row)
 
@@ -466,6 +461,47 @@ class StorageAgentTaskStore(IAgentTaskStore):
             await self._data_store.execute_in_transaction(_action)
         except Exception as exc:
             raise AgentTaskStoreError(f"Failed to update agent task: {type(exc).__name__}") from exc
+
+    async def compare_and_update_task(
+        self,
+        record: PersistedAgentTaskRecord,
+        expected_version: int,
+        expected_status: AgentStatus,
+    ) -> bool:
+        async def _action(session: AsyncSession) -> bool:
+            result = await session.execute(
+                update(AIAgentTaskRow)
+                .where(
+                    AIAgentTaskRow.tenant_id == record.task.tenant_id,
+                    AIAgentTaskRow.task_id == record.task.task_id,
+                    AIAgentTaskRow.version == expected_version,
+                    AIAgentTaskRow.status == expected_status.value,
+                )
+                .values(**_record_columns(record))
+            )
+            return cast(CursorResult[Any], result).rowcount == 1
+
+        try:
+            return bool(await self._data_store.execute_in_transaction(_action))
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to conditionally update agent task: {type(exc).__name__}") from exc
+
+    async def list_tasks_by_status(self, status: AgentStatus, limit: int = 100) -> list[PersistedAgentTaskRecord]:
+        async def _action(session: AsyncSession) -> list[AIAgentTaskRow]:
+            query = (
+                select(AIAgentTaskRow)
+                .where(AIAgentTaskRow.status == status.value)
+                .order_by(AIAgentTaskRow.updated_at.asc())
+                .limit(limit)
+            )
+            result = await session.execute(query)
+            return list(result.scalars().all())
+
+        try:
+            rows = await self._data_store.execute_in_transaction(_action)
+            return [self._row_to_record(r) for r in rows]
+        except Exception as exc:
+            raise AgentTaskStoreError(f"Failed to list agent tasks by status: {type(exc).__name__}") from exc
 
     async def cancel_task(self, task_id: str, tenant_id: str) -> bool:
         require_identifier(tenant_id, "tenant_id")
@@ -482,6 +518,7 @@ class StorageAgentTaskStore(IAgentTaskStore):
                         [
                             AgentStatus.RUNNING.value,
                             AgentStatus.PAUSED_FOR_APPROVAL.value,
+                            AgentStatus.PAUSED_FOR_BROWSER_EXECUTION.value,
                             AgentStatus.RESUMING.value,
                         ]
                     ),
@@ -501,7 +538,11 @@ class StorageAgentTaskStore(IAgentTaskStore):
             raise AgentTaskStoreError(f"Failed to cancel agent task: {type(exc).__name__}") from exc
 
     async def claim_task_for_resumption(
-        self, task_id: str, tenant_id: str, expected_version: int
+        self,
+        task_id: str,
+        tenant_id: str,
+        expected_version: int,
+        expected_status: AgentStatus = AgentStatus.PAUSED_FOR_APPROVAL,
     ) -> PersistedAgentTaskRecord:
         require_identifier(tenant_id, "tenant_id")
         require_identifier(task_id, "task_id")
@@ -513,7 +554,7 @@ class StorageAgentTaskStore(IAgentTaskStore):
                 .where(
                     AIAgentTaskRow.tenant_id == tenant_id,
                     AIAgentTaskRow.task_id == task_id,
-                    AIAgentTaskRow.status == AgentStatus.PAUSED_FOR_APPROVAL.value,
+                    AIAgentTaskRow.status == expected_status.value,
                     AIAgentTaskRow.version == expected_version,
                 )
                 .values(
@@ -542,7 +583,7 @@ class StorageAgentTaskStore(IAgentTaskStore):
             existing = await self.get_task(task_id, tenant_id)
             if existing is None:
                 raise AgentNotFoundError(task_id, f"Agent task '{task_id}' not found.")
-            if existing.status != AgentStatus.PAUSED_FOR_APPROVAL:
+            if existing.status != expected_status:
                 raise AgentStateConflictError(
                     task_id,
                     f"Agent task '{task_id}' cannot be resumed: current status is '{existing.status}'.",
@@ -587,6 +628,12 @@ class StorageAgentTaskStore(IAgentTaskStore):
             if getattr(row, "token_usage_json", None)
             else TokenUsage()
         )
+        browser_execution_json = getattr(row, "browser_execution_json", None)
+        browser_execution = (
+            PendingBrowserExecution.model_validate(json.loads(browser_execution_json))
+            if browser_execution_json
+            else None
+        )
         return PersistedAgentTaskRecord(
             task=task,
             status=AgentStatus(row.status),
@@ -594,6 +641,7 @@ class StorageAgentTaskStore(IAgentTaskStore):
             steps=steps,
             pending_tool_calls=pending_calls,
             resume_token=resume_token,
+            browser_execution=browser_execution,
             total_token_usage=token_usage,
             version=row.version,
             created_at=row.created_at,

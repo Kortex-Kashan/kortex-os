@@ -62,6 +62,13 @@ SENSITIVE_KEY_NAMES: set[str] = {
     # persisted into an audit context or cached idempotency response, since
     # it may carry a password or other value a user typed into a UI field.
     "ui_input_text",
+    # Browser Completion Program (B6): `kortex.browser.report_execution`'s
+    # desktop-reported outcome — rendered page text and extracted field
+    # values. Kept out of the generic dispatch audit record and out of the
+    # `/events/stream` relay copy of `browser.execution.reported`; the
+    # BROWSER_EXECUTION_REPORTED domain audit event records a content-free
+    # summary instead.
+    "execution_outcome",
 }
 
 

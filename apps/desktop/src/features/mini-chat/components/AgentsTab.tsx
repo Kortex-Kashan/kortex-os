@@ -10,6 +10,10 @@ const STATUS_VARIANTS: Record<string, { label: string; className: string }> = {
   RUNNING: { label: "Running", className: "border-primary/40 bg-primary/10 text-primary animate-pulse" },
   RESUMING: { label: "Resuming", className: "border-primary/40 bg-primary/10 text-primary animate-pulse" },
   PAUSED_FOR_APPROVAL: { label: "Awaiting Approval", className: "border-warning/40 bg-warning/10 text-warning" },
+  PAUSED_FOR_BROWSER_EXECUTION: {
+    label: "Browser Action",
+    className: "border-primary/40 bg-primary/10 text-primary animate-pulse",
+  },
   COMPLETED: { label: "Completed", className: "border-success/40 bg-success/10 text-success" },
   FAILED: { label: "Failed", className: "border-destructive/40 bg-destructive/10 text-destructive" },
   CANCELLED: { label: "Cancelled", className: "border-muted bg-muted/40 text-muted-foreground" },
@@ -110,7 +114,11 @@ export function AgentsTab({ tenantId }: AgentsTabProps) {
           label: task.status,
           className: "border-border bg-muted/20 text-muted-foreground",
         };
-        const isActive = task.status === "RUNNING" || task.status === "RESUMING" || task.status === "PAUSED_FOR_APPROVAL";
+        const isActive =
+          task.status === "RUNNING" ||
+          task.status === "RESUMING" ||
+          task.status === "PAUSED_FOR_APPROVAL" ||
+          task.status === "PAUSED_FOR_BROWSER_EXECUTION";
 
         return (
           <div

@@ -33,6 +33,7 @@ from kortex.engines.ai.anthropic_provider import (
     AnthropicProvider,
 )
 from kortex.engines.ai.base_provider import BaseAIProvider
+from kortex.engines.ai.browser_bridge import BrowserExecutionBridgePort
 from kortex.engines.ai.cloud_authorization import TenantCloudRoutingAuthority
 from kortex.engines.ai.credentials import TenantCredentialResolver
 from kortex.engines.ai.diagnostics import AIDiagnostics
@@ -513,6 +514,13 @@ class KernelProductionBootstrap:
         )
 
         approval_policy = governance_manager.create_approval_policy()
+        # Browser Completion Program (B6): the publisher is bound to the
+        # kernel bridge again in `AIOrchestrationEngine.initialize`, the
+        # same bridge instance, so this and the engine can never disagree.
+        browser_execution_port = BrowserExecutionBridgePort(
+            tool_registry=tool_registry,
+            publisher=getattr(kernel_bridge, "publish_event", None),
+        )
         agent_orchestrator = AgentOrchestrator(
             tool_invoker=tool_invoker,
             llm_port=llm_port,
@@ -520,6 +528,7 @@ class KernelProductionBootstrap:
             approval_policy=approval_policy,
             telemetry=telemetry,
             task_store=agent_task_store,
+            browser_execution_port=browser_execution_port,
         )
 
         throttler = TenantConcurrencyThrottler(

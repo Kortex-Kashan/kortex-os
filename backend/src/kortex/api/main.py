@@ -47,6 +47,7 @@ from kortex.engines.security.refresh_token_codec import encode_refresh_token
 logger = logging.getLogger("kortex.api")
 
 _DEFAULT_TIMEOUT_MS = 30_000
+_EVENT_RELAY_QUEUE_MAX = 1_024
 
 # AI Studio Functional Stabilization, Phase F security correction. Only a
 # genuine login mints a NEW refresh token alongside the access token --
@@ -401,10 +402,23 @@ async def events_stream(websocket: WebSocket, topic: str = "*") -> None:
         return
 
     await websocket.accept()
-    queue: asyncio.Queue[Any] = asyncio.Queue()
+    # Bounded: a slow or stalled client must not grow backend memory without
+    # limit. An event arriving at a full queue is dropped for this client
+    # only (logged, never raised into the publishing engine); every consumer
+    # of this relay already tolerates loss — it is a notification channel,
+    # and the Browser bridge in particular fails closed on a lost
+    # notification (the Grant simply expires unexecuted).
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_EVENT_RELAY_QUEUE_MAX)
 
     async def _on_event(event: Any) -> None:
-        await queue.put(event)
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning(
+                "WS /events/stream queue full for principal '%s'; dropping event topic '%s'.",
+                principal.principal_id,
+                getattr(event, "topic", "?"),
+            )
 
     subscription_id = kernel.subscribe_event("*", _on_event, subscriber_name=f"ws:{principal.principal_id}")
 
@@ -418,8 +432,16 @@ async def events_stream(websocket: WebSocket, topic: str = "*") -> None:
                     return False
             elif event.topic != topic:
                 return False
-        event_tenant = event.payload.get("tenant_id") if isinstance(event.payload, dict) else None
-        return event_tenant is None or event_tenant == principal.tenant_id
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        event_tenant = payload.get("tenant_id")
+        if event_tenant is not None and event_tenant != principal.tenant_id:
+            return False
+        # Audience scoping (Browser Completion Program, B6): an event naming
+        # an `audience_principal_id` is relayed only to that principal's own
+        # connections, never to every same-tenant client. Only ever narrows
+        # delivery; an event without it keeps its existing tenant scoping.
+        audience = payload.get("audience_principal_id")
+        return audience is None or audience == principal.principal_id
 
     try:
         while True:

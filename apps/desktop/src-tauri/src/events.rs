@@ -61,10 +61,10 @@ pub fn start_event_relay(
     if relay_state.running.swap(true, Ordering::SeqCst) {
         return false;
     }
-    let Some(token) = ipc_state.current_token() else {
+    if ipc_state.current_token().is_none() {
         relay_state.running.store(false, Ordering::SeqCst);
         return false;
-    };
+    }
 
     // Spawns onto Tauri's managed async runtime rather than `tokio::spawn`:
     // `start_event_relay` is called from synchronous contexts (such as the
@@ -73,15 +73,23 @@ pub fn start_event_relay(
     // with "there is no reactor running, must be called from the context of a
     // Tokio 1.x runtime" (matching backend_process.rs's own precedent).
     tauri::async_runtime::spawn(async move {
-        run_relay_loop(app, ipc_state.base_url().to_string(), token, topic).await;
+        run_relay_loop(app, ipc_state, topic).await;
         relay_state.running.store(false, Ordering::SeqCst);
     });
     true
 }
 
-async fn run_relay_loop(app: AppHandle, base_url: String, token: String, topic: String) {
+async fn run_relay_loop(app: AppHandle, ipc_state: Arc<IpcClientState>, topic: String) {
+    let base_url = ipc_state.base_url().to_string();
     let mut attempt: u32 = 0;
     loop {
+        // Read the CURRENT token on every attempt: access tokens are
+        // short-lived and refreshed by `ipc.rs`, so a reconnect with the
+        // token captured at startup would fail authentication after expiry.
+        let Some(token) = ipc_state.current_token() else {
+            let _ = app.emit(STATUS_TOPIC, "disconnected");
+            return;
+        };
         let _ = app.emit(STATUS_TOPIC, "connecting");
         let app_for_status = app.clone();
         let app_for_message = app.clone();
@@ -93,6 +101,10 @@ async fn run_relay_loop(app: AppHandle, base_url: String, token: String, topic: 
                 let _ = app_for_status.emit(STATUS_TOPIC, status);
             },
             move |payload| {
+                // Browser execution notifications are handled here, in the
+                // host process, never by the webview: the bridge claims and
+                // executes through authenticated Rust-side calls only.
+                crate::browser_bridge::handle_relayed_event(&app_for_message, &payload);
                 let _ = app_for_message.emit(EVENT_TOPIC, payload);
             },
         )

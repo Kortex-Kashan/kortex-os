@@ -121,16 +121,24 @@ export function useConversation({ tenantId, userId }: UseConversationArgs) {
       // showing now, so this reply belongs in the OLD conversation's
       // history (already persisted server-side), never appended here.
       if (variables.conversationId !== conversationIdRef.current) return;
-      if (result.status === "PAUSED_FOR_APPROVAL") {
+      if (result.status === "PAUSED_FOR_APPROVAL" || result.status === "PAUSED_FOR_BROWSER_EXECUTION") {
+        const browserExecution = result.status === "PAUSED_FOR_BROWSER_EXECUTION";
         setPendingTaskId(taskId);
         setMessages((prev) => [
           ...prev,
           {
             id: taskId,
             role: "assistant",
-            content: "Waiting for approval before this can continue.",
+            content: browserExecution
+              ? "Carrying out a Browser action on this desktop."
+              : "Waiting for approval before this can continue.",
             createdAt: new Date().toISOString(),
-            pendingApproval: { taskId, goal, pendingToolCalls: result.pendingToolCalls },
+            pendingApproval: {
+              taskId,
+              goal,
+              pendingToolCalls: result.pendingToolCalls,
+              kind: browserExecution ? "browserExecution" : "approval",
+            },
           },
         ]);
         return;

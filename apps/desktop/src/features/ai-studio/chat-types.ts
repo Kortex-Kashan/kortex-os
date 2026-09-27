@@ -12,6 +12,7 @@ export type AgentTaskStatus =
   | "RUNNING"
   | "RESUMING"
   | "PAUSED_FOR_APPROVAL"
+  | "PAUSED_FOR_BROWSER_EXECUTION"
   | "COMPLETED"
   | "FAILED"
   | "CANCELLED"
@@ -96,5 +97,10 @@ export interface ChatMessage {
     taskId: string;
     goal: string;
     pendingToolCalls: PendingToolCall[];
+    /** What the task is waiting on. Absent means `"approval"` (a human
+     * decision in the Workflow Approval Queue); `"browserExecution"` means
+     * a Browser action is being carried out on this desktop and needs no
+     * decision here. */
+    kind?: "approval" | "browserExecution";
   };
 }

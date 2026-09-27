@@ -128,6 +128,10 @@ class ToolExecutionStatus(StrEnum):
     NOT_FOUND = "NOT_FOUND"
     EXECUTION_ERROR = "EXECUTION_ERROR"
     TIMEOUT = "TIMEOUT"
+    # Never dispatched at all: the call followed a Browser action in the same
+    # batch that paused for desktop execution, so it is withheld rather than
+    # run out of order against a page whose state is not yet known.
+    NOT_EXECUTED = "NOT_EXECUTED"
 
 
 def validate_schema(schema: dict[str, object], data: object, path: str = "") -> None:

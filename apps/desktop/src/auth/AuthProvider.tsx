@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { IpcResultEnvelope } from "@/ipc/client";
+import { connectEventStream } from "@/ipc/events";
 import { clearStoredSession, hasStoredSession } from "@/ipc/session";
 
 import { checkStoredSession, classifyIpcFailure, login as loginCapability, renewSession } from "./authCapability";
@@ -309,6 +310,14 @@ export function AuthProvider({ children, inactivityOptions }: AuthProviderProps)
   // UI showing a stale AUTHENTICATED state that the next real action would
   // just bounce off a 401 anyway.
   const isAuthenticated = state.status === "AUTHENTICATED";
+  // (Re)start the backend event relay once a session exists. Idempotent on
+  // the Rust side; a failure (e.g. no Tauri host in a plain browser) is not
+  // an authentication concern and must never surface as one.
+  React.useEffect(() => {
+    if (isAuthenticated) {
+      connectEventStream().catch(() => undefined);
+    }
+  }, [isAuthenticated]);
   useInactivityLogout(
     isAuthenticated,
     () => {

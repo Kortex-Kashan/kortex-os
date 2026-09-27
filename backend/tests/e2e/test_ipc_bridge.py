@@ -591,6 +591,62 @@ class TestEventStream:
             received = ws.receive_json()
             assert received["payload"]["thing_id"] == "should-arrive"
 
+    def test_audience_scoped_event_reaches_only_its_principal(self, client: Any) -> None:
+        """Browser Completion Program (B6): `browser.grant.pending` names its
+        task owner in `audience_principal_id`; a different user in the SAME
+        tenant must never receive it, even subscribed to the same topic."""
+        kernel = client.app.state.kernel
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        data = kernel.get_engine("storage").data
+        client.portal.call(_seed_principal, data, tenant_id, "owner", [])
+        client.portal.call(_seed_principal, data, tenant_id, "bystander", [])
+        bystander_token = _login(client, tenant_id, "bystander")
+
+        with client.websocket_connect(
+            "/events/stream?topic=browser.grant.pending",
+            headers={"Authorization": f"Bearer {bystander_token}"},
+        ) as ws:
+            client.portal.call(
+                kernel.publish_event,
+                "browser.grant.pending",
+                {"tenant_id": tenant_id, "audience_principal_id": "owner", "grant_id": "must-not-arrive"},
+            )
+            client.portal.call(
+                kernel.publish_event,
+                "browser.grant.pending",
+                {"tenant_id": tenant_id, "audience_principal_id": "bystander", "grant_id": "for-bystander"},
+            )
+            received = ws.receive_json()
+            assert received["payload"]["grant_id"] == "for-bystander"
+
+    def test_browser_execution_outcome_content_never_reaches_the_relay(self, client: Any) -> None:
+        """`execution_outcome` (page text / extracted values) is in
+        `SENSITIVE_KEY_NAMES`: even the reporter's own relay copy omits it —
+        only the in-process AI engine subscriber sees the content."""
+        kernel = client.app.state.kernel
+        tenant_id = f"tenant-{uuid.uuid4().hex[:8]}"
+        client.portal.call(_seed_principal, kernel.get_engine("storage").data, tenant_id, "reporter", [])
+        token = _login(client, tenant_id, "reporter")
+
+        with client.websocket_connect(
+            "/events/stream?topic=browser.execution.reported",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as ws:
+            client.portal.call(
+                kernel.publish_event,
+                "browser.execution.reported",
+                {
+                    "tenant_id": tenant_id,
+                    "audience_principal_id": "reporter",
+                    "grant_id": "g-1",
+                    "execution_outcome": {"result": {"status": "read", "text": "SECRET PAGE TEXT"}},
+                },
+            )
+            received = ws.receive_json()
+            assert received["payload"]["grant_id"] == "g-1"
+            assert received["payload"]["execution_outcome"] is None
+            assert "SECRET PAGE TEXT" not in str(received)
+
 
 class TestApprovalDecisionEventRedaction:
     """M6.4-0: `WorkflowEngine.decide_approval_request` mints a live,

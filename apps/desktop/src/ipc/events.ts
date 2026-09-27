@@ -5,11 +5,12 @@
 //
 // `connectEventStream` is a thin wrapper around the `connect_event_stream`
 // command, which itself no-ops silently if no session token is held yet
-// (see `events.rs::start_event_relay`) — there is no login screen in this
-// codebase yet to call it after a real sign-in, so this is wired as an
-// available, centrally-callable primitive (per §13.1.4, "the frontend
-// subscribes once, centrally, in `app/`"), not yet exercised by a real
-// authenticated user flow.
+// (see `events.rs::start_event_relay`), and is a no-op while a relay is
+// already running. It is called once at app mount (`useKortexEventStream`)
+// and again whenever `AuthProvider` observes the session become
+// AUTHENTICATED — the mount-time call alone never connects when the app
+// starts signed out, which left the relay (and with it the Browser
+// execution bridge, `browser_bridge.rs`) permanently disconnected.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";

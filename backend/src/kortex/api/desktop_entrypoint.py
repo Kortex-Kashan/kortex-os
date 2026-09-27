@@ -140,6 +140,9 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
     # `__table_args__`, so there is nothing further to verify at the
     # table-existence level for this revision.
     ("a1b2c9d3e4f5", frozenset()),
+    # Browser Completion Program (B6): column-only revision on the
+    # pre-existing `ai_agent_tasks` table -- verified by `_COLUMN_REQUIREMENTS`.
+    ("b6c1d2e3f4a5", frozenset()),
 )
 
 # Column-level counterpart to `_REVISION_CHAIN` for a revision that adds a
@@ -152,6 +155,7 @@ _REVISION_CHAIN: tuple[tuple[str, frozenset[str]], ...] = (
 _COLUMN_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "e1a2b3c4d5f6": (("security_principals", "email"),),
     "f5a1b2c3d4e5": (("security_principals", "machine_installation_id"),),
+    "b6c1d2e3f4a5": (("ai_agent_tasks", "browser_execution_json"),),
 }
 
 

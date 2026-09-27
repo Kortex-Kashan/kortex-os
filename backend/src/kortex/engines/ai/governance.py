@@ -114,6 +114,107 @@ _PROMPT_INJECTION_PATTERNS = [
     re.compile(r"disregard\s+(the\s+)?(above|system)\s+(instructions|prompt)", re.IGNORECASE),
 ]
 
+# Tool results are untrusted external data (web pages, documents, connector
+# responses). These patterns flag text inside a tool result that tries to
+# pass itself off as something with authority — a system/developer message,
+# an instruction override, a tool call, an approval, or a credential request.
+# A partial, best-effort defense by design: pattern matching cannot recognize
+# every phrasing, and it is not what keeps a tool result from authorizing
+# anything. That guarantee is structural — tool calls come only from model
+# output, mutations still require human approval, and a Browser action still
+# requires a Grant the desktop independently verifies. This scan only lowers
+# the chance a model is steered by injected text, and makes attempts visible.
+_TOOL_OUTPUT_INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    *(("instruction_override", p) for p in _PROMPT_INJECTION_PATTERNS),
+    (
+        "instruction_override",
+        re.compile(
+            r"(ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+|your\s+)?"
+            r"(previous|prior|above|earlier|existing|original)\s+(instructions|directions|rules|prompts?|guidelines)",
+            re.IGNORECASE,
+        ),
+    ),
+    ("instruction_override", re.compile(r"\b(new|updated|revised)\s+(system\s+)?instructions\s*:", re.IGNORECASE)),
+    ("instruction_override", re.compile(r"\byou\s+are\s+now\s+(a|an|in|the)\b", re.IGNORECASE)),
+    (
+        "fake_role_message",
+        re.compile(r"(^|\n)\s*(system|developer|assistant)\s*(message|prompt)?\s*[:>]", re.IGNORECASE),
+    ),
+    ("fake_role_message", re.compile(r"<\|?\s*(im_start|im_end|system|developer|assistant)\s*\|?>", re.IGNORECASE)),
+    ("fake_role_message", re.compile(r"</?\s*(system|developer)(\s[^>]*)?>", re.IGNORECASE)),
+    ("fake_role_message", re.compile(r"\[/?(INST|SYS)\]|<<\s*/?SYS\s*>>", re.IGNORECASE)),
+    ("fake_tool_call", re.compile(r"[\"']?(tool_calls|function_call|tool_use)[\"']?\s*[:=]", re.IGNORECASE)),
+    ("fake_tool_call", re.compile(r"[\"']name[\"']\s*:\s*[\"']kortex[._]", re.IGNORECASE)),
+    (
+        "fake_approval",
+        re.compile(
+            r"\b(approval|authori[sz]ation|permission)\s+(has\s+been\s+|is\s+|was\s+)?"
+            r"(granted|approved|confirmed|given)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fake_approval",
+        re.compile(
+            r"\b(the\s+)?(user|admin|administrator|operator|owner)\s+(has\s+)?(already\s+)?"
+            r"(approved|authori[sz]ed|confirmed|consented)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fake_approval",
+        re.compile(
+            r"\b(approve|authori[sz]e|confirm)\s+(the\s+following|this|these|all)\s+"
+            r"([a-z]+\s+){0,2}(actions?|requests?|operations?|transactions?|payments?|transfers?|purchases?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "instruction_override",
+        re.compile(
+            r"\b(execute|run|call|invoke|use)\s+(this|that|the\s+following)\s+(tool|command|function|action)"
+            r"\s+(immediately|now|right\s+away|without\s+(asking|approval|confirmation))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "credential_request",
+        re.compile(
+            r"\b(enter|type|provide|paste|reveal|send|share|submit|disclose|print|output)\s+"
+            r"(your|the|this|their|his|her|(the\s+)?(user|owner|admin|account)'?s?)\s+"
+            r"(password|passcode|passphrase|api[\s_-]?key|access\s+token|token|credentials?|secret|"
+            r"2fa|otp|one[\s-]time\s+(code|password)|verification\s+code|recovery\s+code)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "policy_spoof",
+        re.compile(
+            r"\bkortex\s+(security|policy|system|admin(istrator)?)\s+(notice|instruction|override|team)\b", re.I
+        ),
+    ),
+]
+
+TOOL_OUTPUT_INJECTION_REDACTION = "[REMOVED: instruction-like text in untrusted tool output]"
+
+
+def scan_untrusted_tool_output(text: str) -> tuple[str, list[str]]:
+    """Redact authority-impersonating spans from untrusted tool output.
+
+    Returns `(sanitized_text, categories)`; `categories` is empty when
+    nothing matched. Applied to every tool result before it is rendered into
+    model context, regardless of which tool produced it."""
+    if not text:
+        return text, []
+    categories: list[str] = []
+    sanitized = text
+    for category, pattern in _TOOL_OUTPUT_INJECTION_PATTERNS:
+        sanitized, count = pattern.subn(TOOL_OUTPUT_INJECTION_REDACTION, sanitized)
+        if count and category not in categories:
+            categories.append(category)
+    return sanitized, categories
+
+
 _PII_PATTERNS = [
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
     (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b"), "[REDACTED_EMAIL]"),

@@ -33,12 +33,17 @@ from typing import TYPE_CHECKING, Any, cast
 from kortex.core.base_engine import BaseEngine, EngineState
 from kortex.core.dispatch import CapabilityExecutionContext
 from kortex.engines.browser import grant as grant_module
-from kortex.engines.browser.audit import BROWSER_GRANT_MINTED, record_browser_audit_event
+from kortex.engines.browser.audit import (
+    BROWSER_EXECUTION_REPORTED,
+    BROWSER_GRANT_MINTED,
+    record_browser_audit_event,
+)
 from kortex.engines.browser.exceptions import BrowserNotYetSupportedError, BrowserRefusedSensitiveInputError
 from kortex.engines.browser.models import (
     BrowserCapabilityExecutionGrant,
     BrowserCapabilityTarget,
     BrowserElementSelector,
+    BrowserExecutionReport,
 )
 from kortex.engines.security.engine import SecurityEngine
 from kortex.engines.security.providers.local_crypto import LocalCrypto
@@ -74,6 +79,8 @@ EXTRACT_CAPABILITY = "kortex.browser.extract"
 DOWNLOAD_CAPABILITY = "kortex.browser.download"
 SCREENSHOT_CAPABILITY = "kortex.browser.screenshot"
 GRANT_VERIFICATION_KEY_CAPABILITY = "kortex.browser.grant_verification_key"
+REPORT_EXECUTION_CAPABILITY = "kortex.browser.report_execution"
+BROWSER_EXECUTION_REPORTED_TOPIC = "browser.execution.reported"
 
 BROWSER_CAPABILITY_NAMES = (
     NAVIGATE_CAPABILITY,
@@ -85,9 +92,10 @@ BROWSER_CAPABILITY_NAMES = (
     SCREENSHOT_CAPABILITY,
 )
 """Every AI-tool-eligible `kortex.browser.*` capability name — deliberately
-excludes `GRANT_VERIFICATION_KEY_CAPABILITY`, which is desktop-process
-infrastructure (fetching a verification key), never something an AI agent
-should itself invoke as a tool."""
+excludes `GRANT_VERIFICATION_KEY_CAPABILITY` and `REPORT_EXECUTION_CAPABILITY`,
+which are desktop-process infrastructure (fetching a verification key,
+reporting an execution outcome), never something an AI agent should itself
+invoke as a tool."""
 
 _TARGET_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -98,6 +106,10 @@ _TARGET_SCHEMA: dict[str, Any] = {
     },
     "required": ["browser_profile_id", "surface_id"],
 }
+# `UniversalAuditEntry.actor_type` vocabulary for the principal that reports
+# an execution outcome (mirrors `SecurityEngine`'s own private mapping).
+_REPORTER_ACTOR_TYPES: dict[str, str] = {"USER": "HUMAN", "AGENT": "AI_AGENT", "SERVICE_PRINCIPAL": "CONNECTOR"}
+
 _SELECTOR_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -108,8 +120,13 @@ _SELECTOR_SCHEMA: dict[str, Any] = {
 }
 
 
-def _grant_result(grant: BrowserCapabilityExecutionGrant) -> dict[str, Any]:
-    return {"grant": grant.model_dump(mode="json")}
+def _grant_result(grant: BrowserCapabilityExecutionGrant, execution_parameters: dict[str, Any]) -> dict[str, Any]:
+    """`execution_parameters` is the desktop redeem command's own wire shape
+    (`browser_grant.rs::BrowserCapabilityParamsWire`, tagged by
+    `capability`) — built from the exact field set the Grant's parameter
+    hash covers, so the desktop's independent recomputation matches by
+    construction. The Grant still carries only the hash."""
+    return {"grant": grant.model_dump(mode="json"), "execution_parameters": execution_parameters}
 
 
 class BrowserCapabilityEngine(BaseEngine):
@@ -131,6 +148,7 @@ class BrowserCapabilityEngine(BaseEngine):
         self._signing_private_key: bytes | None = None
         self._signing_public_key: bytes | None = None
         self._security_engine: SecurityEngine | None = None
+        self._kernel: Kernel | None = None
 
     @property
     def name(self) -> str:
@@ -318,7 +336,37 @@ class BrowserCapabilityEngine(BaseEngine):
                 is_read_only=True,
                 is_idempotent=True,
             )
+            kernel.register_capability(
+                name=REPORT_EXECUTION_CAPABILITY,
+                description=(
+                    "Report the typed outcome of executing a claimed Capability Execution Grant. "
+                    "Desktop execution-host infrastructure; never an AI tool. Authorizes no Browser action."
+                ),
+                provider=self.name,
+                handler=self.report_execution,
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "grant_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "execution_outcome": {"type": "object"},
+                    },
+                    "required": ["task_id", "grant_id", "execution_outcome"],
+                },
+                # The reporter is the human task owner's desktop, which already
+                # holds `ai:orchestrate` (it started the agent task). The report
+                # is one half of the AI-agent Browser execution protocol, whose
+                # other half (`kortex.ai.agent.browser_execution.claim`) is
+                # gated identically — one permission for the one host role.
+                required_permissions=["ai:orchestrate"],
+                requires_execution_context=True,
+                security_classification="INTERNAL",
+                is_read_only=False,
+                # A repeated report is a no-op at the task state transition.
+                is_idempotent=True,
+            )
 
+            self._kernel = kernel
             self._set_state(EngineState.READY)
             self.logger.info("KORTEX Browser Capability Engine initialized.")
         except Exception:
@@ -348,8 +396,13 @@ class BrowserCapabilityEngine(BaseEngine):
         capability_name: str,
         execution_context: CapabilityExecutionContext | None,
         target: BrowserCapabilityTarget,
-        parameters: dict[str, Any],
+        fields: dict[str, Any],
     ) -> dict[str, Any]:
+        """`fields` are the capability's own parameters other than `target`.
+        The Grant's hash covers `{"target": ..., **fields}`; the desktop
+        receives `{"capability": ..., **fields}` and rebuilds `target` from
+        the Grant itself."""
+        parameters = {"target": target.model_dump(mode="json"), **fields}
         if execution_context is None or execution_context.principal is None:
             # `requires_execution_context=True` + `requires_authentication`
             # defaulting to `True` (never overridden below) should make this
@@ -391,7 +444,7 @@ class BrowserCapabilityEngine(BaseEngine):
                     "expires_at": issued_grant.expires_at,
                 },
             )
-        return _grant_result(issued_grant)
+        return _grant_result(issued_grant, {"capability": capability_name, **fields})
 
     # -- Capability handlers --------------------------------------------------
 
@@ -408,7 +461,7 @@ class BrowserCapabilityEngine(BaseEngine):
             capability_name=NAVIGATE_CAPABILITY,
             execution_context=execution_context,
             target=target,
-            parameters={"target": target.model_dump(mode="json"), "url": url, "timeout_ms": timeout_ms},
+            fields={"url": url, "timeout_ms": timeout_ms},
         )
 
     async def read(
@@ -422,7 +475,7 @@ class BrowserCapabilityEngine(BaseEngine):
             capability_name=READ_CAPABILITY,
             execution_context=execution_context,
             target=target,
-            parameters={"target": target.model_dump(mode="json")},
+            fields={},
         )
 
     async def click(
@@ -437,7 +490,7 @@ class BrowserCapabilityEngine(BaseEngine):
             capability_name=CLICK_CAPABILITY,
             execution_context=execution_context,
             target=target,
-            parameters={"target": target.model_dump(mode="json"), "selector": selector.model_dump(mode="json")},
+            fields={"selector": selector.model_dump(mode="json")},
         )
 
     async def type_text(
@@ -464,12 +517,14 @@ class BrowserCapabilityEngine(BaseEngine):
             capability_name=TYPE_CAPABILITY,
             execution_context=execution_context,
             target=target,
-            parameters={
-                "target": target.model_dump(mode="json"),
+            fields={
                 "selector": selector.model_dump(mode="json"),
-                # Hashed into the Grant's `canonicalized_parameters_hash`
-                # only — never placed in the audit context above, and
-                # never returned in this handler's own result.
+                # Hashed into the Grant's `canonicalized_parameters_hash`,
+                # never placed in the audit context above. It does appear in
+                # this handler's `execution_parameters` — the desktop must
+                # type it — which the AI bridge persists only until the
+                # desktop claims it; its key name keeps it out of the
+                # dispatcher's audit record (`SENSITIVE_KEY_NAMES`).
                 "ui_input_text": ui_input_text,
             },
         )
@@ -497,10 +552,7 @@ class BrowserCapabilityEngine(BaseEngine):
             capability_name=EXTRACT_CAPABILITY,
             execution_context=execution_context,
             target=target,
-            parameters={
-                "target": target.model_dump(mode="json"),
-                "schema_fields": {k: v.model_dump(mode="json") for k, v in validated.items()},
-            },
+            fields={"schema_fields": {k: v.model_dump(mode="json") for k, v in validated.items()}},
         )
 
     async def download(
@@ -540,7 +592,7 @@ class BrowserCapabilityEngine(BaseEngine):
             capability_name=SCREENSHOT_CAPABILITY,
             execution_context=execution_context,
             target=target,
-            parameters={"target": target.model_dump(mode="json"), "full_page": full_page},
+            fields={"full_page": full_page},
         )
 
     async def grant_verification_key(
@@ -557,6 +609,63 @@ class BrowserCapabilityEngine(BaseEngine):
         assert self._signing_public_key is not None
         return {"public_key_hex": self._signing_public_key.hex(), "algorithm": "ed25519"}
 
+    async def report_execution(
+        self,
+        task_id: str,
+        grant_id: str,
+        execution_outcome: dict[str, Any],
+        execution_context: CapabilityExecutionContext | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """`kortex.browser.report_execution` (Browser Completion Program, B6).
+
+        Validates the report's shape, records a content-free
+        BROWSER_EXECUTION_REPORTED audit event, and publishes
+        `browser.execution.reported` for the AI engine to correlate against
+        its durable paused task. Tenant and reporter come only from the
+        dispatcher-verified context. This handler decides nothing about
+        whether the report is accepted — that is the correlation owner's
+        job — and its response never says, so a caller cannot probe which
+        task or grant ids are live.
+        """
+        if execution_context is None or execution_context.principal is None:
+            from kortex.engines.browser.exceptions import BrowserUnauthorizedError
+
+            raise BrowserUnauthorizedError
+        report = BrowserExecutionReport.model_validate(
+            {"task_id": task_id, "grant_id": grant_id, "execution_outcome": execution_outcome}
+        )
+        tenant_id = execution_context.tenant_id
+        principal = execution_context.principal
+        principal_id = principal.principal_id
+        if self._security_engine is not None:
+            await record_browser_audit_event(
+                self._security_engine.audit_manager,
+                BROWSER_EXECUTION_REPORTED,
+                tenant_id=tenant_id,
+                actor_id=principal_id,
+                resource_id=REPORT_EXECUTION_CAPABILITY,
+                context=report.audit_summary(),
+                actor_type=_REPORTER_ACTOR_TYPES.get(principal.principal_type.value, "SYSTEM_ENGINE"),
+            )
+        assert self._kernel is not None
+        await self._kernel.publish_event(
+            topic=BROWSER_EXECUTION_REPORTED_TOPIC,
+            payload={
+                "tenant_id": tenant_id,
+                # Relay audience: the outcome goes back only to the reporter's
+                # own event-stream connections — and its content key is in
+                # `SENSITIVE_KEY_NAMES`, so even that relay copy omits it.
+                "audience_principal_id": principal_id,
+                "reporter_principal_id": principal_id,
+                "task_id": report.task_id,
+                "grant_id": report.grant_id,
+                "execution_outcome": report.execution_outcome,
+            },
+            sender="browser",
+        )
+        return {"accepted": True}
+
 
 __all__ = [
     "BROWSER_CAPABILITY_NAMES",
@@ -566,6 +675,7 @@ __all__ = [
     "GRANT_VERIFICATION_KEY_CAPABILITY",
     "NAVIGATE_CAPABILITY",
     "READ_CAPABILITY",
+    "REPORT_EXECUTION_CAPABILITY",
     "SCREENSHOT_CAPABILITY",
     "TYPE_CAPABILITY",
     "BrowserCapabilityEngine",

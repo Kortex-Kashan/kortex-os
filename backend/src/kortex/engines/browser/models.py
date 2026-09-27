@@ -14,6 +14,7 @@ own authorized scope.
 from __future__ import annotations
 
 import enum
+import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -217,6 +218,57 @@ class BrowserCapabilityExecutionGrant(BaseModel):
     signature: str = Field(min_length=1, description="Hex-encoded detached Ed25519 signature.")
 
 
+MAX_EXECUTION_REPORT_BYTES = 262_144
+"""Upper bound on a serialized `execution_outcome`. Desktop-side results are
+already bounded (UIA text collection, extract field set, screenshots are
+reported by size only); anything larger is refused, never truncated here."""
+
+
+class BrowserExecutionReport(BaseModel):
+    """`kortex.browser.report_execution`'s parameters (Browser Completion
+    Program, B6): the desktop's typed outcome for one claimed Grant.
+
+    Validated for *shape* only — exactly one of `result`/`error`, each an
+    object carrying the desktop wire format's own discriminator (`status`
+    for a result, `kind` for an error). Whether the outcome is consistent
+    with the pending execution, and whether the reporter is the principal
+    that claimed it, is decided against the durable paused task record by
+    the AI engine, never here and never from these fields alone."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=128)
+    grant_id: str = Field(min_length=1, max_length=128)
+    execution_outcome: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _one_discriminated_outcome(self) -> BrowserExecutionReport:
+        outcome = self.execution_outcome
+        if len(outcome) != 1 or not ({"result", "error"} & outcome.keys()):
+            raise ValueError("execution_outcome must contain exactly one of 'result' or 'error'.")
+        ((key, value),) = outcome.items()
+        discriminator = "status" if key == "result" else "kind"
+        if not isinstance(value, dict) or not isinstance(value.get(discriminator), str):
+            raise ValueError(f"execution_outcome.{key} must be an object with a string '{discriminator}'.")
+        if len(json.dumps(outcome, default=str).encode("utf-8")) > MAX_EXECUTION_REPORT_BYTES:
+            raise ValueError(f"execution_outcome exceeds {MAX_EXECUTION_REPORT_BYTES} bytes.")
+        return self
+
+    def audit_summary(self) -> dict[str, Any]:
+        """Content-free description of the outcome — never page text,
+        extracted values, or typed input."""
+        ((key, value),) = self.execution_outcome.items()
+        summary: dict[str, Any] = {"task_id": self.task_id, "grant_id": self.grant_id, "outcome": key}
+        if key == "result":
+            summary["status"] = value.get("status")
+        else:
+            summary["kind"] = value.get("kind")
+            detail = value.get("detail")
+            if isinstance(detail, dict) and isinstance(detail.get("kind"), str):
+                summary["detail_kind"] = detail["kind"]
+        return summary
+
+
 class BrowserGrantVerificationKey(BaseModel):
     """Response shape for `kortex.browser.grant_verification_key` — a
     PUBLIC key, not a secret; publishing it does not weaken anything (only
@@ -233,6 +285,7 @@ class BrowserGrantVerificationKey(BaseModel):
 
 
 __all__ = [
+    "MAX_EXECUTION_REPORT_BYTES",
     "BrowserActionError",
     "BrowserActionErrorCode",
     "BrowserCapabilityExecutionGrant",
@@ -240,6 +293,7 @@ __all__ = [
     "BrowserClickParams",
     "BrowserDownloadParams",
     "BrowserElementSelector",
+    "BrowserExecutionReport",
     "BrowserExtractParams",
     "BrowserGrantVerificationKey",
     "BrowserNavigateParams",

@@ -48,6 +48,9 @@ from kortex.engines.registry.engine import CapabilityDescriptor, RegistryEngine
 # Kept independent of `registry/engine.py`'s own `_CAPABILITY_RISK_
 # CLASSIFICATION` table on purpose — see module docstring.
 _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
+    # Browser Completion Program (B6): the desktop claims a paused task's
+    # Grant exactly once — a real, non-repeatable state change.
+    "kortex.ai.agent.browser_execution.claim": (False, False),
     "kortex.ai.agent.cancel": (False, True),
     "kortex.ai.agent.list": (True, True),
     "kortex.ai.agent.orchestrate": (False, False),
@@ -89,6 +92,8 @@ _EXPECTED_RISK: dict[str, tuple[bool, bool]] = {
     "kortex.browser.grant_verification_key": (True, True),
     "kortex.browser.navigate": (False, False),
     "kortex.browser.read": (True, True),
+    # B6: records a desktop-reported outcome; a duplicate is a no-op.
+    "kortex.browser.report_execution": (False, True),
     "kortex.browser.screenshot": (True, False),
     "kortex.browser.type": (False, False),
     "kortex.connector.action.execute": (False, False),
