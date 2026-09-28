@@ -63,3 +63,8 @@ commands.allow = ["browser_rename_profile"]
 identifier = "allow-browser-delete-profile"
 description = "Allows the webview to delete a profile it owns (via the current tenant). Refused by the store itself while a live process holds that profile's lock."
 commands.allow = ["browser_delete_profile"]
+
+[[permission]]
+identifier = "allow-browser-set-active-profile"
+description = "Allows the webview to declare which of the current tenant's own profiles the Browser app is showing. Only that profile's tabs are eligible Browser Grant targets; the tenant is resolved by the desktop, never supplied by the caller."
+commands.allow = ["browser_set_active_profile"]

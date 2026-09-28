@@ -145,6 +145,14 @@ export async function deleteBrowserProfile(profileId: BrowserProfileId): Promise
   await invoke("browser_delete_profile", { profileId });
 }
 
+/** Tells the desktop which profile the Browser app is showing (`null`:
+ * none). Only that profile's tabs are eligible Browser Grant targets —
+ * parked tabs of other profiles never are. The desktop resolves the tenant
+ * itself and fails closed. */
+export async function setActiveBrowserProfile(profileId: BrowserProfileId | null): Promise<void> {
+  await invoke("browser_set_active_profile", { profileId });
+}
+
 /** `profileId` is opaque — Rust resolves it, via `BrowserProfileStore`,
  * to a containment-checked, tenant-scoped directory; this module must
  * never construct or accept a filesystem path itself (see
@@ -222,6 +230,19 @@ const POLICY_DENIED_EVENT_NAME = "browser://policy-denied";
 
 export function onBrowserPolicyDenied(handler: (event: PolicyDeniedEvent) => void): Promise<UnlistenFn> {
   return listen<PolicyDeniedEvent>(POLICY_DENIED_EVENT_NAME, (event) => handler(event.payload));
+}
+
+/** Emitted whenever a Browser tab's surface finishes a navigation (typed
+ * address, link click, back/forward, reload) — carries only the surface id;
+ * the tab's state is then re-read through `queryBrowserSurfaceState`. */
+export interface SurfaceNavigatedEvent {
+  surfaceId: BrowserSurfaceId;
+}
+
+const SURFACE_NAVIGATED_EVENT_NAME = "browser://surface-navigated";
+
+export function onBrowserSurfaceNavigated(handler: (surfaceId: BrowserSurfaceId) => void): Promise<UnlistenFn> {
+  return listen<SurfaceNavigatedEvent>(SURFACE_NAVIGATED_EVENT_NAME, (event) => handler(event.payload.surfaceId));
 }
 
 /** Human-readable summary for `PolicyDeniedEvent.reason` — used by the

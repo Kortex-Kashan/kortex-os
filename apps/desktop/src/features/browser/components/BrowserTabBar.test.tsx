@@ -7,6 +7,7 @@ import { BrowserTabBar } from "./BrowserTabBar";
 function makeTab(overrides: Partial<BrowserTab> = {}): BrowserTab {
   return {
     id: "browser-surface-1",
+    profileId: "profile-test-1",
     state: { surfaceId: "browser-surface-1", url: "https://example.com/", loading: false, canGoBack: false, canGoForward: false },
     ...overrides,
   };
@@ -34,7 +35,7 @@ describe("BrowserTabBar", () => {
   it("shows a new-tab placeholder label before a surface's first state is known", () => {
     render(
       <BrowserTabBar
-        tabs={[{ id: "a", state: null }]}
+        tabs={[{ id: "a", profileId: "profile-test-1", state: null }]}
         activeTabId="a"
         disabled={false}
         onSwitch={vi.fn()}

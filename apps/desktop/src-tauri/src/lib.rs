@@ -138,6 +138,7 @@ pub fn run() {
             browser_profile_store::browser_create_profile,
             browser_profile_store::browser_rename_profile,
             browser_profile_store::browser_delete_profile,
+            browser_profile_store::browser_set_active_profile,
             browser_grant::browser_execute_granted_action,
         ])
         .setup(|app| {

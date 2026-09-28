@@ -793,6 +793,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ai_grant_for_a_parked_inactive_profile_tab_is_refused_and_reported() {
+        let harness = Harness::new("surface-1", "tenant-a", "profile-1");
+        // The user switched to another profile: "surface-1" is parked.
+        harness.active_profile_surfaces.set_active_profile(
+            "tenant-a".to_string(),
+            Some(crate::browser_profile_store::BrowserProfileId::from_raw_for_test("profile-2")),
+        );
+        let backend = FakeBackend::new(navigate_claim(&harness, "grant-1"));
+
+        let run = process_pending_notice(
+            &deps(&harness),
+            &backend,
+            &harness.verifying_key,
+            &notice(),
+            Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(run.outcome, BridgeOutcome::Reported);
+        assert!(harness.runtime_navigate_calls().is_empty());
+        assert_eq!(
+            backend.reports()[0]["execution_outcome"],
+            json!({"error": {"kind": "profileNotFound"}})
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_notice_for_the_same_grant_cannot_execute_it_again() {
         let harness = Harness::new("surface-1", "tenant-a", "profile-1");
         let backend = FakeBackend::new(navigate_claim(&harness, "grant-1"));

@@ -98,9 +98,10 @@ export function useBrowserProfiles() {
   );
 
   /** Refused by the backend (`ProfileLocked`) while any tab is still open
-   * against this profile — the caller must close its tabs first (`BrowserApp`
+   * against this profile — the caller must close its tabs first. `BrowserApp`
    * only offers deletion for the currently-INACTIVE profiles in the
-   * switcher, so this is not the active/open one in practice). */
+   * switcher, whose tabs are parked but still alive, so it closes them
+   * (`useBrowserTabs.closeProfileTabs`) before calling this. */
   const deleteProfile = useCallback(
     async (profileId: BrowserProfileId) => {
       setError(null);

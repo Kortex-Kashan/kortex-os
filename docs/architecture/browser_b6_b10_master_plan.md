@@ -333,6 +333,51 @@ Graphify (after `graphify update .`: 23,660 nodes, 56,176 edges, 747 communities
 - **Injection scanning is pattern-based and partial** — it can miss phrasing and can redact benign text that happens to match. It is not what prevents authorization by page content; that guarantee is structural (tool calls come only from model output, mutations require approval, Browser actions require a desktop-verified Grant) and is tested.
 - **Pre-existing, cross-cutting, flagged for owner decision:** `kortex.ai.agent.status`/`.list` are tenant-scoped, not user-scoped, so any same-tenant user with `ai:read` can read another user's task trace — which now may include page text a Browser read returned. Changing this is an AI Studio product/security decision and was not made silently.
 
+### 5.4 Browser profile/tab lifecycle and active-profile Grant binding (IMPLEMENTED)
+
+Found while live-validating the Browser in the native Windows app during B7, and committed on their own, separately from B7's provider sign-in work (§6).
+
+#### 5.4.1 Browser lifecycle defects found by native live validation (FIXED)
+
+Found in the native Windows app (never in the Vite preview), each root-caused before changing anything, each fixed with regression tests that fail on the previous code:
+
+- **StrictMode left every tab dead.** `useBrowserTabs`'s unmount cleanup set `isMountedRef = false` and nothing set it back on React StrictMode's remount, so every new surface was destroyed on creation and `isBusy` never cleared (New tab and the address bar stayed disabled). The mount effect now sets it `true`.
+- **Profile switching discarded the previous profile's tabs (D24, superseded by D-BROWSER-16).** Measured live, before the fix: persistent data was never lost (Local Storage, cookies, `profile.json`, and each profile's own `webview2-data` directory were unchanged across switches). Only the surfaces and the frontend tab list were destroyed, and every switch paid a fresh WebView2 environment creation (`create_surface` on a newly switched profile: 946–1,150 ms). Now each tab records its profile; the previous profile's tabs are parked off-screen and stay alive; returning shows the same tabs, pages, and active tab. Only a profile with no tab gets one new tab. Measured after the fix, native, P1 ↔ P2 with two tabs each: 35–86 ms (median 69 ms, n = 20), with zero surface creations or destructions across repeated cycles. Isolation is unchanged: a cookie set in P1 was absent in P2 (httpbin probe), and each profile keeps its own data directory and lock.
+- **Closing one of a profile's tabs released that profile's lock** while another of its tabs was alive (`browser_destroy` closed the profile per surface). `ActiveProfileSurfaces` now releases a lock only with the profile's last surface, counting in-flight creations; the decision and `close_profile` run under its mutex, so a concurrent create cannot race it.
+- **A tab's label and address kept its previous page.** The state refresh ran when the navigate command returned, before the load completed, and link clicks never refreshed at all. General surfaces now emit `browser://surface-navigated` (surface id only, never the URL), and the tab re-reads its state.
+- **Deleting a profile right after its last tab closed left a "(corrupted profile)" entry.** WebView2's browser process briefly outlives the last surface, so the quarantine rename failed and the in-place removal deleted `profile.json` but not the held files. Deletion now retries the rename for a bounded moment (about 3 s, off the async workers). If the directory is still held, deletion keeps the `PendingDeletion` marker, so the profile stays hidden, and removes only its browsing data. Before deletion, the Browser closes the profile's parked tabs.
+- **New-tab page:** a single constant, `features/browser/newTab.ts` `BROWSER_NEW_TAB_URL = "https://www.google.com/"`, used only for a genuinely new tab (navigation still goes through B4 policy).
+
+Remaining, not claimed resolved:
+- Parked tabs keep their WebView2 processes (memory) until closed or the app exits.
+- The profile list shows a parked profile as "In use" after the next list refresh; that label reflects this process's own lock.
+- The owner's security decision on parked tabs of inactive profiles is recorded in §5.4.2.
+
+#### 5.4.2 Browser Grants are restricted to the active profile (owner decision, IMPLEMENTED — D-BROWSER-17)
+
+Parked tabs of inactive profiles stay alive for performance, but they are never an eligible Browser Grant target. The rule is one more fail-closed check inside the existing boundary, `browser_grant::execute_granted_action`, which both the AI bridge and the redeem command use. It runs after the unchanged, still mandatory tenant/profile/surface binding check. It is not a second authorization system.
+
+- **State:** `ActiveProfileSurfaces` (the existing binding state) also holds the declared active profile, as tenant plus profile. The Browser app declares the profile it shows through `browser_set_active_profile`. That command is available only to the main webview. It resolves the tenant itself (OD-B7), and it clears the active profile and refuses when no tenant is available. With nothing declared, nothing is eligible. App shutdown also clears it.
+- **Outcomes:**
+  - Active profile with a matching surface: eligible.
+  - Inactive (parked) profile: denied (audit `inactive_profile`).
+  - Wrong tenant, wrong profile, a Grant naming the active profile for another profile's surface, or a stale or destroyed surface: denied, as before.
+
+  Every denial is reported as `PROFILE_NOT_FOUND`, `executed: "no"`. The caller is never told which check failed.
+- **Evidence:**
+  - **Tests:** 10 new Rust tests (Grant boundary, AI bridge path, the declaration command). With the check disabled, the 5 active-profile-specific ones fail. There are also 2 frontend tests: the shown profile is declared on every switch, and browsing continues if the declaration is refused.
+  - **Live, native Windows, real harness AI task and real Grants:**
+    - A read of the P1 tab with P1 active executed, and the page text reached the model.
+    - A read of the P2 tab with P2 active executed.
+    - A read of P1's parked tab with P2 active was refused (desktop audit `BROWSER_GRANT_REJECTED … inactive_profile`).
+    - A read of P2's parked tab with P1 active was refused.
+    - A Grant naming P2 for P1's surface was never claimed and expired unexecuted.
+    - After switching back to P1, P1 was eligible again.
+  - **Harness provisioning:** for the live run only, the disposable harness gave the AI role exactly `browser:read` in its test tenant, then removed it. No repository or production default changed.
+- **Limitations:**
+  - Eligibility is checked when a Grant is redeemed. A switch during an already-running action does not interrupt it.
+  - The active profile comes from the trusted main webview, the same trust level as every other `browser_*` command.
+
 ---
 
 ## 6. B7 — AI Studio Provider Web Sign-In
@@ -513,6 +558,8 @@ Only the decisions this audit actually needed to make, per the instruction not t
 - **D-BROWSER-13 — Download policy**: remains deliberately unimplemented; not required for B10 as scoped (§28). ACCEPTED, unchanged.
 - **D-BROWSER-14 — `node_ref` policy**: remains deliberately unsupported; not required for B10 (§29). ACCEPTED, unchanged.
 - **D-BROWSER-15 — Browser Technical RC criteria**: per §26. ACCEPTED as this document's own exit gate.
+- **D-BROWSER-16 — Profile switching keeps each profile's tabs (supersedes Browser-B3 D24).** Switching parks the previous profile's tabs instead of closing them. A surface's profile stays immutable (WebView2 cannot re-point one), so each tab records its profile. There is no shared data directory, no copied state, and no relaxed lock. IMPLEMENTED (§5.4.1).
+- **D-BROWSER-17 — Browser Grants execute only against the active profile.** Parked tabs of inactive profiles stay alive but are never Grant targets. Enforced fail-closed at the existing Grant execution boundary, in addition to the unchanged tenant/profile/surface binding. OWNER DECISION, IMPLEMENTED (§5.4.2).
 
 ---
 

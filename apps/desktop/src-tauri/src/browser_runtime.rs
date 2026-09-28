@@ -530,6 +530,20 @@ fn resolve_navigation_waiter(
     }
 }
 
+/// Emitted to the trusted "main" webview whenever a GENERAL surface
+/// finishes a navigation (a typed address, a link click, back/forward,
+/// reload), so the Browser app re-reads that tab's state instead of
+/// showing the page it was on before. Carries only the surface id — never
+/// the URL (the frontend reads state through `browser_query_state`, the
+/// same way every other state read already works).
+pub const SURFACE_NAVIGATED_EVENT_NAME: &str = "browser://surface-navigated";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurfaceNavigatedEvent {
+    pub surface_id: String,
+}
+
 #[cfg(windows)]
 fn register_navigation_loading_handlers<R: Runtime>(
     webview: &Webview<R>,
@@ -543,6 +557,7 @@ fn register_navigation_loading_handlers<R: Runtime>(
     let loading_for_complete = loading;
     let emit_webview = webview.clone();
     let navigation_waiter_for_complete = navigation_waiter.clone();
+    let navigated_surface_id = surface_id.as_label().to_string();
     let _ = webview.with_webview(move |platform_webview| {
         let core = unsafe { platform_webview.controller().CoreWebView2() };
         let Ok(core) = core else { return };
@@ -550,6 +565,7 @@ fn register_navigation_loading_handlers<R: Runtime>(
         let policy_surface_id = surface_id.clone();
         let policy_audit_log_path_for_start = policy_audit_log_path.clone();
         let emit_webview_for_nav = emit_webview.clone();
+        let emit_webview_for_complete = emit_webview.clone();
         let navigation_generation_for_start = navigation_generation.clone();
         let navigation_waiter_for_start = navigation_waiter.clone();
         let start_handler =
@@ -614,6 +630,13 @@ fn register_navigation_loading_handlers<R: Runtime>(
         let complete_handler =
             NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
                 loading_for_complete.store(false, Ordering::Relaxed);
+                let _ = emit_webview_for_complete.emit_to(
+                    "main",
+                    SURFACE_NAVIGATED_EVENT_NAME,
+                    SurfaceNavigatedEvent {
+                        surface_id: navigated_surface_id.clone(),
+                    },
+                );
                 // Browser-B5 (navigate execution): read the REAL outcome —
                 // previously discarded entirely (this handler only ever
                 // flipped `loading`). `IsSuccess`/`WebErrorStatus` are read
@@ -1388,7 +1411,14 @@ pub async fn browser_create_surface(
         "browser_create_surface",
     )?;
 
-    let data_directory = profile_state.0.open_profile(&tenant_id, &profile_id)?;
+    bindings.begin_open(&tenant_id, &profile_id);
+    let data_directory = match profile_state.0.open_profile(&tenant_id, &profile_id) {
+        Ok(directory) => directory,
+        Err(error) => {
+            bindings.cancel_open(&tenant_id, &profile_id);
+            return Err(error.into());
+        }
+    };
 
     let creation_result = runtime_state.0.create_surface(CreateSurfaceRequest {
         data_directory,
@@ -1403,8 +1433,11 @@ pub async fn browser_create_surface(
             // The profile's lock was already acquired above, but no
             // surface ended up using it — release it rather than leave
             // the profile stuck reporting `Locked` for a surface that
-            // was never actually created.
-            let _ = profile_state.0.close_profile(&tenant_id, &profile_id);
+            // was never actually created, unless another of this
+            // profile's surfaces still holds it.
+            bindings.abandon_open(&tenant_id, &profile_id, |tenant, profile| {
+                let _ = profile_state.0.close_profile(tenant, profile);
+            });
             Err(runtime_error.into())
         }
     }
@@ -1461,8 +1494,9 @@ pub async fn browser_query_state(
 }
 
 /// Browser-B3: also releases the surface's profile lock (if it was created
-/// through `browser_create_surface` and therefore has a recorded binding),
-/// after the surface itself is gone. A lock-release failure is swallowed
+/// through `browser_create_surface` and therefore has a recorded binding,
+/// and it was that profile's last live surface), after the surface itself
+/// is gone. A lock-release failure is swallowed
 /// (`let _ =`) for the same reason `destroy`'s own webview-close failure
 /// already is — "already released" and "release failed" both leave the
 /// profile in the same observable state (unlocked at the next stale-lock
@@ -1478,9 +1512,11 @@ pub async fn browser_destroy(
     surface_id: BrowserSurfaceId,
 ) -> Result<(), BrowserRuntimeError> {
     runtime_state.0.destroy(&surface_id)?;
-    if let Some((tenant_id, profile_id)) = bindings.take(&surface_id) {
-        let _ = profile_state.0.close_profile(&tenant_id, &profile_id);
-    }
+    // A profile's lock is released only with its LAST live surface — closing
+    // one of two tabs of a profile must leave the other tab's lock held.
+    let _ = bindings.release_surface(&surface_id, |tenant, profile| {
+        let _ = profile_state.0.close_profile(tenant, profile);
+    });
     Ok(())
 }
 
@@ -1506,6 +1542,18 @@ pub async fn browser_destroy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_navigated_event_carries_only_the_surface_id() {
+        let event = SurfaceNavigatedEvent {
+            surface_id: "browser-surface-1".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({ "surfaceId": "browser-surface-1" })
+        );
+        assert_eq!(SURFACE_NAVIGATED_EVENT_NAME, "browser://surface-navigated");
+    }
 
     // Browser-B3: `sanitize_profile_id`/`resolve_profile_directory`/
     // `default_profile_root` were removed from this module entirely — this

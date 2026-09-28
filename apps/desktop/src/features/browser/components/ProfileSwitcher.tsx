@@ -24,9 +24,9 @@ function availabilityLabel(profile: ProfileSummary): string | null {
   }
 }
 
-/** Browser-B3: compact profile selector. Per the approved V1 UX (decision
- * D24), switching profiles is handled entirely by `useBrowserTabs`
- * reacting to `activeProfileId` changing — this component only ever
+/** Browser-B3: compact profile selector. Switching profiles is handled
+ * entirely by `useBrowserTabs` reacting to `activeProfileId` changing (the
+ * previous profile's tabs are parked, not closed) — this component only ever
  * reports the user's intent (switch/create/rename/delete), it never
  * touches a `BrowserSurfaceId` itself. */
 export function ProfileSwitcher({

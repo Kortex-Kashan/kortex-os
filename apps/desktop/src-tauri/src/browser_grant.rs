@@ -944,6 +944,15 @@ pub(crate) async fn execute_granted_action(
                 reject("profile_mismatch");
                 return Err(BrowserGrantExecutionError::ProfileNotFound);
             }
+            // Owner decision (D-BROWSER-17): only the ACTIVE Browser profile's tabs
+            // are eligible. Tabs of other profiles stay alive while parked
+            // (master plan §5.4) but are never a Grant target; with no
+            // active profile declared, nothing is. Reported like every other
+            // binding failure — the audit detail tells the operator which.
+            if !active_profile_surfaces.is_active_profile(&live_tenant_id, &live_profile_id) {
+                reject("inactive_profile");
+                return Err(BrowserGrantExecutionError::ProfileNotFound);
+            }
         }
     }
 
@@ -2110,9 +2119,24 @@ pub(crate) mod tests {
                     browser_profile_id,
                 ),
             );
+            // The registered surface belongs to the profile the Browser app
+            // is showing — the ordinary case every existing test exercises.
+            active_profile_surfaces.set_active_profile(
+                tenant_id.to_string(),
+                Some(
+                    crate::browser_profile_store::BrowserProfileId::from_raw_for_test(
+                        browser_profile_id,
+                    ),
+                ),
+            );
+            // Unique per harness: tests that share a surface id in the same
+            // second must never share (and read each other's) audit log.
+            static NEXT_AUDIT_LOG: AtomicU64 = AtomicU64::new(0);
             let audit_log_path = std::env::temp_dir().join(format!(
-                "kortex-b5-execute-granted-action-test-{}-{}",
+                "kortex-b5-execute-granted-action-test-{}-{}-{}-{}",
                 unix_now(),
+                std::process::id(),
+                NEXT_AUDIT_LOG.fetch_add(1, AtomicOrdering::SeqCst),
                 surface_id
             ));
             Self {
@@ -2231,6 +2255,245 @@ pub(crate) mod tests {
             harness.runtime.navigate_calls.lock().unwrap().as_slice(),
             ["https://example.com/ok"]
         );
+    }
+
+    // -- Owner decision (D-BROWSER-17): only the ACTIVE Browser profile is eligible --
+    //
+    // P1 ("profile-1") owns "surface-p1"; P2 ("profile-2") owns
+    // "surface-p2". Both surfaces are live — the other profile's tab is
+    // parked, not destroyed — and both bindings are genuine.
+
+    fn two_profile_harness() -> Harness {
+        let harness = Harness::new("surface-p1", "tenant-a", "profile-1");
+        harness.active_profile_surfaces.record(
+            BrowserSurfaceId::from_string("surface-p2".to_string()),
+            "tenant-a".to_string(),
+            crate::browser_profile_store::BrowserProfileId::from_raw_for_test("profile-2"),
+        );
+        harness
+    }
+
+    fn activate(harness: &Harness, tenant_id: &str, profile_id: &str) {
+        harness.active_profile_surfaces.set_active_profile(
+            tenant_id.to_string(),
+            Some(crate::browser_profile_store::BrowserProfileId::from_raw_for_test(profile_id)),
+        );
+    }
+
+    /// A correctly signed, fresh navigate Grant for `surface_id` claiming
+    /// `tenant_id`/`profile_id`, executed through the real orchestration.
+    async fn navigate_on(
+        harness: &Harness,
+        grant_id: &str,
+        surface_id: &str,
+        tenant_id: &str,
+        profile_id: &str,
+    ) -> Result<BrowserGrantExecutionResult, BrowserGrantExecutionError> {
+        let params_value = navigate_parameters_value(
+            &grant_with(|g| {
+                g.surface_id = surface_id.to_string();
+                g.browser_profile_id = profile_id.to_string();
+            }),
+            "https://example.com/ai",
+            30_000,
+        );
+        let grant = harness.mint_grant(
+            grant_id,
+            NAVIGATE_CAPABILITY,
+            surface_id,
+            tenant_id,
+            profile_id,
+            None,
+            &params_value,
+        );
+        harness
+            .execute(
+                grant,
+                Some(BrowserCapabilityParamsWire::Navigate {
+                    url: "https://example.com/ai".to_string(),
+                    timeout_ms: 30_000,
+                }),
+            )
+            .await
+    }
+
+    fn audit_log(harness: &Harness) -> String {
+        std::fs::read_to_string(&harness.audit_log_path).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_active_profile_surface_is_eligible() {
+        let harness = two_profile_harness();
+        activate(&harness, "tenant-a", "profile-1");
+
+        let result = navigate_on(&harness, "g-p1", "surface-p1", "tenant-a", "profile-1").await;
+
+        assert!(matches!(
+            result,
+            Ok(BrowserGrantExecutionResult::Success { .. })
+        ));
+        assert_eq!(harness.runtime_navigate_calls(), ["https://example.com/ai"]);
+    }
+
+    #[tokio::test]
+    async fn a_parked_inactive_profile_surface_is_denied_before_touching_the_runtime() {
+        let harness = two_profile_harness();
+        // The user switched to P2; P1's tab is parked but alive, and the
+        // Grant's tenant/profile/surface binding is otherwise perfect.
+        activate(&harness, "tenant-a", "profile-2");
+
+        let result = navigate_on(&harness, "g-parked", "surface-p1", "tenant-a", "profile-1").await;
+
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ProfileNotFound)
+        ));
+        assert!(harness.runtime_navigate_calls().is_empty());
+        let audit = audit_log(&harness);
+        assert!(audit.contains("inactive_profile"), "audit: {audit}");
+        assert!(!audit.contains("BROWSER_GRANT_REDEEMED"), "audit: {audit}");
+    }
+
+    #[tokio::test]
+    async fn eligibility_follows_the_active_profile_across_switches() {
+        let harness = two_profile_harness();
+
+        activate(&harness, "tenant-a", "profile-2");
+        assert!(
+            navigate_on(&harness, "g1", "surface-p2", "tenant-a", "profile-2")
+                .await
+                .is_ok()
+        );
+        assert!(
+            navigate_on(&harness, "g2", "surface-p1", "tenant-a", "profile-1")
+                .await
+                .is_err()
+        );
+
+        activate(&harness, "tenant-a", "profile-1");
+        assert!(
+            navigate_on(&harness, "g3", "surface-p1", "tenant-a", "profile-1")
+                .await
+                .is_ok()
+        );
+        assert!(
+            navigate_on(&harness, "g4", "surface-p2", "tenant-a", "profile-2")
+                .await
+                .is_err()
+        );
+
+        assert_eq!(
+            harness.runtime_navigate_calls(),
+            ["https://example.com/ai", "https://example.com/ai"]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_no_active_profile_declared_nothing_is_eligible() {
+        let harness = two_profile_harness();
+        harness.active_profile_surfaces.clear_active_profile();
+
+        for (grant_id, surface, profile) in [
+            ("g-none-1", "surface-p1", "profile-1"),
+            ("g-none-2", "surface-p2", "profile-2"),
+        ] {
+            let result = navigate_on(&harness, grant_id, surface, "tenant-a", profile).await;
+            assert!(matches!(
+                result,
+                Err(BrowserGrantExecutionError::ProfileNotFound)
+            ));
+        }
+        assert!(harness.runtime_navigate_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_grant_naming_the_active_profile_cannot_reach_a_parked_surface_of_another() {
+        let harness = two_profile_harness();
+        activate(&harness, "tenant-a", "profile-2");
+
+        // Claims the ACTIVE profile but targets P1's parked surface.
+        let result = navigate_on(
+            &harness,
+            "g-confused",
+            "surface-p1",
+            "tenant-a",
+            "profile-2",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ProfileNotFound)
+        ));
+        assert!(harness.runtime_navigate_calls().is_empty());
+        assert!(audit_log(&harness).contains("profile_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_tenant_is_denied_even_on_the_active_profile() {
+        let harness = two_profile_harness();
+        activate(&harness, "tenant-a", "profile-1");
+
+        let result = navigate_on(&harness, "g-tenant", "surface-p1", "tenant-b", "profile-1").await;
+
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ProfileNotFound)
+        ));
+        assert!(harness.runtime_navigate_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_active_profile_declared_for_another_tenant_makes_nothing_eligible() {
+        let harness = two_profile_harness();
+        // Same profile id string, different tenant.
+        activate(&harness, "tenant-b", "profile-1");
+
+        let result = navigate_on(
+            &harness,
+            "g-other-tenant",
+            "surface-p1",
+            "tenant-a",
+            "profile-1",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(BrowserGrantExecutionError::ProfileNotFound)
+        ));
+        assert!(harness.runtime_navigate_calls().is_empty());
+        assert!(audit_log(&harness).contains("inactive_profile"));
+    }
+
+    #[tokio::test]
+    async fn a_stale_surface_is_denied() {
+        let harness = two_profile_harness();
+        activate(&harness, "tenant-a", "profile-1");
+        // The tab was closed: its binding is released and its surface gone.
+        harness.active_profile_surfaces.release_surface(
+            &BrowserSurfaceId::from_string("surface-p1".to_string()),
+            |_, _| {},
+        );
+
+        let unbound =
+            navigate_on(&harness, "g-stale-1", "surface-p1", "tenant-a", "profile-1").await;
+        assert!(matches!(
+            unbound,
+            Err(BrowserGrantExecutionError::ProfileNotFound)
+        ));
+
+        harness
+            .runtime
+            .surface_exists
+            .store(false, AtomicOrdering::SeqCst);
+        let gone = navigate_on(&harness, "g-stale-2", "surface-p2", "tenant-a", "profile-2").await;
+        assert!(matches!(
+            gone,
+            Err(BrowserGrantExecutionError::SurfaceNotFound)
+        ));
+
+        assert!(harness.runtime_navigate_calls().is_empty());
     }
 
     #[tokio::test]
@@ -3166,6 +3429,10 @@ pub(crate) mod tests {
             BrowserSurfaceId::from_string("surface-1".to_string()),
             "tenant-a".to_string(),
             crate::browser_profile_store::BrowserProfileId::from_raw_for_test("profile-1"),
+        );
+        active_profile_surfaces.set_active_profile(
+            "tenant-a".to_string(),
+            Some(crate::browser_profile_store::BrowserProfileId::from_raw_for_test("profile-1")),
         );
         let redeemed_tracker = StdArc::new(RedeemedGrantTracker::new());
         let surface_locks = StdArc::new(SurfaceRedeemLocks::new());

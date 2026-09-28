@@ -15,6 +15,7 @@
     "allow-browser-list-profiles",
     "allow-browser-create-profile",
     "allow-browser-rename-profile",
-    "allow-browser-delete-profile"
+    "allow-browser-delete-profile",
+    "allow-browser-set-active-profile"
   ]
 }

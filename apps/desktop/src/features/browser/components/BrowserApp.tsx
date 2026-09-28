@@ -9,8 +9,9 @@ import { ProfileSwitcher } from "./ProfileSwitcher";
  * positioned into (`useBrowserTabs`' `containerRef`, tracked via
  * `ResizeObserver` — no polling). `useBrowserProfiles` owns the profile
  * list/selection; `useBrowserTabs(activeProfileId)` reacts to the active
- * profile changing (decision D24: closes every tab, opens one fresh tab
- * against the new profile). Deliberately does not implement: downloads/
+ * profile changing: the previous profile's tabs are parked, not closed, and
+ * the newly active profile's own tabs are shown again (one new tab only if
+ * it has none). Deliberately does not implement: downloads/
  * bookmarks/history, provider authentication, or any AI/automation
  * capability — see `docs/architecture/browser_known_limitations.md`. */
 export function BrowserApp() {
@@ -34,6 +35,7 @@ export function BrowserApp() {
     error: tabError,
     openTab,
     closeTab,
+    closeProfileTabs,
     switchTab,
     navigate,
     reload,
@@ -52,7 +54,11 @@ export function BrowserApp() {
         onSwitch={switchProfile}
         onCreate={(displayName) => void createProfile(displayName)}
         onRename={(profileId, displayName) => void renameProfile(profileId, displayName)}
-        onDelete={(profileId) => void deleteProfile(profileId)}
+        onDelete={(profileId) =>
+          // A deleted profile's parked tabs are still live surfaces holding
+          // its lock — close them first (the backend refuses a locked profile).
+          void closeProfileTabs(profileId).then(() => deleteProfile(profileId))
+        }
       />
       <BrowserTabBar
         tabs={tabs}

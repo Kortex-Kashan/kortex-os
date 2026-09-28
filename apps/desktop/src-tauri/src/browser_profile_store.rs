@@ -1047,6 +1047,21 @@ impl BrowserProfileStore {
         tenant_id: &str,
         profile_id: &BrowserProfileId,
     ) -> Result<(), BrowserProfileError> {
+        self.delete_profile_with_retry(
+            tenant_id,
+            profile_id,
+            DELETE_RENAME_ATTEMPTS,
+            DELETE_RENAME_RETRY_DELAY,
+        )
+    }
+
+    fn delete_profile_with_retry(
+        &self,
+        tenant_id: &str,
+        profile_id: &BrowserProfileId,
+        rename_attempts: u32,
+        rename_retry_delay: std::time::Duration,
+    ) -> Result<(), BrowserProfileError> {
         let dir = self.profile_dir(tenant_id, profile_id)?;
         if !dir.is_dir() {
             return Err(BrowserProfileError::ProfileNotFound {
@@ -1066,9 +1081,10 @@ impl BrowserProfileStore {
         // delete below must never leave this profile listed as `Active`
         // again.
         let metadata_path = dir.join("profile.json");
+        let mut marked_pending_deletion = false;
         if let Ok(mut metadata) = read_metadata(&metadata_path, profile_id) {
             metadata.state = ProfileRecordState::PendingDeletion;
-            let _ = write_metadata_atomically(&metadata_path, &metadata);
+            marked_pending_deletion = write_metadata_atomically(&metadata_path, &metadata).is_ok();
         }
 
         // Rename-then-remove: even if the recursive remove below fails
@@ -1084,11 +1100,23 @@ impl BrowserProfileStore {
                 .unwrap_or("profile"),
             unix_now()
         );
-        let removal_target = match std::fs::rename(&dir, dir.with_file_name(&quarantined_name)) {
-            Ok(()) => dir.with_file_name(&quarantined_name),
-            Err(_) => dir,
-        };
-        let _ = std::fs::remove_dir_all(&removal_target);
+        //
+        // The rename is retried for a bounded moment: a profile deleted right
+        // after its last tab closed is typically still held open by that
+        // WebView2 environment's browser process, which shuts down
+        // asynchronously after its last surface.
+        let quarantined = dir.with_file_name(&quarantined_name);
+        if rename_when_released(&dir, &quarantined, rename_attempts, rename_retry_delay) {
+            let _ = std::fs::remove_dir_all(&quarantined);
+        } else if marked_pending_deletion {
+            // Still in use: keep the PendingDeletion `profile.json` in place —
+            // it is what keeps this profile out of `list_profiles` (removing
+            // it would resurface the remnant as a "corrupted" profile) — and
+            // remove only the browsing data, best effort.
+            let _ = std::fs::remove_dir_all(dir.join("webview2-data"));
+        } else {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         record_audit_event(
             &self.profiles_root,
             ProfileAuditEvent::ProfileDeleted,
@@ -1182,39 +1210,142 @@ pub struct BrowserProfileStoreState(pub Arc<BrowserProfileStore>);
 /// otherwise-independent subsystems.
 #[derive(Default)]
 pub struct ActiveProfileSurfaces {
-    bindings: Mutex<
-        std::collections::HashMap<
-            crate::browser_runtime::BrowserSurfaceId,
-            (String, BrowserProfileId),
-        >,
+    inner: Mutex<ActiveProfileSurfacesInner>,
+}
+
+/// A profile's lock is shared by every surface open against it (and by any
+/// `browser_create_surface` still between `open_profile` and `record`):
+/// closing ONE of a profile's tabs must never release the lock while another
+/// of its tabs is still alive. `pending_opens` counts those in-flight
+/// creations per `(tenant, profile)`.
+#[derive(Default)]
+struct ActiveProfileSurfacesInner {
+    bindings: std::collections::HashMap<
+        crate::browser_runtime::BrowserSurfaceId,
+        (String, BrowserProfileId),
     >,
+    pending_opens: std::collections::HashMap<(String, BrowserProfileId), usize>,
+    /// The Browser app's currently ACTIVE profile, as last declared by the
+    /// trusted main webview (`browser_set_active_profile`). Parked tabs of
+    /// every other profile stay alive but are never a Browser Grant target
+    /// (`browser_grant::execute_granted_action`). `None` — nothing declared
+    /// yet, or cleared — makes no profile eligible.
+    active_profile: Option<(String, BrowserProfileId)>,
+}
+
+impl ActiveProfileSurfacesInner {
+    fn profile_in_use(&self, tenant_id: &str, profile_id: &BrowserProfileId) -> bool {
+        self.bindings
+            .values()
+            .any(|(tenant, profile)| tenant == tenant_id && profile == profile_id)
+            || self
+                .pending_opens
+                .get(&(tenant_id.to_string(), profile_id.clone()))
+                .is_some_and(|count| *count > 0)
+    }
+
+    fn finish_pending_open(&mut self, tenant_id: &str, profile_id: &BrowserProfileId) {
+        let key = (tenant_id.to_string(), profile_id.clone());
+        if let Some(count) = self.pending_opens.get_mut(&key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.pending_opens.remove(&key);
+            }
+        }
+    }
 }
 
 impl ActiveProfileSurfaces {
+    /// Marks a `browser_create_surface` as in flight for this profile BEFORE
+    /// it calls `open_profile`, so a concurrent `release_surface` of the same
+    /// profile's last other tab does not release the lock this creation is
+    /// about to rely on. Always paired with `record`, `cancel_open`, or
+    /// `abandon_open`.
+    pub fn begin_open(&self, tenant_id: &str, profile_id: &BrowserProfileId) {
+        let mut inner = self.inner.lock().unwrap();
+        *inner
+            .pending_opens
+            .entry((tenant_id.to_string(), profile_id.clone()))
+            .or_insert(0) += 1;
+    }
+
+    /// `open_profile` itself failed: nothing was acquired by this creation,
+    /// so nothing is released (the lock may belong to another process).
+    pub fn cancel_open(&self, tenant_id: &str, profile_id: &BrowserProfileId) {
+        self.inner
+            .lock()
+            .unwrap()
+            .finish_pending_open(tenant_id, profile_id);
+    }
+
+    /// `open_profile` succeeded but the surface was never created: runs
+    /// `release` (the profile's `close_profile`) only if no other surface or
+    /// in-flight creation still uses the profile. `release` runs under this
+    /// state's lock, so it cannot interleave with a concurrent `begin_open`.
+    pub fn abandon_open(
+        &self,
+        tenant_id: &str,
+        profile_id: &BrowserProfileId,
+        release: impl FnOnce(&str, &BrowserProfileId),
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.finish_pending_open(tenant_id, profile_id);
+        if !inner.profile_in_use(tenant_id, profile_id) {
+            release(tenant_id, profile_id);
+        }
+    }
+
+    /// Declares the Browser app's active profile for `tenant_id` (`None`
+    /// clears it). The tenant is always the authoritative one resolved by
+    /// the command layer, never a caller-supplied value.
+    pub fn set_active_profile(&self, tenant_id: String, profile_id: Option<BrowserProfileId>) {
+        self.inner.lock().unwrap().active_profile = profile_id.map(|id| (tenant_id, id));
+    }
+
+    pub fn clear_active_profile(&self) {
+        self.inner.lock().unwrap().active_profile = None;
+    }
+
+    /// `true` only if `(tenant_id, profile_id)` is exactly the declared
+    /// active profile — fail closed when nothing is declared.
+    pub fn is_active_profile(&self, tenant_id: &str, profile_id: &BrowserProfileId) -> bool {
+        matches!(
+            &self.inner.lock().unwrap().active_profile,
+            Some((tenant, profile)) if tenant == tenant_id && profile == profile_id
+        )
+    }
+
     pub fn record(
         &self,
         surface_id: crate::browser_runtime::BrowserSurfaceId,
         tenant_id: String,
         profile_id: BrowserProfileId,
     ) {
-        self.bindings
-            .lock()
-            .unwrap()
-            .insert(surface_id, (tenant_id, profile_id));
+        let mut inner = self.inner.lock().unwrap();
+        inner.finish_pending_open(&tenant_id, &profile_id);
+        inner.bindings.insert(surface_id, (tenant_id, profile_id));
     }
 
-    /// Removes and returns the binding, if any — `browser_destroy` uses
-    /// this to know which profile to `close_profile` after the surface
-    /// itself is gone. A surface with no recorded binding simply has
-    /// nothing to release (never panics).
-    pub fn take(
+    /// Removes and returns the surface's binding, if any, and — only when it
+    /// was that profile's LAST live surface (and no creation is in flight) —
+    /// runs `release` (the profile's `close_profile`) under this state's
+    /// lock. `browser_destroy` uses this after the surface itself is gone. A
+    /// surface with no recorded binding simply has nothing to release (never
+    /// panics).
+    pub fn release_surface(
         &self,
         surface_id: &crate::browser_runtime::BrowserSurfaceId,
+        release: impl FnOnce(&str, &BrowserProfileId),
     ) -> Option<(String, BrowserProfileId)> {
-        self.bindings.lock().unwrap().remove(surface_id)
+        let mut inner = self.inner.lock().unwrap();
+        let (tenant_id, profile_id) = inner.bindings.remove(surface_id)?;
+        if !inner.profile_in_use(&tenant_id, &profile_id) {
+            release(&tenant_id, &profile_id);
+        }
+        Some((tenant_id, profile_id))
     }
 
-    /// Non-destructive counterpart to `take` — Browser-B5.4's redeem
+    /// Non-destructive counterpart to `release_surface` — Browser-B5.4's redeem
     /// command (`browser_execute_granted_action`, `lib.rs`) needs to
     /// verify a Capability Execution Grant's claimed `tenant_id`/
     /// `browser_profile_id` against this surface's real, live binding
@@ -1224,7 +1355,7 @@ impl ActiveProfileSurfaces {
         &self,
         surface_id: &crate::browser_runtime::BrowserSurfaceId,
     ) -> Option<(String, BrowserProfileId)> {
-        self.bindings.lock().unwrap().get(surface_id).cloned()
+        self.inner.lock().unwrap().bindings.get(surface_id).cloned()
     }
 
     /// Every currently-tracked binding, removing them all — used by the
@@ -1233,12 +1364,15 @@ impl ActiveProfileSurfaces {
     /// `BrowserRuntime::destroy_all`'s own existing "no orphaned browser
     /// runtime" guarantee.
     pub fn take_all(&self) -> Vec<(String, BrowserProfileId)> {
-        self.bindings
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, v)| v)
-            .collect()
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending_opens.clear();
+        inner.active_profile = None;
+        // One entry per profile: a profile with two open tabs is closed once.
+        let mut profiles: Vec<(String, BrowserProfileId)> =
+            inner.bindings.drain().map(|(_, binding)| binding).collect();
+        profiles.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+        profiles.dedup();
+        profiles
     }
 }
 
@@ -1296,6 +1430,57 @@ pub async fn browser_rename_profile(
         .rename_profile(&tenant_id, &profile_id, &display_name)
 }
 
+/// How long `delete_profile` waits for a just-closed profile's directory to
+/// be released (WebView2's browser process outlives the last surface by a
+/// moment): 20 attempts, 150 ms apart — about 3 s at most.
+const DELETE_RENAME_ATTEMPTS: u32 = 20;
+const DELETE_RENAME_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+fn rename_when_released(from: &Path, to: &Path, attempts: u32, delay: std::time::Duration) -> bool {
+    for attempt in 0..attempts.max(1) {
+        if std::fs::rename(from, to).is_ok() {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    false
+}
+
+/// The Browser app declares which profile it is SHOWING; only that
+/// profile's surfaces are eligible Browser Grant targets. The tenant is
+/// resolved here (OD-B7), never accepted from the caller. Fails closed: if
+/// no tenant is available, the active profile is cleared and nothing is
+/// eligible. Synchronous, so
+/// declarations are applied in the order the webview sends them.
+#[tauri::command]
+pub fn browser_set_active_profile(
+    state: tauri::State<'_, BrowserProfileStoreState>,
+    bindings: tauri::State<'_, ActiveProfileSurfaces>,
+    ipc_state: tauri::State<'_, Arc<crate::ipc::IpcClientState>>,
+    profile_id: Option<BrowserProfileId>,
+) -> Result<(), BrowserProfileError> {
+    let tenant = resolve_tenant_or_deny(&ipc_state, &state.0, "browser_set_active_profile");
+    declare_active_profile(&bindings, tenant, profile_id)
+}
+
+pub(crate) fn declare_active_profile(
+    bindings: &ActiveProfileSurfaces,
+    tenant: Result<String, BrowserProfileError>,
+    profile_id: Option<BrowserProfileId>,
+) -> Result<(), BrowserProfileError> {
+    let tenant_id = match tenant {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => {
+            bindings.clear_active_profile();
+            return Err(error);
+        }
+    };
+    bindings.set_active_profile(tenant_id, profile_id);
+    Ok(())
+}
+
 /// Refuses (via the store's own `ProfileLocked` check) while a live
 /// process holds the profile open — never races an open surface out from
 /// under it.
@@ -1306,7 +1491,14 @@ pub async fn browser_delete_profile(
     profile_id: BrowserProfileId,
 ) -> Result<(), BrowserProfileError> {
     let tenant_id = resolve_tenant_or_deny(&ipc_state, &state.0, "browser_delete_profile")?;
-    state.0.delete_profile(&tenant_id, &profile_id)
+    // May wait (bounded) for WebView2 to release the directory — off the
+    // async runtime's worker threads.
+    let store = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || store.delete_profile(&tenant_id, &profile_id))
+        .await
+        .map_err(|e| BrowserProfileError::Platform {
+            message: format!("profile deletion did not complete: {e}"),
+        })?
 }
 
 #[cfg(test)]
@@ -1634,6 +1826,248 @@ mod tests {
             Err(BrowserProfileError::ProfileCorrupted { .. })
         ));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn availability_of(store: &BrowserProfileStore, id: &BrowserProfileId) -> ProfileAvailability {
+        store
+            .list_profiles("tenant-1")
+            .unwrap()
+            .into_iter()
+            .find(|profile| &profile.profile_id == id)
+            .unwrap()
+            .availability
+    }
+
+    fn surface(label: &str) -> crate::browser_runtime::BrowserSurfaceId {
+        crate::browser_runtime::BrowserSurfaceId::from_string(label.to_string())
+    }
+
+    /// Opens a tab the way `browser_create_surface` does.
+    fn open_tab(
+        store: &BrowserProfileStore,
+        bindings: &ActiveProfileSurfaces,
+        id: &BrowserProfileId,
+        label: &str,
+    ) {
+        bindings.begin_open("tenant-1", id);
+        store.open_profile("tenant-1", id).unwrap();
+        bindings.record(surface(label), "tenant-1".to_string(), id.clone());
+    }
+
+    /// Closes a tab the way `browser_destroy` does.
+    fn close_tab(store: &BrowserProfileStore, bindings: &ActiveProfileSurfaces, label: &str) {
+        bindings.release_surface(&surface(label), |tenant, profile| {
+            store.close_profile(tenant, profile).unwrap();
+        });
+    }
+
+    #[test]
+    fn closing_one_of_two_tabs_keeps_the_profile_lock_until_the_last_closes() {
+        let (store, _root) = test_store();
+        let bindings = ActiveProfileSurfaces::default();
+        let id = store.create_profile("tenant-1", "Work").unwrap();
+
+        open_tab(&store, &bindings, &id, "tab-1");
+        open_tab(&store, &bindings, &id, "tab-2");
+        assert!(matches!(
+            availability_of(&store, &id),
+            ProfileAvailability::Locked
+        ));
+
+        close_tab(&store, &bindings, "tab-1");
+        assert!(
+            matches!(availability_of(&store, &id), ProfileAvailability::Locked),
+            "the profile's other tab is still alive"
+        );
+        assert!(store.delete_profile("tenant-1", &id).is_err());
+
+        close_tab(&store, &bindings, "tab-2");
+        assert!(matches!(
+            availability_of(&store, &id),
+            ProfileAvailability::Available
+        ));
+    }
+
+    #[test]
+    fn closing_a_tab_of_one_profile_never_releases_another_profiles_lock() {
+        let (store, _root) = test_store();
+        let bindings = ActiveProfileSurfaces::default();
+        let first = store.create_profile("tenant-1", "First").unwrap();
+        let second = store.create_profile("tenant-1", "Second").unwrap();
+
+        open_tab(&store, &bindings, &first, "first-tab");
+        open_tab(&store, &bindings, &second, "second-tab");
+        close_tab(&store, &bindings, "first-tab");
+
+        assert!(matches!(
+            availability_of(&store, &first),
+            ProfileAvailability::Available
+        ));
+        assert!(matches!(
+            availability_of(&store, &second),
+            ProfileAvailability::Locked
+        ));
+    }
+
+    #[test]
+    fn an_in_flight_creation_keeps_the_lock_when_the_last_other_tab_closes() {
+        let (store, _root) = test_store();
+        let bindings = ActiveProfileSurfaces::default();
+        let id = store.create_profile("tenant-1", "Work").unwrap();
+        open_tab(&store, &bindings, &id, "tab-1");
+
+        // A second tab's creation has begun (between `open_profile` and
+        // `record`) when the first tab closes.
+        bindings.begin_open("tenant-1", &id);
+        store.open_profile("tenant-1", &id).unwrap();
+        close_tab(&store, &bindings, "tab-1");
+        assert!(matches!(
+            availability_of(&store, &id),
+            ProfileAvailability::Locked
+        ));
+
+        // ...and that creation then fails: now nothing uses the profile.
+        bindings.abandon_open("tenant-1", &id, |tenant, profile| {
+            store.close_profile(tenant, profile).unwrap();
+        });
+        assert!(matches!(
+            availability_of(&store, &id),
+            ProfileAvailability::Available
+        ));
+    }
+
+    #[test]
+    fn a_failed_open_releases_nothing() {
+        let (store, _root) = test_store();
+        let bindings = ActiveProfileSurfaces::default();
+        let id = store.create_profile("tenant-1", "Work").unwrap();
+        open_tab(&store, &bindings, &id, "tab-1");
+
+        bindings.begin_open("tenant-1", &id);
+        bindings.cancel_open("tenant-1", &id);
+        assert!(matches!(
+            availability_of(&store, &id),
+            ProfileAvailability::Locked
+        ));
+
+        close_tab(&store, &bindings, "tab-1");
+        assert!(matches!(
+            availability_of(&store, &id),
+            ProfileAvailability::Available
+        ));
+    }
+
+    #[test]
+    fn take_all_returns_each_bound_profile_once() {
+        let (store, _root) = test_store();
+        let bindings = ActiveProfileSurfaces::default();
+        let first = store.create_profile("tenant-1", "First").unwrap();
+        let second = store.create_profile("tenant-1", "Second").unwrap();
+        open_tab(&store, &bindings, &first, "a");
+        open_tab(&store, &bindings, &first, "b");
+        open_tab(&store, &bindings, &second, "c");
+
+        let mut released = bindings.take_all();
+        released.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
+        let mut expected = vec![
+            ("tenant-1".to_string(), first.clone()),
+            ("tenant-1".to_string(), second.clone()),
+        ];
+        expected.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
+        assert_eq!(released, expected);
+        assert!(bindings.take_all().is_empty());
+    }
+
+    /// Holds a file inside the profile's browsing data open WITHOUT
+    /// `FILE_SHARE_DELETE` — what a still-running WebView2 browser process
+    /// does — so the profile directory cannot be renamed until it is dropped.
+    #[cfg(windows)]
+    fn hold_browsing_data(store: &BrowserProfileStore, id: &BrowserProfileId) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        let data = store.open_profile("tenant-1", id).unwrap();
+        store.close_profile("tenant-1", id).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .share_mode(0x1) // FILE_SHARE_READ only
+            .open(data.join("Local State"))
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_waits_for_a_briefly_held_directory_and_removes_it() {
+        let (store, root) = test_store();
+        let id = store.create_profile("tenant-1", "Scratch").unwrap();
+        let held = hold_browsing_data(&store, &id);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+        });
+
+        store
+            .delete_profile_with_retry("tenant-1", &id, 20, std::time::Duration::from_millis(50))
+            .unwrap();
+        release.join().unwrap();
+
+        assert!(store.list_profiles("tenant-1").unwrap().is_empty());
+        let remaining: Vec<_> = std::fs::read_dir(store.tenant_dir("tenant-1").unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(remaining.is_empty(), "left behind: {remaining:?}");
+        let _ = root;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_still_held_after_the_retries_stays_hidden_never_corrupted() {
+        let (store, _root) = test_store();
+        let id = store.create_profile("tenant-1", "Scratch").unwrap();
+        let held = hold_browsing_data(&store, &id);
+
+        store
+            .delete_profile_with_retry("tenant-1", &id, 3, std::time::Duration::from_millis(10))
+            .unwrap();
+
+        // Not listed at all — in particular never as a "(corrupted profile)".
+        assert!(store.list_profiles("tenant-1").unwrap().is_empty());
+        assert!(matches!(
+            store.open_profile("tenant-1", &id),
+            Err(BrowserProfileError::ProfileNotFound { .. })
+        ));
+        drop(held);
+    }
+
+    #[test]
+    fn declaring_the_active_profile_uses_the_resolved_tenant_and_fails_closed() {
+        let bindings = ActiveProfileSurfaces::default();
+        let work = BrowserProfileId::from_raw_for_test("profile-work");
+
+        declare_active_profile(&bindings, Ok("tenant-1".to_string()), Some(work.clone())).unwrap();
+        assert!(bindings.is_active_profile("tenant-1", &work));
+        assert!(!bindings.is_active_profile("tenant-2", &work));
+
+        // No authenticated tenant: refused and cleared.
+        declare_active_profile(&bindings, Ok("tenant-1".to_string()), Some(work.clone())).unwrap();
+        assert!(declare_active_profile(
+            &bindings,
+            Err(BrowserProfileError::ProfileIdentityUnavailable),
+            Some(work.clone())
+        )
+        .is_err());
+        assert!(!bindings.is_active_profile("tenant-1", &work));
+
+        // `None` clears; app shutdown clears too.
+        declare_active_profile(&bindings, Ok("tenant-1".to_string()), Some(work.clone())).unwrap();
+        declare_active_profile(&bindings, Ok("tenant-1".to_string()), None).unwrap();
+        assert!(!bindings.is_active_profile("tenant-1", &work));
+        declare_active_profile(&bindings, Ok("tenant-1".to_string()), Some(work.clone())).unwrap();
+        bindings.take_all();
+        assert!(!bindings.is_active_profile("tenant-1", &work));
     }
 
     #[test]
