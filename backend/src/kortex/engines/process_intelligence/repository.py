@@ -288,11 +288,11 @@ class TenantScopedProcessAnalyticsRepository(IProcessAnalyticsRepository):
             )
             res_app = await session.execute(stmt_approvals)
             approval_step_waits: dict[str, list[float]] = defaultdict(list)
-            for row in res_app.all():
-                if row.step_id and row.created_at and row.updated_at:
-                    wait_ms = (row.updated_at - row.created_at).total_seconds() * 1000.0
+            for app_row in res_app.all():
+                if app_row.step_id and app_row.created_at and app_row.updated_at:
+                    wait_ms = (app_row.updated_at - app_row.created_at).total_seconds() * 1000.0
                     if wait_ms >= 0.0:
-                        approval_step_waits[row.step_id].append(wait_ms)
+                        approval_step_waits[app_row.step_id].append(wait_ms)
 
             approval_avg_map: dict[str, float] = {}
             for step_key, waits in approval_step_waits.items():
