@@ -227,6 +227,14 @@ describe("renewSession", () => {
     renewStoredSessionMock.mockRejectedValueOnce(new Error("tauri ipc failure"));
     expect(await renewSession()).toBe("BACKEND_UNAVAILABLE");
   });
+
+  it("returns INVALID when renewStoredSession resolves to a malformed or non-envelope response", async () => {
+    renewStoredSessionMock.mockResolvedValueOnce(false as unknown as IpcResultEnvelope);
+    expect(await renewSession()).toBe("INVALID");
+
+    renewStoredSessionMock.mockResolvedValueOnce({ status: "FAILURE" } as unknown as IpcResultEnvelope);
+    expect(await renewSession()).toBe("INVALID");
+  });
 });
 
 describe("requestPasswordReset", () => {

@@ -62,7 +62,7 @@ describe("App", () => {
       if (command === "has_session") {
         return Promise.resolve(true);
       }
-      if (command === "invoke_capability") {
+      if (command === "invoke_capability" || command === "refresh_session") {
         return Promise.resolve({
           requestId: "req-1",
           correlationId: "corr-1",

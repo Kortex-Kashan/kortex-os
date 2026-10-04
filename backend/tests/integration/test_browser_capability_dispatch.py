@@ -275,7 +275,9 @@ async def test_wrong_tenant_context_does_not_grant_cross_tenant_access(env: _Env
     # ABAC denies: the request's own `resource_tenant_id` context defaults
     # to tenant A, but the authenticated principal belongs to tenant B.
     with pytest.raises(AuthorizationDeniedError):
-        await _invoke(env, NAVIGATE_CAPABILITY, token, context_tenant=_TENANT_A, target=_target(), url="https://example.com")
+        await _invoke(
+            env, NAVIGATE_CAPABILITY, token, context_tenant=_TENANT_A, target=_target(), url="https://example.com"
+        )
 
 
 # -- Authorized success: every capability mints a grant, none execute -----------

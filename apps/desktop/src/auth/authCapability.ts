@@ -183,10 +183,10 @@ export async function renewSession(): Promise<SessionCheckResult> {
     return "BACKEND_UNAVAILABLE";
   }
 
-  if (envelope.status === "SUCCESS") {
+  if (envelope?.status === "SUCCESS") {
     return "VALID";
   }
-  const category = envelope.errors[0]?.category;
+  const category = envelope?.errors?.[0]?.category;
   if (category === "SERVICE_UNAVAILABLE" || category === "TIMEOUT_EXCEEDED") {
     return "BACKEND_UNAVAILABLE";
   }
