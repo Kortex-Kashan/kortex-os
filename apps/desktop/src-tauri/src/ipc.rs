@@ -236,6 +236,13 @@ pub struct IpcClientState {
     /// stale, previously-cached tenant_id behind — see
     /// `forward_capability_request`'s capture logic.
     tenant_id: Mutex<Option<String>>,
+    /// Runs when the session that owns this process's Browser state ends:
+    /// on logout, and when a freshly minted token belongs to a DIFFERENT
+    /// tenant (or to none). `lib.rs` wires it to destroy every live Browser
+    /// surface and release every profile lock, so a Browser tab can never
+    /// outlive the session — or reach the tenant — that opened it. Set once
+    /// at startup; `None` (no hook) in unit tests that don't need one.
+    session_boundary_hook: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl IpcClientState {
@@ -247,6 +254,19 @@ impl IpcClientState {
             base_url,
             token_store,
             tenant_id: Mutex::new(None),
+            session_boundary_hook: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Installs the session-boundary hook (see the field's doc comment).
+    /// Only the first call takes effect.
+    pub fn set_session_boundary_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.session_boundary_hook.set(hook);
+    }
+
+    fn session_boundary(&self) {
+        if let Some(hook) = self.session_boundary_hook.get() {
+            hook();
         }
     }
 
@@ -276,7 +296,20 @@ impl IpcClientState {
     }
 
     fn set_tenant_id(&self, tenant_id: Option<String>) {
-        *self.tenant_id.lock().unwrap() = tenant_id;
+        // A token minted for a DIFFERENT tenant — or one whose tenant can't
+        // be established — ends the previous tenant's session in this
+        // process, even without a logout: its Browser state must not carry
+        // over. The first capture (from `None`) and a same-tenant refresh
+        // end nothing.
+        let ended = {
+            let mut current = self.tenant_id.lock().unwrap();
+            let ended = current.is_some() && *current != tenant_id;
+            *current = tenant_id;
+            ended
+        };
+        if ended {
+            self.session_boundary();
+        }
     }
 
     pub fn clear_token(&self) {
@@ -287,7 +320,10 @@ impl IpcClientState {
         // from. Every existing call site of `clear_token` is already a
         // logout/session-end point (`logout` below), so this adds no new
         // behavior beyond what "the session is over" already implies.
-        self.set_tenant_id(None);
+        *self.tenant_id.lock().unwrap() = None;
+        // Logout always ends the session, whatever tenant (if any) was
+        // cached — the Browser state it owns ends with it.
+        self.session_boundary();
     }
 }
 
@@ -742,7 +778,121 @@ mod tests {
             base_url,
             token_store,
             tenant_id: Mutex::new(None),
+            session_boundary_hook: std::sync::OnceLock::new(),
         }
+    }
+
+    /// A state whose session-boundary hook counts its invocations.
+    fn state_counting_boundaries(
+        base_url: String,
+        token_store: Arc<dyn TokenStore>,
+    ) -> (IpcClientState, Arc<std::sync::atomic::AtomicUsize>) {
+        let state = state_with(base_url, token_store);
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = count.clone();
+        state.set_session_boundary_hook(Box::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        (state, count)
+    }
+
+    const LOGIN_ALPHA: &str = r#"{"requestId":"req-1","correlationId":"c-1","status":"SUCCESS","payload":{"result":{"principal_id":"alice","principal_type":"USER","tenant_id":"tenant-alpha","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"blob-1"}"#;
+    const REFRESH_ALPHA: &str = r#"{"requestId":"req-2","correlationId":"c-2","status":"SUCCESS","payload":{"result":{"principal_id":"alice","principal_type":"USER","tenant_id":"tenant-alpha","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"blob-2"}"#;
+    const LOGIN_BETA: &str = r#"{"requestId":"req-3","correlationId":"c-3","status":"SUCCESS","payload":{"result":{"principal_id":"bob","principal_type":"USER","tenant_id":"tenant-beta","roles":[],"attributes":{}}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"blob-3"}"#;
+    const MINT_WITHOUT_TENANT: &str = r#"{"requestId":"req-4","correlationId":"c-4","status":"SUCCESS","payload":{"result":{"principal_id":"alice"}},"errors":[],"warnings":[],"executionDurationMs":1.0,"sessionToken":"blob-4"}"#;
+
+    // Browser lifecycle hardening (Issue 1): a session restored at startup
+    // is renewed through `auth.refresh`; the refreshed principal is what
+    // gives this process its authoritative tenant.
+    #[tokio::test]
+    async fn a_refresh_captures_the_tenant_a_restored_session_never_had() {
+        let server = start_recording_server(REFRESH_ALPHA).await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        store.store("expired-access-token");
+        store.store_refresh("the-refresh-token");
+        let state = state_with(server.base_url, store.clone());
+        assert_eq!(
+            state.current_tenant_id(),
+            None,
+            "a restored session starts without one"
+        );
+
+        let envelope = refresh_session_impl(&state).await;
+
+        assert_eq!(envelope.status, "SUCCESS");
+        assert_eq!(state.current_tenant_id(), Some("tenant-alpha".to_string()));
+        assert_eq!(store.load(), Some("blob-2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_refresh_captures_no_tenant() {
+        let server = start_recording_server_with_status(
+            r#"{"requestId":"req-1","correlationId":"c-1","status":"FAILURE","payload":null,"errors":[{"category":"PERMISSION_DENIED","message":"Refresh token is expired.","correlationId":"c-1"}],"warnings":[],"executionDurationMs":1.0}"#,
+            401,
+        )
+        .await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        store.store("expired-access-token");
+        store.store_refresh("an-expired-refresh-token");
+        let state = state_with(server.base_url, store);
+
+        let envelope = refresh_session_impl(&state).await;
+
+        assert_eq!(envelope.status, "FAILURE");
+        assert_eq!(state.current_tenant_id(), None);
+    }
+
+    #[tokio::test]
+    async fn logout_ends_the_browser_session_exactly_once() {
+        let server = start_recording_server(LOGIN_ALPHA).await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let (state, boundaries) = state_counting_boundaries(server.base_url, store);
+        let _ = forward_capability_request(&state, sample_request()).await;
+        assert_eq!(boundaries.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        state.clear_token();
+
+        assert_eq!(boundaries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(state.current_tenant_id(), None);
+    }
+
+    #[tokio::test]
+    async fn a_same_tenant_refresh_does_not_end_the_browser_session() {
+        let server = start_sequenced_recording_server(vec![LOGIN_ALPHA, REFRESH_ALPHA]).await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let (state, boundaries) = state_counting_boundaries(server.base_url, store);
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(boundaries.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(state.current_tenant_id(), Some("tenant-alpha".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_token_for_another_tenant_ends_the_previous_browser_session() {
+        let server = start_sequenced_recording_server(vec![LOGIN_ALPHA, LOGIN_BETA]).await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let (state, boundaries) = state_counting_boundaries(server.base_url, store);
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(boundaries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(state.current_tenant_id(), Some("tenant-beta".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_token_whose_tenant_cannot_be_established_ends_the_browser_session() {
+        let server = start_sequenced_recording_server(vec![LOGIN_ALPHA, MINT_WITHOUT_TENANT]).await;
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryTokenStore::default());
+        let (state, boundaries) = state_counting_boundaries(server.base_url, store);
+
+        let _ = forward_capability_request(&state, sample_request()).await;
+        let _ = forward_capability_request(&state, sample_request()).await;
+
+        assert_eq!(boundaries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(state.current_tenant_id(), None);
     }
 
     #[tokio::test]

@@ -207,6 +207,17 @@ pub fn run() {
             }
             app.manage(ActiveProfileSurfaces::default());
 
+            // Browser lifecycle hardening: Browser tabs live as long as the
+            // signed-in session, not as long as the Browser view — so the
+            // session's end (logout, or a token for another tenant) must
+            // tear every one of them down natively, whatever the webview
+            // does. Fail closed: this never depends on the frontend.
+            let session_end_handle = app.handle().clone();
+            app.state::<Arc<IpcClientState>>()
+                .set_session_boundary_hook(Box::new(move || {
+                    teardown_browser_session(&session_end_handle)
+                }));
+
             // Browser-B5.4: the AI-only redeem command's own state —
             // independent of anything B4's WebView2RuntimeAdapter owns.
             // `GrantVerificationKeyCache`/`RedeemedGrantTracker`/
@@ -330,6 +341,20 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// Ends every piece of live Browser state the signed-in session owns: every
+/// surface (parked ones included) and every profile lock, which also clears
+/// the active-profile declaration Browser Grants are checked against
+/// (`ActiveProfileSurfaces::take_all`). Run at the session boundary
+/// (`IpcClientState::set_session_boundary_hook`) — the same teardown app
+/// shutdown already performs, so no Browser tab survives into another
+/// session. Persistent profile data on disk is untouched.
+fn teardown_browser_session(app_handle: &tauri::AppHandle) {
+    if let Some(state) = app_handle.try_state::<BrowserRuntimeState>() {
+        state.0.destroy_all();
+    }
+    release_all_profile_locks(app_handle);
 }
 
 /// Releases every profile lock any surface this process ever created still

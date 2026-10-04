@@ -113,8 +113,8 @@ function renderAuth(inactivityOptions?: UseInactivityLogoutOptions) {
 
 beforeEach(() => {
   // Default: backend immediately ready, already bootstrapped — preserves
-  // every pre-M7.1 test's expectations about the OLD single-step
-  // hasStoredSession/checkStoredSession flow. Individual tests override
+  // every pre-M7.1 test's expectations about the single-step
+  // hasStoredSession -> renewSession flow. Individual tests override
   // this to exercise the STARTING/BOOTSTRAP_REQUIRED/BACKEND_UNAVAILABLE
   // paths this mock now sits in front of.
   waitForBackendReadyMock.mockResolvedValue({ ready: true, bootstrapRequired: false });
@@ -181,22 +181,42 @@ describe("AuthProvider startup — session resolution (pre-M7.1 behavior, now ga
     renderAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED"));
+    expect(renewSessionMock).not.toHaveBeenCalled();
     expect(checkStoredSessionMock).not.toHaveBeenCalled();
   });
 
-  it("resolves directly to AUTHENTICATED for a valid stored session, restoring cached identity for display", async () => {
+  // Browser lifecycle hardening (Issue 1): only a freshly minted token
+  // carries the principal Rust takes the authoritative tenant from, so a
+  // restored session is renewed through the refresh path, never merely
+  // validated by the non-minting `checkStoredSession` ping.
+  it("restores a stored session by renewing it through the refresh path, restoring cached identity for display", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID");
+    renewSessionMock.mockResolvedValue("VALID");
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     renderAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED"));
     expect(screen.getByTestId("identity")).toHaveTextContent("alice");
+    expect(renewSessionMock).toHaveBeenCalledTimes(1);
+    expect(checkStoredSessionMock).not.toHaveBeenCalled();
   });
 
-  it("clears the invalid session and resolves to UNAUTHENTICATED for an invalid/expired stored token", async () => {
+  it("recovers a session whose access token expired while the app was closed, through the refresh token", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
+    // The expired access token alone would no longer validate ...
     checkStoredSessionMock.mockResolvedValue("INVALID");
+    // ... but the refresh token still renews it.
+    renewSessionMock.mockResolvedValue("VALID");
+    loadCachedIdentityMock.mockReturnValue(IDENTITY);
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED"));
+    expect(clearStoredSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed -- clears the session and requires a normal login -- when the refresh is rejected", async () => {
+    hasStoredSessionMock.mockResolvedValue(true);
+    renewSessionMock.mockResolvedValue("INVALID");
     renderAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED"));
@@ -209,12 +229,12 @@ describe("AuthProvider startup — session resolution (pre-M7.1 behavior, now ga
     renderAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("UNAUTHENTICATED"));
-    expect(checkStoredSessionMock).not.toHaveBeenCalled();
+    expect(renewSessionMock).not.toHaveBeenCalled();
   });
 
   it("resolves to BACKEND_UNAVAILABLE without clearing the session when the backend can't be reached mid-session-check", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("BACKEND_UNAVAILABLE");
+    renewSessionMock.mockResolvedValue("BACKEND_UNAVAILABLE");
     renderAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("BACKEND_UNAVAILABLE"));
@@ -378,7 +398,7 @@ describe("login", () => {
 describe("logout", () => {
   it("clears the session and cached identity, returning to UNAUTHENTICATED", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID");
+    renewSessionMock.mockResolvedValue("VALID");
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     renderAuth();
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED"));
@@ -394,7 +414,7 @@ describe("logout", () => {
 describe("401 vs 403 (Phase 7)", () => {
   it("a 401 on any authenticated call ends the session and forces re-authentication", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID");
+    renewSessionMock.mockResolvedValue("VALID");
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     renderAuth();
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED"));
@@ -408,7 +428,7 @@ describe("401 vs 403 (Phase 7)", () => {
 
   it("a 403 on any authenticated call never logs the user out", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID");
+    renewSessionMock.mockResolvedValue("VALID");
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     renderAuth();
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED"));
@@ -429,7 +449,7 @@ describe("Phase F — true one-hour inactivity logout", () => {
   // against the real clock is not retroactively adopted by switching to
   // fake timers afterward). Fake timers do not intercept microtask-based
   // Promise resolution, so the async startup chain
-  // (`waitForBackendReady`/`hasStoredSession`/`checkStoredSession`, all
+  // (`waitForBackendReady`/`hasStoredSession`/`renewSession`, all
   // pre-resolved mocks with no real delay) still resolves; `flushAsync`
   // below drains exactly that microtask queue in place of
   // testing-library's `waitFor` (which polls via a real `setTimeout` and
@@ -452,7 +472,6 @@ describe("Phase F — true one-hour inactivity logout", () => {
 
   async function renderAuthenticated(inactivityOptions: UseInactivityLogoutOptions) {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID");
     renewSessionMock.mockResolvedValue("VALID");
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     renderAuth(inactivityOptions);
@@ -531,20 +550,20 @@ describe("Phase F — true one-hour inactivity logout", () => {
     await flushAsync();
 
     expect(renewSessionMock.mock.calls.length).toBeGreaterThanOrEqual(renewCallsAtStart + 3);
-    // checkStoredSession is only ever the one-time startup validation ping
-    // -- heartbeats must never call it.
+    // checkStoredSession (the non-minting validation ping) is never part
+    // of the session lifecycle -- neither startup nor heartbeats call it.
     expect(checkStoredSessionMock.mock.calls.length).toBe(checkCallsAtStart);
     expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
   });
 
   it("logs out immediately if the heartbeat discovers the refresh token is already invalid", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID"); // startup check
+    renewSessionMock.mockResolvedValueOnce("VALID"); // the startup renewal
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     // No heartbeat has fired yet at this point (interval is 500ms, nothing
-    // has advanced the clock) -- checkStoredSession alone (the startup
-    // check) is what gets this to AUTHENTICATED, so renewSession need not
-    // be primed until just before the first heartbeat below.
+    // has advanced the clock) -- the startup renewal alone is what gets
+    // this to AUTHENTICATED; the refresh token is found invalid only at the
+    // first heartbeat below.
     renderAuth({ timeoutMs: 100_000, heartbeatIntervalMs: 500 });
     await flushAsync();
     expect(screen.getByTestId("status")).toHaveTextContent("AUTHENTICATED");
@@ -582,7 +601,6 @@ describe("Phase F — true one-hour inactivity logout", () => {
 
   it("production default (no inactivityOptions override) is exactly 60 minutes and does not fire early", async () => {
     hasStoredSessionMock.mockResolvedValue(true);
-    checkStoredSessionMock.mockResolvedValue("VALID");
     renewSessionMock.mockResolvedValue("VALID");
     loadCachedIdentityMock.mockReturnValue(IDENTITY);
     renderAuth(); // no override -- exercises the real INACTIVITY_TIMEOUT_MS/HEARTBEAT_INTERVAL_MS constants

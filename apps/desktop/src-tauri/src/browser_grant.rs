@@ -2466,6 +2466,37 @@ pub(crate) mod tests {
         assert!(audit_log(&harness).contains("inactive_profile"));
     }
 
+
+    // Browser lifecycle hardening: the session boundary (logout, or a token
+    // for another tenant) runs `lib.rs::teardown_browser_session`, whose
+    // binding half is `ActiveProfileSurfaces::take_all`. Afterwards nothing
+    // the previous session opened is a Grant target — not even a surface
+    // the runtime somehow still reports as live.
+    #[tokio::test]
+    async fn after_the_session_boundary_no_previous_surface_is_eligible() {
+        let harness = two_profile_harness();
+        activate(&harness, "tenant-a", "profile-1");
+        assert!(
+            navigate_on(&harness, "g-before", "surface-p1", "tenant-a", "profile-1")
+                .await
+                .is_ok()
+        );
+
+        harness.active_profile_surfaces.take_all();
+
+        for (grant_id, surface, profile) in [
+            ("g-after-1", "surface-p1", "profile-1"),
+            ("g-after-2", "surface-p2", "profile-2"),
+        ] {
+            let result = navigate_on(&harness, grant_id, surface, "tenant-a", profile).await;
+            assert!(matches!(
+                result,
+                Err(BrowserGrantExecutionError::ProfileNotFound)
+            ));
+        }
+        assert_eq!(harness.runtime_navigate_calls(), ["https://example.com/ai"]);
+    }
+
     #[tokio::test]
     async fn a_stale_surface_is_denied() {
         let harness = two_profile_harness();

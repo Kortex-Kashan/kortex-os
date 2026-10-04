@@ -1,6 +1,7 @@
 import { createHashRouter, type RouteObject } from "react-router-dom";
 import { AuthGate } from "@/auth/AuthGate";
 import { AuthProvider } from "@/auth/AuthProvider";
+import { BrowserSessionProvider } from "@/features/browser/BrowserSessionProvider";
 import { DesktopShell } from "@/shell/DesktopShell";
 import { buildApplicationRoutes } from "@/navigation/applicationRoutes";
 import { WorkspaceNavigationSync } from "@/navigation/navigationBridge";
@@ -85,7 +86,12 @@ export const router = createHashRouter([
               <PanelProvider initialPanels={DEFAULT_PANELS}>
                 <WorkspaceNavigationSync />
                 <SessionSync />
-                <DesktopShell />
+                {/* Browser tabs belong to the signed-in shell, not to the
+                    Browser view: they survive switching applications and end
+                    with sign-out (AuthGate unmounts this whole subtree). */}
+                <BrowserSessionProvider>
+                  <DesktopShell />
+                </BrowserSessionProvider>
               </PanelProvider>
             </WorkspaceProvider>
           </AuthGate>

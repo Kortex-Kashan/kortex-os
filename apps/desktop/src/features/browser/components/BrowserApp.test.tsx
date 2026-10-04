@@ -271,7 +271,9 @@ describe("BrowserApp", () => {
     notifyNavigated("browser-surface-1");
 
     expect(await screen.findByText("example.org")).toBeInTheDocument();
-    expect(screen.getByTestId("browser-address-input")).toHaveValue("https://example.org/");
+    // The address bar follows the refreshed URL in its own (passive)
+    // effect, one step after the tab label renders.
+    await waitFor(() => expect(screen.getByTestId("browser-address-input")).toHaveValue("https://example.org/"));
   });
 
   it("ignores a navigation event for a surface it does not track", async () => {

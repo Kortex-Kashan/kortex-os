@@ -66,5 +66,5 @@ commands.allow = ["browser_delete_profile"]
 
 [[permission]]
 identifier = "allow-browser-set-active-profile"
-description = "Allows the webview to declare which of the current tenant's own profiles the Browser app is showing. Only that profile's tabs are eligible Browser Grant targets; the tenant is resolved by the desktop, never supplied by the caller."
+description = "Allows the webview to declare which of the current tenant's own profiles the Browser app is showing. Only that profile's tabs are eligible Browser Grant targets; the tenant is resolved by the desktop, never supplied by the caller, and a provider-authentication profile is refused."
 commands.allow = ["browser_set_active_profile"]

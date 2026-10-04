@@ -9,6 +9,7 @@
     "allow-connect-event-stream",
     "allow-has-session",
     "allow-logout",
+    "allow-refresh-session",
     "allow-get-system-health",
     "shell:allow-open",
     "deep-link:default"

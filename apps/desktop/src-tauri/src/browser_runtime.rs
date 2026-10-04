@@ -1016,9 +1016,11 @@ impl<R: Runtime> BrowserRuntime for WebView2RuntimeAdapter<R> {
 
         let surface_id = BrowserSurfaceId::generate();
 
+        let data_directory =
+            crate::browser_profile_store::strip_verbatim_prefix(request.data_directory);
         let builder =
             tauri::webview::WebviewBuilder::new(surface_id.as_label(), WebviewUrl::External(url))
-                .data_directory(request.data_directory);
+                .data_directory(data_directory);
 
         let webview = self
             .window

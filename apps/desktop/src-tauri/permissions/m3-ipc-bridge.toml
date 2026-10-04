@@ -19,6 +19,11 @@ description = "Allows the webview to request logout (M4.1) — discards the held
 commands.allow = ["logout"]
 
 [[permission]]
+identifier = "allow-refresh-session"
+description = "Allows the webview to renew the session (Phase F): Rust exchanges the refresh token it holds for a fresh access token through kortex.security.auth.refresh. Takes no arguments and never returns or accepts a token value — the webview never handles either token."
+commands.allow = ["refresh_session"]
+
+[[permission]]
 identifier = "allow-get-system-health"
 description = "Allows the webview to fetch GET /health — intentionally unauthenticated backend/Kernel diagnostic data (phase3_desktop_architecture.md §11.1). Does not grant the webview any network capability itself — the request runs entirely in Rust, with no Authorization header attached and no session token read."
 commands.allow = ["get_system_health"]

@@ -4,7 +4,7 @@ import type { IpcResultEnvelope } from "@/ipc/client";
 import { connectEventStream } from "@/ipc/events";
 import { clearStoredSession, hasStoredSession } from "@/ipc/session";
 
-import { checkStoredSession, classifyIpcFailure, login as loginCapability, renewSession } from "./authCapability";
+import { classifyIpcFailure, login as loginCapability, renewSession } from "./authCapability";
 import type { AuthState, BootstrapCredentials, LoginCredentials } from "./authTypes";
 import { waitForBackendReady } from "./backendReadiness";
 import { bootstrapFirstAdmin } from "./bootstrapCapability";
@@ -184,7 +184,15 @@ export function AuthProvider({ children, inactivityOptions }: AuthProviderProps)
         return;
       }
 
-      const result = await checkStoredSession();
+      // A restored session is renewed through the existing refresh path
+      // (`kortex.security.auth.refresh`), not merely validated: only a
+      // freshly minted token carries the principal Rust takes the
+      // authoritative tenant from, so a validation-only check would leave
+      // the Browser without one until the user signed in again. Renewing
+      // also recovers an access token that expired while the app was
+      // closed; an invalid, expired or revoked refresh token fails closed
+      // below exactly as an invalid session always did.
+      const result = await renewSession();
       if (cancelled) {
         return;
       }

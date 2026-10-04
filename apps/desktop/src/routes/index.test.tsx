@@ -97,7 +97,10 @@ beforeEach(async () => {
     if (command === "get_system_health") {
       return Promise.resolve({ ok: true, statusCode: 200, body: { bootstrap_required: false } });
     }
-    if (command === "invoke_capability") {
+    // A stored session is restored by renewing it (`refresh_session`,
+    // `kortex.security.auth.refresh`) — answered here as a successful
+    // renewal, exactly like the capability call below.
+    if (command === "invoke_capability" || command === "refresh_session") {
       return Promise.resolve({
         requestId: "req-1",
         correlationId: "corr-1",

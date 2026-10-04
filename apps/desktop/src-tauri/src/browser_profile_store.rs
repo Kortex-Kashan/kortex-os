@@ -775,6 +775,34 @@ fn quarantine_legacy_default_profile(profiles_root: &Path) {
     }
 }
 
+/// Strips the Windows verbatim path prefix (`\\?\` or `\\?\UNC\`), if present.
+///
+/// On Windows, `std::fs::canonicalize` returns extended-length verbatim paths
+/// (e.g. `\\?\C:\path` or `\\?\UNC\server\share\path`). While Win32 file APIs
+/// accept verbatim paths, Chromium's SQLite-backed storage subsystems
+/// (notably `net::SQLitePersistentCookieStore`) fail to create or open database
+/// files when passed `\\?\` paths on Windows, silently degrading to an
+/// in-memory cookie jar where cookies never persist across process restarts.
+///
+/// Stripping the prefix restores standard Win32 path format for WebView2's
+/// user data directory, enabling SQLite database creation and full disk persistence.
+#[cfg(windows)]
+pub fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{}", rest))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest.to_string())
+    } else {
+        path
+    }
+}
+
+#[cfg(not(windows))]
+pub fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// Persistent, tenant-scoped browser profile storage. See this module's
 /// own doc comment for the boundary with `browser_runtime::BrowserRuntime`
 /// (surfaces) and the opaque-WebView2-data boundary.
@@ -845,9 +873,10 @@ impl BrowserProfileStore {
         tenant_id: &str,
         profile_id: &BrowserProfileId,
     ) -> Result<PathBuf, BrowserProfileError> {
-        Ok(self
+        let dir = self
             .profile_dir(tenant_id, profile_id)?
-            .join("webview2-data"))
+            .join("webview2-data");
+        Ok(strip_verbatim_prefix(dir))
     }
 
     /// Audits a `ProfileIdentityUnavailable` rejection (§ D23/OD-B7) — the
@@ -2529,6 +2558,47 @@ mod tests {
             );
         }
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+    #[test]
+    fn strip_verbatim_prefix_removes_extended_length_prefixes() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\test\data")),
+                PathBuf::from(r"C:\Users\test\data")
+            );
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\test")),
+                PathBuf::from(r"\\server\share\test")
+            );
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"C:\Users\test\data")),
+                PathBuf::from(r"C:\Users\test\data")
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from("/home/user/data")),
+                PathBuf::from("/home/user/data")
+            );
+        }
+    }
+
+    #[test]
+    fn webview2_data_directory_never_returns_verbatim_prefix() {
+        let (store, root) = test_store();
+        let id = store.create_profile("tenant-1", "Personal").unwrap();
+        let data_dir = store.webview2_data_directory("tenant-1", &id).unwrap();
+        let path_str = data_dir.to_str().unwrap();
+        assert!(!path_str.starts_with(r"\\?\"));
+        assert!(path_str.ends_with("webview2-data"));
+
+        let opened_dir = store.open_profile("tenant-1", &id).unwrap();
+        let opened_str = opened_dir.to_str().unwrap();
+        assert!(!opened_str.starts_with(r"\\?\"));
+        assert!(opened_str.ends_with("webview2-data"));
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   createBrowserProfile,
@@ -17,14 +17,21 @@ const DEFAULT_FIRST_PROFILE_NAME = "Default";
  * current tenant has no profiles yet, one is auto-created (named
  * "Default") and made active — avoids a jarring empty state on first use
  * without inventing a fallback/shared profile id anywhere (this is a real,
- * persisted profile like any other, just created on the user's behalf). */
-export function useBrowserProfiles() {
+ * persisted profile like any other, just created on the user's behalf).
+ *
+ * Loads when `enabled` (the Browser view has been opened at least once) and
+ * loads AGAIN whenever `identityKey` (the signed-in identity) changes — the
+ * profile list belongs to the authenticated tenant, so it is never loaded
+ * once and kept across a change of identity. The desktop resolves the
+ * tenant itself; `identityKey` is only the trigger to re-ask. */
+export function useBrowserProfiles({
+  enabled = true,
+  identityKey = null,
+}: { enabled?: boolean; identityKey?: string | null } = {}) {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<BrowserProfileId | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const hasInitializedRef = useRef(false);
 
   const refreshProfiles = useCallback(async () => {
     try {
@@ -38,16 +45,21 @@ export function useBrowserProfiles() {
   }, []);
 
   useEffect(() => {
-    if (hasInitializedRef.current) return;
-    hasInitializedRef.current = true;
+    if (!enabled) return;
+    // A superseded load (StrictMode's dev-only double effect run, or an
+    // identity change mid-load) must not apply its result or auto-create a
+    // second "Default" profile.
+    let cancelled = false;
     void (async () => {
       setIsLoading(true);
       setError(null);
       try {
         let list = await listBrowserProfiles();
+        if (cancelled) return;
         if (list.length === 0) {
           await createBrowserProfile(DEFAULT_FIRST_PROFILE_NAME);
           list = await listBrowserProfiles();
+          if (cancelled) return;
         }
         setProfiles(list);
         if (list.length > 0) {
@@ -55,14 +67,23 @@ export function useBrowserProfiles() {
           // a reasonable default when nothing has been opened yet.
           const mostRecent = [...list].sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0))[0];
           setActiveProfileId(mostRecent.profileId);
+        } else {
+          setActiveProfileId(null);
         }
       } catch (err) {
+        if (cancelled) return;
+        // Fail closed: e.g. no authenticated tenant yet — nothing is active.
+        setProfiles([]);
+        setActiveProfileId(null);
         setError(browserRuntimeErrorMessage(err));
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, identityKey]);
 
   const switchProfile = useCallback((profileId: BrowserProfileId) => {
     setActiveProfileId(profileId);

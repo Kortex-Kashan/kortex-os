@@ -1,5 +1,6 @@
-import { useBrowserProfiles } from "../hooks/useBrowserProfiles";
-import { useBrowserTabs } from "../hooks/useBrowserTabs";
+import { useEffect } from "react";
+
+import { BrowserSessionProvider, useBrowserSession, type BrowserSession } from "../BrowserSessionProvider";
 import { BrowserTabBar } from "./BrowserTabBar";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { ProfileSwitcher } from "./ProfileSwitcher";
@@ -7,16 +8,36 @@ import { ProfileSwitcher } from "./ProfileSwitcher";
 /** Browser-B2/B3: profiles, tabs, a toolbar (back/forward/reload/address),
  * and the content area the active tab's real WebView2 surface is
  * positioned into (`useBrowserTabs`' `containerRef`, tracked via
- * `ResizeObserver` — no polling). `useBrowserProfiles` owns the profile
- * list/selection; `useBrowserTabs(activeProfileId)` reacts to the active
- * profile changing: the previous profile's tabs are parked, not closed, and
- * the newly active profile's own tabs are shown again (one new tab only if
- * it has none). Deliberately does not implement: downloads/
- * bookmarks/history, provider authentication, or any AI/automation
- * capability — see `docs/architecture/browser_known_limitations.md`. */
+ * `ResizeObserver` — no polling). The profiles and tabs themselves live in
+ * the shell-level `BrowserSessionProvider`, so this view unmounting (the
+ * user switching to another KORTEX application) keeps every tab alive and
+ * parked off-screen until it is shown again. Rendered outside a signed-in
+ * shell, it owns a session of its own, ended when it unmounts. Switching
+ * profiles parks the previous profile's tabs and shows the newly active
+ * profile's own tabs again (one new tab only if it has none). Deliberately
+ * does not implement: downloads/bookmarks/history, provider authentication,
+ * or any AI/automation capability — see
+ * `docs/architecture/browser_known_limitations.md`. */
 export function BrowserApp() {
+  const session = useBrowserSession();
+  if (session === null) {
+    return (
+      <BrowserSessionProvider>
+        <BrowserView />
+      </BrowserSessionProvider>
+    );
+  }
+  return <BrowserView />;
+}
+
+function BrowserView() {
+  const { profiles, tabs, activate } = useBrowserSession() as BrowserSession;
+  useEffect(() => {
+    activate();
+  }, [activate]);
+
   const {
-    profiles,
+    profiles: profileList,
     activeProfileId,
     isLoading: isLoadingProfiles,
     error: profileError,
@@ -24,10 +45,10 @@ export function BrowserApp() {
     createProfile,
     renameProfile,
     deleteProfile,
-  } = useBrowserProfiles();
+  } = profiles;
 
   const {
-    tabs,
+    tabs: tabList,
     activeTabId,
     activeTab,
     containerRef,
@@ -41,14 +62,17 @@ export function BrowserApp() {
     reload,
     goBack,
     goForward,
-  } = useBrowserTabs(activeProfileId);
+  } = tabs;
 
-  const error = tabError ?? profileError;
+  // With no active profile, the profile error is the cause (e.g. no
+  // authenticated tenant) and a tab error only its consequence — show the
+  // cause, never mask it.
+  const error = activeProfileId === null ? (profileError ?? tabError) : (tabError ?? profileError);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/70 bg-background/40 shadow-low backdrop-blur-xl">
       <ProfileSwitcher
-        profiles={profiles}
+        profiles={profileList}
         activeProfileId={activeProfileId}
         disabled={isBusy || isLoadingProfiles}
         onSwitch={switchProfile}
@@ -61,7 +85,7 @@ export function BrowserApp() {
         }
       />
       <BrowserTabBar
-        tabs={tabs}
+        tabs={tabList}
         activeTabId={activeTabId}
         disabled={isBusy}
         onSwitch={switchTab}
@@ -87,7 +111,7 @@ export function BrowserApp() {
       {/* The active tab's real WebView2 surface is positioned over exactly
           this element's on-screen rect by `useBrowserTabs` — it renders no
           visible content of its own (the surface sits above it), it only
-          exists to be measured. */}
+          exists to be measured. Its absence is what parks every surface. */}
       <div ref={containerRef} className="min-h-0 flex-1" data-testid="browser-content-area" />
     </div>
   );

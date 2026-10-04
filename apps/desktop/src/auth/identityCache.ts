@@ -5,9 +5,9 @@ const STORAGE_KEY = "kortex.auth.identity.v1";
 /**
  * A *display-only* cache of the last known identity — never a credential,
  * never a token, never anything Rust's `TokenStore` custody covers. Its
- * only purpose is UX continuity: session restoration (Phase 6) validates a
- * stored token via an inert capability call that returns no identity data
- * (see `authCapability.ts::checkStoredSession`), so without this cache the
+ * only purpose is UX continuity: session restoration renews a stored
+ * session through `authCapability.ts::renewSession`, whose envelope the
+ * frontend does not read identity from, so without this cache the
  * TopBar would have nothing to show for who is signed in until the next
  * fresh login. `principal_id`/`principal_type`/`tenant_id`/`roles` are
  * ordinary identity metadata, not secrets — nothing here can authenticate

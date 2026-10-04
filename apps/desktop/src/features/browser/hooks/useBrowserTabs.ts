@@ -94,7 +94,16 @@ export function useBrowserTabs(profileId: BrowserProfileId | null) {
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  // The Browser view's content-area element — the rect the active tab is
+  // placed over. It is also this hook's visibility signal: the hook may
+  // outlive its view (it lives in the shell-level `BrowserSessionProvider`,
+  // so tabs survive switching KORTEX applications), and while no view is
+  // mounted there is nowhere to show a tab, so every surface is parked
+  // off-screen instead of drawing over whatever application is showing.
+  const [containerElement, setContainerElement] = useState<HTMLDivElement | null>(null);
+  const containerRef = setContainerElement;
+  const containerElementRef = useRef(containerElement);
+  containerElementRef.current = containerElement;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const activeTabId = profileId === null ? null : (activeByProfile[profileId] ?? null);
@@ -119,7 +128,7 @@ export function useBrowserTabs(profileId: BrowserProfileId | null) {
   }, []);
 
   const applyActiveBounds = useCallback(() => {
-    const element = containerRef.current;
+    const element = containerElementRef.current;
     const activeId = activeTabIdRef.current;
     if (!element || !activeId) return;
     const rect = element.getBoundingClientRect();
@@ -135,9 +144,17 @@ export function useBrowserTabs(profileId: BrowserProfileId | null) {
   // toggles, window resize, maximize) via ResizeObserver — event-driven, not
   // a polling loop. The `window resize` listener is a backstop for the case
   // where the content area's own size is unchanged but its position shifted.
+  // With no content area (the view is not mounted — another KORTEX
+  // application is showing), every surface, the active one included, is
+  // parked: the native surfaces stay alive but never draw over it.
   useEffect(() => {
-    const element = containerRef.current;
-    if (!element) return;
+    const element = containerElement;
+    if (!element) {
+      for (const tab of tabsRef.current) {
+        void setBrowserSurfaceBounds(tab.id, OFFSCREEN_BOUNDS);
+      }
+      return;
+    }
     applyActiveBounds();
     const observer = new ResizeObserver(applyActiveBounds);
     observer.observe(element);
@@ -146,7 +163,7 @@ export function useBrowserTabs(profileId: BrowserProfileId | null) {
       observer.disconnect();
       window.removeEventListener("resize", applyActiveBounds);
     };
-  }, [applyActiveBounds]);
+  }, [containerElement, applyActiveBounds]);
 
   // Browser-B4: surfaces a policy-denied navigation, popup, download, or
   // native permission request as the same error banner every other
@@ -336,8 +353,12 @@ export function useBrowserTabs(profileId: BrowserProfileId | null) {
   const goForward = useCallback(() => withActiveTab((id) => goForwardBrowserSurface(id)), [withActiveTab]);
 
   // Browser-B1's "no orphaned browser runtime" requirement: destroy every
-  // surface this component ever created — every profile's — when the
-  // Browser application itself unmounts. `isMountedRef` is set `true` on
+  // surface this hook ever created — every profile's — when its owner
+  // unmounts. In the app that owner is the shell-level
+  // `BrowserSessionProvider`, which unmounts with the signed-in shell
+  // (sign-out), NOT when the user merely switches to another KORTEX
+  // application; the desktop independently tears the same surfaces down at
+  // the session boundary (`lib.rs::teardown_browser_session`). `isMountedRef` is set `true` on
   // (re)mount: React StrictMode (every development build) mounts, unmounts,
   // and remounts each component once, and without this the simulated
   // unmount left the hook believing it was unmounted forever (every tab
